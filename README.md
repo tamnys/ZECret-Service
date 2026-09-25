@@ -72,7 +72,7 @@ Requests are bounded at 16 KiB and encoded fixture responses at 16 MiB, from des
 
 These commands perform local arithmetic or in-memory simulation. They never call a provider or schedule a real job. Rates use integer microUSD; timestamps use Unix UTC seconds. The fixture reproduces **$40.84416** for 168 hours and 80 GB. Fixture availability, fees and cleanup references are synthetic assumptions, not a checkout quote.
 
-Planning refuses more than $50 projected usage and requires external deadline/watchdog/deletion evidence references. The watchdog requests deletion at $45 conservative cumulative cost or an absolute deadline no later than 168 hours. **Stopping does not stop disk billing.** A real deployment requires authenticated pricing, tested external deletion and deadline jobs, and a separate explicit operator action. `zrpc deploy` always refuses.
+The operator's total experiment budget is **$50**, including all deployment, testing and deletion costs. Planning refuses more than $50 projected usage and requires external deadline/watchdog/deletion evidence references. The watchdog requests deletion at $45 conservative cumulative cost or an absolute deadline no later than 168 hours; modeled detection/deletion costs and fees must fit the remaining $5. **Stopping does not stop disk billing.** Account funding does not authorize spending: obtain explicit operator approval before any billable action. A real deployment also requires authenticated pricing and tested external deletion and deadline jobs. `zrpc deploy` always refuses.
 
 ## Project map
 

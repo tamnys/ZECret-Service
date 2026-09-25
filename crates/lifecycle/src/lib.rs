@@ -4,10 +4,12 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
 
-// Authorities: design section 13 (USD and maximum hosting duration).
+// Authorities: design section 13 sets the lifetime, preflight ceiling and
+// deletion trigger. The operator's subsequent $50 total cap supersedes its
+// original approximately $60 overall ceiling; credited funds do not authorize spending.
 pub const MAX_LIFETIME_SECONDS: u64 = 168 * 60 * 60;
 pub const PLAN_CEILING_MICROUSD: u64 = 50_000_000;
-pub const TOTAL_CEILING_MICROUSD: u64 = 60_000_000;
+pub const TOTAL_CEILING_MICROUSD: u64 = 50_000_000;
 pub const DELETE_THRESHOLD_MICROUSD: u64 = 45_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,11 +233,11 @@ pub fn plan(input: &PlanInput) -> Result<CostPlan, LifecycleError> {
     )?;
     let delayed_cost = duration_cost(hourly, detection_and_deletion)?;
     // Derived bound: the modeled detection/deletion delay cannot consume the
-    // design's $15 margin between the $45 trigger and $60 overall ceiling.
+    // $5 margin between the design's $45 trigger and the operator's $50 total cap.
     // This arithmetic is not a guaranteed cap or proof that a job will run.
     if add(add(DELETE_THRESHOLD_MICROUSD, delayed_cost)?, fees)? > TOTAL_CEILING_MICROUSD {
         return Err(LifecycleError(
-            "modeled watchdog/deletion delay exceeds the $60 ceiling margin",
+            "modeled watchdog/deletion delay and fees exceed the $50 total ceiling margin",
         ));
     }
     let mut blockers = vec![
@@ -516,7 +518,7 @@ mod tests {
         assert_eq!(report.projected_compute_microusd, 38_976_000);
         assert_eq!(report.projected_disk_microusd, 1_868_160);
         assert_eq!(report.projected_total_microusd, 40_844_160);
-        assert_eq!(report.remaining_overall_ceiling_microusd, 19_155_840);
+        assert_eq!(report.remaining_overall_ceiling_microusd, 9_155_840);
         assert!(!report.deployment_enabled);
         let mut actual = input();
         actual.quote.source = QuoteSource::OperatorSupplied;
@@ -527,16 +529,34 @@ mod tests {
     fn all_cost_categories_and_existing_resources_count() {
         let mut input = input();
         input.accrued_experiment_microusd = 1_000_000;
-        input.quote.network_total_upper_bound_microusd = Some(2_000_000);
-        input.quote.tax_and_payment_total_upper_bound_microusd = Some(3_000_000);
+        input.quote.network_total_upper_bound_microusd = Some(1_000_000);
+        input.quote.tax_and_payment_total_upper_bound_microusd = Some(2_000_000);
         input.quote.other_total_upper_bound_microusd = Some(1_000_000);
         input.existing_resources.push(ExistingResourceCost {
             resource_id: "fixture-existing-disk".into(),
             remaining_microusd_per_hour: 1000,
         });
-        assert_eq!(plan(&input).unwrap().projected_total_microusd, 48_012_160);
-        input.quote.other_total_upper_bound_microusd = Some(4_000_000);
+        assert_eq!(plan(&input).unwrap().projected_total_microusd, 46_012_160);
+        input.quote.other_total_upper_bound_microusd = Some(6_000_000);
         assert!(plan(&input).is_err());
+    }
+
+    #[test]
+    fn deletion_delay_and_fees_must_fit_five_dollar_reserve() {
+        let mut candidate = input();
+        // The fixture's one-hour poll interval costs $0.24312. At the existing
+        // $45 trigger, $4.75688 of fees exactly exhausts the new $50 total cap.
+        candidate.quote.tax_and_payment_total_upper_bound_microusd = Some(4_756_880);
+        let report = plan(&candidate).unwrap();
+        assert_eq!(report.projected_total_microusd, 45_601_040);
+
+        // One additional microdollar still fits the $50 projected-usage gate,
+        // and would fit the former $15 reserve, but exceeds the new $5 reserve.
+        candidate.quote.tax_and_payment_total_upper_bound_microusd = Some(4_756_881);
+        assert_eq!(
+            plan(&candidate).unwrap_err().0,
+            "modeled watchdog/deletion delay and fees exceed the $50 total ceiling margin"
+        );
     }
 
     #[test]

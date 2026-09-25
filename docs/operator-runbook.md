@@ -6,6 +6,8 @@ For cost arithmetic, copy `deploy/plan.fixture.json` and replace the quote sourc
 
 No production image, verifier/SDK compatibility tuple, measurements or attestation-key encoding is approved. Complete [Gates A–E](phala-feasibility.md) before enabling a protected service. The public pricing baseline is $40.84416; actual inventory and checkout control the cost. The hosting clock includes synchronization and testing.
 
+The operator has capped the whole experiment at **$50**, including setup tests and deletion costs. Account credits are funding, not permission to spend. Ask for explicit operator approval before any billable action, including temporary validation deployments. At the baseline, 168 hours leaves $9.15584 before the total cap, before additional costs. Keep the existing $45 deletion trigger; the modeled watchdog/deletion tail and fees must fit its $5 reserve. Inspect shared-account consumption and current available balance before requesting approval; other workloads may consume the same credits.
+
 Before an explicit future deployment action:
 
 1. Obtain and review an authenticated resource quote including disk, network, fees, taxes, minimum funding, preauthorization and any provider-enforced cap.

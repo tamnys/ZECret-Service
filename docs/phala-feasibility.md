@@ -20,6 +20,6 @@ The stock dstack v0.5.11 storage layout is incompatible with this project's publ
 
 The planning baseline is $40.84416 for 168 hours at $0.232/hour plus 80 GB at $0.000139/GB/hour. These are published inputs, not an authenticated checkout quote. Storage remains billable after stopping a CVM; deletion is required. The published new-account limit is 80 GB per CVM. [Phala pricing](https://cloud.phala.com/about/pricing).
 
-Deployment requires a separate explicit operator action. The design sets a $50 projected-usage preflight ceiling, deletion at $45 conservative cumulative cost or 168 hours, and an approximately $60 overall infrastructure ceiling. External deadline and cleanup controls are prerequisites; polling cannot guarantee a billing hard cap.
+The operator's total infrastructure ceiling is $50, superseding the design's earlier approximately $60 envelope. Retain the $50 projected-usage preflight ceiling and deletion at $45 conservative cumulative cost or 168 hours. Modeled detection/deletion costs and fees must fit the $5 reserve. Funding the account does not authorize spending; each billable action requires explicit operator approval. External deadline and cleanup controls are prerequisites; polling cannot guarantee a billing hard cap.
 
 The dated source review and precise missing evidence are in the [internal feasibility record](../records/feasibility-research.md) and [Gate D source analysis](../records/gate-d-source-analysis.md).
