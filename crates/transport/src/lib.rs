@@ -18,7 +18,10 @@ use zrpc_protocol::{ErrorCode, Request, SafeError};
 use zrpc_verifier::VerifiedChannel;
 
 mod tls;
-pub use tls::{PendingChallenge, PublicBootstrapTls, UnverifiedPublicEvidence};
+pub use tls::{
+    EndpointInspection, EndpointInspectionIssue, PendingChallenge, PublicBootstrapTls,
+    UnverifiedPublicEvidence,
+};
 
 /// A configuration value is not evidence that Tor is connected or functional.
 #[derive(Debug, Clone, Copy)]

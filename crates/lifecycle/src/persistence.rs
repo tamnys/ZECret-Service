@@ -262,6 +262,21 @@ pub struct LedgerStore {
     poisoned: bool,
 }
 
+/// A concrete immutable snapshot reference observed under the local writer lock.
+/// It is not a signature, live activation receipt, or provider deletion evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct CommittedLedgerReference {
+    original_binding_path: PathBuf,
+    snapshot_path: PathBuf,
+    generation: u64,
+}
+
+impl CommittedLedgerReference {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommitPoint {
     DraftCreated,
@@ -273,6 +288,19 @@ enum CommitPoint {
 }
 
 impl LedgerStore {
+    pub fn planning_reference(&self) -> Result<CommittedLedgerReference, StoreError> {
+        self.ledger()?;
+        self.verify_current()?;
+        Ok(CommittedLedgerReference {
+            original_binding_path: self.original_path.clone(),
+            snapshot_path: self
+                .original
+                .store_directory
+                .join(snapshot_name(self.generation)),
+            generation: self.generation,
+        })
+    }
+
     /// A create-new initialization receipt lives beside the trusted original.
     /// Once claimed, missing/deleted/partially initialized stores are never reset
     /// by this API. Such failures need operator investigation.

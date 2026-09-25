@@ -1,6 +1,8 @@
 //! Shared CLI/dashboard client. Simulation and genuine approval have no conversion.
 #![forbid(unsafe_code)]
 
+pub mod inspection;
+
 use serde::Serialize;
 use serde_json::Value;
 use std::str::FromStr;

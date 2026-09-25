@@ -119,6 +119,22 @@ fn inspect_at(
     inspect_at_with_claims(quote, collateral_json, now, time_source, |_| {})
 }
 
+#[cfg(test)]
+pub(crate) fn inspect_fixture_quote_with_claims(
+    quote: &[u8],
+    collateral_json: &[u8],
+    now: u64,
+    inspect: impl FnOnce(&QuoteClaims),
+) -> OfflineInspection {
+    inspect_at_with_claims(
+        quote,
+        collateral_json,
+        now,
+        "historical_upstream_fixture_test",
+        inspect,
+    )
+}
+
 fn inspect_at_with_claims(
     quote: &[u8],
     collateral_json: &[u8],

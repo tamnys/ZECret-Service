@@ -95,11 +95,50 @@ cost/binding/resource fields, positional array rejection, explicit draft recover
 uncertain writes, and subprocess exits without Rust destructors at each
 write/publication boundary. Generated fixtures stay under the workspace's ignored
 `.codex-tmp`. This is process-interruption evidence, not a physical power-cut test.
-The root task's final managed-container workspace suite passed all 109 unit tests
-and 15 compile-fail tests. That includes all 33 lifecycle unit tests: the earlier
+After persistence was added, the root task's managed-container workspace suite
+passed all 109 unit tests and 15 compile-fail tests. That included all 33 lifecycle unit tests: the earlier
 22 tests plus 11 persistence tests, including the strict JSON regressions.
 
-Next required layer is operator-reviewed activation/job specifications. A live adapter, external periodic and absolute
-deadline jobs, independent backstop, real teardown test, disk evidence, and final
+`crates/lifecycle/src/activation.rs` now generates an offline activation planning
+artifact from an actual committed snapshot, verified under the store's held lock.
+It carries the original binding, generation and snapshot path; pending storage
+recovery blocks generation. Retry plans must preserve the original deadline,
+include the committed/modeled accrued cost, and retain every tracked resource's
+conservative rate. The existing cost planner checks every quoted fee category and
+the $45 trigger plus polling/deletion-delay cost against the $50 total cap.
+
+The artifact contains proposed periodic and absolute timer directives and an
+independent backstop check at the proposed deletion-start time. It emits no unit
+files or runnable command; its executable and arguments are absent, installation
+state is `proposed_only`, and activation remains unavailable. External reference
+strings remain operator assertions, with explicit outstanding receipt categories
+for the adapter, credentials/external store, installed jobs, measured delays,
+deletion/readback/disk evidence, billing, independent backstop and operator action.
+
+The [official systemd timer contract](https://github.com/systemd/systemd/blob/a446e8ff2ccb76a8719cb5f06a7fcf785dc116e2/man/systemd.timer.xml)
+documents `AccuracySec=1us` for best accuracy and default zero randomized delay.
+The proposal subtracts that one-microsecond window from the supplied maximum poll
+interval. Its absolute trigger subtracts supplied deletion latency and the same
+accuracy window from the original deadline. Kernel slack, service overlap,
+suspension, and host downtime still require measured external controls; this
+arithmetic does not establish a guaranteed cap. `Persistent=true` only affects
+calendar timers and catches missed runs after reactivation. The command contract
+separately requires an immediate startup policy check, never deadline renewal.
+
+UTC conversion uses already locked `chrono` 0.4.45 with only `std` enabled,
+without its clock feature. Output includes six fractional digits and explicit
+`UTC`, as supported by the [official calendar syntax](https://github.com/systemd/systemd/blob/a446e8ff2ccb76a8719cb5f06a7fcf785dc116e2/man/systemd.time.xml).
+It enforces the target parser's [1970–2199 year range](https://github.com/systemd/systemd/blob/a446e8ff2ccb76a8719cb5f06a7fcf785dc116e2/src/shared/calendarspec.c#L19)
+rather than emitting chrono's wider dates as unsupported systemd expressions.
+New unit cases cover exact UTC/leap-day conversion, unactivatable output, retries,
+reserve boundaries including fees and latency, missed deadlines, and refusal of
+pending or financially incomplete ledger plans. The root task ran the focused
+managed-container lifecycle suite: all 39 tests passed, including these six
+activation-planning cases. The final integrated managed-container check also
+passed: 123 workspace unit tests, 15 compile-fail tests, 14 standalone runtime-guard
+tests, feature/checksum checks, CLI checks, formatting and CLI/example builds.
+
+A live adapter, external periodic and absolute deadline jobs, independent backstop,
+real teardown test, disk evidence, and final
 charge reconciliation remain prerequisites to hosting. No mock receipt satisfies
 those prerequisites or the genuine private-mode acceptance policy.

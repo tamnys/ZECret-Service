@@ -8,7 +8,7 @@ use std::{
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
 
-const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nM0: local fixtures and offline diagnostics; private mode and deployment are unavailable.";
+const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc inspect-endpoint --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --policy FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nM0 plus public endpoint diagnostics; private mode and deployment are unavailable.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
@@ -53,7 +53,9 @@ fn exhausted(args: &[String]) -> Result<(), String> {
 async fn main() {
     if let Err(error) = run().await {
         // Static/sanitized messages only; never echo query input or credentials.
-        let _ = print_json(json!({"error":error,"query_sent":false,"deployment_enabled":false}));
+        let _ = print_json(
+            json!({"error":error,"private_accepted":false,"query_sent":false,"deployment_enabled":false}),
+        );
         std::process::exit(1);
     }
 }
@@ -66,7 +68,8 @@ async fn run() -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str(){
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
-        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","private_mode":"blocked","simulation_available":true,"tor":"not_checked; CLI has no Tor connection path","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"tor":"not_checked; public inspection requires explicit loopback SOCKS","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "inspect-endpoint"=>inspect_endpoint_command(args).await,
         "inspect-quote"=>{
             let quote_path=required(&mut args,"--quote")?;
             let collateral_path=required(&mut args,"--collateral")?;
@@ -172,4 +175,42 @@ async fn run() -> Result<(), String> {
         "deploy"=>Err("deployment is disabled in M0; Gates A–E, external deletion proof and explicit operator deployment action are required".into()),
         _=>Err("unknown command; run zrpc help".into())
     }
+}
+
+async fn inspect_endpoint_command(mut args: Vec<String>) -> Result<(), String> {
+    let hostname = required(&mut args, "--endpoint-host")?;
+    let port = required(&mut args, "--endpoint-port")?
+        .parse::<u16>()
+        .map_err(|_| "invalid endpoint port")?;
+    let socks = required(&mut args, "--socks")?;
+    let collateral_path = required(&mut args, "--collateral")?;
+    let compose_path = required(&mut args, "--app-compose")?;
+    let policy_path = required(&mut args, "--policy")?;
+    exhausted(&args)?;
+    // Validate local settings and parse policy before opening any network socket.
+    let config = zrpc_client::inspection::PublicInspectionConfig::new(&hostname, port, &socks)
+        .map_err(|error| error.to_string())?;
+    let policy_bytes = fs::read(policy_path).map_err(|_| "workload policy file unavailable")?;
+    let policy = zrpc_verifier::workload::WorkloadPolicy::from_json(&policy_bytes)
+        .map_err(|_| "workload policy rejected")?;
+    let collateral = fs::read(collateral_path).map_err(|_| "collateral file unavailable")?;
+    let compose = fs::read(compose_path).map_err(|_| "app-compose file unavailable")?;
+    let report = zrpc_client::inspection::inspect_endpoint(&config, &collateral, &compose, &policy)
+        .await
+        .map_err(|error| error.to_string())?;
+    let passed = report.diagnostic_passed();
+    print_json(json!({
+        "mode":"public_endpoint_inspection",
+        "transport":"configured_loopback_socks_with_hostname_forwarding",
+        "tor_process_identity_verified":false,
+        "approved_release":null,
+        "private_accepted":false,
+        "query_sent":false,
+        "deployment_enabled":false,
+        "inspection":report
+    }))?;
+    if !passed {
+        std::process::exit(1);
+    }
+    Ok(())
 }

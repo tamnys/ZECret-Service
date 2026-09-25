@@ -128,6 +128,22 @@ pub struct WorkloadInspection {
     pub workload_issue: Option<WorkloadIssue>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportDataIssue {
+    AuthenticatedReportDataMismatch,
+}
+
+/// A comparison against caller-supplied expected bytes, not proof of how those
+/// bytes were obtained, approved workload ownership, or private-query authority.
+#[derive(Debug, Serialize)]
+pub struct BoundWorkloadInspection {
+    #[serde(flatten)]
+    pub workload: WorkloadInspection,
+    pub authenticated_report_data_match: InspectionStatus,
+    pub binding_issue: Option<ReportDataIssue>,
+}
+
 /// Inspect supplied files at the system clock. There is no network fetch,
 /// historical-time override, inferred expectation or release-registration path.
 pub fn inspect_workload(
@@ -137,11 +153,48 @@ pub fn inspect_workload(
     raw_app_compose: &[u8],
     policy: &WorkloadPolicy,
 ) -> WorkloadInspection {
+    inspect_workload_using(event_log_json, raw_app_compose, policy, None, |inspect| {
+        offline::inspect_quote_with_claims(quote, collateral_json, inspect)
+    })
+    .workload
+}
+
+/// Authenticate supplied evidence at the current system clock before comparing
+/// signed REPORTDATA. Echoed report_data strings or provider assertions are not
+/// inputs. A match never approves the policy or constructs a verified channel.
+pub fn inspect_workload_and_report_data(
+    quote: &[u8],
+    collateral_json: &[u8],
+    event_log_json: &[u8],
+    raw_app_compose: &[u8],
+    policy: &WorkloadPolicy,
+    expected_report_data: &[u8; 64],
+) -> BoundWorkloadInspection {
+    inspect_workload_using(
+        event_log_json,
+        raw_app_compose,
+        policy,
+        Some(expected_report_data),
+        |inspect| offline::inspect_quote_with_claims(quote, collateral_json, inspect),
+    )
+}
+
+fn inspect_workload_using(
+    event_log_json: &[u8],
+    raw_app_compose: &[u8],
+    policy: &WorkloadPolicy,
+    expected_report_data: Option<&[u8; 64]>,
+    inspect_quote: impl FnOnce(&mut dyn FnMut(&dcap_qvl::QuoteClaims)) -> OfflineInspection,
+) -> BoundWorkloadInspection {
     let mut checks = Checks::new();
-    let mut quote = offline::inspect_quote_with_claims(quote, collateral_json, |claims| {
-        // The callback runs only after strict hardware policy passed. That
-        // policy requires TDX; still avoid a panic if its contract changes.
+    let mut report_data = InspectionStatus::NotChecked;
+    let mut quote = inspect_quote(&mut |claims| {
+        // The callback runs only after strict hardware policy passed. Expected
+        // bytes and measurements cannot replace this authentication boundary.
         if let Some(td) = claims.report.as_td10() {
+            if let Some(expected) = expected_report_data {
+                report_data = compare_report_data(td, expected);
+            }
             checks.issue =
                 check_workload(td, event_log_json, raw_app_compose, policy, &mut checks).err();
         } else {
@@ -154,13 +207,27 @@ pub fn inspect_workload(
     } else if checks.app == InspectionStatus::Verified {
         quote.workload_policy = InspectionStatus::Verified;
     }
-    WorkloadInspection {
+    let workload = WorkloadInspection {
         quote,
         policy_source: "explicit_local_input_not_release_approval",
         runtime_event_integrity: checks.runtime,
         os_measurement_policy: checks.os,
         app_configuration_policy: checks.app,
         workload_issue: checks.issue,
+    };
+    BoundWorkloadInspection {
+        workload,
+        authenticated_report_data_match: report_data,
+        binding_issue: (report_data == InspectionStatus::Rejected)
+            .then_some(ReportDataIssue::AuthenticatedReportDataMismatch),
+    }
+}
+
+fn compare_report_data(td: &TDReport10, expected: &[u8; 64]) -> InspectionStatus {
+    if td.report_data == *expected {
+        InspectionStatus::Verified
+    } else {
+        InspectionStatus::Rejected
     }
 }
 
@@ -405,6 +472,133 @@ mod tests {
         raw: &[u8],
     ) -> Result<(), WorkloadIssue> {
         check_workload(td, &log_json(events), raw, policy, &mut Checks::new())
+    }
+
+    fn historical_bound(quote: &[u8], expected: &[u8; 64]) -> BoundWorkloadInspection {
+        let (policy, _, _) = policy_unit_only();
+        inspect_workload_using(b"[]", RAW_COMPOSE, &policy, Some(expected), |inspect| {
+            offline::inspect_fixture_quote_with_claims(quote, COLLATERAL, 1_752_919_234, inspect)
+        })
+    }
+
+    #[test]
+    fn authentic_fixture_strict_rejection_keeps_report_data_and_workload_unchecked() {
+        let quote = Quote::parse(QUOTE).unwrap();
+        let expected = quote.report.as_td10().unwrap().report_data;
+        let report = historical_bound(QUOTE, &expected);
+        assert_eq!(
+            report.workload.quote.hardware_authenticity,
+            InspectionStatus::Verified
+        );
+        assert_eq!(
+            report.workload.quote.security_policy,
+            InspectionStatus::Rejected
+        );
+        assert_eq!(
+            report.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+        // Authentic hardware signatures do not bypass strict appraisal, even
+        // when caller-supplied expected bytes equal the signed report field.
+        assert_eq!(
+            report.workload.quote.workload_policy,
+            InspectionStatus::NotChecked
+        );
+        assert_eq!(report.binding_issue, None);
+        assert_eq!(
+            report.workload.quote.live_key_binding,
+            InspectionStatus::NotChecked
+        );
+        assert_eq!(
+            report.workload.quote.freshness,
+            InspectionStatus::NotChecked
+        );
+        assert!(!report.workload.quote.private_accepted && !report.workload.quote.query_sent);
+    }
+
+    #[test]
+    fn strict_rejected_and_tampered_quotes_never_reach_report_data_comparison() {
+        let mut quote = Quote::parse(QUOTE).unwrap();
+        let expected = quote.report.as_td10().unwrap().report_data;
+        let mut wrong_expected = expected;
+        wrong_expected[0] ^= 1;
+        let mismatch = historical_bound(QUOTE, &wrong_expected);
+        assert_eq!(
+            mismatch.workload.quote.hardware_authenticity,
+            InspectionStatus::Verified
+        );
+        assert_eq!(
+            mismatch.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+        assert_eq!(
+            mismatch.workload.quote.security_policy,
+            InspectionStatus::Rejected
+        );
+        assert_eq!(mismatch.binding_issue, None);
+        match &mut quote.report {
+            Report::TD10(td) => td.report_data[0] ^= 1,
+            _ => panic!("fixture type changed"),
+        }
+        let tampered = historical_bound(&quote.encode(), &wrong_expected);
+        assert_eq!(
+            tampered.workload.quote.hardware_authenticity,
+            InspectionStatus::Rejected
+        );
+        assert_eq!(
+            tampered.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+        assert!(!tampered.workload.quote.private_accepted);
+    }
+
+    #[test]
+    fn synthetic_comparator_only_equality_and_mismatch_are_not_authentication() {
+        let (_, mut synthetic_td, _) = policy_unit_only();
+        synthetic_td.report_data = [7; 64];
+        assert_eq!(
+            compare_report_data(&synthetic_td, &[7; 64]),
+            InspectionStatus::Verified
+        );
+        let mut mismatch = [7; 64];
+        mismatch[0] ^= 1;
+        assert_eq!(
+            compare_report_data(&synthetic_td, &mismatch),
+            InspectionStatus::Rejected
+        );
+        // This pure comparison is below authentication. These fabricated bytes
+        // cannot cause a real inspected quote to bypass its strict rejection.
+        let authentic_but_rejected = historical_bound(QUOTE, &synthetic_td.report_data);
+        assert_eq!(
+            authentic_but_rejected.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+        assert!(!authentic_but_rejected.workload.quote.private_accepted);
+    }
+
+    #[test]
+    fn production_clock_cannot_reuse_historical_fixture_validity() {
+        let quote = Quote::parse(QUOTE).unwrap();
+        let expected = quote.report.as_td10().unwrap().report_data;
+        let (policy, _, _) = policy_unit_only();
+        let report = inspect_workload_and_report_data(
+            QUOTE,
+            COLLATERAL,
+            b"[]",
+            RAW_COMPOSE,
+            &policy,
+            &expected,
+        );
+        assert_eq!(
+            report.workload.quote.hardware_authenticity,
+            InspectionStatus::Rejected
+        );
+        assert_eq!(
+            report.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+        assert_eq!(report.workload.quote.time_source, "system_clock");
+        assert!(!report.workload.quote.private_accepted && !report.workload.quote.network_used);
     }
 
     #[test]

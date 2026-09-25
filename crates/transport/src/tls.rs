@@ -18,7 +18,7 @@ use tokio_socks::tcp::Socks5Stream;
 use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
 
 mod attestation;
-pub use attestation::UnverifiedPublicEvidence;
+pub use attestation::{EndpointInspection, EndpointInspectionIssue, UnverifiedPublicEvidence};
 
 type BootstrapStream = TlsStream<Socks5Stream<RequirePassword<TcpStream>>>;
 

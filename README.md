@@ -1,6 +1,6 @@
 # ZRPC — local foundation and offline evidence inspection
 
-A Rust scaffold for a Phala Intel TDX Zcash testnet RPC experiment. **Private mode is unavailable and every private verification attempt fails closed.** The dashboard and RPC path remain local simulations. An offline Intel hardware-evidence inspector is available separately; no cloud deployment, Tor dialer, TLS integration or live Zebra node is included.
+A Rust scaffold for a Phala Intel TDX Zcash testnet RPC experiment. **Private mode is unavailable and every private verification attempt fails closed.** The dashboard and CLI RPC path remain local simulations. Separate offline and public endpoint diagnostics inspect Intel hardware evidence. The public diagnostic uses explicit loopback SOCKS and TLS; no cloud deployment or live Zebra node is included.
 
 The native CLI and its bundled loopback dashboard share the same client core. Synthetic evidence cannot create a verified channel. The public documentation preview is static and has no private-query path.
 
@@ -38,6 +38,8 @@ Private mode is the default. `zrpc query --stdin` refuses before reading standar
 
 This uses pinned `dcap-qvl` 0.6.3, Intel's production root, supplied signed collateral and the system clock without fetching anything. Hardware cryptography and strict security appraisal are separate results. It never approves private mode, workload identity, freshness or the live TLS key. See [offline evidence](docs/offline-evidence.md) for supported inputs and policy.
 
+For a compatible operator-selected endpoint, [public endpoint inspection](docs/public-inspection.md) adds a nonce-only SOCKS/TLS exchange and compares authenticated quote REPORTDATA with that connection's proposed exporter binding. Diagnostic matches do not authorize private queries or establish release approval.
+
 ## Local UI and public preview
 
 The native release embeds `ui/local/index.html`, its stylesheet and committed compiled TypeScript. The dashboard exchanges a one-time fragment capability for an in-memory session capability. API access also requires exact Host and Origin. It does not persist query history or load remote assets.
@@ -58,7 +60,7 @@ cargo build --locked -p zrpc-cli
 
 The strict fixture protocol supports `getblockchaininfo`, `getblockcount`, `getblockhash`, `getblockheader` and `getrawtransaction`. It rejects notifications, batches, unknown/duplicate fields, write methods, wallet methods, arbitrary upstream URLs, and malformed or oversized input. Header/transaction verbosity is an explicit boolean in this fixture model; live compatibility must be established against the selected Zebra release.
 
-Requests are bounded at 16 KiB and encoded fixture responses at 16 MiB, from design §9. The two-executing/four-queued/15-second backend policy is represented as constants for a future backend; no live queue or timeout implementation is claimed. Synthetic raw data is deliberately not valid Zcash wire data.
+Requests are bounded at 16 KiB and encoded responses at 16 MiB, from design §9. The internal loopback-node library implements the two-executing/four-queued/15-second backend policy and testnet checks. It is not exposed through a private-query listener. Synthetic raw data is deliberately not valid Zcash wire data.
 
 `PrivateSession<UnverifiedChannel>` exposes no query method. `VerifiedChannel` cannot be constructed or deserialized in M0. The fixture client is a separate type and has no conversion to it. `verified: true` provider assertions never authorize a query.
 

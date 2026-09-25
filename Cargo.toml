@@ -24,6 +24,7 @@ http-body-util = "=0.1.5"
 bytes = "=1.12.1"
 base64 = "=0.22.1"
 libc = "=0.2.189"
+chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 
 # Maintained dstack runtime-event encoding/replay, pinned to the catalog OS source.
 cc-eventlog = { git = "https://github.com/Dstack-TEE/dstack", rev = "282eeb27d22d8f091ad0fa5a90e638f85cf68751", version = "=0.5.9" }

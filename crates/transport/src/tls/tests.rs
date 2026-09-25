@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream as ServerStream};
 
-mod attestation_tests;
+pub(super) mod attestation_tests;
 
 // Candidate encoding in ADR 0002, used only in tests until attestation protocol
 // review. These are exporter inputs, not a fabricated expected TLS output.
@@ -51,7 +51,7 @@ impl Signer for CorruptSigner {
     }
 }
 
-fn server_config(corrupt_signature: bool, alpn: Option<&[u8]>) -> Arc<ServerConfig> {
+pub(super) fn server_config(corrupt_signature: bool, alpn: Option<&[u8]>) -> Arc<ServerConfig> {
     // Public Rustls test credentials, pinned and documented by fixture manifest.
     let certificate =
         CertificateDer::from(include_bytes!("../../../../tests/fixtures/tls/end.der").to_vec());
@@ -105,7 +105,7 @@ async fn accept_socks(mut socket: TcpStream) -> TcpStream {
     socket
 }
 
-async fn connect_pair(
+pub(super) async fn connect_pair(
     config: Arc<ServerConfig>,
 ) -> (
     Result<PublicBootstrapTls, SafeError>,
@@ -135,7 +135,7 @@ async fn connect_pair(
     (client, server.await.unwrap())
 }
 
-async fn assert_no_application_bytes(mut server: ServerStream<TcpStream>) {
+pub(super) async fn assert_no_application_bytes(mut server: ServerStream<TcpStream>) {
     let mut bytes = Vec::new();
     let result = server.read_to_end(&mut bytes).await;
     assert!(bytes.is_empty());

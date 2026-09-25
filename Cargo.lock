@@ -1855,8 +1855,11 @@ dependencies = [
 name = "zrpc-client"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
+ "hex",
  "serde",
  "serde_json",
+ "tokio",
  "zrpc-protocol",
  "zrpc-server",
  "zrpc-transport",
@@ -1867,6 +1870,7 @@ dependencies = [
 name = "zrpc-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "libc",
  "serde",
  "serde_json",
@@ -1906,10 +1910,12 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "getrandom 0.3.4",
+ "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
  "rustls",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-rustls",

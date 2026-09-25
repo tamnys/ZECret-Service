@@ -22,6 +22,14 @@ pub struct ExperimentBinding {
 }
 
 impl ExperimentBinding {
+    #[cfg(unix)]
+    pub(crate) fn original_window(&self) -> (u64, u64) {
+        (
+            self.started_at_unix_seconds,
+            self.deletion_deadline_unix_seconds,
+        )
+    }
+
     pub fn new(
         experiment_id: String,
         workspace_id: String,
@@ -163,6 +171,27 @@ struct LedgerData {
 pub struct ExperimentLedger(LedgerData);
 
 impl ExperimentLedger {
+    #[cfg(unix)]
+    pub(crate) fn planning_cost_at(&self, now: u64) -> Result<u64, LifecycleError> {
+        self.validate()?;
+        if now < self.0.last_observed_at_unix_seconds {
+            return Err(LifecycleError("plan predates the committed ledger"));
+        }
+        Ok(self
+            .0
+            .conservative_cost_floor_microusd
+            .max(self.modeled_cost(now)?)
+            .max(self.observed_cost()?))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn tracked_rates(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.0
+            .resources
+            .iter()
+            .map(|(id, resource)| (id.as_str(), resource.cvm.compute_and_disk_microusd_per_hour))
+    }
+
     pub fn new(
         binding: ExperimentBinding,
         initial_cost_microusd: u64,

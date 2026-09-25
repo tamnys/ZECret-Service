@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
 
+#[cfg(unix)]
+pub mod activation;
 pub mod controller;
 #[cfg(unix)]
 pub mod persistence;

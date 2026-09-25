@@ -12,6 +12,9 @@ use zrpc_protocol::{
     parse_attestation_response,
 };
 
+mod inspection;
+pub use inspection::{EndpointInspection, EndpointInspectionIssue};
+
 fn invalid_response() -> SafeError {
     SafeError::new(
         ErrorCode::InvalidBackendResponse,
@@ -203,13 +206,9 @@ pub struct UnverifiedPublicEvidence {
     _session: OwnedHttpSession,
     // Retained for the future authenticated verifier boundary, never exported
     // through the raw evidence accessor or treated as acceptance in this API.
-    #[allow(dead_code)]
     expected_report_data: [u8; 64],
-    #[allow(dead_code)]
     established: Instant,
-    #[allow(dead_code)]
     deadline: Instant,
-    #[allow(dead_code)]
     nonce: [u8; 32],
 }
 

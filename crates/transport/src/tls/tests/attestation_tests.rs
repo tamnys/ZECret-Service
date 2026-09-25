@@ -6,7 +6,9 @@ use zrpc_protocol::{
     parse_attestation_request,
 };
 
-async fn read_public_request(server: &mut ServerStream<TcpStream>) -> PublicAttestationRequest {
+pub(in crate::tls) async fn read_public_request(
+    server: &mut ServerStream<TcpStream>,
+) -> PublicAttestationRequest {
     // This fixture observes only the fixed request produced by our typed API.
     // HTTP parsing in production belongs to Hyper, not this observation helper.
     let mut headers = Vec::new();
@@ -38,7 +40,7 @@ async fn read_public_request(server: &mut ServerStream<TcpStream>) -> PublicAtte
     request
 }
 
-fn synthetic_body(nonce: [u8; 32]) -> Vec<u8> {
+pub(in crate::tls) fn synthetic_body(nonce: [u8; 32]) -> Vec<u8> {
     serde_json::to_vec(&PublicAttestationResponse {
         nonce,
         quote: "00".into(),
@@ -49,7 +51,7 @@ fn synthetic_body(nonce: [u8; 32]) -> Vec<u8> {
     .unwrap()
 }
 
-fn response(status: &str, extra_headers: &str, body: &[u8]) -> Vec<u8> {
+pub(in crate::tls) fn response(status: &str, extra_headers: &str, body: &[u8]) -> Vec<u8> {
     let mut wire = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}\r\n", body.len()).into_bytes();
     wire.extend_from_slice(body);
     wire
