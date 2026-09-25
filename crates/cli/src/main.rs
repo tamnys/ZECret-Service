@@ -8,7 +8,7 @@ use std::{
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
 
-const USAGE: &str = "zrpc doctor\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nM0: local fixtures only; private mode and deployment are unavailable.";
+const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nM0: local fixtures only; private mode and deployment are unavailable.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
@@ -66,7 +66,19 @@ async fn run() -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str(){
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
-        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","private_mode":"blocked","simulation_available":true,"tor":"not_checked; no network adapter in M0","hardware_verifier":"not_integrated","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","private_mode":"blocked","simulation_available":true,"tor":"not_checked; no network adapter in M0","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "inspect-quote"=>{
+            let quote_path=required(&mut args,"--quote")?;
+            let collateral_path=required(&mut args,"--collateral")?;
+            exhausted(&args)?;
+            let quote=fs::read(quote_path).map_err(|_|"quote file unavailable")?;
+            let collateral=fs::read(collateral_path).map_err(|_|"collateral file unavailable")?;
+            let report=zrpc_verifier::offline::inspect_quote(&quote,&collateral);
+            let rejected=report.issue.is_some();
+            print_json(report)?;
+            if rejected { std::process::exit(1) }
+            Ok(())
+        },
         "verify"=>{
             let _endpoint=take_value(&mut args,"--endpoint")?;
             let policy=take_value(&mut args,"--policy")?;

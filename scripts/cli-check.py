@@ -39,3 +39,13 @@ assert run("teardown", "--simulate", "--manifest", "deploy/manifest.fixture.json
 manifest = json.loads((ROOT / "deploy/manifest.fixture.json").read_text())
 assert run("watchdog", "--manifest", "deploy/manifest.fixture.json", "--now", str(manifest["deletion_deadline_unix_seconds"]), "--accrued-microusd", "0")["action"] == "delete_all"
 print("CLI checks passed: fixtures, private refusal, negative scenarios, sanitized errors, exact plan, disabled deployment, deletion decisions.")
+
+# The authentic upstream fixture has expired collateral at today's clock. A
+# historical-time override is intentionally absent from the production CLI.
+report = run("inspect-quote", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin", "--collateral", "tests/fixtures/dcap/tdx_quote_collateral.json", success=False)
+assert report["hardware_authenticity"] == "rejected"
+assert report["time_source"] == "system_clock"
+assert not report["private_accepted"] and not report["network_used"] and not report["query_sent"]
+assert report["issue"] == "cryptographic_or_validity_check_failed"
+run("inspect-quote", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin", "--collateral", "tests/fixtures/dcap/tdx_quote_collateral.json", "--time", "1752919234", success=False)
+print("Offline inspection CLI checks passed: expired evidence rejected; no historical-time override.")

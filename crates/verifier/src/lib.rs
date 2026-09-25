@@ -1,6 +1,8 @@
 //! Fail-closed M0 integration boundary. No synthetic fact can mint an approval.
 #![forbid(unsafe_code)]
 
+pub mod offline;
+
 use serde::{Deserialize, Serialize};
 use zrpc_protocol::{ErrorCode, Network, SafeError};
 

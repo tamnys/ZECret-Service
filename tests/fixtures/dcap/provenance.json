@@ -1,0 +1,28 @@
+{
+  "source_repository": "https://github.com/Phala-Network/dcap-qvl",
+  "source_commit": "e61f4fba357e96d68fc7d7be71635049841824fb",
+  "source_tag": "v0.6.3",
+  "purpose": "Historical upstream hardware evidence for offline verifier tests; not this project's deployment or release policy",
+  "historical_test_time_unix_seconds": 1752919234,
+  "historical_time_derivation": "PCK CRL nextUpdate 2025-07-19T10:00:35Z minus one second, following upstream fixture test logic",
+  "current_private_acceptance": false,
+  "files": {
+    "tdx_quote.bin": {
+      "source_path": "sample/tdx_quote",
+      "sha256": "c42f9164325024bca2757bc8819b11879a0a369132ea4e2b7c85df4805ea72db"
+    },
+    "tdx_quote_collateral.json": {
+      "source_path": "sample/tdx_quote_collateral.json",
+      "sha256": "b0a5f5fd620a8881b1eda45261fdf30dd930b49aff93231556645c81fcb4c0bc"
+    },
+    "LICENSE.upstream": {
+      "source_path": "LICENSE",
+      "sha256": "f77e71ba8380d395e78485302cc4beccab400b9a01648e2acaf26085fe65bd7f"
+    },
+    "tdx_quote.exact.bin": {
+      "source_path": "sample/tdx_quote",
+      "sha256": "f1c8503301126c30ab9863df145a8c328f0834a59817e77abc24d1db6e9fce24",
+      "derivation": "Exact 4936 bytes consumed by maintained Quote::decode; upstream file has 70 trailing zero padding bytes. Tests prove derivation. Production inspector does not trim."
+    }
+  }
+}

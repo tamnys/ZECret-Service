@@ -1,6 +1,6 @@
-# ZRPC — local M0 foundation
+# ZRPC — local foundation and offline evidence inspection
 
-A Rust scaffold for a Phala Intel TDX Zcash testnet RPC experiment. **M0 is a local simulation. Private mode is unavailable and every genuine verification attempt fails closed.** No cloud deployment, Tor dialer, hardware verifier, TLS integration or live Zebra node is included.
+A Rust scaffold for a Phala Intel TDX Zcash testnet RPC experiment. **Private mode is unavailable and every private verification attempt fails closed.** The dashboard and RPC path remain local simulations. An offline Intel hardware-evidence inspector is available separately; no cloud deployment, Tor dialer, TLS integration or live Zebra node is included.
 
 The native CLI and its bundled loopback dashboard share the same client core. Synthetic evidence cannot create a verified channel. The public documentation preview is static and has no private-query path.
 
@@ -29,6 +29,14 @@ bash scripts/check.sh --browser
 ```
 
 Private mode is the default. `zrpc query --stdin` refuses before reading standard input. Fixture requests use `--simulate --stdin`; transaction selections need not enter command arguments or shell history. Each query or verify invocation emits one JSON report; rejection returns a nonzero exit code. No environment variable enables genuine acceptance or a direct fallback.
+
+## Offline evidence inspection
+
+```sh
+./target/debug/zrpc inspect-quote --quote quote.bin --collateral collateral.json
+```
+
+This uses pinned `dcap-qvl` 0.6.3, Intel's production root, supplied signed collateral and the system clock without fetching anything. Hardware cryptography and strict security appraisal are separate results. It never approves private mode, workload identity, freshness or the live TLS key. See [offline evidence](docs/offline-evidence.md) for supported inputs and policy.
 
 ## Local UI and public preview
 
@@ -71,7 +79,7 @@ Planning refuses more than $50 projected usage and requires external deadline/wa
 - `crates/{protocol,verifier,transport,client,server}`: typed boundaries and in-process fixtures.
 - `crates/cli`: native CLI, loopback authorization and bundled UI server.
 - `crates/lifecycle`: offline planning, deadline decisions and fake cleanup.
-- `tests/fixtures`: unmistakably synthetic node data.
+- `tests/fixtures`: synthetic node data plus separately labeled historical upstream hardware evidence in `dcap/`.
 - `docs/implementation-plan.md`, `docs/gates-and-tests.md`: implementation contract and acceptance checklist.
 - `docs/phala-feasibility.md`, `docs/operator-runbook.md`: compatibility gates and operator workflow.
 - `records/`: internal research and verification evidence.

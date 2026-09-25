@@ -16,8 +16,10 @@ Before a private release can be supported:
 
 Reuse maintained TLS, dstack and quote-verification implementations. No version tuple is approved for this project yet. A current upstream release or a passing quote signature alone does not establish that tuple.
 
+The stock dstack v0.5.11 storage layout is incompatible with this project's public-chain-data-only persistence requirement: it places Docker, containerd and sysbox state on the persistent data disk. A supported configuration must keep executable and configuration state off that disk before either runtime can reuse it. Container-level `read_only` or `tmpfs` settings alone do not meet that requirement. The measured early startup hook is a candidate for configuring an ephemeral runtime, but no such configuration is approved here. This does not establish that Phala can read live query plaintext. [Pinned upstream startup source](https://github.com/Dstack-TEE/dstack/blob/40eaf35e6b3f112998d01569f2a26110baab123b/basefiles/dstack-prepare.sh#L262).
+
 The planning baseline is $40.84416 for 168 hours at $0.232/hour plus 80 GB at $0.000139/GB/hour. These are published inputs, not an authenticated checkout quote. Storage remains billable after stopping a CVM; deletion is required. The published new-account limit is 80 GB per CVM. [Phala pricing](https://cloud.phala.com/about/pricing).
 
 Deployment requires a separate explicit operator action. The design sets a $50 projected-usage preflight ceiling, deletion at $45 conservative cumulative cost or 168 hours, and an approximately $60 overall infrastructure ceiling. External deadline and cleanup controls are prerequisites; polling cannot guarantee a billing hard cap.
 
-The dated source review and precise missing evidence are in the [internal feasibility record](../records/feasibility-research.md).
+The dated source review and precise missing evidence are in the [internal feasibility record](../records/feasibility-research.md) and [Gate D source analysis](../records/gate-d-source-analysis.md).
