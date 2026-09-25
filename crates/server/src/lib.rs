@@ -1,7 +1,9 @@
-//! Fixture wrapper and internal loopback-only node adapter. No public listener.
+//! Fixture wrapper, internal node adapter, and public-attestation-only listener.
+//! No private RPC listener or attestation acceptance authority is provided.
 #![forbid(unsafe_code)]
 
 pub mod attestation;
+pub mod bootstrap;
 pub mod node;
 
 use serde_json::{Value, json};

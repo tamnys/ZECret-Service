@@ -40,6 +40,8 @@ This uses pinned `dcap-qvl` 0.6.3, Intel's production root, supplied signed coll
 
 For a compatible operator-selected endpoint, [public endpoint inspection](docs/public-inspection.md) adds a nonce-only SOCKS/TLS exchange and compares authenticated quote REPORTDATA with that connection's proposed exporter binding. Diagnostic matches do not authorize private queries or establish release approval.
 
+The [local public wrapper](docs/public-wrapper.md) provides the corresponding attestation-only TLS listener with a fresh process-local key and an explicit dstack Unix socket. It binds only loopback through its CLI and exposes no RPC route or private acceptance.
+
 ## Local UI and public preview
 
 The native release embeds `ui/local/index.html`, its stylesheet and committed compiled TypeScript. The dashboard exchanges a one-time fragment capability for an in-memory session capability. API access also requires exact Host and Origin. It does not persist query history or load remote assets.

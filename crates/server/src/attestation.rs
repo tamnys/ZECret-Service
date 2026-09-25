@@ -21,13 +21,15 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpStream, UnixStream},
-    sync::Semaphore,
+    sync::{OwnedSemaphorePermit, Semaphore},
 };
 use tokio_rustls::server::TlsStream;
+#[cfg(test)]
+use zrpc_protocol::MAX_CONNECTION_LIFETIME_SECONDS;
 use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, ErrorCode, MAX_ATTESTATION_REQUEST_BYTES,
-    MAX_ATTESTATION_RESPONSE_BYTES, MAX_CONNECTION_LIFETIME_SECONDS, PublicAttestationResponse,
-    SafeError, parse_attestation_request,
+    MAX_ATTESTATION_RESPONSE_BYTES, PublicAttestationResponse, SafeError,
+    parse_attestation_request,
 };
 
 fn unavailable() -> SafeError {
@@ -134,7 +136,7 @@ impl Drop for AbortOnDrop {
 
 struct Shared<Q> {
     source: Q,
-    connections: Semaphore,
+    connections: Arc<Semaphore>,
     quotes: Semaphore,
     quote_spacing: Duration,
     last_quote: Mutex<Option<Instant>>,
@@ -143,7 +145,7 @@ impl<Q: QuoteSource> Shared<Q> {
     fn new(source: Q, limits: BootstrapLimits) -> Self {
         Self {
             source,
-            connections: Semaphore::new(limits.connections.get()),
+            connections: Arc::new(Semaphore::new(limits.connections.get())),
             quotes: Semaphore::new(limits.quotes.get()),
             quote_spacing: limits.quote_spacing,
             last_quote: Mutex::new(None),
@@ -151,10 +153,9 @@ impl<Q: QuoteSource> Shared<Q> {
     }
 }
 
-/// A library endpoint for already-negotiated TLS streams. No listener, key import,
-/// certificate generation, deployment or private-RPC activation is provided.
-/// A future listener must generate ephemeral keys inside the approved workload
-/// and apply global admission before TLS handshakes as well.
+/// Public attestation service used by the owned bootstrap listener. The runnable
+/// path generates its TLS identity locally and admits sockets before handshake.
+/// This service provides no private-RPC activation or approved-workload claim.
 #[derive(Clone)]
 pub struct AttestationService {
     shared: Arc<Shared<DstackQuoteSource>>,
@@ -177,23 +178,56 @@ impl AttestationService {
             )),
         })
     }
-    /// Call immediately after the server handshake. This checks TLS1.3, full
-    /// handshake and ALPN; it does not certify the caller's key-generation policy.
+    // Only tests may inject a pre-negotiated stream. Production listener owns
+    // key generation and admission before negotiating any TLS connection.
+    #[cfg(test)]
     pub async fn serve_connection(&self, stream: TlsStream<TcpStream>) -> Result<(), SafeError> {
         serve(self.shared.clone(), stream).await
+    }
+
+    pub(crate) fn admit_connection(&self) -> Result<OwnedSemaphorePermit, SafeError> {
+        self.shared
+            .connections
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| unavailable())
+    }
+
+    pub(crate) async fn serve_admitted_connection(
+        &self,
+        stream: TlsStream<TcpStream>,
+        _admission: OwnedSemaphorePermit,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), SafeError> {
+        serve_until(self.shared.clone(), stream, deadline).await
     }
 }
 
 // Both Hyper I/O and the exporter use the same Rustls session. Locks are held
 // only during one synchronous poll/exporter operation, never across await.
 #[derive(Clone)]
-struct SessionIo(Arc<Mutex<TlsStream<TcpStream>>>);
+struct SessionIo(Arc<Mutex<TlsStream<TcpStream>>>, tokio::time::Instant);
+impl SessionIo {
+    fn check_deadline(&self) -> io::Result<()> {
+        if tokio::time::Instant::now() >= self.1 {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Public connection expired.",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
 impl AsyncRead for SessionIo {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
         match self.0.lock() {
             Ok(mut stream) => Pin::new(&mut *stream).poll_read(cx, buf),
             Err(_) => Poll::Ready(Err(io::Error::other("TLS session unavailable"))),
@@ -206,18 +240,27 @@ impl AsyncWrite for SessionIo {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
         match self.0.lock() {
             Ok(mut stream) => Pin::new(&mut *stream).poll_write(cx, buf),
             Err(_) => Poll::Ready(Err(io::Error::other("TLS session unavailable"))),
         }
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
         match self.0.lock() {
             Ok(mut stream) => Pin::new(&mut *stream).poll_flush(cx),
             Err(_) => Poll::Ready(Err(io::Error::other("TLS session unavailable"))),
         }
     }
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
         match self.0.lock() {
             Ok(mut stream) => Pin::new(&mut *stream).poll_shutdown(cx),
             Err(_) => Poll::Ready(Err(io::Error::other("TLS session unavailable"))),
@@ -229,6 +272,7 @@ struct Session {
     challenged: AtomicBool,
 }
 
+#[cfg(test)]
 async fn serve<Q: QuoteSource>(
     shared: Arc<Shared<Q>>,
     stream: TlsStream<TcpStream>,
@@ -237,8 +281,22 @@ async fn serve<Q: QuoteSource>(
         .connections
         .try_acquire()
         .map_err(|_| unavailable())?;
+    serve_until(
+        shared.clone(),
+        stream,
+        tokio::time::Instant::now() + Duration::from_secs(MAX_CONNECTION_LIFETIME_SECONDS),
+    )
+    .await
+}
+
+async fn serve_until<Q: QuoteSource>(
+    shared: Arc<Shared<Q>>,
+    stream: TlsStream<TcpStream>,
+    deadline: tokio::time::Instant,
+) -> Result<(), SafeError> {
     let (_, tls) = stream.get_ref();
-    if tls.is_handshaking()
+    if tokio::time::Instant::now() >= deadline
+        || tls.is_handshaking()
         || tls.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
         || tls.alpn_protocol() != Some(b"http/1.1")
         || !matches!(
@@ -248,7 +306,7 @@ async fn serve<Q: QuoteSource>(
     {
         return Err(unavailable());
     }
-    let io = SessionIo(Arc::new(Mutex::new(stream)));
+    let io = SessionIo(Arc::new(Mutex::new(stream)), deadline);
     let session = Arc::new(Session {
         io: io.clone(),
         challenged: AtomicBool::new(false),
@@ -259,8 +317,8 @@ async fn serve<Q: QuoteSource>(
         async move { Ok::<_, Infallible>(handle(shared, session, request).await) }
     });
     // Dropping the connection future also drops an in-progress quote future.
-    tokio::time::timeout(
-        Duration::from_secs(MAX_CONNECTION_LIFETIME_SECONDS),
+    tokio::time::timeout_at(
+        deadline,
         hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(io), service),
     )
     .await
@@ -292,6 +350,9 @@ async fn handle<Q: QuoteSource>(
     session: Arc<Session>,
     request: Request<Incoming>,
 ) -> Response<Full<Bytes>> {
+    if session.io.check_deadline().is_err() {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    }
     if request.method() != hyper::Method::POST
         || request.uri().path_and_query().map(|p| p.as_str()) != Some("/attestation")
         || request.uri().authority().is_some()
@@ -347,6 +408,9 @@ async fn handle<Q: QuoteSource>(
         *last = Some(now);
     }
     let exporter = {
+        if session.io.check_deadline().is_err() {
+            return failure(StatusCode::SERVICE_UNAVAILABLE);
+        }
         let stream = match session.io.0.lock() {
             Ok(stream) => stream,
             Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE),
@@ -364,6 +428,9 @@ async fn handle<Q: QuoteSource>(
         Ok(evidence) => evidence,
         Err(_) => return failure(StatusCode::SERVICE_UNAVAILABLE),
     };
+    if session.io.check_deadline().is_err() {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let response = PublicAttestationResponse {
         nonce: request.nonce,
         quote: evidence.quote,

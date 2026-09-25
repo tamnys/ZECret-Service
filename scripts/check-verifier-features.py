@@ -55,6 +55,7 @@ for name, version, checksum in [
     ("rustls", "0.23.45", "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"),
     ("tokio-rustls", "0.26.5", "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"),
     ("rustls-webpki", "0.103.15", "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"),
+    ("rcgen", "0.14.10", "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"),
     ("zcash_primitives", "0.30.1", "403d5be1e96339534be098e3377fb8a78d68ca7585b1780133d884b810277418"),
     ("zcash_protocol", "0.10.5", "314329b91ec4bbb517441840e47d0b2029bf0b946f086980c96c889c2d92dc5d"),
 ]:
@@ -64,6 +65,7 @@ for name, reviewed_features in [
     ("rustls", {"ring", "std"}),
     ("tokio-rustls", {"ring"}),
     ("rustls-webpki", {"alloc", "ring", "std"}),
+    ("rcgen", {"crypto", "ring", "zeroize"}),
 ]:
     package = next(p for p in packages.values() if p["name"] == name)
     assert set(nodes[package["id"]]["features"]) == reviewed_features, f"unreviewed {name} features"
@@ -78,6 +80,18 @@ locked_packages = {(p["name"], p["version"]): p for p in lock["package"]}
 for item in parser_receipt["packages"]:
     package = locked_packages[(item["name"], item["version"])]
     assert package["checksum"] == item["sha256"], "parser dependency review no longer matches lock"
+listener_receipt = json.loads((root / "records/listener-dependency-receipt.json").read_text())
+for item in listener_receipt["packages"]:
+    package = locked_packages[(item["name"], item["version"])]
+    assert package["checksum"] == item["sha256"], "listener dependency review no longer matches lock"
+# Metadata includes inactive optional package edges. Cargo tree resolves the
+# actual native normal/build graph used by this executable.
+listener_tree = subprocess.check_output([
+    "cargo", "tree", "--locked", "-p", "zrpc-server", "--target", host,
+    "-e", "normal,build", "--prefix", "none", "--format", "{p}"
+], cwd=root, text=True)
+listener_packages = {line.split()[0] for line in listener_tree.splitlines()}
+assert not ({"x509-parser", "aws-lc-rs", "aws-lc-sys", "pem"} & listener_packages)
 for family in ("dcap", "dstack", "tls"):
     fixture_dir = root / "tests/fixtures" / family
     provenance = json.loads((fixture_dir / "provenance.json").read_text())
