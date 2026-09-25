@@ -1,0 +1,6 @@
+1 0 0:1 / / ro - squashfs /dev/mapper/rootfs ro
+2 1 0:2 / /proc rw,nosuid,nodev,noexec - proc proc rw
+10 1 0:10 / /var/volatile rw,nosuid,nodev shared:1 future_tag:value - tmpfs tmpfs rw
+20 10 0:20 / /var/volatile/lib/docker rw - tmpfs tmpfs rw
+21 10 0:21 /containerd /var/volatile/lib/containerd rw - tmpfs none rw
+22 10 0:22 / /var/volatile/lib/sysbox rw - ramfs ramfs rw

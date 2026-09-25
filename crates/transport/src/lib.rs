@@ -18,7 +18,7 @@ use zrpc_protocol::{ErrorCode, Request, SafeError};
 use zrpc_verifier::VerifiedChannel;
 
 mod tls;
-pub use tls::{PendingChallenge, PublicBootstrapTls};
+pub use tls::{PendingChallenge, PublicBootstrapTls, UnverifiedPublicEvidence};
 
 /// A configuration value is not evidence that Tor is connected or functional.
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +78,7 @@ impl TorConfig {
         Ok(UnverifiedChannel {
             socket: Some(socket),
             server_name: Some(endpoint.hostname.clone()),
+            authority: Some(format!("{}:{}", endpoint.hostname, endpoint.port)),
         })
     }
 }
@@ -241,6 +242,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RequirePassword<S> {
 pub struct UnverifiedChannel {
     socket: Option<Socks5Stream<RequirePassword<TcpStream>>>,
     server_name: Option<String>,
+    authority: Option<String>,
 }
 
 impl UnverifiedChannel {

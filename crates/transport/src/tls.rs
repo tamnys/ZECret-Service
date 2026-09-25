@@ -15,13 +15,16 @@ use std::{
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use tokio_socks::tcp::Socks5Stream;
-use zrpc_protocol::{ErrorCode, SafeError};
+use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
+
+mod attestation;
+pub use attestation::UnverifiedPublicEvidence;
 
 type BootstrapStream = TlsStream<Socks5Stream<RequirePassword<TcpStream>>>;
 
 // Design §7 limits each connection to five minutes before a new handshake and
 // challenge. This is an upper lifetime bound, not evidence of quote freshness.
-const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(300);
+const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(MAX_CONNECTION_LIFETIME_SECONDS);
 const ALPN: &[u8] = b"http/1.1";
 
 fn unavailable() -> SafeError {
@@ -107,6 +110,7 @@ impl UnverifiedChannel {
     /// This verifies TLS key possession only. No certificate identity is trusted.
     pub async fn start_tls(self) -> Result<PublicBootstrapTls, SafeError> {
         let socket = self.socket.ok_or_else(unavailable)?;
+        let authority = self.authority.ok_or_else(unavailable)?;
         let name = ServerName::try_from(self.server_name.ok_or_else(unavailable)?)
             .map_err(|_| unavailable())?;
         let stream = TlsConnector::from(bootstrap_config()?)
@@ -127,6 +131,7 @@ impl UnverifiedChannel {
         Ok(PublicBootstrapTls {
             stream,
             established: Instant::now(),
+            authority,
         })
     }
 }
@@ -154,6 +159,7 @@ pub struct PublicBootstrapTls {
     // Retained to keep challenge ownership tied to this single TLS connection.
     stream: BootstrapStream,
     established: Instant,
+    authority: String,
 }
 
 impl PublicBootstrapTls {

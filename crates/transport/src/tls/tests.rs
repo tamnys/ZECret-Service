@@ -13,6 +13,8 @@ use tokio::{
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream as ServerStream};
 
+mod attestation_tests;
+
 // Candidate encoding in ADR 0002, used only in tests until attestation protocol
 // review. These are exporter inputs, not a fabricated expected TLS output.
 const EXPORTER_LABEL: &[u8] = b"EXPORTER-zrpc-attestation-v1";

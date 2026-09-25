@@ -1,6 +1,9 @@
 //! The M0 fixture protocol. No wallet, write, forwarding, or generic RPC method.
 #![forbid(unsafe_code)]
 
+mod attestation;
+pub use attestation::*;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;

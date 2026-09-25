@@ -44,6 +44,11 @@ assert not (forbidden & {packages[p]["name"] for p in seen})
 dstack_lock = next(p for p in lock["package"] if p["name"] == "cc-eventlog")
 assert dstack_lock["version"] == "0.5.9"
 assert dstack_lock["source"] == "git+https://github.com/Dstack-TEE/dstack?rev=282eeb27d22d8f091ad0fa5a90e638f85cf68751#282eeb27d22d8f091ad0fa5a90e638f85cf68751"
+sdk_types = next(p for p in lock["package"] if p["name"] == "dstack-sdk-types")
+assert sdk_types["version"] == "0.1.2" and sdk_types["source"] == dstack_lock["source"]
+# Only maintained wire types are needed by the bounded Unix adapter. Adding the
+# full SDK would introduce unrelated signer and HTTP-fetch implementations.
+assert not any(p["name"] == "dstack-sdk" for p in packages.values())
 for name, version, checksum in [
     ("ez-hash", "1.1.0", "42b3b3adc5fbbc9e21416d5b721b1bccb501a87d7b32ac89f2c7cea229d40772"),
     ("tokio-socks", "0.5.3", "a7e2948f60dbe26b35f2c7fb74ac2854c1fddded0fe9d7548fcc674a246f7615"),

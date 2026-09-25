@@ -1,0 +1,5 @@
+1 0 0:1 / / ro - squashfs /dev/mapper/rootfs ro
+10 1 0:10 / /var/volatile rw,nosuid,nodev - tmpfs tmpfs rw
+20 10 253:0 /var/lib/docker /var/volatile/lib/docker rw - ext4 /dev/mapper/dstack-data rw
+21 10 0:21 / /var/volatile/lib/containerd rw - tmpfs tmpfs rw
+22 10 0:22 / /var/volatile/lib/sysbox rw - tmpfs tmpfs rw

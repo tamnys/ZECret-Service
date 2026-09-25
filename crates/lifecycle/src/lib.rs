@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
 
 pub mod controller;
+#[cfg(unix)]
+pub mod persistence;
 
 // Authorities: design section 13 sets the lifetime, preflight ceiling and
 // deletion trigger. The operator's subsequent $50 total cap supersedes its

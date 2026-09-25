@@ -56,7 +56,7 @@ impl ExperimentBinding {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Attempt {
     started_at_unix_seconds: u64,
@@ -73,7 +73,7 @@ pub enum DeletionState {
 
 /// One explicitly tracked CVM, including its attached disk cost. This is not a
 /// fabricated independently addressable Phala disk resource.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TrackedCvm {
     pub cvm_id: String,
@@ -156,8 +156,8 @@ struct LedgerData {
 }
 
 /// Fields are private; attempt APIs cannot replace the original policy or
-/// remove earlier resources/costs. Persistence and a trusted binding store are
-/// deliberately unfinished; serialization alone is not durable activation.
+/// remove earlier resources/costs. The separate Unix persistence module checks
+/// successors under an OS lock; serialization alone is not durable activation.
 #[derive(Debug, Clone, Serialize)]
 #[serde(transparent)]
 pub struct ExperimentLedger(LedgerData);
@@ -181,6 +181,40 @@ impl ExperimentLedger {
 
     pub fn binding(&self) -> &ExperimentBinding {
         &self.0.binding
+    }
+
+    /// Persistence may append history, never replace known identities, costs,
+    /// or billing records with a fresh ledger carrying the same binding.
+    #[cfg(unix)]
+    pub(crate) fn validate_successor(&self, previous: &Self) -> Result<(), LifecycleError> {
+        self.validate()?;
+        previous.validate()?;
+        if self.0.binding != previous.0.binding
+            || self.0.initial_cost_microusd != previous.0.initial_cost_microusd
+            || self.0.conservative_cost_floor_microusd < previous.0.conservative_cost_floor_microusd
+            || self.0.last_observed_at_unix_seconds < previous.0.last_observed_at_unix_seconds
+            || previous
+                .0
+                .attempts
+                .iter()
+                .any(|(id, value)| self.0.attempts.get(id) != Some(value))
+            || previous
+                .0
+                .usage
+                .iter()
+                .any(|(id, value)| self.0.usage.get(id) != Some(value))
+            || previous.0.resources.iter().any(|(id, value)| {
+                self.0
+                    .resources
+                    .get(id)
+                    .is_none_or(|next| next.attempt_id != value.attempt_id || next.cvm != value.cvm)
+            })
+        {
+            return Err(LifecycleError(
+                "ledger successor would reset or alter experiment history",
+            ));
+        }
+        Ok(())
     }
 
     pub fn from_json(bytes: &[u8], original: &ExperimentBinding) -> Result<Self, LifecycleError> {
