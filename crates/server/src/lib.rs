@@ -1,5 +1,7 @@
-//! In-process fixture wrapper. No listener, backend URL, TLS, or cloud service.
+//! Fixture wrapper and internal loopback-only node adapter. No public listener.
 #![forbid(unsafe_code)]
+
+pub mod node;
 
 use serde_json::{Value, json};
 use std::io::{self, Write};

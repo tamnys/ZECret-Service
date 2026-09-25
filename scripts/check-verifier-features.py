@@ -1,4 +1,4 @@
-"""Verify the pinned QVL has no collateral-fetch/override feature in this build."""
+"""Check offline verifier features, reviewed TLS pins and upstream fixture hashes."""
 import hashlib
 import json
 import subprocess
@@ -47,12 +47,22 @@ assert dstack_lock["source"] == "git+https://github.com/Dstack-TEE/dstack?rev=28
 for name, version, checksum in [
     ("ez-hash", "1.1.0", "42b3b3adc5fbbc9e21416d5b721b1bccb501a87d7b32ac89f2c7cea229d40772"),
     ("tokio-socks", "0.5.3", "a7e2948f60dbe26b35f2c7fb74ac2854c1fddded0fe9d7548fcc674a246f7615"),
+    ("rustls", "0.23.45", "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"),
+    ("tokio-rustls", "0.26.5", "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"),
+    ("rustls-webpki", "0.103.15", "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"),
 ]:
     package = next(p for p in lock["package"] if p["name"] == name)
     assert package["version"] == version and package["checksum"] == checksum
-for family in ("dcap", "dstack"):
+for name, reviewed_features in [
+    ("rustls", {"ring", "std"}),
+    ("tokio-rustls", {"ring"}),
+    ("rustls-webpki", {"alloc", "ring", "std"}),
+]:
+    package = next(p for p in packages.values() if p["name"] == name)
+    assert set(nodes[package["id"]]["features"]) == reviewed_features, f"unreviewed {name} features"
+for family in ("dcap", "dstack", "tls"):
     fixture_dir = root / "tests/fixtures" / family
     provenance = json.loads((fixture_dir / "provenance.json").read_text())
     for name, item in provenance["files"].items():
         assert hashlib.sha256((fixture_dir / name).read_bytes()).hexdigest() == item["sha256"]
-print(f"Offline verifier guard passed ({host}): exact package/checksums; no fetch or dangerous override feature; no known network client in its native dependency graph.")
+print(f"Verifier/TLS guard passed ({host}): exact pins and fixture hashes; offline verifier has no fetch/override feature or known network client; reviewed Ring-only TLS features.")

@@ -9,3 +9,4 @@
 .env.*
 /deploy/runtime/
 /.pnpm-store/
+__pycache__/

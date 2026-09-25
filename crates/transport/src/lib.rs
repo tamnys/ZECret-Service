@@ -1,4 +1,4 @@
-//! A standalone SOCKS bootstrap transport; no private RPC or TLS path is enabled.
+//! A standalone SOCKS/TLS bootstrap transport; no private RPC path is enabled.
 //! Connections go only to the configured numeric loopback socket. A successful
 //! SOCKS handshake does not establish that the proxy is Tor or attest its peer.
 #![forbid(unsafe_code)]
@@ -16,6 +16,9 @@ use tokio::{
 use tokio_socks::tcp::Socks5Stream;
 use zrpc_protocol::{ErrorCode, Request, SafeError};
 use zrpc_verifier::VerifiedChannel;
+
+mod tls;
+pub use tls::{PendingChallenge, PublicBootstrapTls};
 
 /// A configuration value is not evidence that Tor is connected or functional.
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +77,7 @@ impl TorConfig {
         })?;
         Ok(UnverifiedChannel {
             socket: Some(socket),
+            server_name: Some(endpoint.hostname.clone()),
         })
     }
 }
@@ -236,6 +240,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RequirePassword<S> {
 #[derive(Default)]
 pub struct UnverifiedChannel {
     socket: Option<Socks5Stream<RequirePassword<TcpStream>>>,
+    server_name: Option<String>,
 }
 
 impl UnverifiedChannel {

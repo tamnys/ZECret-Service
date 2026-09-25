@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
 
+pub mod controller;
+
 // Authorities: design section 13 sets the lifetime, preflight ceiling and
 // deletion trigger. The operator's subsequent $50 total cap supersedes its
 // original approximately $60 overall ceiling; credited funds do not authorize spending.

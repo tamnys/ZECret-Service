@@ -1,0 +1,20 @@
+{
+  "source_repository": "https://github.com/rustls/rustls",
+  "source_commit": "2976d90fd1c2db6b518700dd101b714069cfcb17",
+  "license": "Apache-2.0",
+  "purpose": "Public upstream TLS test certificate and PUBLIC TEST PRIVATE KEY, for loopback tests only. Never use this key for a deployment or treat this certificate as an approved server identity.",
+  "files": {
+    "end.der": {
+      "url": "https://raw.githubusercontent.com/rustls/rustls/2976d90fd1c2db6b518700dd101b714069cfcb17/test-ca/ecdsa-p256/end.der",
+      "sha256": "0bc72ae2b4207b6ad964eee2a1e384204ac902c9186da9b6bac2fc77d2c2a7ef"
+    },
+    "end.key": {
+      "url": "https://raw.githubusercontent.com/rustls/rustls/2976d90fd1c2db6b518700dd101b714069cfcb17/test-ca/ecdsa-p256/end.key",
+      "sha256": "abe1d61dc354811b2db9555e8f4d806cc9a6f36b863c778b86431e870a17476b"
+    },
+    "LICENSE-APACHE": {
+      "url": "https://raw.githubusercontent.com/rustls/rustls/2976d90fd1c2db6b518700dd101b714069cfcb17/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+    }
+  }
+}

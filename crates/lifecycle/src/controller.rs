@@ -1,0 +1,1036 @@
+//! Local controller model. The provider trait is sealed to the in-memory mock;
+//! this module cannot activate a real provider, scheduler, or deployment.
+//! JSON restoration checks an independently retained original binding, but is
+//! not authenticated storage or protection against operator filesystem edits.
+
+use crate::{
+    DELETE_THRESHOLD_MICROUSD, DeploymentManifest, LifecycleError, MAX_LIFETIME_SECONDS,
+    ManifestSource, TOTAL_CEILING_MICROUSD, WatchdogAction, add, duration_cost, nonempty, watchdog,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExperimentBinding {
+    experiment_id: String,
+    workspace_id: String,
+    started_at_unix_seconds: u64,
+    deletion_deadline_unix_seconds: u64,
+    total_ceiling_microusd: u64,
+    delete_threshold_microusd: u64,
+}
+
+impl ExperimentBinding {
+    pub fn new(
+        experiment_id: String,
+        workspace_id: String,
+        started_at_unix_seconds: u64,
+        deletion_deadline_unix_seconds: u64,
+    ) -> Result<Self, LifecycleError> {
+        let binding = Self {
+            experiment_id,
+            workspace_id,
+            started_at_unix_seconds,
+            deletion_deadline_unix_seconds,
+            total_ceiling_microusd: TOTAL_CEILING_MICROUSD,
+            delete_threshold_microusd: DELETE_THRESHOLD_MICROUSD,
+        };
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    fn validate(&self) -> Result<(), LifecycleError> {
+        if !nonempty(&self.experiment_id)
+            || !nonempty(&self.workspace_id)
+            || self.total_ceiling_microusd != TOTAL_CEILING_MICROUSD
+            || self.delete_threshold_microusd != DELETE_THRESHOLD_MICROUSD
+            || !self
+                .deletion_deadline_unix_seconds
+                .checked_sub(self.started_at_unix_seconds)
+                .is_some_and(|duration| duration > 0 && duration <= MAX_LIFETIME_SECONDS)
+        {
+            return Err(LifecycleError("invalid original experiment binding"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Attempt {
+    started_at_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletionState {
+    Tracking,
+    DeletionRequested,
+    AbsentFromInventory,
+    BillingReconciliationPending,
+}
+
+/// One explicitly tracked CVM, including its attached disk cost. This is not a
+/// fabricated independently addressable Phala disk resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrackedCvm {
+    pub cvm_id: String,
+    pub app_id: String,
+    pub instance_id: String,
+    pub created_at_unix_seconds: u64,
+    pub compute_and_disk_microusd_per_hour: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackedResource {
+    attempt_id: String,
+    cvm: TrackedCvm,
+    deletion: DeletionState,
+}
+
+/// Domain representation of an exact monetary token, not an f64 conversion.
+/// A future HTTP adapter must preserve/normalize decimal tokens without binary
+/// floating point. Refunds never silently reduce this conservative expense log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UsageRecord {
+    pub billing_key: String,
+    pub app_id: String,
+    pub instance_id: String,
+    pub usage_type: String,
+    pub cost_usd_decimal: String,
+}
+
+/// Nonnegative plain decimal USD, rounded up to an integer microdollar.
+/// Rejects unsupported syntax and overflow rather than estimating a value.
+pub fn decimal_usd_to_microusd(value: &str) -> Result<u64, LifecycleError> {
+    let invalid = LifecycleError("invalid or overflowing decimal USD amount");
+    let mut parts = value.split('.');
+    let whole = parts.next().ok_or_else(|| invalid.clone())?;
+    let fraction = parts.next();
+    if parts.next().is_some()
+        || whole.is_empty()
+        || !whole.bytes().all(|b| b.is_ascii_digit())
+        || fraction.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(invalid);
+    }
+    let mut amount = whole
+        .parse::<u64>()
+        .map_err(|_| invalid.clone())?
+        .checked_mul(1_000_000)
+        .ok_or_else(|| invalid.clone())?;
+    let fraction = fraction.unwrap_or("");
+    // Six decimal places are the existing microUSD accounting unit.
+    let mut fractional_microusd = 0_u64;
+    for index in 0..6 {
+        fractional_microusd = fractional_microusd * 10
+            + u64::from(fraction.as_bytes().get(index).copied().unwrap_or(b'0') - b'0');
+    }
+    amount = amount
+        .checked_add(fractional_microusd)
+        .ok_or_else(|| invalid.clone())?;
+    if fraction
+        .as_bytes()
+        .get(6..)
+        .is_some_and(|tail| tail.iter().any(|b| *b != b'0'))
+    {
+        amount = amount.checked_add(1).ok_or(invalid)?;
+    }
+    Ok(amount)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerData {
+    binding: ExperimentBinding,
+    initial_cost_microusd: u64,
+    conservative_cost_floor_microusd: u64,
+    last_observed_at_unix_seconds: u64,
+    attempts: BTreeMap<String, Attempt>,
+    resources: BTreeMap<String, TrackedResource>,
+    usage: BTreeMap<String, UsageRecord>,
+}
+
+/// Fields are private; attempt APIs cannot replace the original policy or
+/// remove earlier resources/costs. Persistence and a trusted binding store are
+/// deliberately unfinished; serialization alone is not durable activation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct ExperimentLedger(LedgerData);
+
+impl ExperimentLedger {
+    pub fn new(
+        binding: ExperimentBinding,
+        initial_cost_microusd: u64,
+    ) -> Result<Self, LifecycleError> {
+        binding.validate()?;
+        Ok(Self(LedgerData {
+            last_observed_at_unix_seconds: binding.started_at_unix_seconds,
+            binding,
+            initial_cost_microusd,
+            conservative_cost_floor_microusd: initial_cost_microusd,
+            attempts: BTreeMap::new(),
+            resources: BTreeMap::new(),
+            usage: BTreeMap::new(),
+        }))
+    }
+
+    pub fn binding(&self) -> &ExperimentBinding {
+        &self.0.binding
+    }
+
+    pub fn from_json(bytes: &[u8], original: &ExperimentBinding) -> Result<Self, LifecycleError> {
+        original.validate()?;
+        let data: LedgerData = serde_json::from_slice(bytes)
+            .map_err(|_| LifecycleError("invalid experiment ledger JSON"))?;
+        if &data.binding != original {
+            return Err(LifecycleError(
+                "ledger differs from original experiment binding",
+            ));
+        }
+        let ledger = Self(data);
+        ledger.validate()?;
+        Ok(ledger)
+    }
+
+    fn validate(&self) -> Result<(), LifecycleError> {
+        self.0.binding.validate()?;
+        if self.0.last_observed_at_unix_seconds < self.0.binding.started_at_unix_seconds
+            || self.0.conservative_cost_floor_microusd < self.0.initial_cost_microusd
+        {
+            return Err(LifecycleError("invalid ledger cost or clock"));
+        }
+        for (id, attempt) in &self.0.attempts {
+            if !nonempty(id)
+                || attempt.started_at_unix_seconds < self.0.binding.started_at_unix_seconds
+                || attempt.started_at_unix_seconds >= self.0.binding.deletion_deadline_unix_seconds
+            {
+                return Err(LifecycleError("invalid ledger attempt"));
+            }
+        }
+        let mut instances = BTreeSet::new();
+        for (id, resource) in &self.0.resources {
+            self.validate_resource(&resource.attempt_id, &resource.cvm)?;
+            if id != &resource.cvm.cvm_id || !instances.insert(&resource.cvm.instance_id) {
+                return Err(LifecycleError("invalid or duplicate tracked resource"));
+            }
+        }
+        for (key, usage) in &self.0.usage {
+            self.validate_usage(usage)?;
+            if key != &usage.billing_key {
+                return Err(LifecycleError("invalid billing record key"));
+            }
+        }
+        if self.modeled_cost(self.0.last_observed_at_unix_seconds)?
+            > self.0.conservative_cost_floor_microusd
+            || self.observed_cost()? > self.0.conservative_cost_floor_microusd
+        {
+            return Err(LifecycleError("ledger cost floor omits known costs"));
+        }
+        Ok(())
+    }
+
+    pub fn begin_attempt(&mut self, attempt_id: String, now: u64) -> Result<(), LifecycleError> {
+        self.advance_cost(now)?;
+        if !nonempty(&attempt_id) || self.0.attempts.contains_key(&attempt_id) {
+            return Err(LifecycleError("attempt ID must be nonempty and unique"));
+        }
+        if now >= self.0.binding.deletion_deadline_unix_seconds
+            || self.0.conservative_cost_floor_microusd >= DELETE_THRESHOLD_MICROUSD
+        {
+            return Err(LifecycleError(
+                "experiment already requires deletion; retry forbidden",
+            ));
+        }
+        self.0.attempts.insert(
+            attempt_id,
+            Attempt {
+                started_at_unix_seconds: now,
+            },
+        );
+        Ok(())
+    }
+
+    fn validate_resource(&self, attempt_id: &str, cvm: &TrackedCvm) -> Result<(), LifecycleError> {
+        let attempt = self
+            .0
+            .attempts
+            .get(attempt_id)
+            .ok_or(LifecycleError("unknown attempt"))?;
+        if !nonempty(&cvm.cvm_id)
+            || !nonempty(&cvm.app_id)
+            || !nonempty(&cvm.instance_id)
+            || cvm.created_at_unix_seconds < attempt.started_at_unix_seconds
+            || cvm.created_at_unix_seconds >= self.0.binding.deletion_deadline_unix_seconds
+            || cvm.compute_and_disk_microusd_per_hour == 0
+        {
+            return Err(LifecycleError("invalid explicitly tracked CVM"));
+        }
+        Ok(())
+    }
+
+    pub fn track_cvm(
+        &mut self,
+        workspace_id: &str,
+        attempt_id: &str,
+        cvm: TrackedCvm,
+    ) -> Result<(), LifecycleError> {
+        if workspace_id != self.0.binding.workspace_id {
+            return Err(LifecycleError("resource workspace differs from experiment"));
+        }
+        self.validate_resource(attempt_id, &cvm)?;
+        if self.0.resources.contains_key(&cvm.cvm_id)
+            || self
+                .0
+                .resources
+                .values()
+                .any(|r| r.cvm.instance_id == cvm.instance_id)
+        {
+            return Err(LifecycleError("resource is already tracked"));
+        }
+        self.0.resources.insert(
+            cvm.cvm_id.clone(),
+            TrackedResource {
+                attempt_id: attempt_id.to_owned(),
+                cvm,
+                deletion: DeletionState::Tracking,
+            },
+        );
+        // Recording a partially created resource is allowed even at the deletion
+        // threshold: refusing its identity would make cleanup less complete.
+        self.advance_cost(self.0.last_observed_at_unix_seconds)
+    }
+
+    fn validate_usage(&self, usage: &UsageRecord) -> Result<u64, LifecycleError> {
+        if !nonempty(&usage.billing_key)
+            || !nonempty(&usage.usage_type)
+            || !self
+                .0
+                .resources
+                .values()
+                .any(|r| r.cvm.app_id == usage.app_id && r.cvm.instance_id == usage.instance_id)
+        {
+            return Err(LifecycleError(
+                "billing record is outside tracked experiment",
+            ));
+        }
+        decimal_usd_to_microusd(&usage.cost_usd_decimal)
+    }
+
+    pub fn record_usage(&mut self, usage: UsageRecord) -> Result<(), LifecycleError> {
+        self.validate_usage(&usage)?;
+        if let Some(existing) = self.0.usage.get(&usage.billing_key) {
+            if existing != &usage {
+                return Err(LifecycleError("conflicting duplicate billing record"));
+            }
+            return Ok(());
+        }
+        let amount = decimal_usd_to_microusd(&usage.cost_usd_decimal)?;
+        let observed = add(self.observed_cost()?, amount)?;
+        self.0.usage.insert(usage.billing_key.clone(), usage);
+        self.0.conservative_cost_floor_microusd =
+            self.0.conservative_cost_floor_microusd.max(observed);
+        Ok(())
+    }
+
+    fn observed_cost(&self) -> Result<u64, LifecycleError> {
+        self.0
+            .usage
+            .values()
+            .try_fold(self.0.initial_cost_microusd, |sum, row| {
+                add(sum, decimal_usd_to_microusd(&row.cost_usd_decimal)?)
+            })
+    }
+
+    fn modeled_cost(&self, now: u64) -> Result<u64, LifecycleError> {
+        self.0
+            .resources
+            .values()
+            .try_fold(self.0.initial_cost_microusd, |sum, resource| {
+                // No deletion/billing completion proof exists here. Preserve the
+                // modeled floor for every attempt, including stopped/absent CVMs.
+                add(
+                    sum,
+                    duration_cost(
+                        resource.cvm.compute_and_disk_microusd_per_hour,
+                        now.saturating_sub(resource.cvm.created_at_unix_seconds),
+                    )?,
+                )
+            })
+    }
+
+    fn advance_cost(&mut self, now: u64) -> Result<(), LifecycleError> {
+        if now < self.0.last_observed_at_unix_seconds {
+            return Err(LifecycleError("controller clock moved backwards"));
+        }
+        self.0.conservative_cost_floor_microusd = self
+            .0
+            .conservative_cost_floor_microusd
+            .max(self.modeled_cost(now)?)
+            .max(self.observed_cost()?);
+        self.0.last_observed_at_unix_seconds = now;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderError {
+    Unauthorized,
+    Forbidden,
+    Unavailable,
+    MalformedResponse,
+}
+
+#[derive(Debug, Clone)]
+pub struct InventoryItem {
+    pub cvm_id: String,
+    pub workspace_id: String,
+    /// Provider status is informational. Stopped is never deleted or free.
+    pub status: String,
+}
+#[derive(Debug, Clone)]
+pub struct InventoryPage {
+    pub workspace_id: String,
+    pub page: u64,
+    pub pages: u64,
+    pub total: u64,
+    pub items: Vec<InventoryItem>,
+}
+#[derive(Debug, Clone)]
+pub enum DetailReply {
+    Present(InventoryItem),
+    Absent404,
+}
+#[derive(Debug, Clone, Copy)]
+pub enum DeleteReply {
+    Initiated204,
+    Absent404,
+}
+#[derive(Debug, Clone)]
+pub struct UsagePage {
+    pub records: Vec<UsageRecord>,
+    pub total: u64,
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// These are proposed internal operations, not Phala SDK method names. Only the
+/// in-memory implementation can implement this trait. There is no live adapter.
+pub trait MockProvider: sealed::Sealed {
+    fn workspace_identity(&mut self) -> Result<String, ProviderError>;
+    fn inventory_page(&mut self, page: u64) -> Result<InventoryPage, ProviderError>;
+    fn detail(&mut self, cvm_id: &str) -> Result<DetailReply, ProviderError>;
+    fn usage_page(
+        &mut self,
+        app_id: &str,
+        start: u64,
+        end: u64,
+        offset: u64,
+    ) -> Result<UsagePage, ProviderError>;
+    fn delete(&mut self, cvm_id: &str) -> Result<DeleteReply, ProviderError>;
+}
+
+/// Replies must be supplied explicitly. Missing replies are errors, never
+/// fabricated absence, free billing, or successful deletion.
+#[derive(Debug, Clone)]
+pub struct ScriptedMockProvider {
+    pub workspace: Result<String, ProviderError>,
+    pub inventory: BTreeMap<u64, Result<InventoryPage, ProviderError>>,
+    pub details: BTreeMap<String, Result<DetailReply, ProviderError>>,
+    pub usage: BTreeMap<(String, u64), Result<UsagePage, ProviderError>>,
+    pub deletion: BTreeMap<String, Result<DeleteReply, ProviderError>>,
+    pub deletion_requests: Vec<String>,
+    pub usage_requests: Vec<(String, u64, u64, u64)>,
+}
+
+impl sealed::Sealed for ScriptedMockProvider {}
+impl MockProvider for ScriptedMockProvider {
+    fn workspace_identity(&mut self) -> Result<String, ProviderError> {
+        self.workspace.clone()
+    }
+    fn inventory_page(&mut self, page: u64) -> Result<InventoryPage, ProviderError> {
+        self.inventory
+            .get(&page)
+            .cloned()
+            .unwrap_or(Err(ProviderError::MalformedResponse))
+    }
+    fn detail(&mut self, id: &str) -> Result<DetailReply, ProviderError> {
+        self.details
+            .get(id)
+            .cloned()
+            .unwrap_or(Err(ProviderError::MalformedResponse))
+    }
+    fn usage_page(
+        &mut self,
+        app: &str,
+        start: u64,
+        end: u64,
+        offset: u64,
+    ) -> Result<UsagePage, ProviderError> {
+        self.usage_requests
+            .push((app.to_owned(), start, end, offset));
+        self.usage
+            .get(&(app.to_owned(), offset))
+            .cloned()
+            .unwrap_or(Err(ProviderError::MalformedResponse))
+    }
+    fn delete(&mut self, id: &str) -> Result<DeleteReply, ProviderError> {
+        self.deletion_requests.push(id.to_owned());
+        self.deletion
+            .get(id)
+            .cloned()
+            .unwrap_or(Err(ProviderError::MalformedResponse))
+    }
+}
+
+fn full_inventory(
+    provider: &mut impl MockProvider,
+    workspace: &str,
+) -> Result<BTreeSet<String>, ProviderError> {
+    let mut ids = BTreeSet::new();
+    let mut page = 1;
+    let mut expected = None;
+    loop {
+        let reply = provider.inventory_page(page)?;
+        let metadata = (reply.pages, reply.total);
+        if reply.workspace_id != workspace
+            || reply.page != page
+            || expected.is_some_and(|value| value != metadata)
+            || (reply.pages == 0 && (page != 1 || reply.total != 0 || !reply.items.is_empty()))
+            || (reply.pages != 0 && page > reply.pages)
+        {
+            return Err(ProviderError::MalformedResponse);
+        }
+        expected = Some(metadata);
+        for item in reply.items {
+            if item.workspace_id != workspace
+                || !nonempty(&item.cvm_id)
+                || !nonempty(&item.status)
+                || !ids.insert(item.cvm_id)
+            {
+                return Err(ProviderError::MalformedResponse);
+            }
+        }
+        if reply.pages == 0 || page == reply.pages {
+            if u64::try_from(ids.len()).ok() != Some(reply.total) {
+                return Err(ProviderError::MalformedResponse);
+            }
+            return Ok(ids);
+        }
+        page = page
+            .checked_add(1)
+            .ok_or(ProviderError::MalformedResponse)?;
+    }
+}
+
+fn collect_usage(
+    ledger: &mut ExperimentLedger,
+    provider: &mut impl MockProvider,
+    now: u64,
+) -> Result<(), LifecycleError> {
+    let apps: BTreeSet<_> = ledger
+        .0
+        .resources
+        .values()
+        .map(|r| r.cvm.app_id.clone())
+        .collect();
+    for app in apps {
+        let mut offset = 0_u64;
+        let mut scanned_keys = BTreeSet::new();
+        loop {
+            let page = provider
+                .usage_page(&app, ledger.0.binding.started_at_unix_seconds, now, offset)
+                .map_err(|_| LifecycleError("billing retrieval incomplete"))?;
+            if u64::try_from(page.records.len()).ok() != Some(page.total) {
+                return Err(LifecycleError("billing pagination is inconsistent"));
+            }
+            if page.records.is_empty() {
+                break;
+            }
+            let previous = scanned_keys.len();
+            for record in page.records {
+                if record.app_id != app {
+                    return Err(LifecycleError("billing app does not match request"));
+                }
+                scanned_keys.insert(record.billing_key.clone());
+                ledger.record_usage(record)?;
+            }
+            if scanned_keys.len() == previous {
+                return Err(LifecycleError("billing pagination made no progress"));
+            }
+            offset = offset
+                .checked_add(page.total)
+                .ok_or(LifecycleError("billing offset overflow"))?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ControllerReport {
+    pub simulation: bool,
+    pub live_activation_available: bool,
+    pub provider_action_performed: bool,
+    pub action: WatchdogAction,
+    pub conservative_cost_microusd: u64,
+    pub inventory_complete: bool,
+    pub usage_complete: bool,
+    pub resources: BTreeMap<String, DeletionState>,
+    pub untracked_inventory_ids: Vec<String>,
+    pub independent_disk_deletion_verified: bool,
+    pub cleanup_complete: bool,
+    pub issues: Vec<String>,
+}
+
+/// One explicitly invoked local mock tick; no timer, network, activation, or
+/// persistence. Inventory errors do not prevent requesting deletion of known
+/// IDs at the policy trigger, but can never establish their absence.
+pub fn tick_mock(
+    ledger: &mut ExperimentLedger,
+    provider: &mut impl MockProvider,
+    now: u64,
+) -> Result<ControllerReport, LifecycleError> {
+    ledger.validate()?;
+    ledger.advance_cost(now)?;
+    if provider
+        .workspace_identity()
+        .map_err(|_| LifecycleError("provider identity unavailable"))?
+        != ledger.0.binding.workspace_id
+    {
+        return Err(LifecycleError("provider workspace differs from experiment"));
+    }
+    let mut issues = Vec::new();
+    let usage_complete = match collect_usage(ledger, provider, now) {
+        Ok(()) => true,
+        Err(error) => {
+            issues.push(error.0.to_owned());
+            false
+        }
+    };
+    let decision = watchdog(
+        &DeploymentManifest {
+            source: ManifestSource::SyntheticFixture,
+            experiment_id: ledger.0.binding.experiment_id.clone(),
+            started_at_unix_seconds: ledger.0.binding.started_at_unix_seconds,
+            deletion_deadline_unix_seconds: Some(ledger.0.binding.deletion_deadline_unix_seconds),
+            initial_cost_microusd: ledger.0.conservative_cost_floor_microusd,
+            quote_reference: "local controller ledger; not a provider quote".to_owned(),
+            resources: Vec::new(),
+        },
+        now,
+        ledger.0.conservative_cost_floor_microusd,
+    )?;
+    let inventory = full_inventory(provider, &ledger.0.binding.workspace_id);
+    if inventory.is_err() {
+        issues.push("complete workspace inventory unavailable; absence unproven".to_owned());
+    }
+    for (id, resource) in &mut ledger.0.resources {
+        let mut absent = false;
+        let previous = resource.deletion;
+        if matches!(
+            previous,
+            DeletionState::AbsentFromInventory | DeletionState::BillingReconciliationPending
+        ) {
+            // A past observation is not current absence after an inventory or
+            // authorization failure. Preserve no optimistic current status.
+            resource.deletion = DeletionState::DeletionRequested;
+        }
+        if let Ok(ids) = &inventory {
+            if !ids.contains(id) {
+                match provider.detail(id) {
+                    Ok(DetailReply::Absent404) => {
+                        absent = true;
+                        resource.deletion = match previous {
+                            DeletionState::AbsentFromInventory
+                            | DeletionState::BillingReconciliationPending
+                                if usage_complete =>
+                            {
+                                DeletionState::BillingReconciliationPending
+                            }
+                            _ => DeletionState::AbsentFromInventory,
+                        };
+                    }
+                    _ => issues
+                        .push("resource detail does not corroborate inventory absence".to_owned()),
+                }
+            } else if matches!(
+                previous,
+                DeletionState::AbsentFromInventory | DeletionState::BillingReconciliationPending
+            ) {
+                resource.deletion = DeletionState::DeletionRequested;
+                issues.push("previously absent tracked resource is present again".to_owned());
+            }
+        }
+        if decision.action == WatchdogAction::DeleteAll && !absent {
+            match provider.delete(id) {
+                Ok(DeleteReply::Initiated204 | DeleteReply::Absent404) => {
+                    resource.deletion = DeletionState::DeletionRequested
+                }
+                Err(_) => issues
+                    .push("deletion request unconfirmed; cleanup remains incomplete".to_owned()),
+            }
+        }
+    }
+    let untracked_inventory_ids = inventory
+        .as_ref()
+        .map(|ids| {
+            ids.iter()
+                .filter(|id| !ledger.0.resources.contains_key(*id))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    issues.push(
+        "independent disk disappearance and final billing reconciliation are unavailable"
+            .to_owned(),
+    );
+    Ok(ControllerReport {
+        simulation: true,
+        live_activation_available: false,
+        provider_action_performed: false,
+        action: decision.action,
+        conservative_cost_microusd: ledger.0.conservative_cost_floor_microusd,
+        inventory_complete: inventory.is_ok(),
+        usage_complete,
+        resources: ledger
+            .0
+            .resources
+            .iter()
+            .map(|(id, r)| (id.clone(), r.deletion))
+            .collect(),
+        untracked_inventory_ids,
+        independent_disk_deletion_verified: false,
+        cleanup_complete: false,
+        issues,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const START: u64 = 1_000;
+    fn ledger() -> ExperimentLedger {
+        let binding = ExperimentBinding::new(
+            "experiment".into(),
+            "workspace".into(),
+            START,
+            START + MAX_LIFETIME_SECONDS,
+        )
+        .unwrap();
+        let mut ledger = ExperimentLedger::new(binding, 0).unwrap();
+        ledger.begin_attempt("first".into(), START).unwrap();
+        ledger
+            .track_cvm("workspace", "first", cvm("one", START))
+            .unwrap();
+        ledger
+    }
+    fn cvm(id: &str, created: u64) -> TrackedCvm {
+        TrackedCvm {
+            cvm_id: id.into(),
+            app_id: "app".into(),
+            instance_id: format!("instance-{id}"),
+            created_at_unix_seconds: created,
+            compute_and_disk_microusd_per_hour: 243_120,
+        }
+    }
+    fn page(ids: &[&str]) -> InventoryPage {
+        InventoryPage {
+            workspace_id: "workspace".into(),
+            page: 1,
+            pages: 1,
+            total: ids.len() as u64,
+            items: ids
+                .iter()
+                .map(|id| InventoryItem {
+                    cvm_id: (*id).into(),
+                    workspace_id: "workspace".into(),
+                    status: "running".into(),
+                })
+                .collect(),
+        }
+    }
+    fn provider() -> ScriptedMockProvider {
+        ScriptedMockProvider {
+            workspace: Ok("workspace".into()),
+            inventory: BTreeMap::from([(1, Ok(page(&["one"])))]),
+            details: BTreeMap::from([("one".into(), Ok(DetailReply::Absent404))]),
+            usage: BTreeMap::from([(
+                ("app".into(), 0),
+                Ok(UsagePage {
+                    records: vec![],
+                    total: 0,
+                }),
+            )]),
+            deletion: BTreeMap::from([("one".into(), Ok(DeleteReply::Initiated204))]),
+            deletion_requests: vec![],
+            usage_requests: vec![],
+        }
+    }
+    fn usage(key: &str, cost: &str) -> UsageRecord {
+        UsageRecord {
+            billing_key: key.into(),
+            app_id: "app".into(),
+            instance_id: "instance-one".into(),
+            usage_type: "storage".into(),
+            cost_usd_decimal: cost.into(),
+        }
+    }
+
+    #[test]
+    fn decimals_are_exact_rounded_up_and_checked() {
+        assert_eq!(decimal_usd_to_microusd("40.84416").unwrap(), 40_844_160);
+        assert_eq!(decimal_usd_to_microusd("0.0000001").unwrap(), 1);
+        assert_eq!(decimal_usd_to_microusd("45.000000000").unwrap(), 45_000_000);
+        for invalid in [
+            "-1",
+            "NaN",
+            "1e2",
+            "1.",
+            ".1",
+            " 1",
+            "1.2.3",
+            "18446744073710",
+        ] {
+            assert!(decimal_usd_to_microusd(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn restart_and_retries_preserve_original_deadline_and_budget() {
+        let mut ledger = ledger();
+        let original = ledger.binding().clone();
+        let now = START + 3600;
+        ledger.begin_attempt("retry".into(), now).unwrap();
+        ledger
+            .track_cvm("workspace", "retry", cvm("two", now))
+            .unwrap();
+        let bytes = serde_json::to_vec(&ledger).unwrap();
+        let mut restored = ExperimentLedger::from_json(&bytes, &original).unwrap();
+        assert_eq!(restored.binding(), &original);
+        let report = tick_mock(&mut restored, &mut provider(), now + 3600).unwrap();
+        assert_eq!(report.conservative_cost_microusd, 3 * 243_120);
+        assert!(
+            restored
+                .begin_attempt("late".into(), START + MAX_LIFETIME_SECONDS)
+                .is_err()
+        );
+        for field in [
+            "deletion_deadline_unix_seconds",
+            "started_at_unix_seconds",
+            "total_ceiling_microusd",
+            "delete_threshold_microusd",
+        ] {
+            let mut edited: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let value = edited["binding"][field].as_u64().unwrap();
+            edited["binding"][field] = serde_json::json!(value + 1);
+            assert!(
+                ExperimentLedger::from_json(&serde_json::to_vec(&edited).unwrap(), &original)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn initiated_deletion_stays_pending_until_independent_readback() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        let deadline = START + MAX_LIFETIME_SECONDS;
+        let first = tick_mock(&mut ledger, &mut provider, deadline).unwrap();
+        assert_eq!(first.resources["one"], DeletionState::DeletionRequested);
+        assert!(!first.cleanup_complete);
+        provider.inventory.insert(1, Ok(page(&[])));
+        let second = tick_mock(&mut ledger, &mut provider, deadline).unwrap();
+        assert_eq!(second.resources["one"], DeletionState::AbsentFromInventory);
+        let third = tick_mock(&mut ledger, &mut provider, deadline).unwrap();
+        assert_eq!(
+            third.resources["one"],
+            DeletionState::BillingReconciliationPending
+        );
+        assert_eq!(provider.deletion_requests, ["one"]);
+        assert!(
+            !third.independent_disk_deletion_verified
+                && !third.cleanup_complete
+                && !third.live_activation_available
+        );
+    }
+
+    #[test]
+    fn workspace_and_auth_errors_never_establish_absence() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        provider.workspace = Ok("another-workspace".into());
+        assert!(tick_mock(&mut ledger, &mut provider, START + MAX_LIFETIME_SECONDS).is_err());
+        assert!(provider.deletion_requests.is_empty());
+        provider.workspace = Ok("workspace".into());
+        provider.inventory.insert(1, Ok(page(&[])));
+        for error in [ProviderError::Unauthorized, ProviderError::Forbidden] {
+            provider.details.insert("one".into(), Err(error));
+            let report =
+                tick_mock(&mut ledger, &mut provider, START + MAX_LIFETIME_SECONDS).unwrap();
+            assert_eq!(report.resources["one"], DeletionState::DeletionRequested);
+            assert!(!report.cleanup_complete);
+        }
+    }
+
+    #[test]
+    fn partial_inventory_cannot_prove_absence_and_untracked_ids_are_never_deleted() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        let mut first = page(&["unrelated"]);
+        first.pages = 2;
+        first.total = 2;
+        provider.inventory.insert(1, Ok(first));
+        provider
+            .inventory
+            .insert(2, Err(ProviderError::Unavailable));
+        let report = tick_mock(&mut ledger, &mut provider, START + MAX_LIFETIME_SECONDS).unwrap();
+        assert!(!report.inventory_complete);
+        assert_eq!(report.resources["one"], DeletionState::DeletionRequested);
+        let mut second = page(&["one"]);
+        second.page = 2;
+        second.pages = 2;
+        second.total = 2;
+        provider.inventory.insert(2, Ok(second));
+        let report = tick_mock(&mut ledger, &mut provider, START + MAX_LIFETIME_SECONDS).unwrap();
+        assert_eq!(report.untracked_inventory_ids, ["unrelated"]);
+        assert!(provider.deletion_requests.iter().all(|id| id == "one"));
+    }
+
+    #[test]
+    fn partial_creation_and_lost_delete_response_remain_recoverable() {
+        let mut ledger = ledger();
+        ledger
+            .begin_attempt("failed-partway".into(), START)
+            .unwrap();
+        let mut provider = provider();
+        provider
+            .deletion
+            .insert("one".into(), Err(ProviderError::Unavailable));
+        let first = tick_mock(&mut ledger, &mut provider, START + MAX_LIFETIME_SECONDS).unwrap();
+        assert_eq!(first.resources["one"], DeletionState::Tracking);
+        provider.inventory.insert(1, Ok(page(&[])));
+        let second = tick_mock(&mut ledger, &mut provider, START + MAX_LIFETIME_SECONDS).unwrap();
+        assert_eq!(second.resources["one"], DeletionState::AbsentFromInventory);
+        assert_eq!(provider.deletion_requests, ["one"]);
+    }
+
+    #[test]
+    fn paginated_usage_deduplicates_and_triggers_cumulative_deletion() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        provider.usage.insert(
+            ("app".into(), 0),
+            Ok(UsagePage {
+                records: vec![usage("first", "44")],
+                total: 1,
+            }),
+        );
+        provider.usage.insert(
+            ("app".into(), 1),
+            Ok(UsagePage {
+                records: vec![usage("second", "1")],
+                total: 1,
+            }),
+        );
+        provider.usage.insert(
+            ("app".into(), 2),
+            Ok(UsagePage {
+                records: vec![],
+                total: 0,
+            }),
+        );
+        let report = tick_mock(&mut ledger, &mut provider, START).unwrap();
+        assert_eq!(report.action, WatchdogAction::DeleteAll);
+        assert_eq!(report.conservative_cost_microusd, 45_000_000);
+        assert_eq!(
+            tick_mock(&mut ledger, &mut provider, START)
+                .unwrap()
+                .conservative_cost_microusd,
+            45_000_000
+        );
+        assert!(ledger.begin_attempt("over-budget".into(), START).is_err());
+        assert!(ledger.record_usage(usage("first", "43")).is_err());
+        assert!(
+            provider
+                .usage_requests
+                .iter()
+                .all(|(_, start, end, _)| *start == START && *end == START)
+        );
+    }
+
+    #[test]
+    fn missing_or_late_billing_never_lowers_the_cost_floor() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        let first = tick_mock(&mut ledger, &mut provider, START + 3600).unwrap();
+        assert_eq!(first.conservative_cost_microusd, 243_120);
+        provider
+            .usage
+            .insert(("app".into(), 0), Err(ProviderError::Unavailable));
+        provider.inventory.insert(1, Ok(page(&[])));
+        let second = tick_mock(&mut ledger, &mut provider, START + 7200).unwrap();
+        assert!(!second.usage_complete);
+        assert_eq!(second.conservative_cost_microusd, 486_240);
+        ledger.record_usage(usage("late", "2")).unwrap();
+        let third = tick_mock(&mut ledger, &mut provider, START + 7200).unwrap();
+        assert_eq!(third.conservative_cost_microusd, 2_000_000);
+        assert!(!third.cleanup_complete);
+    }
+
+    #[test]
+    fn earlier_absence_is_revoked_when_current_readback_fails() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        provider.inventory.insert(1, Ok(page(&[])));
+        let deadline = START + MAX_LIFETIME_SECONDS;
+        assert_eq!(
+            tick_mock(&mut ledger, &mut provider, deadline)
+                .unwrap()
+                .resources["one"],
+            DeletionState::AbsentFromInventory
+        );
+        provider
+            .details
+            .insert("one".into(), Err(ProviderError::Forbidden));
+        let report = tick_mock(&mut ledger, &mut provider, deadline).unwrap();
+        assert_eq!(report.resources["one"], DeletionState::DeletionRequested);
+        assert!(!report.cleanup_complete);
+    }
+
+    #[test]
+    fn stopped_resources_keep_the_conservative_compute_and_disk_floor() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        let mut stopped = page(&["one"]);
+        stopped.items[0].status = "stopped".into();
+        provider.inventory.insert(1, Ok(stopped));
+        let report = tick_mock(&mut ledger, &mut provider, START + 3600).unwrap();
+        assert_eq!(report.conservative_cost_microusd, 243_120);
+        assert_eq!(report.resources["one"], DeletionState::Tracking);
+        assert!(!report.cleanup_complete);
+    }
+
+    #[test]
+    fn duplicate_or_inconsistent_pagination_fails_without_erasing_known_usage() {
+        let mut ledger = ledger();
+        let mut provider = provider();
+        let repeated = UsagePage {
+            records: vec![usage("same", "1")],
+            total: 1,
+        };
+        provider
+            .usage
+            .insert(("app".into(), 0), Ok(repeated.clone()));
+        provider.usage.insert(("app".into(), 1), Ok(repeated));
+        let report = tick_mock(&mut ledger, &mut provider, START).unwrap();
+        assert!(!report.usage_complete);
+        assert_eq!(report.conservative_cost_microusd, 1_000_000);
+    }
+}
