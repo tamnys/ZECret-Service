@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod offline;
+pub mod workload;
 
 use serde::{Deserialize, Serialize};
 use zrpc_protocol::{ErrorCode, Network, SafeError};

@@ -8,7 +8,7 @@ use std::{
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
 
-const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nM0: local fixtures only; private mode and deployment are unavailable.";
+const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nM0: local fixtures and offline diagnostics; private mode and deployment are unavailable.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
@@ -66,7 +66,7 @@ async fn run() -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str(){
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
-        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","private_mode":"blocked","simulation_available":true,"tor":"not_checked; no network adapter in M0","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","private_mode":"blocked","simulation_available":true,"tor":"not_checked; CLI has no Tor connection path","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-quote"=>{
             let quote_path=required(&mut args,"--quote")?;
             let collateral_path=required(&mut args,"--collateral")?;
@@ -75,6 +75,25 @@ async fn run() -> Result<(), String> {
             let collateral=fs::read(collateral_path).map_err(|_|"collateral file unavailable")?;
             let report=zrpc_verifier::offline::inspect_quote(&quote,&collateral);
             let rejected=report.issue.is_some();
+            print_json(report)?;
+            if rejected { std::process::exit(1) }
+            Ok(())
+        },
+        "inspect-workload"=>{
+            let quote_path=required(&mut args,"--quote")?;
+            let collateral_path=required(&mut args,"--collateral")?;
+            let event_log_path=required(&mut args,"--event-log")?;
+            let app_compose_path=required(&mut args,"--app-compose")?;
+            let policy_path=required(&mut args,"--policy")?;
+            exhausted(&args)?;
+            let policy_bytes=fs::read(policy_path).map_err(|_|"workload policy file unavailable")?;
+            let policy=zrpc_verifier::workload::WorkloadPolicy::from_json(&policy_bytes).map_err(|_|"workload policy rejected")?;
+            let quote=fs::read(quote_path).map_err(|_|"quote file unavailable")?;
+            let collateral=fs::read(collateral_path).map_err(|_|"collateral file unavailable")?;
+            let event_log=fs::read(event_log_path).map_err(|_|"event log file unavailable")?;
+            let app_compose=fs::read(app_compose_path).map_err(|_|"app-compose file unavailable")?;
+            let report=zrpc_verifier::workload::inspect_workload(&quote,&collateral,&event_log,&app_compose,&policy);
+            let rejected=report.quote.issue.is_some() || report.workload_issue.is_some();
             print_json(report)?;
             if rejected { std::process::exit(1) }
             Ok(())

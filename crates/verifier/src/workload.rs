@@ -1,0 +1,627 @@
+//! Offline comparison with an explicit local policy, never release approval.
+//! The dstack v0.5.9 KMS boot sequence is the supported evidence format.
+use crate::offline::{self, InspectionStatus, OfflineInspection};
+use cc_eventlog::{RuntimeEvent, TdxEvent};
+use dcap_qvl::quote::TDReport10;
+use ez_hash::{Hasher, Sha256, Sha384};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkloadPolicy {
+    pub schema_version: u32,
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub mrtd: [u8; 48],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub rtmr0: [u8; 48],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub rtmr1: [u8; 48],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub rtmr2: [u8; 48],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub os_image_hash: [u8; 32],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub compose_hash: [u8; 32],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub mr_kms: [u8; 32],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub app_id: [u8; 20],
+    #[serde(deserialize_with = "decode_hash", serialize_with = "encode_hash")]
+    pub instance_id: [u8; 20],
+    pub storage_fs: StorageFs,
+    pub key_provider: KeyProviderPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageFs {
+    Ext4,
+    Zfs,
+}
+
+impl StorageFs {
+    fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Ext4 => b"ext4",
+            Self::Zfs => b"zfs",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyProviderPolicy {
+    pub name: String,
+    pub id: String,
+}
+
+fn decode_hash<'de, D: Deserializer<'de>, const N: usize>(d: D) -> Result<[u8; N], D::Error> {
+    let value = String::deserialize(d)?;
+    let mut bytes = [0; N];
+    hex::decode_to_slice(value, &mut bytes)
+        .map_err(|_| serde::de::Error::custom("invalid fixed-size hex value"))?;
+    Ok(bytes)
+}
+
+fn encode_hash<S: Serializer, const N: usize>(value: &[u8; N], s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&hex::encode(value))
+}
+
+impl WorkloadPolicy {
+    /// This parses operator-supplied expectations. It does not approve their
+    /// provenance, measure an OS image, or register an approved release.
+    pub fn from_json(bytes: &[u8]) -> Result<Self, WorkloadIssue> {
+        let shape: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| WorkloadIssue::InvalidPolicy)?;
+        if !shape.is_object() || !shape.get("key_provider").is_some_and(|v| v.is_object()) {
+            return Err(WorkloadIssue::InvalidPolicy);
+        }
+        // Deserialize the original bytes so duplicate known fields are rejected.
+        let policy: Self =
+            serde_json::from_slice(bytes).map_err(|_| WorkloadIssue::InvalidPolicy)?;
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    fn validate(&self) -> Result<(), WorkloadIssue> {
+        if self.schema_version != 1
+            || self.key_provider.name != "kms"
+            || self.key_provider.id.is_empty()
+        {
+            return Err(WorkloadIssue::InvalidPolicy);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkloadIssue {
+    InvalidPolicy,
+    UnsupportedEndianness,
+    MalformedEventLog,
+    UnsupportedEventFormat,
+    RuntimeMeasurementMismatch,
+    MissingBootEvent,
+    AmbiguousBootEvent,
+    UnexpectedBootEvent,
+    InvalidBootSequence,
+    OsMeasurementMismatch,
+    OsImageDigestMismatch,
+    ComposeHashMismatch,
+    ApplicationIdentityMismatch,
+    KeyProviderMismatch,
+    KmsMeasurementMismatch,
+    StoragePolicyMismatch,
+}
+
+/// Matching a supplied policy is a diagnostic, not approval of that policy or a
+/// capability to send a query. No authenticated claims are returned to callers.
+#[derive(Debug, Serialize)]
+pub struct WorkloadInspection {
+    #[serde(flatten)]
+    pub quote: OfflineInspection,
+    pub policy_source: &'static str,
+    pub runtime_event_integrity: InspectionStatus,
+    pub os_measurement_policy: InspectionStatus,
+    pub app_configuration_policy: InspectionStatus,
+    pub workload_issue: Option<WorkloadIssue>,
+}
+
+/// Inspect supplied files at the system clock. There is no network fetch,
+/// historical-time override, inferred expectation or release-registration path.
+pub fn inspect_workload(
+    quote: &[u8],
+    collateral_json: &[u8],
+    event_log_json: &[u8],
+    raw_app_compose: &[u8],
+    policy: &WorkloadPolicy,
+) -> WorkloadInspection {
+    let mut checks = Checks::new();
+    let mut quote = offline::inspect_quote_with_claims(quote, collateral_json, |claims| {
+        // The callback runs only after strict hardware policy passed. That
+        // policy requires TDX; still avoid a panic if its contract changes.
+        if let Some(td) = claims.report.as_td10() {
+            checks.issue =
+                check_workload(td, event_log_json, raw_app_compose, policy, &mut checks).err();
+        } else {
+            checks.issue = Some(WorkloadIssue::UnsupportedEventFormat);
+        }
+    });
+    quote.operation = "offline_workload_inspection";
+    if checks.issue.is_some() {
+        quote.workload_policy = InspectionStatus::Rejected;
+    } else if checks.app == InspectionStatus::Verified {
+        quote.workload_policy = InspectionStatus::Verified;
+    }
+    WorkloadInspection {
+        quote,
+        policy_source: "explicit_local_input_not_release_approval",
+        runtime_event_integrity: checks.runtime,
+        os_measurement_policy: checks.os,
+        app_configuration_policy: checks.app,
+        workload_issue: checks.issue,
+    }
+}
+
+struct Checks {
+    runtime: InspectionStatus,
+    os: InspectionStatus,
+    app: InspectionStatus,
+    issue: Option<WorkloadIssue>,
+}
+
+impl Checks {
+    fn new() -> Self {
+        Self {
+            runtime: InspectionStatus::NotChecked,
+            os: InspectionStatus::NotChecked,
+            app: InspectionStatus::NotChecked,
+            issue: None,
+        }
+    }
+}
+
+fn runtime_events(bytes: &[u8]) -> Result<Vec<RuntimeEvent>, WorkloadIssue> {
+    // Keep upstream byte decoding, while requiring unambiguous object-shaped
+    // entries and rejecting fields its permissive serde model would ignore.
+    let shape: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| WorkloadIssue::MalformedEventLog)?;
+    let entries = shape.as_array().ok_or(WorkloadIssue::MalformedEventLog)?;
+    for entry in entries {
+        let object = entry.as_object().ok_or(WorkloadIssue::MalformedEventLog)?;
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "imr" | "event_type" | "digest" | "event" | "event_payload"
+            )
+        }) {
+            return Err(WorkloadIssue::MalformedEventLog);
+        }
+    }
+    let events: Vec<TdxEvent> =
+        serde_json::from_slice(bytes).map_err(|_| WorkloadIssue::MalformedEventLog)?;
+    let mut runtime = Vec::new();
+    for event in events {
+        if event.imr > 3 || (event.imr == 3) != event.is_runtime_event() {
+            return Err(WorkloadIssue::UnsupportedEventFormat);
+        }
+        if let Some(measured) = event.to_runtime_event() {
+            if !event.digest.is_empty() && event.digest != measured.sha384_digest() {
+                return Err(WorkloadIssue::MalformedEventLog);
+            }
+            runtime.push(measured);
+        }
+    }
+    Ok(runtime)
+}
+
+// Exact successful KMS boot order at the pinned dstack v0.5.9 source:
+// dstack-util/src/system_setup.rs measure_app_info, request_app_keys,
+// verify_app and setup_fs. Additional post-ready runtime events remain in replay.
+const BOOT_SEQUENCE: [&str; 10] = [
+    "system-preparing",
+    "app-id",
+    "compose-hash",
+    "instance-id",
+    "boot-mr-done",
+    "mr-kms",
+    "os-image-hash",
+    "key-provider",
+    "storage-fs",
+    "system-ready",
+];
+
+fn boot_events(events: &[RuntimeEvent]) -> Result<&[RuntimeEvent], WorkloadIssue> {
+    let mut ready = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.event == "system-ready");
+    let end = ready.next().ok_or(WorkloadIssue::MissingBootEvent)?.0;
+    if ready.next().is_some() {
+        return Err(WorkloadIssue::AmbiguousBootEvent);
+    }
+    let boot = &events[..=end];
+    for name in BOOT_SEQUENCE {
+        let mut found = boot.iter().filter(|event| event.event == name);
+        if found.next().is_none() {
+            return Err(WorkloadIssue::MissingBootEvent);
+        }
+        if found.next().is_some() {
+            return Err(WorkloadIssue::AmbiguousBootEvent);
+        }
+    }
+    if boot
+        .iter()
+        .any(|event| !BOOT_SEQUENCE.contains(&event.event.as_str()))
+    {
+        return Err(WorkloadIssue::UnexpectedBootEvent);
+    }
+    if !boot
+        .iter()
+        .map(|event| event.event.as_str())
+        .eq(BOOT_SEQUENCE)
+    {
+        return Err(WorkloadIssue::InvalidBootSequence);
+    }
+    if [0, 4, 9].iter().any(|&i| !boot[i].payload.is_empty()) {
+        return Err(WorkloadIssue::InvalidBootSequence);
+    }
+    Ok(boot)
+}
+
+fn check_workload(
+    td: &TDReport10,
+    event_log_json: &[u8],
+    raw_app_compose: &[u8],
+    policy: &WorkloadPolicy,
+    checks: &mut Checks,
+) -> Result<(), WorkloadIssue> {
+    policy.validate()?;
+    // Upstream RuntimeEvent uses to_ne_bytes; the pinned dstack target is LE.
+    if !cfg!(target_endian = "little") {
+        return Err(WorkloadIssue::UnsupportedEndianness);
+    }
+    checks.runtime = InspectionStatus::Rejected;
+    let runtime = runtime_events(event_log_json)?;
+    if cc_eventlog::replay_events::<Sha384>(&runtime, None) != td.rt_mr3 {
+        return Err(WorkloadIssue::RuntimeMeasurementMismatch);
+    }
+    checks.runtime = InspectionStatus::Verified;
+    checks.app = InspectionStatus::Rejected;
+    let boot = boot_events(&runtime)?;
+    checks.os = InspectionStatus::Rejected;
+    if td.mr_td != policy.mrtd
+        || td.rt_mr0 != policy.rtmr0
+        || td.rt_mr1 != policy.rtmr1
+        || td.rt_mr2 != policy.rtmr2
+    {
+        return Err(WorkloadIssue::OsMeasurementMismatch);
+    }
+    if boot[6].payload != policy.os_image_hash {
+        return Err(WorkloadIssue::OsImageDigestMismatch);
+    }
+    checks.os = InspectionStatus::Verified;
+    let actual_compose = Sha256::hash(raw_app_compose);
+    if actual_compose != policy.compose_hash || boot[2].payload != policy.compose_hash {
+        return Err(WorkloadIssue::ComposeHashMismatch);
+    }
+    if boot[1].payload != policy.app_id || boot[3].payload != policy.instance_id {
+        return Err(WorkloadIssue::ApplicationIdentityMismatch);
+    }
+    if boot[5].payload != policy.mr_kms {
+        return Err(WorkloadIssue::KmsMeasurementMismatch);
+    }
+    if boot[8].payload != policy.storage_fs.as_bytes() {
+        return Err(WorkloadIssue::StoragePolicyMismatch);
+    }
+    let provider_shape: serde_json::Value =
+        serde_json::from_slice(&boot[7].payload).map_err(|_| WorkloadIssue::KeyProviderMismatch)?;
+    if !provider_shape.is_object() {
+        return Err(WorkloadIssue::KeyProviderMismatch);
+    }
+    let provider: KeyProviderPolicy =
+        serde_json::from_slice(&boot[7].payload).map_err(|_| WorkloadIssue::KeyProviderMismatch)?;
+    if provider != policy.key_provider {
+        return Err(WorkloadIssue::KeyProviderMismatch);
+    }
+    checks.app = InspectionStatus::Verified;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcap_qvl::quote::{Quote, Report};
+    use parity_scale_codec::Encode;
+
+    const RAW_COMPOSE: &[u8] = br#"{"simulation":"POLICY_UNIT_ONLY"}"#;
+    const QUOTE: &[u8] = include_bytes!("../../../tests/fixtures/dcap/tdx_quote.exact.bin");
+    const COLLATERAL: &[u8] =
+        include_bytes!("../../../tests/fixtures/dcap/tdx_quote_collateral.json");
+
+    // Deliberately fabricated expectations and report fields. These exercise
+    // policy comparisons only and are never authentic evidence or release data.
+    fn policy_unit_only() -> (WorkloadPolicy, TDReport10, Vec<RuntimeEvent>) {
+        let policy = WorkloadPolicy {
+            schema_version: 1,
+            mrtd: [1; 48],
+            rtmr0: [2; 48],
+            rtmr1: [3; 48],
+            rtmr2: [4; 48],
+            os_image_hash: [5; 32],
+            compose_hash: Sha256::hash(RAW_COMPOSE),
+            mr_kms: [6; 32],
+            app_id: [7; 20],
+            instance_id: [8; 20],
+            storage_fs: StorageFs::Ext4,
+            key_provider: KeyProviderPolicy {
+                name: "kms".into(),
+                id: "POLICY_UNIT_ONLY".into(),
+            },
+        };
+        let payloads = [
+            vec![],
+            policy.app_id.to_vec(),
+            policy.compose_hash.to_vec(),
+            policy.instance_id.to_vec(),
+            vec![],
+            policy.mr_kms.to_vec(),
+            policy.os_image_hash.to_vec(),
+            serde_json::to_vec(&policy.key_provider).unwrap(),
+            b"ext4".to_vec(),
+            vec![],
+        ];
+        let events = BOOT_SEQUENCE
+            .into_iter()
+            .zip(payloads)
+            .map(|(name, payload)| RuntimeEvent::new(name.into(), payload))
+            .collect::<Vec<_>>();
+        let quote = Quote::parse(QUOTE).unwrap();
+        let mut td = quote.report.as_td10().unwrap().clone();
+        td.mr_td = policy.mrtd;
+        td.rt_mr0 = policy.rtmr0;
+        td.rt_mr1 = policy.rtmr1;
+        td.rt_mr2 = policy.rtmr2;
+        td.rt_mr3 = cc_eventlog::replay_events::<Sha384>(&events, None);
+        (policy, td, events)
+    }
+
+    fn log_json(events: &[RuntimeEvent]) -> Vec<u8> {
+        serde_json::to_vec(
+            &events
+                .iter()
+                .cloned()
+                .map(TdxEvent::from)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
+    fn policy_check(
+        policy: &WorkloadPolicy,
+        td: &TDReport10,
+        events: &[RuntimeEvent],
+        raw: &[u8],
+    ) -> Result<(), WorkloadIssue> {
+        check_workload(td, &log_json(events), raw, policy, &mut Checks::new())
+    }
+
+    #[test]
+    fn policy_unit_only_matches_do_not_authenticate_fabricated_quote() {
+        let (policy, td, events) = policy_unit_only();
+        assert_eq!(policy_check(&policy, &td, &events, RAW_COMPOSE), Ok(()));
+        let mut quote = Quote::parse(QUOTE).unwrap();
+        quote.report = Report::TD10(td);
+        let report = inspect_workload(
+            &quote.encode(),
+            COLLATERAL,
+            &log_json(&events),
+            RAW_COMPOSE,
+            &policy,
+        );
+        assert_eq!(
+            report.quote.hardware_authenticity,
+            InspectionStatus::Rejected
+        );
+        assert_eq!(report.quote.workload_policy, InspectionStatus::NotChecked);
+        assert_eq!(report.runtime_event_integrity, InspectionStatus::NotChecked);
+        assert_eq!(report.quote.freshness, InspectionStatus::NotChecked);
+        assert_eq!(report.quote.live_key_binding, InspectionStatus::NotChecked);
+        assert!(
+            !report.quote.private_accepted
+                && !report.quote.query_sent
+                && !report.quote.network_used
+        );
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("POLICY_UNIT_ONLY")
+        );
+    }
+
+    #[test]
+    fn explicit_policy_rejects_missing_wrong_size_duplicate_and_unknown_fields() {
+        let (policy, _, _) = policy_unit_only();
+        let raw = serde_json::to_vec(&policy).unwrap();
+        assert_eq!(WorkloadPolicy::from_json(&raw), Ok(policy));
+        for key in [
+            "mrtd",
+            "rtmr0",
+            "rtmr1",
+            "rtmr2",
+            "os_image_hash",
+            "compose_hash",
+            "mr_kms",
+            "app_id",
+            "instance_id",
+            "storage_fs",
+            "key_provider",
+            "schema_version",
+        ] {
+            let mut value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            value.as_object_mut().unwrap().remove(key);
+            assert_eq!(
+                WorkloadPolicy::from_json(&serde_json::to_vec(&value).unwrap()),
+                Err(WorkloadIssue::InvalidPolicy)
+            );
+        }
+        for (key, value) in [
+            ("mrtd", serde_json::json!("00")),
+            ("verified", serde_json::json!(true)),
+            ("key_provider", serde_json::json!(["kms", "id"])),
+        ] {
+            let mut changed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            changed[key] = value;
+            assert_eq!(
+                WorkloadPolicy::from_json(&serde_json::to_vec(&changed).unwrap()),
+                Err(WorkloadIssue::InvalidPolicy)
+            );
+        }
+        let raw = String::from_utf8(raw).unwrap();
+        let duplicate = raw.replacen('{', "{\"schema_version\":1,", 1);
+        assert_eq!(
+            WorkloadPolicy::from_json(duplicate.as_bytes()),
+            Err(WorkloadIssue::InvalidPolicy)
+        );
+        let duplicate_provider =
+            raw.replace("\"name\":\"kms\"", "\"name\":\"kms\",\"name\":\"kms\"");
+        assert_eq!(
+            WorkloadPolicy::from_json(duplicate_provider.as_bytes()),
+            Err(WorkloadIssue::InvalidPolicy)
+        );
+    }
+
+    #[test]
+    fn policy_unit_only_rejects_every_os_register_and_exact_compose_mismatch() {
+        let (policy, td, events) = policy_unit_only();
+        for index in 0..4 {
+            let mut changed = td.clone();
+            let register = match index {
+                0 => &mut changed.mr_td,
+                1 => &mut changed.rt_mr0,
+                2 => &mut changed.rt_mr1,
+                _ => &mut changed.rt_mr2,
+            };
+            register[0] ^= 1;
+            assert_eq!(
+                policy_check(&policy, &changed, &events, RAW_COMPOSE),
+                Err(WorkloadIssue::OsMeasurementMismatch)
+            );
+        }
+        let mut raw = RAW_COMPOSE.to_vec();
+        raw.push(b'\n');
+        assert_eq!(
+            policy_check(&policy, &td, &events, &raw),
+            Err(WorkloadIssue::ComposeHashMismatch)
+        );
+        for (index, issue) in [
+            (1, WorkloadIssue::ApplicationIdentityMismatch),
+            (2, WorkloadIssue::ComposeHashMismatch),
+            (3, WorkloadIssue::ApplicationIdentityMismatch),
+            (5, WorkloadIssue::KmsMeasurementMismatch),
+            (6, WorkloadIssue::OsImageDigestMismatch),
+            (7, WorkloadIssue::KeyProviderMismatch),
+            (8, WorkloadIssue::StoragePolicyMismatch),
+        ] {
+            let mut events = events.clone();
+            events[index].payload[0] ^= 1;
+            let mut changed = td.clone();
+            changed.rt_mr3 = cc_eventlog::replay_events::<Sha384>(&events, None);
+            assert_eq!(
+                policy_check(&policy, &changed, &events, RAW_COMPOSE),
+                Err(issue)
+            );
+        }
+    }
+
+    #[test]
+    fn policy_unit_only_authenticates_tail_and_rejects_ambiguous_boot_fields() {
+        let (policy, td, mut events) = policy_unit_only();
+        events.push(RuntimeEvent::new(
+            "after-ready".into(),
+            b"POLICY_UNIT_ONLY".to_vec(),
+        ));
+        assert_eq!(
+            policy_check(&policy, &td, &events, RAW_COMPOSE),
+            Err(WorkloadIssue::RuntimeMeasurementMismatch)
+        );
+        let mut td = td;
+        td.rt_mr3 = cc_eventlog::replay_events::<Sha384>(&events, None);
+        assert_eq!(policy_check(&policy, &td, &events, RAW_COMPOSE), Ok(()));
+        for name in BOOT_SEQUENCE {
+            let mut duplicated = events.clone();
+            let duplicate = duplicated.iter().find(|e| e.event == name).unwrap().clone();
+            duplicated.insert(0, duplicate);
+            let mut changed = td.clone();
+            changed.rt_mr3 = cc_eventlog::replay_events::<Sha384>(&duplicated, None);
+            assert_eq!(
+                policy_check(&policy, &changed, &duplicated, RAW_COMPOSE),
+                Err(WorkloadIssue::AmbiguousBootEvent)
+            );
+        }
+        let mut missing = events.clone();
+        missing.retain(|e| e.event != "compose-hash");
+        let mut changed = td.clone();
+        changed.rt_mr3 = cc_eventlog::replay_events::<Sha384>(&missing, None);
+        assert_eq!(
+            policy_check(&policy, &changed, &missing, RAW_COMPOSE),
+            Err(WorkloadIssue::MissingBootEvent)
+        );
+        events.swap(1, 2);
+        changed.rt_mr3 = cc_eventlog::replay_events::<Sha384>(&events, None);
+        assert_eq!(
+            policy_check(&policy, &changed, &events, RAW_COMPOSE),
+            Err(WorkloadIssue::InvalidBootSequence)
+        );
+    }
+
+    #[test]
+    fn malformed_event_objects_indices_types_and_digests_are_rejected() {
+        let (_, _, events) = policy_unit_only();
+        let raw = log_json(&events);
+        for (key, value) in [
+            ("imr", serde_json::json!(0)),
+            ("event_type", serde_json::json!(0)),
+            ("digest", serde_json::json!("00")),
+            ("unknown", serde_json::json!(true)),
+        ] {
+            let mut changed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            changed[0][key] = value;
+            assert!(runtime_events(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        for invalid in [b"{}".as_slice(), b"[[]]", b"[{\"verified\":true}]"] {
+            assert!(runtime_events(invalid).is_err());
+        }
+        let duplicate =
+            String::from_utf8(raw)
+                .unwrap()
+                .replacen("\"imr\":3", "\"imr\":3,\"imr\":3", 1);
+        assert!(runtime_events(duplicate.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn upstream_replay_compatibility_only_has_no_authenticated_collateral_tuple() {
+        let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/dstack/quote-report.json"
+        ))
+        .unwrap();
+        let events = runtime_events(fixture["event_log"].as_str().unwrap().as_bytes()).unwrap();
+        let quote =
+            Quote::parse(&hex::decode(fixture["quote"].as_str().unwrap()).unwrap()).unwrap();
+        // This compares decoded fixture data only. It does NOT authenticate
+        // hardware, collateral, the workload, freshness or a live public key.
+        assert_eq!(
+            cc_eventlog::replay_events::<Sha384>(&events, None),
+            quote.report.as_td10().unwrap().rt_mr3
+        );
+        assert_eq!(
+            hex::encode(events[0].sha384_digest()),
+            "f9974020ef507068183313d0ca808e0d1ca9b2d1ad0c61f5784e7157c362c06536f5ddacdad4451693f48fcc72fff624"
+        );
+        assert_eq!(
+            boot_events(&events).unwrap_err(),
+            WorkloadIssue::MissingBootEvent
+        );
+    }
+}

@@ -1,6 +1,7 @@
 """Local CLI contract checks. No cloud calls and no live query material."""
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,3 +50,32 @@ assert not report["private_accepted"] and not report["network_used"] and not rep
 assert report["issue"] == "cryptographic_or_validity_check_failed"
 run("inspect-quote", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin", "--collateral", "tests/fixtures/dcap/tdx_quote_collateral.json", "--time", "1752919234", success=False)
 print("Offline inspection CLI checks passed: expired evidence rejected; no historical-time override.")
+
+# Synthetic policy values are rejection-test inputs, never release measurements.
+with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
+    directory = Path(temporary)
+    policy = {"schema_version": 1,
+              **{key: "00" * 48 for key in ("mrtd", "rtmr0", "rtmr1", "rtmr2")},
+              **{key: "00" * 32 for key in ("os_image_hash", "compose_hash", "mr_kms")},
+              **{key: "00" * 20 for key in ("app_id", "instance_id")},
+              "storage_fs": "ext4", "key_provider": {"name": "kms", "id": "SYNTHETIC_ONLY"}}
+    (directory / "policy.json").write_text(json.dumps(policy))
+    (directory / "events.json").write_text("[]")
+    (directory / "app-compose.json").write_text('{"synthetic":true}')
+    args = ("inspect-workload", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin",
+            "--collateral", "tests/fixtures/dcap/tdx_quote_collateral.json",
+            "--event-log", str(directory / "events.json"),
+            "--app-compose", str(directory / "app-compose.json"),
+            "--policy", str(directory / "policy.json"))
+    report = run(*args, success=False)
+    assert report["operation"] == "offline_workload_inspection"
+    assert report["hardware_authenticity"] == "rejected"
+    assert report["runtime_event_integrity"] == report["workload_policy"] == "not_checked"
+    assert report["policy_source"] == "explicit_local_input_not_release_approval"
+    assert not report["private_accepted"] and not report["query_sent"] and not report["network_used"]
+    run(*args, "--time", "1752919234", success=False)
+    (directory / "policy.json").write_text('{"verified":true,"secret":"SYNTHETIC_PRIVATE_MARKER"}')
+    report = run(*args, success=False)
+    assert report["error"] == "workload policy rejected"
+    assert "SYNTHETIC_PRIVATE_MARKER" not in json.dumps(report)
+print("Workload CLI checks passed: expired evidence cannot reach policy checks; malformed policy and time override reject.")

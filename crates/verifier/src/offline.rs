@@ -83,8 +83,24 @@ impl OfflineInspection {
 /// historical-time, custom-root or permissive-policy production entrypoint.
 /// Collateral is untrusted signed input; no PCCS or other HTTP call is available.
 pub fn inspect_quote(quote: &[u8], collateral_json: &[u8]) -> OfflineInspection {
+    inspect_quote_with_claims(quote, collateral_json, |_| {})
+}
+
+// The callback receives an immutable borrow only after hardware and strict
+// security checks pass. Authenticated claims never leave this crate.
+pub(crate) fn inspect_quote_with_claims(
+    quote: &[u8],
+    collateral_json: &[u8],
+    inspect: impl FnOnce(&QuoteClaims),
+) -> OfflineInspection {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(now) => inspect_at(quote, collateral_json, now.as_secs(), "system_clock"),
+        Ok(now) => inspect_at_with_claims(
+            quote,
+            collateral_json,
+            now.as_secs(),
+            "system_clock",
+            inspect,
+        ),
         Err(_) => {
             let mut report = OfflineInspection::new(None, "system_clock");
             report.issue = Some(InspectionIssue::ClockUnavailable);
@@ -93,11 +109,22 @@ pub fn inspect_quote(quote: &[u8], collateral_json: &[u8]) -> OfflineInspection 
     }
 }
 
+#[cfg(test)]
 fn inspect_at(
     quote: &[u8],
     collateral_json: &[u8],
     now: u64,
     time_source: &'static str,
+) -> OfflineInspection {
+    inspect_at_with_claims(quote, collateral_json, now, time_source, |_| {})
+}
+
+fn inspect_at_with_claims(
+    quote: &[u8],
+    collateral_json: &[u8],
+    now: u64,
+    time_source: &'static str,
+    inspect: impl FnOnce(&QuoteClaims),
 ) -> OfflineInspection {
     let mut result = OfflineInspection::new(Some(now), time_source);
     // Upstream parse() permits trailing bytes. Use its complete decoder and
@@ -154,7 +181,10 @@ fn inspect_at(
     result.advisory_ids = claims.tcb.advisory_ids.clone();
     result.collateral_earliest_expiration_unix_seconds = Some(claims.earliest_expiration_date);
     match appraise(&claims, now) {
-        Ok(()) => result.security_policy = InspectionStatus::Verified,
+        Ok(()) => {
+            result.security_policy = InspectionStatus::Verified;
+            inspect(&claims);
+        }
         Err(issue) => {
             result.security_policy = InspectionStatus::Rejected;
             result.issue = Some(issue);

@@ -11,3 +11,6 @@ zrpc-protocol = { path = "../protocol" }
 
 dcap-qvl.workspace = true
 parity-scale-codec.workspace = true
+cc-eventlog.workspace = true
+ez-hash.workspace = true
+hex.workspace = true

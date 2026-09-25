@@ -1,0 +1,12 @@
+{
+  "source_repository": "https://github.com/Dstack-TEE/dstack",
+  "source_commit": "282eeb27d22d8f091ad0fa5a90e638f85cf68751",
+  "license": "Apache-2.0",
+  "purpose": "Historical upstream runtime-event replay compatibility only; no matching authenticated collateral tuple or deployment approval.",
+  "files": {
+    "quote-report.json": {
+      "url": "https://raw.githubusercontent.com/Dstack-TEE/dstack/282eeb27d22d8f091ad0fa5a90e638f85cf68751/verifier/fixtures/quote-report.json",
+      "sha256": "91736754bceb1ddb2677eed951b8a42f3ca382e170fcf8961ff5de774fe09aaa"
+    }
+  }
+}
