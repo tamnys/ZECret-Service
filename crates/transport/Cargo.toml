@@ -1,0 +1,9 @@
+[package]
+name = "zrpc-transport"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+zrpc-protocol = { path = "../protocol" }
+zrpc-verifier = { path = "../verifier" }

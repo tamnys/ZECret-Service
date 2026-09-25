@@ -1,0 +1,7 @@
+[
+  {"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]},
+  {"jsonrpc":"2.0","id":2,"method":"getblockcount","params":[]},
+  {"jsonrpc":"2.0","id":3,"method":"getblockhash","params":[42]},
+  {"jsonrpc":"2.0","id":4,"method":"getblockheader","params":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",true]},
+  {"jsonrpc":"2.0","id":5,"method":"getrawtransaction","params":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",true]}
+]

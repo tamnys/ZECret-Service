@@ -1,0 +1,36 @@
+{
+  "quote": {
+    "source": "synthetic_fixture",
+    "reference": "SIMULATION: design section 13 published-rate baseline, NOT a provider quote",
+    "quoted_at_unix_seconds": 1790352000,
+    "expires_at_unix_seconds": 1790355600,
+    "instance_type": "tdx.large",
+    "vcpu": 4,
+    "memory_gib": 8,
+    "disk_gib": 80,
+    "confirmed_disk_limit_gib": 80,
+    "availability_confirmed": true,
+    "compute_microusd_per_hour": 232000,
+    "disk_microusd_per_gib_hour": 139,
+    "network_total_upper_bound_microusd": 0,
+    "tax_and_payment_total_upper_bound_microusd": 0,
+    "other_total_upper_bound_microusd": 0,
+    "network_allowance_reviewed": true,
+    "all_charge_categories_reviewed": true,
+    "minimum_account_funding_microusd": 0,
+    "preauthorization_microusd": 0
+  },
+  "evaluated_at_unix_seconds": 1790352000,
+  "start_unix_seconds": 1790352000,
+  "deletion_deadline_unix_seconds": 1790956800,
+  "accrued_experiment_microusd": 0,
+  "existing_resources": [],
+  "external_controls": {
+    "absolute_deadline_job_reference": "SIMULATION: no real scheduler installed",
+    "watchdog_reference": "SIMULATION: offline watchdog decision only",
+    "independent_backstop_reference": "SIMULATION: no reminder scheduled",
+    "successful_deletion_test_reference": "SIMULATION: in-memory lifecycle unit tests only",
+    "maximum_poll_interval_seconds": 3600,
+    "deletion_latency_upper_bound_seconds": 0
+  }
+}

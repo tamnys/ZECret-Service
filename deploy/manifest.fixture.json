@@ -1,0 +1,22 @@
+{
+  "source": "synthetic_fixture",
+  "experiment_id": "SIMULATION-local-m0-no-cloud-resources",
+  "started_at_unix_seconds": 1790352000,
+  "deletion_deadline_unix_seconds": 1790956800,
+  "initial_cost_microusd": 0,
+  "quote_reference": "SIMULATION: design section 13 baseline, NOT a provider quote",
+  "resources": [
+    {
+      "id": "SIMULATION-cvm-never-created",
+      "kind": "virtual_machine",
+      "state": "running",
+      "microusd_per_hour": 232000
+    },
+    {
+      "id": "SIMULATION-disk-never-created",
+      "kind": "persistent_disk",
+      "state": "running",
+      "microusd_per_hour": 11120
+    }
+  ]
+}

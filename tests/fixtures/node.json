@@ -1,0 +1,28 @@
+{
+  "fixture_only": true,
+  "description": "Synthetic M0 data: not an actual block, transaction, node, or attestation.",
+  "height": 42,
+  "block_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "transaction_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "blockchain_info": {
+    "fixture_only": true,
+    "chain": "testnet",
+    "blocks": 42,
+    "headers": 42,
+    "initialblockdownload": false,
+    "readiness": "synthetic"
+  },
+  "block_header": {
+    "fixture_only": true,
+    "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "height": 42,
+    "description": "Synthetic header; not consensus-verifiable."
+  },
+  "transaction": {
+    "fixture_only": true,
+    "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "description": "Synthetic transaction; no keys, spends, or consensus-valid bytes."
+  },
+  "raw_header": "SYNTHETIC_HEADER_NOT_ZCASH_BYTES",
+  "raw_transaction": "SYNTHETIC_TRANSACTION_NOT_ZCASH_BYTES"
+}

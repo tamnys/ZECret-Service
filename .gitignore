@@ -1,0 +1,11 @@
+/target/
+/node_modules/
+/ui/local/node_modules/
+/.codex-tmp/
+/.codex-tools/
+/.codex/
+*.log
+.env
+.env.*
+/deploy/runtime/
+/.pnpm-store/

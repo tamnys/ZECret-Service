@@ -1,0 +1,9 @@
+[package]
+name = "zrpc-server"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+zrpc-protocol = { path = "../protocol" }
