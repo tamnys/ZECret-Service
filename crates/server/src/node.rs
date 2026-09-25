@@ -1,5 +1,7 @@
 //! Internal Zebra JSON-RPC over an explicit loopback socket. This module grants
 //! no customer transport or attestation authority and has no public listener.
+mod identity;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
@@ -107,7 +109,8 @@ impl LocalNode {
         })?;
         // The design's 15-second bound includes queueing, network check and body
         // collection, so a slow peer cannot turn queueing into unbounded waiting.
-        tokio::time::timeout(Duration::from_secs(BACKEND_TIMEOUT_SECONDS), async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(BACKEND_TIMEOUT_SECONDS);
+        let result = tokio::time::timeout_at(deadline, async {
             let _executing = self
                 .0
                 .executing
@@ -117,12 +120,10 @@ impl LocalNode {
             self.exchange(request).await
         })
         .await
-        .map_err(|_| {
-            SafeError::new(
-                ErrorCode::BackendTimeout,
-                "The internal node deadline expired.",
-            )
-        })?
+        .map_err(|_| timed_out())?;
+        // Tokio cannot preempt a synchronous maintained decoder/hash operation.
+        // Its result must still not escape after the original operation deadline.
+        finish_before_deadline(deadline, result)
     }
 
     async fn exchange(&self, request: &Request) -> Result<Value, SafeError> {
@@ -158,6 +159,19 @@ impl LocalNode {
             .await?
         };
         validate_result(request.method(), &result)?;
+        if let Method::GetBlockHeader {
+            hash,
+            verbosity: Verbosity::Verbose,
+        } = request.method()
+        {
+            // The raw companion stays on this socket, with the original admission
+            // permit and deadline. No new connection, retry, or deadline reset.
+            let raw = self
+                .call(&mut sender, "getblockheader", json!([hash.as_str(), false]))
+                .await?;
+            let header = identity::header(&raw, hash.as_str())?;
+            identity::verbose_header(&result, &header)?;
+        }
         let response = json!({"jsonrpc":"2.0", "id":request.id(), "result":result});
         // The caller's original ID can increase size; bound the returned envelope too.
         super::check_response_bound(&response)?;
@@ -305,26 +319,39 @@ fn validate_result(method: &Method, result: &Value) -> Result<(), SafeError> {
         Method::GetRawTransaction {
             txid,
             verbosity: Verbosity::Verbose,
-        } => result
-            .get("txid")
-            .and_then(Value::as_str)
-            .is_some_and(|s| s.eq_ignore_ascii_case(txid.as_str())),
+        } => return identity::verbose_transaction(result, txid.as_str()),
         Method::GetBlockHeader {
+            hash,
             verbosity: Verbosity::Raw,
-            ..
-        }
-        | Method::GetRawTransaction {
+        } => return identity::header(result, hash.as_str()).map(|_| ()),
+        Method::GetRawTransaction {
+            txid,
             verbosity: Verbosity::Raw,
-            ..
-        } => result.as_str().is_some_and(|s| {
-            !s.is_empty() && s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit())
-        }),
+        } => return identity::transaction(result, txid.as_str()).map(|_| ()),
     };
     if valid {
         Ok(())
     } else {
         Err(invalid_response())
     }
+}
+
+fn finish_before_deadline<T>(
+    deadline: tokio::time::Instant,
+    result: Result<T, SafeError>,
+) -> Result<T, SafeError> {
+    if tokio::time::Instant::now() >= deadline {
+        Err(timed_out())
+    } else {
+        result
+    }
+}
+
+fn timed_out() -> SafeError {
+    SafeError::new(
+        ErrorCode::BackendTimeout,
+        "The internal node deadline expired.",
+    )
 }
 
 fn unavailable() -> SafeError {
@@ -365,6 +392,12 @@ mod tests {
 
     const COOKIE: &[u8] = b"__cookie__:SYNTHETIC_COOKIE_ONLY";
     const MARKER: &str = "SYNTHETIC_CUSTOMER_ID";
+    const HEADER_HASH: &str = "025579869bcf52a989337342f5f57a84f3a28b968f7d6a8307902b065a668d23";
+    const HEADER: &str = include_str!("../../../tests/fixtures/zcash/testnet-header.hex");
+    const HEADER_JSON: &str =
+        include_str!("../../../tests/fixtures/zcash/testnet-header-verbose.json");
+    const TX_ID: &str = "64f0bd7fe30ce23753358fe3a2dc835b8fba9c0274c4e2c54a6f73114cb55639";
+    const TX: &str = include_str!("../../../tests/fixtures/zcash/testnet-v4-tx.hex");
     fn auth() -> CookieAuth {
         CookieAuth::from_cookie(COOKIE).unwrap()
     }
@@ -386,10 +419,14 @@ mod tests {
         Compressed,
         Oversized,
         Malformed,
+        HeaderFieldMismatch,
+        BytesMismatch,
+        HeaderRawStall,
     }
     struct Seen {
         body: Value,
         headers: header::HeaderMap,
+        connection: u64,
     }
     struct FakeNode {
         node: LocalNode,
@@ -426,10 +463,12 @@ mod tests {
         let captured = seen.clone();
         let task = tokio::spawn(async move {
             let mut connections = JoinSet::new();
+            let mut connection = 0;
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let (socket, _) = accepted.unwrap();
+                        connection += 1;
                         let seen = captured.clone();
                         connections.spawn(async move {
                             let service = service_fn(move |req: HttpRequest<Incoming>| {
@@ -443,18 +482,34 @@ mod tests {
                                     let id = value["id"].as_u64().unwrap();
                                     let method = value["method"].as_str().unwrap().to_owned();
                                     let params = value["params"].clone();
-                                    seen.lock().unwrap().push(Seen { body:value, headers:parts.headers });
-                                    let result = match method.as_str() {
+                                    seen.lock().unwrap().push(Seen { body:value, headers:parts.headers, connection });
+                                    if matches!(mode, Mode::HeaderRawStall) && method == "getblockheader" && params[1] == false {
+                                        std::future::pending::<()>().await;
+                                    }
+                                    let mut result = match method.as_str() {
                                         "getblockchaininfo" => if matches!(mode, Mode::Mainnet) {
                                             json!({"chain":"main"})
                                         } else { chain() },
                                         "getblockcount" => json!(42),
                                         "getblockhash" => json!("ab".repeat(32)),
-                                        "getblockheader" if params[1] == true => json!({"hash":params[0]}),
-                                        "getrawtransaction" if params[1] == 1 => json!({"txid":params[0]}),
-                                        "getblockheader" | "getrawtransaction" => json!("abcd"),
+                                        "getblockheader" if params[1] == true => serde_json::from_str(HEADER_JSON).unwrap(),
+                                        "getrawtransaction" if params[1] == 1 => json!({"txid":TX_ID, "hex":TX.trim()}),
+                                        "getblockheader" => json!(HEADER.trim()),
+                                        "getrawtransaction" => json!(TX.trim()),
                                         _ => panic!("unexpected forwarded method"),
                                     };
+                                    if matches!(mode, Mode::HeaderFieldMismatch) && method == "getblockheader" && params[1] == true {
+                                        result["merkleroot"] = json!("ab".repeat(32));
+                                    }
+                                    if matches!(mode, Mode::BytesMismatch) {
+                                        if method == "getblockheader" && params[1] == false {
+                                            result = json!(format!("{}00", HEADER.trim()));
+                                        } else if method == "getrawtransaction" && params[1] == 1 {
+                                            result["hex"] = json!(format!("{}00", TX.trim()));
+                                        } else if method == "getrawtransaction" {
+                                            result = json!(format!("{}00", TX.trim()));
+                                        }
+                                    }
                                     let mut response = json!({"jsonrpc":"2.0", "id":id, "result":result});
                                     let mut status = StatusCode::OK;
                                     let mut compressed = false;
@@ -522,10 +577,10 @@ mod tests {
             ("getblockchaininfo", json!([])),
             ("getblockcount", json!([])),
             ("getblockhash", json!([42])),
-            ("getblockheader", json!(["ab".repeat(32), true])),
-            ("getblockheader", json!(["ab".repeat(32), false])),
-            ("getrawtransaction", json!(["cd".repeat(32), true])),
-            ("getrawtransaction", json!(["cd".repeat(32), false])),
+            ("getblockheader", json!([HEADER_HASH, true])),
+            ("getblockheader", json!([HEADER_HASH, false])),
+            ("getrawtransaction", json!([TX_ID, true])),
+            ("getrawtransaction", json!([TX_ID, false])),
         ];
         for (method, params) in selections {
             let response = fake.node.handle(&request(method, params)).await.unwrap();
@@ -558,6 +613,88 @@ mod tests {
             .collect();
         assert_eq!(raw[0].body["params"][1], 1);
         assert_eq!(raw[1].body["params"][1], 0);
+        let mut connections = std::collections::BTreeMap::<u64, Vec<&Seen>>::new();
+        for req in seen.iter() {
+            connections.entry(req.connection).or_default().push(req);
+        }
+        assert_eq!(connections.len(), 7);
+        for requests in connections.values() {
+            assert_eq!(requests[0].body["method"], "getblockchaininfo");
+        }
+        let companion = connections
+            .values()
+            .find(|requests| requests.len() == 3)
+            .unwrap();
+        assert_eq!(companion[1].body["params"], json!([HEADER_HASH, true]));
+        assert_eq!(companion[2].body["params"], json!([HEADER_HASH, false]));
+    }
+
+    #[tokio::test]
+    async fn actual_http_rejects_fabricated_fields_and_mismatched_companion_bytes() {
+        let fake = fake(Mode::HeaderFieldMismatch).await;
+        assert_eq!(
+            fake.node
+                .handle(&request("getblockheader", json!([HEADER_HASH, true])))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidBackendResponse
+        );
+        assert_eq!(fake.seen.lock().unwrap().len(), 3);
+        let fake = super::tests::fake(Mode::BytesMismatch).await;
+        for (method, params) in [
+            ("getblockheader", json!([HEADER_HASH, true])),
+            ("getblockheader", json!([HEADER_HASH, false])),
+            ("getrawtransaction", json!([TX_ID, true])),
+            ("getrawtransaction", json!([TX_ID, false])),
+        ] {
+            assert_eq!(
+                fake.node
+                    .handle(&request(method, params))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidBackendResponse
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn companion_raw_header_uses_original_deadline_and_capacity() {
+        let fake = fake(Mode::HeaderRawStall).await;
+        let node = fake.node.clone();
+        let operation = tokio::spawn(async move {
+            node.handle(&request("getblockheader", json!([HEADER_HASH, true])))
+                .await
+        });
+        while fake.seen.lock().unwrap().len() != 3 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(BACKEND_TIMEOUT_SECONDS)).await;
+        assert_eq!(
+            operation.await.unwrap().unwrap_err().code,
+            ErrorCode::BackendTimeout
+        );
+        tokio::time::resume();
+        assert_eq!(
+            fake.node.0.admitted.available_permits(),
+            EXECUTING_QUERIES + QUEUED_QUERIES
+        );
+        assert_eq!(fake.node.0.executing.available_permits(), EXECUTING_QUERIES);
+        let seen = fake.seen.lock().unwrap();
+        assert!(seen.iter().all(|req| req.connection == seen[0].connection));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn synchronous_result_cannot_escape_after_original_deadline() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(BACKEND_TIMEOUT_SECONDS);
+        assert!(finish_before_deadline(deadline, Ok(())).is_ok());
+        tokio::time::advance(Duration::from_secs(BACKEND_TIMEOUT_SECONDS)).await;
+        assert_eq!(
+            finish_before_deadline(deadline, Ok(())).unwrap_err().code,
+            ErrorCode::BackendTimeout
+        );
     }
 
     #[tokio::test]

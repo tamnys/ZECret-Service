@@ -18,6 +18,8 @@ hex.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 dstack-sdk-types.workspace = true
+zcash_primitives.workspace = true
+zcash_protocol.workspace = true
 zrpc-protocol = { path = "../protocol" }
 
 [dev-dependencies]

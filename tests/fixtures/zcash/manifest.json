@@ -1,0 +1,120 @@
+{
+  "schema": "zcash-public-response-fixtures-v1",
+  "private_accepted": false,
+  "sources": {
+    "transaction_vectors": {
+      "repository": "https://github.com/zcash/librustzcash",
+      "commit": "97aefdc39a037da9c4f19a0e8a450d2c7932f53e",
+      "path": "zcash_primitives/src/transaction/tests/data.rs",
+      "url": "https://raw.githubusercontent.com/zcash/librustzcash/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/zcash_primitives/src/transaction/tests/data.rs",
+      "git_blob": "df009b2dabd2137ec4b6b1ef9ee63b34462dd465",
+      "source_bytes": 684905,
+      "source_sha256": "97e2a2e8c108f82a0b49b5445bebef001857f3dcd9dfdc3be60e1eaa60b7a2f1"
+    },
+    "header_raw": {
+      "repository": "https://github.com/ZcashFoundation/zebra",
+      "commit": "f5c5277fe41eba9c74f37098738f93f35dd70d60",
+      "path": "zebra-rpc/src/methods/tests/snapshots/get_block_header_hash@testnet_10.snap",
+      "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/f5c5277fe41eba9c74f37098738f93f35dd70d60/zebra-rpc/src/methods/tests/snapshots/get_block_header_hash@testnet_10.snap",
+      "git_blob": "7942eddd2e2f6581b6f6cdc385eef27ec6b5411a",
+      "source_bytes": 3051,
+      "source_sha256": "6de4fee41d52e3919885d062930d7e6bf7579d2205d60d0a148e697670e191d0"
+    },
+    "header_verbose": {
+      "repository": "https://github.com/ZcashFoundation/zebra",
+      "commit": "f5c5277fe41eba9c74f37098738f93f35dd70d60",
+      "path": "zebra-rpc/src/methods/tests/snapshots/get_block_header_hash_verbose@testnet_10.snap",
+      "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/f5c5277fe41eba9c74f37098738f93f35dd70d60/zebra-rpc/src/methods/tests/snapshots/get_block_header_hash_verbose@testnet_10.snap",
+      "git_blob": "03ae04e2e84a983a12fe9596d37fb118ddfe9135",
+      "source_bytes": 3501,
+      "source_sha256": "4df89c104b923a41e6486405ea4a418bc5a48332f90370fb7f438960a133f033"
+    },
+    "license_librustzcash": {
+      "repository": "https://github.com/zcash/librustzcash",
+      "commit": "97aefdc39a037da9c4f19a0e8a450d2c7932f53e",
+      "path": "zcash_primitives/LICENSE-MIT",
+      "url": "https://raw.githubusercontent.com/zcash/librustzcash/97aefdc39a037da9c4f19a0e8a450d2c7932f53e/zcash_primitives/LICENSE-MIT",
+      "git_blob": "1581c90d16c53486143e5f2cf6418c85165748e5",
+      "source_bytes": 1093,
+      "source_sha256": "5746c0bdf1827f3ae16352345242bd67da23fda8e2d7e504264bc1aaea21c678"
+    },
+    "license_zebra": {
+      "repository": "https://github.com/ZcashFoundation/zebra",
+      "commit": "f5c5277fe41eba9c74f37098738f93f35dd70d60",
+      "path": "LICENSE-MIT",
+      "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/f5c5277fe41eba9c74f37098738f93f35dd70d60/LICENSE-MIT",
+      "git_blob": "7f46ce5537a56f1053636cf922487e714f99213e",
+      "source_bytes": 1065,
+      "source_sha256": "a688813a3853401dd742104df9829c5d232c7c8d8f0b3adf9e421e514cd3399a"
+    }
+  },
+  "fixtures": {
+    "testnet-v4-tx.hex": {
+      "encoding": "lowercase hexadecimal with terminal newline",
+      "decoded_bytes": 2005,
+      "source": "transaction_vectors::tx_read_write::TX_READ_WRITE",
+      "network_provenance": "public testnet block 280003",
+      "txid_rpc": "64f0bd7fe30ce23753358fe3a2dc835b8fba9c0274c4e2c54a6f73114cb55639",
+      "file_bytes": 4011,
+      "file_sha256": "74362ebbfbdda9888209dd2d632508f6a0f9a3f0e57f5811c5bdd126431b023d"
+    },
+    "zip244-v5-0.hex": {
+      "encoding": "lowercase hexadecimal with terminal newline",
+      "decoded_bytes": 3483,
+      "source": "transaction_vectors::zip_0244::make_test_vectors()[0]",
+      "network_provenance": "public synthetic protocol vector; not mined testnet evidence",
+      "txid_internal_hex": "552c96bd33834ba1a8a3ecd80a2c9cb41187553a3dcfe7928316bb70704b85d0",
+      "txid_rpc": "d0854b7070bb168392e7cf3d3a558711b49c2c0ad8eca3a8a14b8333bd962c55",
+      "auth_digest_internal_hex": "12767e5f678567360fb3a1cb9cf858613ffe2263b653c6a370ee1f6820abdc57",
+      "file_bytes": 6967,
+      "file_sha256": "541e8b1cec4e08a14175018764c66546175544271a315ae5b7e933b59d7c189b"
+    },
+    "zip244-v5-2.hex": {
+      "encoding": "lowercase hexadecimal with terminal newline",
+      "decoded_bytes": 72,
+      "source": "transaction_vectors::zip_0244::make_test_vectors()[2]",
+      "network_provenance": "public synthetic protocol vector; not mined testnet evidence",
+      "txid_internal_hex": "28d16c3cd78a6b7a50b11a1b8417764c4e63c6e3d8aa289f7e87e39845872764",
+      "txid_rpc": "6427874598e3877e9f28aad8e3c6634e4c7617841b1ab1507a6b8ad73c6cd128",
+      "auth_digest_internal_hex": "332155b1cc23a2571e86e49e06010cd25321dcfcca34ae14e8b3f4f00270d287",
+      "file_bytes": 145,
+      "file_sha256": "908d81fca986f98a949bdc85019ebf5bec810cb893364fd9e2d0738051e63479"
+    },
+    "zip244-v5-2-auth-mutated.hex": {
+      "encoding": "lowercase hexadecimal with terminal newline",
+      "decoded_bytes": 72,
+      "source": "derived from zip244-v5-2.hex",
+      "network_provenance": "derived negative test fixture; no consensus validity claimed",
+      "expected_txid_rpc": "6427874598e3877e9f28aad8e3c6634e4c7617841b1ab1507a6b8ad73c6cd128",
+      "expected_auth_digest_relation": "different from original; no calculated digest asserted",
+      "mutation": {
+        "byte_offset_zero_based": 63,
+        "old_hex": "00",
+        "new_hex": "51",
+        "field": "transparent input 0 scriptSig",
+        "original_script_sig_hex": "0468984d0200",
+        "mutated_script_sig_hex": "0468984d0251"
+      },
+      "file_bytes": 145,
+      "file_sha256": "679e5961658a329785d9d2fe5aeb399853d3439f42c878d380106a01e41a1ff3"
+    },
+    "testnet-header.hex": {
+      "encoding": "lowercase hexadecimal with terminal newline",
+      "decoded_bytes": 1487,
+      "source": "header_raw",
+      "network_provenance": "public testnet block 1",
+      "block_hash_rpc": "025579869bcf52a989337342f5f57a84f3a28b968f7d6a8307902b065a668d23",
+      "file_bytes": 2975,
+      "file_sha256": "67ed59431cdb686d04affdac3f576484e52dcd4a1d15c9e7adeb9afc360873b4"
+    },
+    "testnet-header-verbose.json": {
+      "encoding": "JSON result object",
+      "source": "header_verbose",
+      "network_provenance": "public testnet block 1",
+      "block_hash_rpc": "025579869bcf52a989337342f5f57a84f3a28b968f7d6a8307902b065a668d23",
+      "file_bytes": 3427,
+      "file_sha256": "3af733d2eac1e166b40c1d1c73874de4e16e29ded0143c3302da6c6c50f4cd2b"
+    }
+  },
+  "derivation": "Source arrays and JSON extracted as data; txid RPC conversion reverses upstream 32-byte txid; no protocol hash computed."
+}

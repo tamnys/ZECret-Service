@@ -1,4 +1,4 @@
-"""Check offline verifier features, reviewed TLS pins and upstream fixture hashes."""
+"""Check offline verifier, TLS and Zcash parser features/pins and fixture hashes."""
 import hashlib
 import json
 import subprocess
@@ -55,6 +55,8 @@ for name, version, checksum in [
     ("rustls", "0.23.45", "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"),
     ("tokio-rustls", "0.26.5", "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"),
     ("rustls-webpki", "0.103.15", "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"),
+    ("zcash_primitives", "0.30.1", "403d5be1e96339534be098e3377fb8a78d68ca7585b1780133d884b810277418"),
+    ("zcash_protocol", "0.10.5", "314329b91ec4bbb517441840e47d0b2029bf0b946f086980c96c889c2d92dc5d"),
 ]:
     package = next(p for p in lock["package"] if p["name"] == name)
     assert package["version"] == version and package["checksum"] == checksum
@@ -65,9 +67,27 @@ for name, reviewed_features in [
 ]:
     package = next(p for p in packages.values() if p["name"] == name)
     assert set(nodes[package["id"]]["features"]) == reviewed_features, f"unreviewed {name} features"
+# The maintained decoding/hash APIs need no crate features. In particular do not
+# add proof generation, transparent spending, test graphs or multicore execution.
+for name in ("zcash_primitives", "zcash_protocol", "orchard", "sapling-crypto",
+             "zcash_transparent", "equihash"):
+    package = next(p for p in packages.values() if p["name"] == name)
+    assert not nodes[package["id"]]["features"], f"unreviewed {name} parser features"
+parser_receipt = json.loads((root / "records/protocol-dependency-receipt.json").read_text())
+locked_packages = {(p["name"], p["version"]): p for p in lock["package"]}
+for item in parser_receipt["packages"]:
+    package = locked_packages[(item["name"], item["version"])]
+    assert package["checksum"] == item["sha256"], "parser dependency review no longer matches lock"
 for family in ("dcap", "dstack", "tls"):
     fixture_dir = root / "tests/fixtures" / family
     provenance = json.loads((fixture_dir / "provenance.json").read_text())
     for name, item in provenance["files"].items():
         assert hashlib.sha256((fixture_dir / name).read_bytes()).hexdigest() == item["sha256"]
-print(f"Verifier/TLS guard passed ({host}): exact pins and fixture hashes; offline verifier has no fetch/override feature or known network client; reviewed Ring-only TLS features.")
+zcash_dir = root / "tests/fixtures/zcash"
+zcash_manifest = json.loads((zcash_dir / "manifest.json").read_text())
+for name, item in zcash_manifest["fixtures"].items():
+    assert hashlib.sha256((zcash_dir / name).read_bytes()).hexdigest() == item["file_sha256"]
+for upstream in ("librustzcash", "zebra"):
+    source = zcash_manifest["sources"][f"license_{upstream}"]
+    assert hashlib.sha256((zcash_dir / f"LICENSE-MIT-{upstream}").read_bytes()).hexdigest() == source["source_sha256"]
+print(f"Verifier/TLS/parser guard passed ({host}): exact pins and fixture hashes; offline verifier has no fetch/override feature or known network client; reviewed Ring-only TLS and decoding-only Zcash features.")
