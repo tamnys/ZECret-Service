@@ -104,4 +104,4 @@ For another explicit **real deletion attempt**, use `zrpc lifecycle retry-tracke
 - `docs/phala-feasibility.md`, `docs/operator-runbook.md`: compatibility gates and operator workflow.
 - `records/`: internal research and verification evidence.
 
-Dependencies have exact direct pins and checksum-bearing lockfiles. Native builds use the committed UI bundle; build outputs can be checksummed with `sha256sum target/debug/zrpc`. Bit-for-bit reproducible release binaries, signed releases and independently reviewed attestation integration are future release work. This scaffold is not an audited private service.
+Dependencies have exact direct pins and checksum-bearing lockfiles. Native builds use the committed UI bundle. The [unsigned build reproduction workflow](docs/release-verification.md) compares two clean native Linux builds from an immutable commit and produces binaries, checksums and an input manifest. Its scope is the recorded build environment; signatures, approved releases and independently reviewed attestation integration remain separate requirements. This scaffold is not an audited private service.
