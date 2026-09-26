@@ -5,7 +5,9 @@
 
 use crate::{
     DELETE_THRESHOLD_MICROUSD, DeploymentManifest, LifecycleError, MAX_LIFETIME_SECONDS,
-    ManifestSource, TOTAL_CEILING_MICROUSD, WatchdogAction, add, duration_cost, nonempty, watchdog,
+    ManifestSource, TOTAL_CEILING_MICROUSD, WatchdogAction, add, duration_cost, nonempty,
+    reconciliation::{ObservationRecord, ObservedUsage},
+    watchdog,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +24,9 @@ pub struct ExperimentBinding {
 }
 
 impl ExperimentBinding {
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
     #[cfg(unix)]
     pub(crate) fn original_window(&self) -> (u64, u64) {
         (
@@ -169,6 +174,8 @@ struct LedgerData {
     usage: BTreeMap<String, UsageRecord>,
     #[serde(default)]
     deletion_intents: Vec<DeletionIntentRecord>,
+    #[serde(default)]
+    observations: Vec<ObservationRecord>,
 }
 
 /// Fields are private; attempt APIs cannot replace the original policy or
@@ -214,6 +221,7 @@ impl ExperimentLedger {
             resources: BTreeMap::new(),
             usage: BTreeMap::new(),
             deletion_intents: Vec::new(),
+            observations: Vec::new(),
         }))
     }
 
@@ -225,6 +233,14 @@ impl ExperimentLedger {
         &self.0.deletion_intents
     }
 
+    pub fn observations(&self) -> &[ObservationRecord] {
+        &self.0.observations
+    }
+
+    pub fn conservative_cost_floor_microusd(&self) -> u64 {
+        self.0.conservative_cost_floor_microusd
+    }
+
     pub(crate) fn workspace_id(&self) -> &str {
         &self.0.binding.workspace_id
     }
@@ -232,6 +248,39 @@ impl ExperimentLedger {
     #[cfg(unix)]
     pub(crate) fn tracked_cvms(&self) -> impl Iterator<Item = &TrackedCvm> {
         self.0.resources.values().map(|resource| &resource.cvm)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn append_observation(
+        &mut self,
+        record: ObservationRecord,
+    ) -> Result<(), LifecycleError> {
+        self.validate()?;
+        record.validate(self.workspace_id())?;
+        if record.usage_start_unix_seconds != self.0.binding.started_at_unix_seconds
+            || record.usage_cutoff_unix_seconds < self.0.last_observed_at_unix_seconds
+            || record.tracked.len() != self.0.resources.len()
+            || record.tracked.iter().any(|observed| {
+                self.0
+                    .resources
+                    .get(&observed.target.cvm_id)
+                    .is_none_or(|resource| resource.cvm != observed.target)
+            })
+            || record.known_cost_floor_microusd
+                != self.planning_cost_at(record.finished_at_unix_seconds)?
+        {
+            return Err(LifecycleError(
+                "observation differs from committed experiment",
+            ));
+        }
+        // Validate the entire successor before changing this ledger. Provider
+        // usage is retained as unjoined data and never enters accepted charges.
+        let mut next = self.clone();
+        next.advance_cost(record.recorded_at_unix_seconds)?;
+        next.0.observations.push(record);
+        next.validate()?;
+        *self = next;
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -252,8 +301,8 @@ impl ExperimentLedger {
             .ok_or(LifecycleError("deletion target is not already tracked"))?
             .cvm
             .clone();
-        // Reconciliation and retry authority are not implemented. No API may
-        // silently turn a persisted request, response, or crash into a retry.
+        // Retained observations grant no retry authority. No API may silently
+        // turn a persisted request, response, or crash into a retry.
         if self
             .0
             .deletion_intents
@@ -311,6 +360,11 @@ impl ExperimentLedger {
     pub(crate) fn validate_successor(&self, previous: &Self) -> Result<(), LifecycleError> {
         self.validate()?;
         previous.validate()?;
+        if !self.0.observations.starts_with(&previous.0.observations) {
+            return Err(LifecycleError(
+                "observation journal would alter prior history",
+            ));
+        }
         if self.0.deletion_intents.len() < previous.0.deletion_intents.len()
             || previous
                 .0
@@ -429,11 +483,75 @@ impl ExperimentLedger {
                 }
             }
         }
+        self.validate_observations()?;
         if self.modeled_cost(self.0.last_observed_at_unix_seconds)?
             > self.0.conservative_cost_floor_microusd
             || self.observed_cost()? > self.0.conservative_cost_floor_microusd
         {
             return Err(LifecycleError("ledger cost floor omits known costs"));
+        }
+        Ok(())
+    }
+
+    fn validate_observations(&self) -> Result<(), LifecycleError> {
+        let mut prior_generation = None;
+        let mut prior_recorded = self.0.binding.started_at_unix_seconds;
+        let mut prior_floor = self.0.initial_cost_microusd;
+        let mut prior_rows: BTreeMap<(&str, &str), &ObservedUsage> = BTreeMap::new();
+        for record in &self.0.observations {
+            record.validate(self.workspace_id())?;
+            if record.usage_start_unix_seconds != self.0.binding.started_at_unix_seconds
+                || record.usage_cutoff_unix_seconds < prior_recorded
+                || record.recorded_at_unix_seconds > self.0.last_observed_at_unix_seconds
+                || prior_generation.is_some_and(|generation| record.source_generation < generation)
+                || record.known_cost_floor_microusd < prior_floor
+                || record.known_cost_floor_microusd > self.0.conservative_cost_floor_microusd
+                || record.tracked.iter().any(|observed| {
+                    self.0
+                        .resources
+                        .get(&observed.target.cvm_id)
+                        .is_none_or(|resource| resource.cvm != observed.target)
+                })
+                || self
+                    .0
+                    .deletion_intents
+                    .iter()
+                    .any(|intent| intent.committed_generation == record.committed_generation)
+            {
+                return Err(LifecycleError("invalid observation journal history"));
+            }
+            // Use the resources actually retained by this earlier record.
+            // Resources added later must not retroactively invalidate it.
+            let modeled_at_finish =
+                record
+                    .tracked
+                    .iter()
+                    .try_fold(self.0.initial_cost_microusd, |sum, observed| {
+                        add(
+                            sum,
+                            duration_cost(
+                                observed.target.compute_and_disk_microusd_per_hour,
+                                record
+                                    .finished_at_unix_seconds
+                                    .saturating_sub(observed.target.created_at_unix_seconds),
+                            )?,
+                        )
+                    })?;
+            if record.known_cost_floor_microusd < modeled_at_finish {
+                return Err(LifecycleError("observation omits its known modeled cost"));
+            }
+            for (app, rows) in &record.usage_by_app {
+                for row in rows {
+                    let key = (app.as_str(), row.billing_key.as_str());
+                    if prior_rows.get(&key).is_some_and(|prior| *prior != row) {
+                        return Err(LifecycleError("conflicting historical provider usage"));
+                    }
+                    prior_rows.insert(key, row);
+                }
+            }
+            prior_generation = Some(record.committed_generation);
+            prior_recorded = record.recorded_at_unix_seconds;
+            prior_floor = record.known_cost_floor_microusd;
         }
         Ok(())
     }

@@ -1,11 +1,12 @@
 //! Explicit operator reads of the original ledger's provider resources.
-//! This command cannot initialize or recover a ledger, modify provider state,
-//! add charges, persist an observation, or accept a caller-selected clock.
+//! Reconciliation saves an authenticated observation to the existing ledger.
+//! Neither command initializes or recovers a ledger, modifies provider state,
+//! attributes charges, or accepts a caller-selected clock.
 
 use super::{exhausted, print_json, required, take_value};
 use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
 
-const USAGE: &str = r"zrpc lifecycle observe \
+const USAGE: &str = r"zrpc lifecycle (observe|reconcile) \
   --original-binding FILE \
   --api-key-file FILE \
   --trust-root DER_FILE [--trust-root DER_FILE ...] \
@@ -19,8 +20,9 @@ const USAGE: &str = r"zrpc lifecycle observe \
 zrpc lifecycle --help
 Every option is required; no limits or credentials are inferred.
 Use absolute file paths. Each trust-root file contains one independently selected DER trust anchor.
-Read observations are not persisted. Usage remains unjoined; billing, disk deletion, and cleanup remain unverified.
-This command performs provider reads only and never deploys, deletes, or installs jobs.";
+observe leaves the ledger unchanged; reconcile commits the observation and advances modeled cost/time.
+Usage remains unjoined; billing, disk deletion, and cleanup remain unverified. Reconciliation grants no deletion retry authority.
+Both commands perform provider reads only and never deploy, delete, or install jobs.";
 
 struct Settings {
     original_binding: PathBuf,
@@ -101,22 +103,29 @@ pub async fn run(mut args: Vec<String>) -> Result<(), String> {
         println!("{USAGE}");
         return Ok(());
     }
-    if args.first().map(String::as_str) != Some("observe") {
-        return Err("supported lifecycle command: observe; use lifecycle --help".to_owned());
-    }
+    let persist = match args.first().map(String::as_str) {
+        Some("observe") => false,
+        Some("reconcile") => true,
+        _ => {
+            return Err(
+                "supported lifecycle commands: observe, reconcile; use lifecycle --help".to_owned(),
+            );
+        }
+    };
     args.remove(0);
-    observe(parse_settings(args)?).await
+    observe(parse_settings(args)?, persist).await
 }
 
 #[cfg(unix)]
-async fn observe(settings: Settings) -> Result<(), String> {
+async fn observe(settings: Settings, persist: bool) -> Result<(), String> {
     use zrpc_lifecycle::{
         observation::{ObservationLimits, ObservationSession},
         persistence::LedgerStore,
         provider_inputs::ProviderFiles,
     };
 
-    let store = LedgerStore::open(&settings.original_binding).map_err(|error| error.to_string())?;
+    let mut store =
+        LedgerStore::open(&settings.original_binding).map_err(|error| error.to_string())?;
     let session = ObservationSession::new(&store).map_err(|error| error.to_string())?;
     let client = ProviderFiles {
         workspace_id: session
@@ -143,11 +152,28 @@ async fn observe(settings: Settings) -> Result<(), String> {
         )
         .await
         .map_err(|error| error.to_string())?;
-    print_json(report(&observation))
+    let mut output = report(&observation);
+    if persist {
+        let committed = store
+            .commit_observation(observation)
+            .map_err(|error| error.to_string())?;
+        output["source_committed_reference"] = output["committed_reference"].take();
+        output["committed_reference"] =
+            serde_json::to_value(committed).map_err(|error| error.to_string())?;
+        output["mode"] = "provider_observation_reconciliation".into();
+        output["persisted"] = true.into();
+        output["local_ledger_updated"] = true.into();
+        output["committed_cost_floor_microusd"] = store
+            .ledger()
+            .map_err(|error| error.to_string())?
+            .conservative_cost_floor_microusd()
+            .into();
+    }
+    print_json(output)
 }
 
 #[cfg(not(unix))]
-async fn observe(_settings: Settings) -> Result<(), String> {
+async fn observe(_settings: Settings, _persist: bool) -> Result<(), String> {
     Err("provider observation requires the Unix ledger store".to_owned())
 }
 
@@ -241,6 +267,8 @@ fn report(observation: &zrpc_lifecycle::observation::ReadObservation) -> serde_j
     json!({
         "mode": "provider_read_observation",
         "persisted": false,
+        "local_ledger_updated": false,
+        "deletion_retry_authorized": false,
         "private_accepted": false,
         "query_sent": false,
         "deployment_enabled": false,

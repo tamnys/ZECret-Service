@@ -130,6 +130,129 @@ fn complete_replies(inventory: &str, detail: &str, usage: &str) -> Vec<Vec<u8>> 
     ]
 }
 
+async fn complete_observation(store: &LedgerStore) -> ReadObservation {
+    let server = Server::start(
+        complete_replies(INVENTORY, DETAIL, USAGE),
+        "cloud-api.phala.com",
+    )
+    .await;
+    let observation = ObservationSession::at(store, CUTOFF)
+        .unwrap()
+        .observe_with_clock(server.client(fixture_bound()), limits(), || Ok(CUTOFF))
+        .await
+        .unwrap();
+    server.wait_closed(8).await;
+    assert!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET "))
+    );
+    observation
+}
+
+#[tokio::test]
+async fn reconciliation_retains_unjoined_usage_and_pending_deletion_across_reopen() {
+    let fixture = Fixture::new(WORKSPACE);
+    let mut store = LedgerStore::open(&fixture.original).unwrap();
+    // The local journal records a prepared request; this test sends no DELETE.
+    drop(
+        store
+            .prepare_deletion(0, WORKSPACE, "synthetic-cvm-1", START + 2)
+            .unwrap(),
+    );
+    let before = serde_json::to_value(store.ledger().unwrap()).unwrap();
+    let observation = complete_observation(&store).await;
+    let scan_floor = observation.known_cost_floor_microusd();
+    let reference = store.commit_observation(observation).unwrap();
+    assert_eq!(reference.generation(), 2);
+    let ledger = store.ledger().unwrap();
+    let record = &ledger.observations()[0];
+    assert_eq!(
+        (record.source_generation, record.committed_generation),
+        (1, 2)
+    );
+    assert_eq!(record.known_cost_floor_microusd, scan_floor);
+    assert!(record.recorded_at_unix_seconds >= record.finished_at_unix_seconds);
+    assert_eq!(record.tracked.len(), 3);
+    assert_eq!(record.untracked_inventory_ids, ["synthetic-cvm-partial"]);
+    assert_eq!(record.usage_by_app[APP].len(), 2);
+    assert_eq!(record.usage_by_app[APP][1].cost_canonical_decimal, "2e-7");
+    assert_eq!(
+        ledger.conservative_cost_floor_microusd(),
+        ledger
+            .planning_cost_at(record.recorded_at_unix_seconds)
+            .unwrap()
+    );
+    assert!(ledger.conservative_cost_floor_microusd() >= scan_floor);
+    let after = serde_json::to_value(ledger).unwrap();
+    assert!(after["usage"].as_object().unwrap().is_empty());
+    let mut retained = after.clone();
+    for field in [
+        "observations",
+        "conservative_cost_floor_microusd",
+        "last_observed_at_unix_seconds",
+    ] {
+        retained[field] = before[field].clone();
+    }
+    assert_eq!(retained, before);
+    let recorded_at = record.recorded_at_unix_seconds;
+    drop(store);
+    let mut reopened = LedgerStore::open(&fixture.original).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.ledger().unwrap()).unwrap(),
+        after
+    );
+    assert!(
+        reopened.ledger().unwrap().deletion_intents()[0]
+            .outcome
+            .is_none()
+    );
+    assert!(
+        reopened
+            .prepare_deletion(2, WORKSPACE, "synthetic-cvm-1", recorded_at)
+            .is_err()
+    );
+    assert_eq!(reopened.planning_reference().unwrap().generation(), 2);
+}
+
+#[tokio::test]
+async fn reconciliation_rejects_same_binding_different_store_and_stale_snapshot() {
+    let first = Fixture::new(WORKSPACE);
+    let second = Fixture::new(WORKSPACE);
+    let mut source = LedgerStore::open(&first.original).unwrap();
+    let mut other = LedgerStore::open(&second.original).unwrap();
+    assert_eq!(
+        source.ledger().unwrap().binding(),
+        other.ledger().unwrap().binding()
+    );
+    let source_before = first.bytes();
+    let other_before = second.bytes();
+    let observation = complete_observation(&source).await;
+    assert!(matches!(
+        other.commit_observation(observation),
+        Err(StoreError::InvalidState)
+    ));
+    assert_eq!(first.bytes(), source_before);
+    assert_eq!(second.bytes(), other_before);
+
+    let observation = complete_observation(&source).await;
+    let mut next = source.ledger().unwrap().clone();
+    next.begin_attempt("intervening-commit".into(), START + 2)
+        .unwrap();
+    source.commit(&next).unwrap();
+    let committed = first.bytes();
+    assert!(matches!(
+        source.commit_observation(observation),
+        Err(StoreError::InvalidState)
+    ));
+    assert_eq!(first.bytes(), committed);
+    assert_eq!(source.planning_reference().unwrap().generation(), 1);
+    assert!(source.ledger().unwrap().observations().is_empty());
+}
+
 #[tokio::test]
 async fn complete_reads_preserve_all_history_and_never_attribute_usage_or_prove_cleanup() {
     let fixture = Fixture::new(WORKSPACE);

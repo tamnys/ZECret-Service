@@ -7,6 +7,8 @@
 use crate::{
     LifecycleError,
     controller::{DeletionIntentRecord, DeletionOutcome, ExperimentBinding, ExperimentLedger},
+    observation::ReadObservation,
+    reconciliation::ObservationRecord,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::{RawValue, to_raw_value};
@@ -17,6 +19,7 @@ use std::{
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const LOCK: &str = "writer.lock";
@@ -184,7 +187,7 @@ pub fn create_original_binding(
     store_directory: &Path,
     initial: &ExperimentLedger,
 ) -> Result<(), StoreError> {
-    if !initial.deletion_intents().is_empty() {
+    if !initial.deletion_intents().is_empty() || !initial.observations().is_empty() {
         return Err(StoreError::InvalidState);
     }
     validate_absolute(path)?;
@@ -201,10 +204,8 @@ pub fn create_original_binding(
         store_directory: store_directory.to_path_buf(),
         initial_ledger: to_raw_value(initial).map_err(|_| StoreError::InvalidState)?,
     };
-    if !ledger_from_raw(&record.initial_ledger, &record.binding)?
-        .deletion_intents()
-        .is_empty()
-    {
+    let restored = ledger_from_raw(&record.initial_ledger, &record.binding)?;
+    if !restored.deletion_intents().is_empty() || !restored.observations().is_empty() {
         return Err(StoreError::InvalidState);
     }
     let pending = sibling(path, ".pending")?;
@@ -240,10 +241,8 @@ fn original(path: &Path) -> Result<(OriginalRecord, File), StoreError> {
     if path.starts_with(&record.store_directory) {
         return Err(StoreError::UnsafePath);
     }
-    if !ledger_from_raw(&record.initial_ledger, &record.binding)?
-        .deletion_intents()
-        .is_empty()
-    {
+    let restored = ledger_from_raw(&record.initial_ledger, &record.binding)?;
+    if !restored.deletion_intents().is_empty() || !restored.observations().is_empty() {
         return Err(StoreError::InvalidState);
     }
     Ok((record, file))
@@ -356,6 +355,49 @@ enum CommitPoint {
 }
 
 impl LedgerStore {
+    /// Persist one completed authenticated read against the exact original and
+    /// snapshot that produced it. The observation remains unjoined evidence;
+    /// this operation does not accept provider charges or establish cleanup.
+    /// The original writer lock stays held through the durable snapshot write.
+    pub fn commit_observation(
+        &mut self,
+        observation: ReadObservation,
+    ) -> Result<CommittedLedgerReference, StoreError> {
+        self.commit_observation_with_clock_and_hook(
+            observation,
+            &mut || {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs())
+                    .map_err(|_| StoreError::InvalidState)
+            },
+            &mut |_| Ok(()),
+        )
+    }
+
+    fn commit_observation_with_clock_and_hook(
+        &mut self,
+        observation: ReadObservation,
+        clock: &mut impl FnMut() -> Result<u64, StoreError>,
+        hook: &mut impl FnMut(CommitPoint) -> Result<(), StoreError>,
+    ) -> Result<CommittedLedgerReference, StoreError> {
+        let current = self.planning_reference()?;
+        // Generation alone is not a store identity. Bind both original and
+        // immutable snapshot paths as well as every original policy field.
+        if json_bytes(&current)? != json_bytes(observation.reference())?
+            || json_bytes(self.ledger()?.binding())? != json_bytes(observation.original_binding())?
+        {
+            return Err(StoreError::InvalidState);
+        }
+        let record = ObservationRecord::from_read(&observation, clock()?)?;
+        let mut next = self.ledger()?.clone();
+        next.append_observation(record)?;
+        self.commit_with_hook(&next, hook)?;
+        // This reference is returned only after all snapshot and directory
+        // synchronization, followed by the ordinary full-history revalidation.
+        self.planning_reference()
+    }
+
     /// Record an explicit first cleanup intent for an already committed target.
     /// No provider request is made; generation/workspace arguments are local
     /// consistency checks, not provider authentication or spending permission.
@@ -516,8 +558,10 @@ impl LedgerStore {
 
     pub fn commit(&mut self, next: &ExperimentLedger) -> Result<(), StoreError> {
         // Ordinary callers may supply restored JSON. They cannot synthesize an
-        // intent or fill/erase a pending outcome through generic persistence.
-        if next.deletion_intents() != self.ledger()?.deletion_intents() {
+        // observation, intent, or pending outcome through generic persistence.
+        if next.deletion_intents() != self.ledger()?.deletion_intents()
+            || next.observations() != self.ledger()?.observations()
+        {
             return Err(StoreError::InvalidState);
         }
         self.commit_with_hook(next, &mut |_| Ok(()))
@@ -539,6 +583,7 @@ impl LedgerStore {
         }
         next.validate_successor(&self.ledger)?;
         validate_journal_transition(&self.ledger, next, self.generation)?;
+        validate_observation_transition(&self.ledger, next, self.generation)?;
         let generation = self
             .generation
             .checked_add(1)
@@ -663,6 +708,35 @@ fn acquire_lock(lock: &File) -> Result<(), StoreError> {
     }
 }
 
+fn validate_observation_transition(
+    previous: &ExperimentLedger,
+    next: &ExperimentLedger,
+    prior_generation: u64,
+) -> Result<(), StoreError> {
+    let before = previous.observations();
+    let after = next.observations();
+    if after == before {
+        return Ok(());
+    }
+    // A single completed read appends one immutable historical statement. A
+    // combined target, attempt, charge or deletion change is not that operation.
+    if after.len().checked_sub(before.len()) != Some(1) || &after[..before.len()] != before {
+        return Err(StoreError::InvalidState);
+    }
+    let record = after.last().ok_or(StoreError::InvalidState)?;
+    if record.source_generation != prior_generation
+        || Some(record.committed_generation) != prior_generation.checked_add(1)
+    {
+        return Err(StoreError::InvalidState);
+    }
+    let mut expected = previous.clone();
+    expected.append_observation(record.clone())?;
+    if json_bytes(&expected)? != json_bytes(next)? {
+        return Err(StoreError::InvalidState);
+    }
+    Ok(())
+}
+
 fn load_history(original: &OriginalRecord) -> Result<(u64, ExperimentLedger, bool), StoreError> {
     let mut snapshots = BTreeMap::new();
     let mut pending = false;
@@ -697,8 +771,10 @@ fn load_history(original: &OriginalRecord) -> Result<(u64, ExperimentLedger, boo
             }
             ledger.validate_successor(prior)?;
             validate_journal_transition(prior, &ledger, *prior_generation)?;
+            validate_observation_transition(prior, &ledger, *prior_generation)?;
         } else if generation != 0
             || !ledger.deletion_intents().is_empty()
+            || !ledger.observations().is_empty()
             || json_bytes(&ledger)?
                 != json_bytes(&ledger_from_raw(
                     &original.initial_ledger,
@@ -712,6 +788,9 @@ fn load_history(original: &OriginalRecord) -> Result<(u64, ExperimentLedger, boo
     let (generation, ledger) = previous.ok_or(StoreError::InvalidState)?;
     Ok((generation, ledger, pending))
 }
+
+#[cfg(test)]
+mod observation_tests;
 
 #[cfg(test)]
 mod tests {
