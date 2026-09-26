@@ -1,4 +1,5 @@
 //! Session-owned attestation and optional typed node RPC on the same TLS stream.
+use crate::gcp_quote::{GcpQuoteEvidence, request_gcp_quote};
 use crate::node::LocalNode;
 use bytes::Bytes;
 use dstack_sdk_types::dstack::GetQuoteResponse;
@@ -76,10 +77,19 @@ trait QuoteSource: Send + Sync + 'static {
     fn quote(
         &self,
         report_data: [u8; 64],
-    ) -> impl Future<Output = Result<GetQuoteResponse, SafeError>> + Send;
+    ) -> impl Future<Output = Result<QuoteEvidence, SafeError>> + Send;
+}
+enum QuoteEvidence {
+    Phala(GetQuoteResponse),
+    Gcp(GcpQuoteEvidence),
 }
 impl QuoteSource for DstackQuoteSource {
-    async fn quote(&self, report_data: [u8; 64]) -> Result<GetQuoteResponse, SafeError> {
+    async fn quote(&self, report_data: [u8; 64]) -> Result<QuoteEvidence, SafeError> {
+        self.request(report_data).await.map(QuoteEvidence::Phala)
+    }
+}
+impl DstackQuoteSource {
+    async fn request(&self, report_data: [u8; 64]) -> Result<GetQuoteResponse, SafeError> {
         let socket = UnixStream::connect(&self.socket)
             .await
             .map_err(|_| unavailable())?;
@@ -137,8 +147,23 @@ pub(crate) async fn request_dstack_quote(
     DstackQuoteSource {
         socket: socket.to_owned(),
     }
-    .quote(report_data)
+    .request(report_data)
     .await
+}
+
+enum GuestQuoteSource {
+    Phala(DstackQuoteSource),
+    Gcp(PathBuf),
+}
+impl QuoteSource for GuestQuoteSource {
+    async fn quote(&self, report_data: [u8; 64]) -> Result<QuoteEvidence, SafeError> {
+        match self {
+            Self::Phala(source) => source.quote(report_data).await,
+            Self::Gcp(path) => request_gcp_quote(path, report_data)
+                .await
+                .map(QuoteEvidence::Gcp),
+        }
+    }
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -175,7 +200,7 @@ impl<Q: QuoteSource> Shared<Q> {
 /// It does not itself assert that a client approved this workload.
 #[derive(Clone)]
 pub struct AttestationService {
-    shared: Arc<Shared<DstackQuoteSource>>,
+    shared: Arc<Shared<GuestQuoteSource>>,
 }
 impl AttestationService {
     pub fn new(socket: &Path, limits: BootstrapLimits) -> Result<Self, SafeError> {
@@ -188,9 +213,24 @@ impl AttestationService {
         }
         Ok(Self {
             shared: Arc::new(Shared::new(
-                DstackQuoteSource {
+                GuestQuoteSource::Phala(DstackQuoteSource {
                     socket: socket.to_owned(),
-                },
+                }),
+                limits,
+            )),
+        })
+    }
+    pub fn new_gcp(socket: &Path, limits: BootstrapLimits) -> Result<Self, SafeError> {
+        if !socket.is_absolute()
+            || socket
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(unavailable());
+        }
+        Ok(Self {
+            shared: Arc::new(Shared::new(
+                GuestQuoteSource::Gcp(socket.to_owned()),
                 limits,
             )),
         })
@@ -461,16 +501,31 @@ async fn handle<Q: QuoteSource>(
     if session.io.check_deadline().is_err() {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     }
-    let response = PublicAttestationResponse {
-        nonce: request.nonce,
-        quote: evidence.quote,
-        event_log: evidence.event_log,
-        report_data: evidence.report_data,
-        vm_config: evidence.vm_config,
-    };
     // Bound while serializing, avoiding a second unbounded response allocation.
     let mut output = BoundedOutput(Vec::new());
-    if serde_json::to_writer(&mut output, &response).is_err() {
+    let serialized = match evidence {
+        QuoteEvidence::Phala(evidence) => serde_json::to_writer(
+            &mut output,
+            &PublicAttestationResponse {
+                nonce: request.nonce,
+                quote: evidence.quote,
+                event_log: evidence.event_log,
+                report_data: evidence.report_data,
+                vm_config: evidence.vm_config,
+            },
+        ),
+        QuoteEvidence::Gcp(evidence) => serde_json::to_writer(
+            &mut output,
+            &zrpc_protocol::GcpAttestationResponse {
+                schema_version: 1,
+                platform: zrpc_protocol::Backend::GcpTdx,
+                nonce: request.nonce,
+                quote: evidence.quote,
+                ccel: evidence.ccel,
+            },
+        ),
+    };
+    if serialized.is_err() {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     }
     session.attestation_issued.store(true, Ordering::SeqCst);

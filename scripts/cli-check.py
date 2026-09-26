@@ -1,12 +1,13 @@
 """Local CLI contract checks. No cloud calls and no live query material."""
 import json
+import os
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = ROOT / "target/debug/zrpc"
+BIN = ROOT / os.environ.get("CARGO_TARGET_DIR", "target") / "debug/zrpc"
 
 def run(*args, data=None, success=True):
     proc = subprocess.run([str(BIN), *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=ROOT)
@@ -279,7 +280,7 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
     (directory / "policy.json").write_text(json.dumps(policy))
     (directory / "events.json").write_text("[]")
     (directory / "app-compose.json").write_text('{"synthetic":true}')
-    args = ("inspect-workload", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin",
+    args = ("inspect-workload", "--platform", "phala-dstack", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin",
             "--collateral", "tests/fixtures/dcap/tdx_quote_collateral.json",
             "--event-log", str(directory / "events.json"),
             "--app-compose", str(directory / "app-compose.json"),

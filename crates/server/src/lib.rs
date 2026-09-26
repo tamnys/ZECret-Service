@@ -5,6 +5,7 @@
 
 pub mod attestation;
 pub mod bootstrap;
+pub mod gcp_quote;
 pub mod node;
 pub mod quote_proxy;
 

@@ -1,0 +1,14 @@
+[Match]
+Driver=gvnic
+
+[Network]
+DHCP=ipv4
+IPv6AcceptRA=no
+LLMNR=no
+MulticastDNS=no
+
+[DHCPv4]
+UseDNS=yes
+UseNTP=no
+UseHostname=no
+UseMTU=yes

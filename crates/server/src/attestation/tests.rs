@@ -131,7 +131,7 @@ impl FakeQuote {
     }
 }
 impl QuoteSource for FakeQuote {
-    async fn quote(&self, report_data: [u8; 64]) -> Result<GetQuoteResponse, SafeError> {
+    async fn quote(&self, report_data: [u8; 64]) -> Result<QuoteEvidence, SafeError> {
         self.calls.lock().unwrap().push(report_data);
         self.started.notify_one();
         if let Some(hold) = &self.hold {
@@ -140,12 +140,12 @@ impl QuoteSource for FakeQuote {
         if self.fail {
             return Err(unavailable());
         }
-        Ok(GetQuoteResponse {
+        Ok(QuoteEvidence::Phala(GetQuoteResponse {
             quote: "SYNTHETIC_NOT_A_HARDWARE_QUOTE".into(),
             event_log: "[]".into(),
             report_data: hex::encode(report_data),
             vm_config: "{}".into(),
-        })
+        }))
     }
 }
 // Test values exercise configured boundaries; they are not release defaults.
@@ -216,6 +216,51 @@ async fn quote_uses_own_live_session_exporter_and_connection_nonce_only_once() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn gcp_response_has_separate_wire_format_and_same_live_exporter() {
+    struct FakeGcp(Arc<Mutex<Vec<[u8; 64]>>>);
+    impl QuoteSource for FakeGcp {
+        async fn quote(&self, report_data: [u8; 64]) -> Result<QuoteEvidence, SafeError> {
+            self.0.lock().unwrap().push(report_data);
+            Ok(QuoteEvidence::Gcp(GcpQuoteEvidence {
+                quote: hex::encode(b"SYNTHETIC_NOT_A_HARDWARE_QUOTE"),
+                ccel: hex::encode(b"SYNTHETIC_NOT_A_CCEL"),
+            }))
+        }
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let shared = Arc::new(Shared::new(
+        FakeGcp(calls.clone()),
+        limits(1, 1, Duration::from_nanos(1)),
+    ));
+    let nonce = [17; 32];
+    let (mut client, expected, _driver, _server) = connect(shared, &nonce).await;
+    let (status, body) = read(
+        client
+            .send_request(request("/attestation", nonce_body(nonce)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let evidence = zrpc_protocol::parse_gcp_attestation_response(&body).unwrap();
+    assert_eq!(evidence.nonce, nonce);
+    assert_eq!(evidence.platform, zrpc_protocol::Backend::GcpTdx);
+    assert_eq!(*calls.lock().unwrap(), vec![expected]);
+    assert!(zrpc_protocol::parse_attestation_response(&body).is_err());
+    assert_eq!(
+        read(
+            client
+                .send_request(request("/attestation", nonce_body(nonce)))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
 }
 
 #[tokio::test]

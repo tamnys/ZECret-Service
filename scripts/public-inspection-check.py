@@ -15,10 +15,13 @@ import tempfile
 import threading
 
 ROOT = Path(__file__).resolve().parents[1]
-BIN = ROOT / "target/debug/zrpc"
+BIN = ROOT / os.environ.get("CARGO_TARGET_DIR", "target") / "debug/zrpc"
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--strace", type=Path)
+parser.add_argument("--platform", choices=["phala-dstack", "gcp-tdx"], default="phala-dstack")
 options = parser.parse_args()
+gcp = options.platform == "gcp-tdx"
+endpoint = "192.0.2.1" if gcp else "unresolved-fixture.invalid"
 if options.strace:
     assert options.strace.is_absolute() and options.strace.is_file()
 
@@ -55,6 +58,8 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
               **{key: "00" * 20 for key in ("app_id", "instance_id")},
               "storage_fs": "ext4", "key_provider": {"name": "kms", "id": "SYNTHETIC_ONLY"}}
     policy_path = directory / "policy.json"
+    if gcp:
+        policy = json.loads((ROOT / "tests/fixtures/gcp/policy.synthetic.json").read_text())
     policy_path.write_text(json.dumps(policy))
     compose_path = directory / "app-compose.json"
     compose_path.write_text('{"synthetic":true}')
@@ -72,10 +77,10 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
     context.set_servername_callback(lambda _connection, hostname, _context: sni.append(hostname))
 
     def arguments(socks):
-        return ["inspect-endpoint", "--endpoint-host", "unresolved-fixture.invalid",
+        return ["inspect-endpoint", "--platform", options.platform, "--endpoint-host", endpoint,
                 "--endpoint-port", "443", "--socks", socks,
-                "--collateral", str(collateral), "--app-compose", str(compose_path),
-                "--policy", str(policy_path)]
+                "--collateral", str(collateral), "--policy", str(policy_path),
+                *([] if gcp else ["--app-compose", str(compose_path)])]
 
     # These proxy settings must have no effect on the maintained existing-stream
     # transport. A bound listener lets us observe any unexpected proxy connection.
@@ -105,8 +110,11 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
                         isolation = exact(connection, exact(connection, 1)[0])
                         assert len(isolation) == 64 and all(c in b"0123456789abcdef" for c in isolation)
                         connection.sendall(bytes([1, 0]))
-                        assert exact(connection, 4) == bytes([5, 1, 0, 3])
-                        assert exact(connection, exact(connection, 1)[0]) == b"unresolved-fixture.invalid"
+                        assert exact(connection, 4) == bytes([5, 1, 0, 1 if gcp else 3])
+                        if gcp:
+                            assert exact(connection, 4) == bytes([192, 0, 2, 1])
+                        else:
+                            assert exact(connection, exact(connection, 1)[0]) == endpoint.encode()
                         assert exact(connection, 2) == bytes([1, 187])
                         connection.sendall(bytes([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]))
                         with context.wrap_socket(connection, server_side=True) as tls:
@@ -117,15 +125,19 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
                             lines = header.decode("ascii").split("\r\n")
                             assert lines[0] == "POST /attestation HTTP/1.1"
                             headers = dict(line.lower().split(": ", 1) for line in lines[1:] if line)
-                            assert headers["host"] == "unresolved-fixture.invalid:443"
+                            assert headers["host"] == f"{endpoint}:443"
                             assert "cookie" not in headers and "authorization" not in headers
                             assert "user-agent" not in headers
                             body = json.loads(exact(tls, int(headers["content-length"])))
                             assert set(body) == {"nonce"}
                             assert len(body["nonce"]) == 32 and all(type(x) is int and 0 <= x <= 255 for x in body["nonce"])
-                            response = json.dumps({"nonce": body["nonce"], "quote": quote,
+                            evidence = {"nonce": body["nonce"], "quote": quote,
                                 "event_log": "[]", "report_data": "00" * 64,
-                                "vm_config": "{}"}).encode()
+                                "vm_config": "{}"}
+                            if gcp:
+                                evidence = {"schema_version":1, "platform":"gcp-tdx", "nonce":body["nonce"],
+                                    "quote":quote, "ccel":(ROOT / "tests/fixtures/gcp/ccel.synthetic.bin").read_bytes().hex()}
+                            response = json.dumps(evidence).encode()
                             tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: "
                                         + str(len(response)).encode() + b"\r\n\r\n" + response)
                             # Remain open for the independent verifier, then require
@@ -143,14 +155,14 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
             assert not output["tor_process_identity_verified"] and output["approved_release"] is None
             inspection = output["inspection"]
             assert inspection["network_used"] and not inspection["private_accepted"]
-            evidence = inspection["evidence"]
+            evidence = inspection["gcp_evidence" if gcp else "evidence"]
             assert evidence["hardware_authenticity"] == "rejected"
             assert evidence["time_source"] == "system_clock"
             assert evidence["authenticated_report_data_match"] == "not_checked"
             assert evidence["issue"] == "cryptographic_or_validity_check_failed"
             assert inspection["live_key_binding"] == inspection["freshness"] == "not_checked"
             thread.join()
-            assert outcomes == [True] and sni == ["unresolved-fixture.invalid"]
+            assert outcomes == [True] and sni == [None if gcp else endpoint]
             if trace:
                 lines = trace.read_text().splitlines()
                 connections = [line for line in lines if re.search(r"\bconnect\(", line)]
@@ -168,7 +180,7 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
             for extra in [["--time", "1752919234"], ["--stdin"], ["--simulate"], ["--socks", "127.0.0.1:1"]]:
                 assert process([*args, *extra], environment)[0] == 1
             policy_path.write_text('{"verified":true,"secret":"SYNTHETIC_PRIVATE_MARKER"}')
-            assert process(args, environment)[1]["error"] == "workload policy rejected"
+            assert process(args, environment)[1]["error"] == ("GCP workload policy rejected" if gcp else "workload policy rejected")
             try:
                 unexpected, _ = unused.accept()
             except BlockingIOError:

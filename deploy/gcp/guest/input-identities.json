@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "status": "incomplete-non-deployable",
+  "distribution": "debian",
+  "release": "trixie",
+  "architecture": "x86_64",
+  "mkosi_source": {
+    "repository": "https://github.com/systemd/mkosi",
+    "version": "25.3",
+    "commit": "54c625c380ef5500f17460981a3c67b109b6a847",
+    "distribution_package_version": "25.3-7"
+  },
+  "downloaded_metadata": {
+    "authentication": "unverified-signature-not-a-trust-input",
+    "mkosi_25.3-7.dsc_sha256": "05241915b6d7d0e633eafdde1248acb4cc734c06e19c41436e82e457a034a07f",
+    "mkosi_25.3.orig.tar.gz_sha256_from_dsc": "7b039fb3b34e1680173a7f4af1bc24b475465afe335c8b21c213167734061e35",
+    "mkosi_25.3-7.debian.tar.xz_sha256_from_dsc": "2d91b18e25cf2906b874cda68240e03f5fac3eafc60ca5fadb609f9969b80ec6",
+    "trixie_inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675"
+  },
+  "required_local_inputs": [
+    "authenticated_snapshot_and_full_package_closure",
+    "reviewed_kernel_systemd_and_initramfs",
+    "verified_eligible_zebra_x86_64",
+    "target_built_wrapper_broker_and_guard",
+    "reviewed_resource_limits",
+    "operator_secure_boot_public_certificate",
+    "external_signing_key_reference",
+    "firmware_endorsements_and_boot_policy"
+  ],
+  "artifact_hashes": null,
+  "measurement_values": null
+}

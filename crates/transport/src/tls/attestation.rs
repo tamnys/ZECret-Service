@@ -9,14 +9,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{fmt, time::Instant};
 use zrpc_protocol::{
-    ATTESTATION_EXPORTER_LABEL, ErrorCode, MAX_ATTESTATION_REQUEST_BYTES,
+    ATTESTATION_EXPORTER_LABEL, ErrorCode, GcpAttestationResponse, MAX_ATTESTATION_REQUEST_BYTES,
     MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Method,
     PublicAttestationRequest, PublicAttestationResponse, Request as RpcRequest, RequestId,
-    SafeError, Verbosity, parse_attestation_response,
+    SafeError, Verbosity, parse_attestation_response, parse_gcp_attestation_response,
 };
 
 mod inspection;
 pub use inspection::{EndpointInspection, EndpointInspectionIssue};
+mod gcp;
 
 fn invalid_response() -> SafeError {
     SafeError::new(
@@ -57,6 +58,38 @@ impl PendingChallenge {
     /// this session's 32-byte nonce. No caller payload, selector or key is accepted.
     /// The nonce is consumed once, and the response is explicitly unverified.
     pub async fn request_attestation(self) -> Result<UnverifiedPublicEvidence, SafeError> {
+        let received = self.receive_evidence().await?;
+        let evidence = parse_attestation_response(&received.body)?;
+        if evidence.nonce != received.nonce {
+            return Err(challenge_mismatch());
+        }
+        Ok(UnverifiedPublicEvidence {
+            evidence,
+            _session: received.session,
+            authority: received.authority,
+            expected_report_data: received.expected_report_data,
+            established: received.established,
+            deadline: received.deadline,
+            nonce: received.nonce,
+        })
+    }
+
+    /// Explicit GCP decoding on the same nonce-only exchange. Never retries with
+    /// another provider when the selected evidence schema does not match.
+    pub async fn request_gcp_attestation(self) -> Result<UnverifiedGcpEvidence, SafeError> {
+        let mut received = self.receive_evidence().await?;
+        let evidence = parse_gcp_attestation_response(&received.body)?;
+        if evidence.nonce != received.nonce {
+            return Err(challenge_mismatch());
+        }
+        received.body = Bytes::new();
+        Ok(UnverifiedGcpEvidence {
+            evidence,
+            connection: received,
+        })
+    }
+
+    async fn receive_evidence(self) -> Result<ReceivedEvidence, SafeError> {
         self.tls.ensure_live()?;
         let deadline = self
             .tls
@@ -70,7 +103,7 @@ impl PendingChallenge {
             .map_err(|_| expired())?
     }
 
-    async fn exchange(self) -> Result<UnverifiedPublicEvidence, SafeError> {
+    async fn exchange(self) -> Result<ReceivedEvidence, SafeError> {
         let nonce = self.nonce;
         let established = self.tls.established;
         let authority = self.tls.authority.clone();
@@ -157,13 +190,6 @@ impl PendingChallenge {
                 }
             })?
             .to_bytes();
-        let evidence = parse_attestation_response(&body)?;
-        if evidence.nonce != nonce {
-            return Err(SafeError::new(
-                ErrorCode::InvalidNonce,
-                "Public attestation response does not match this challenge.",
-            ));
-        }
         if Instant::now()
             .checked_duration_since(established)
             .is_none_or(|age| age >= MAX_CONNECTION_LIFETIME)
@@ -173,15 +199,57 @@ impl PendingChallenge {
         if session.sender.is_closed() || session.driver.is_finished() {
             return Err(unavailable());
         }
-        Ok(UnverifiedPublicEvidence {
-            evidence,
-            _session: session,
+        Ok(ReceivedEvidence {
+            body,
+            session,
             authority,
             expected_report_data,
             established,
             deadline,
             nonce,
         })
+    }
+}
+
+fn challenge_mismatch() -> SafeError {
+    SafeError::new(
+        ErrorCode::InvalidNonce,
+        "Public attestation response does not match this challenge.",
+    )
+}
+
+struct ReceivedEvidence {
+    body: Bytes,
+    session: OwnedHttpSession,
+    authority: String,
+    expected_report_data: [u8; 64],
+    established: Instant,
+    deadline: Instant,
+    nonce: [u8; 32],
+}
+
+/// GCP quote material retained with its original connection. There is no raw
+/// socket, serializer, or query capability on this unauthenticated type.
+///
+/// ```compile_fail
+/// async fn cannot_query(evidence: zrpc_transport::UnverifiedGcpEvidence, request: &zrpc_protocol::Request) {
+///     evidence.query(request).await.unwrap();
+/// }
+/// ```
+/// ```compile_fail
+/// use tokio::io::AsyncWriteExt;
+/// async fn cannot_write(mut evidence: zrpc_transport::UnverifiedGcpEvidence) {
+///     evidence.write_all(b"private query").await.unwrap();
+/// }
+/// ```
+pub struct UnverifiedGcpEvidence {
+    evidence: GcpAttestationResponse,
+    connection: ReceivedEvidence,
+}
+
+impl fmt::Debug for UnverifiedGcpEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("UnverifiedGcpEvidence([unverified public evidence])")
     }
 }
 

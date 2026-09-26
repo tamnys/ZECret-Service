@@ -4,8 +4,10 @@ use super::{UnverifiedPublicEvidence, VerifiedRpcSession};
 use crate::tls::MAX_CONNECTION_LIFETIME;
 use serde::Serialize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use zrpc_protocol::Backend;
 use zrpc_verifier::{
     ApprovedRelease, ReleasePolicy,
+    gcp::BoundGcpWorkloadInspection,
     offline::InspectionStatus,
     workload::{BoundWorkloadInspection, WorkloadPolicy, inspect_workload_and_report_data},
 };
@@ -27,7 +29,9 @@ pub enum EndpointInspectionIssue {
 #[derive(Debug, Serialize)]
 pub struct EndpointInspection {
     pub operation: &'static str,
+    pub platform: Backend,
     pub evidence: Option<BoundWorkloadInspection>,
+    pub gcp_evidence: Option<BoundGcpWorkloadInspection>,
     pub local_session_lifetime: InspectionStatus,
     pub session_observed_open: InspectionStatus,
     pub local_clock: InspectionStatus,
@@ -42,10 +46,12 @@ pub struct EndpointInspection {
 }
 
 impl EndpointInspection {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             operation: "endpoint_evidence_inspection",
+            platform: Backend::PhalaDstack,
             evidence: None,
+            gcp_evidence: None,
             local_session_lifetime: InspectionStatus::NotChecked,
             session_observed_open: InspectionStatus::NotChecked,
             local_clock: InspectionStatus::NotChecked,
@@ -69,17 +75,23 @@ impl EndpointInspection {
             && self.local_session_lifetime == InspectionStatus::Verified
             && self.session_observed_open == InspectionStatus::Verified
             && self.local_clock == InspectionStatus::Verified
-            && self.evidence.as_ref().is_some_and(|evidence| {
-                let quote = &evidence.workload.quote;
-                quote.issue.is_none()
-                    && evidence.workload.workload_issue.is_none()
-                    && evidence.workload.runtime_event_integrity == InspectionStatus::Verified
-                    && evidence.workload.os_measurement_policy == InspectionStatus::Verified
-                    && evidence.workload.app_configuration_policy == InspectionStatus::Verified
-                    && quote.hardware_authenticity == InspectionStatus::Verified
-                    && quote.security_policy == InspectionStatus::Verified
-                    && quote.workload_policy == InspectionStatus::Verified
-                    && evidence.authenticated_report_data_match == InspectionStatus::Verified
+            && (match self.platform {
+                Backend::GcpTdx => self
+                    .gcp_evidence
+                    .as_ref()
+                    .is_some_and(|evidence| evidence.diagnostic_passed()),
+                Backend::PhalaDstack => self.evidence.as_ref().is_some_and(|evidence| {
+                    let quote = &evidence.workload.quote;
+                    quote.issue.is_none()
+                        && evidence.workload.workload_issue.is_none()
+                        && evidence.workload.runtime_event_integrity == InspectionStatus::Verified
+                        && evidence.workload.os_measurement_policy == InspectionStatus::Verified
+                        && evidence.workload.app_configuration_policy == InspectionStatus::Verified
+                        && quote.hardware_authenticity == InspectionStatus::Verified
+                        && quote.security_policy == InspectionStatus::Verified
+                        && quote.workload_policy == InspectionStatus::Verified
+                        && evidence.authenticated_report_data_match == InspectionStatus::Verified
+                }),
             })
     }
 }
@@ -119,10 +131,13 @@ impl UnverifiedPublicEvidence {
             ));
         }
         let approved = releases.iter().any(|release| {
+            let Some(policy) = release.workload() else {
+                return false;
+            };
             if !release.matches_launch_config(raw_app_compose) {
                 return false;
             }
-            let report = self.inspect_against(collateral_json, raw_app_compose, release.workload());
+            let report = self.inspect_against(collateral_json, raw_app_compose, policy);
             report.diagnostic_passed()
         });
         if !approved {

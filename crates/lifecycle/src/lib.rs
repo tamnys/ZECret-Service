@@ -1,6 +1,8 @@
 //! Cost accounting, local persistence and explicitly invoked provider reads.
 //! A separate library capability prepares a tracked deletion before dispatch.
-//! No scheduler, deployment or private-query path is exposed.
+//! Phala paths expose no deployment. The separate GCP module contains local
+//! packages and explicitly invoked operator tooling, with live creation gated
+//! on its unresolved cleanup contract. No private-query path is exposed.
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
@@ -9,6 +11,8 @@ use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
 pub mod activation;
 pub mod amount;
 pub mod controller;
+#[cfg(unix)]
+pub mod gcp;
 #[cfg(unix)]
 pub mod observation;
 #[cfg(unix)]

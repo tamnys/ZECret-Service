@@ -24,7 +24,7 @@ If a check fails, the client stops. It does not silently switch to a direct conn
 
 ## Privacy at the server: TEEs
 
-A TEE isolates a workload from the machine hosting it. ZECret service targets Phala's Intel TDX environment, where hardware protects the virtual machine's private memory from access by the host operating system and hypervisor. See [Intel's TDX overview](https://www.intel.com/content/www/us/en/support/articles/000097227/processors/intel-xeon-processors.html).
+A TEE isolates a workload from the machine hosting it. ZECret service targets Google Cloud C3 Intel TDX with a custom measured guest, and retains a separate Phala dstack backend. TDX protects the virtual machine's private memory from access by the host operating system and hypervisor. See [Intel's TDX overview](https://www.intel.com/content/www/us/en/support/articles/000097227/processors/intel-xeon-processors.html).
 
 Attestation lets the client check what it is connecting to before trusting it with a query. The client makes that decision locally; a provider's claim that a server is “verified” is not enough.
 
@@ -94,6 +94,7 @@ These tools inspect evidence. Passing an inspection does not approve a server re
 The Rust workspace separates request validation, attestation verification, transport, client logic, server wrappers, and resource lifecycle tools. The native CLI bundles the local dashboard; `ui/public/` contains a static demo site.
 
 - [Local server wrapper](docs/public-wrapper.md): run an attestation-only listener.
+- [Google Cloud TDX](docs/gcp-tdx.md): native client commands, guest inputs, and operator lifecycle tooling.
 - [Operator guide](docs/operator-runbook.md): deployment prerequisites and experiment cost controls.
 - [Watchdog guide](docs/watchdog.md): track resources and prepare cleanup jobs.
 - [Reproducible builds](docs/release-verification.md): reproduce the native Linux binary.

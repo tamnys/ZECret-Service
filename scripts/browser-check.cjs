@@ -9,9 +9,10 @@ let browserStage='startup';
 
 (async () => {
   const root = path.resolve(__dirname, '..');
+  const fixture = path.resolve(root, process.env.CARGO_TARGET_DIR || 'target', 'debug/examples/ui_fixture');
   const output = path.join(process.env.CODEX_TMP_DIR, 'playwright');
   fs.mkdirSync(output, { recursive: true });
-  const child = spawn(path.join(root, 'target/debug/examples/ui_fixture'), [], {stdio:['ignore','ignore','inherit','pipe']});
+  const child = spawn(fixture, [], {stdio:['ignore','ignore','inherit','pipe']});
   let browser, publicServer, liveChild;
   try {
     const url = await new Promise((resolve,reject) => {
@@ -67,7 +68,7 @@ let browserStage='startup';
     // Live dashboard uses the same native core. With no reviewed release it
     // must show blocked status and never contact the configured SOCKS port.
     browserStage='live-startup';
-    liveChild=spawn(path.join(root,'target/debug/examples/ui_fixture'), [], {
+    liveChild=spawn(fixture, [], {
       env:{...process.env,ZRPC_BROWSER_LIVE:'1'},stdio:['ignore','ignore','inherit','pipe']
     });
     const liveUrl=await new Promise((resolve,reject)=>{

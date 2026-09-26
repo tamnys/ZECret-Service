@@ -55,7 +55,9 @@ pub struct KeyProviderPolicy {
     pub id: String,
 }
 
-fn decode_hash<'de, D: Deserializer<'de>, const N: usize>(d: D) -> Result<[u8; N], D::Error> {
+pub(crate) fn decode_hash<'de, D: Deserializer<'de>, const N: usize>(
+    d: D,
+) -> Result<[u8; N], D::Error> {
     let value = String::deserialize(d)?;
     let mut bytes = [0; N];
     hex::decode_to_slice(value, &mut bytes)
@@ -63,7 +65,10 @@ fn decode_hash<'de, D: Deserializer<'de>, const N: usize>(d: D) -> Result<[u8; N
     Ok(bytes)
 }
 
-fn encode_hash<S: Serializer, const N: usize>(value: &[u8; N], s: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn encode_hash<S: Serializer, const N: usize>(
+    value: &[u8; N],
+    s: S,
+) -> Result<S::Ok, S::Error> {
     s.serialize_str(&hex::encode(value))
 }
 

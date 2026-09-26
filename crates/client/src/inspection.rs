@@ -4,23 +4,35 @@ use std::{
     net::SocketAddrV4,
     time::{Duration, Instant},
 };
-use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError, parse_request};
-use zrpc_transport::{
-    EndpointInspection, IsolationLabel, RemoteEndpoint, TorConfig, UnverifiedPublicEvidence,
-    VerifiedRpcSession,
+use zrpc_protocol::{
+    Backend, ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError, parse_request,
 };
-use zrpc_verifier::{ReleasePolicy, workload::WorkloadPolicy};
+use zrpc_transport::{
+    EndpointInspection, IsolationLabel, RemoteEndpoint, TorConfig, UnverifiedGcpEvidence,
+    UnverifiedPublicEvidence, VerifiedRpcSession,
+};
+use zrpc_verifier::{ReleasePolicy, gcp::GcpWorkloadPolicy, workload::WorkloadPolicy};
 
 /// Explicit endpoint and numeric loopback SOCKS address. No discovery, defaults,
 /// direct mode, proxy environment or caller-supplied stream-isolation secret.
 #[derive(Debug)]
 pub struct PublicInspectionConfig {
+    platform: Backend,
     tor: TorConfig,
     endpoint: RemoteEndpoint,
 }
 
 impl PublicInspectionConfig {
     pub fn new(hostname: &str, port: u16, socks: &str) -> Result<Self, SafeError> {
+        Self::for_platform(Backend::PhalaDstack, hostname, port, socks)
+    }
+
+    pub fn for_platform(
+        platform: Backend,
+        hostname: &str,
+        port: u16,
+        socks: &str,
+    ) -> Result<Self, SafeError> {
         let address: SocketAddrV4 = socks.parse().map_err(|_| {
             SafeError::new(
                 ErrorCode::TorUnavailable,
@@ -28,9 +40,14 @@ impl PublicInspectionConfig {
             )
         })?;
         Ok(Self {
+            platform,
             tor: TorConfig::new(address)?,
             endpoint: RemoteEndpoint::new(hostname, port)?,
         })
+    }
+
+    pub fn platform(&self) -> Backend {
+        self.platform
     }
 }
 
@@ -50,8 +67,42 @@ pub async fn inspect_endpoint(
     raw_app_compose: &[u8],
     policy: &WorkloadPolicy,
 ) -> Result<EndpointInspection, SafeError> {
+    if config.platform != Backend::PhalaDstack {
+        return Err(wrong_platform());
+    }
     let evidence = request_evidence(config).await?;
-    Ok(evidence.inspect(collateral_json, raw_app_compose, policy))
+    match evidence {
+        NativeEvidence::Phala(evidence) => {
+            Ok(evidence.inspect(collateral_json, raw_app_compose, policy))
+        }
+        NativeEvidence::Gcp(_) => Err(wrong_platform()),
+    }
+}
+
+pub async fn inspect_gcp_endpoint(
+    config: &PublicInspectionConfig,
+    collateral: &[u8],
+    policy: &GcpWorkloadPolicy,
+) -> Result<EndpointInspection, SafeError> {
+    if config.platform != Backend::GcpTdx {
+        return Err(wrong_platform());
+    }
+    match request_evidence(config).await? {
+        NativeEvidence::Gcp(evidence) => Ok(evidence.inspect(collateral, policy)),
+        NativeEvidence::Phala(_) => Err(wrong_platform()),
+    }
+}
+
+fn wrong_platform() -> SafeError {
+    SafeError::new(
+        ErrorCode::InvalidPolicy,
+        "The evidence policy does not match the explicitly selected platform.",
+    )
+}
+
+enum NativeEvidence {
+    Phala(UnverifiedPublicEvidence),
+    Gcp(UnverifiedGcpEvidence),
 }
 
 /// This is the only native promotion to a private-capable connection. It
@@ -63,15 +114,24 @@ pub async fn connect_verified(
     selection: &ReleasePolicy,
 ) -> Result<VerifiedRpcSession, SafeError> {
     // Reject unapproved local policy before dialing or receiving evidence.
-    if zrpc_verifier::ApprovedRelease::selected(selection)?.is_empty() {
+    if config.platform == Backend::GcpTdx && !raw_app_compose.is_empty() {
+        return Err(wrong_platform());
+    }
+    if !zrpc_verifier::ApprovedRelease::selected(selection)?
+        .iter()
+        .any(|release| release.backend() == config.platform)
+    {
         return Err(SafeError::new(
             ErrorCode::UnknownRelease,
             "This client has no selected reviewed release.",
         ));
     }
-    request_evidence(config)
-        .await?
-        .authorize(collateral_json, raw_app_compose, selection)
+    match request_evidence(config).await? {
+        NativeEvidence::Phala(evidence) => {
+            evidence.authorize(collateral_json, raw_app_compose, selection)
+        }
+        NativeEvidence::Gcp(evidence) => evidence.authorize(collateral_json, selection),
+    }
 }
 
 /// Build/read query bytes only after approval, then parse the typed allowlist
@@ -88,9 +148,7 @@ pub async fn query_endpoint(
     session.query(&request).await
 }
 
-async fn request_evidence(
-    config: &PublicInspectionConfig,
-) -> Result<UnverifiedPublicEvidence, SafeError> {
+async fn request_evidence(config: &PublicInspectionConfig) -> Result<NativeEvidence, SafeError> {
     // Fresh OS randomness per native session; its encoded isolation label is
     // never returned or logged. RFC1929's one-byte length accommodates 64 hex bytes.
     let mut isolation = [0u8; 32];
@@ -111,7 +169,16 @@ async fn request_evidence(
             .connect_bootstrap(&config.endpoint, isolation)
             .await?;
         let pending = channel.start_tls().await?.prepare_challenge()?;
-        pending.request_attestation().await
+        match config.platform {
+            Backend::PhalaDstack => pending
+                .request_attestation()
+                .await
+                .map(NativeEvidence::Phala),
+            Backend::GcpTdx => pending
+                .request_gcp_attestation()
+                .await
+                .map(NativeEvidence::Gcp),
+        }
     };
     let result = tokio::time::timeout(lifetime, operation)
         .await
@@ -128,11 +195,19 @@ async fn request_evidence(
 mod tests {
     use super::*;
     #[test]
-    fn configuration_is_explicit_local_socks_and_dns_endpoint_only() {
+    fn configuration_is_explicit_local_socks_and_endpoint_only() {
         assert!(PublicInspectionConfig::new("fixture.invalid", 443, "127.0.0.1:9050").is_ok());
+        assert!(
+            PublicInspectionConfig::for_platform(
+                Backend::GcpTdx,
+                "192.0.2.1",
+                443,
+                "127.0.0.1:9050"
+            )
+            .is_ok()
+        );
         for (host, port, socks) in [
             ("https://fixture.invalid", 443, "127.0.0.1:9050"),
-            ("127.0.0.1", 443, "127.0.0.1:9050"),
             ("fixture.invalid", 0, "127.0.0.1:9050"),
             ("fixture.invalid", 443, "localhost:9050"),
             ("fixture.invalid", 443, "192.0.2.1:9050"),
@@ -147,6 +222,14 @@ mod tests {
         let config = PublicInspectionConfig::new("fixture.invalid", 443, "127.0.0.1:9").unwrap();
         let result = query_endpoint(&config, b"{}", b"{}", &ReleasePolicy::default(), || {
             panic!("private body read before approval")
+        })
+        .await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::UnknownRelease);
+        let config =
+            PublicInspectionConfig::for_platform(Backend::GcpTdx, "192.0.2.1", 443, "127.0.0.1:9")
+                .unwrap();
+        let result = query_endpoint(&config, b"{}", b"", &ReleasePolicy::default(), || {
+            panic!("GCP private body read before approval")
         })
         .await;
         assert_eq!(result.unwrap_err().code, ErrorCode::UnknownRelease);
