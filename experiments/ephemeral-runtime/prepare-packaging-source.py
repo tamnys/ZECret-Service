@@ -9,8 +9,10 @@ run BitBake, build a rootfs, publish an image, or approve private mode.
 import argparse
 import hashlib
 import importlib.util
+from io import BytesIO
 import json
-from pathlib import Path
+import posixpath
+from pathlib import Path, PurePosixPath
 import re
 import stat
 import struct
@@ -33,6 +35,10 @@ META_HASHES = {
 GUARD_NAME = "phala-runtime-guard"
 BRIDGE_NAME = "zrpc-quote-proxy"
 SERVICE_NAME = "zrpc-quote-proxy.service"
+STAGED_ROOT = "staged-source"
+SOURCE_FILE_LIST = "zrpc-dstack-files.txt"
+SOURCE_CHECKSUMS = "zrpc-dstack.sha256"
+SOURCE_MODES = "zrpc-dstack-modes.txt"
 
 
 class Refusal(ValueError):
@@ -58,12 +64,12 @@ def replace_once(source: str, old: str, new: str) -> str:
 
 
 def pinned_meta(meta_repo: Path) -> dict[Path, str]:
-    head = subprocess.run(["git", "-C", str(meta_repo), "rev-parse", "HEAD"],
+    head = subprocess.run(["git", "--no-replace-objects", "-C", str(meta_repo), "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=False)
     if head.returncode != 0 or head.stdout.strip() != META_COMMIT:
         raise Refusal("meta-dstack checkout is not at the pinned commit")
     gitlink = subprocess.run(
-        ["git", "-C", str(meta_repo), "ls-tree", META_COMMIT, "dstack"],
+        ["git", "--no-replace-objects", "-C", str(meta_repo), "ls-tree", META_COMMIT, "dstack"],
         capture_output=True, text=True, check=False)
     if gitlink.returncode != 0 or gitlink.stdout.strip() != (
             f"160000 commit {DSTACK_COMMIT}\tdstack"):
@@ -71,7 +77,8 @@ def pinned_meta(meta_repo: Path) -> dict[Path, str]:
     originals = {}
     for source_path, expected in META_HASHES.items():
         result = subprocess.run(
-            ["git", "-C", str(meta_repo), "show", f"{META_COMMIT}:{source_path}"],
+            ["git", "--no-replace-objects", "-C", str(meta_repo),
+             "show", f"{META_COMMIT}:{source_path}"],
             capture_output=True, check=False)
         if result.returncode != 0 or digest(result.stdout) != expected:
             raise Refusal(f"pinned meta-dstack object unavailable or changed: {source_path}")
@@ -120,8 +127,60 @@ def verify_binary(path: Path, expected_digest: str) -> bytes:
     return data
 
 
-def candidate_guest_recipe(source: str, runtime) -> str:
-    """Install every generated runtime file from the recipe's rsynced dstack tree."""
+def candidate_guest_recipe(source: str, runtime, list_digest: str,
+                           checksums_digest: str, modes_digest: str) -> str:
+    """Copy only the checked staged dstack tree and install its runtime files."""
+    for value in (list_digest, checksums_digest, modes_digest):
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise Refusal("staged source manifest digest is invalid")
+    source = replace_once(
+        source, "    mkdir -p ${S}\n",
+        '    [ "${S}" = "${WORKDIR}/dstack" ] || exit 1\n'
+        '    [ -d "${S}" ] && [ ! -L "${S}" ] || exit 1\n'
+        '    stale_files=$(find "${S}" -mindepth 1 -print -quit) || exit 1\n'
+        '    [ -z "$stale_files" ] || exit 1\n',
+    )
+    source = replace_once(source, 'do_unpack[nostamp] = "1"\n',
+                          'do_unpack[cleandirs] = "${WORKDIR}/dstack"\n'
+                          'do_unpack[nostamp] = "1"\n')
+    source = replace_once(
+        source,
+        '    rsync -a --exclude="target" ${SRC_DIR}/ ${S}/\n',
+        '    [ -d "${SRC_DIR}" ] && [ ! -L "${SRC_DIR}" ] || exit 1\n'
+        '    source_links=$(find "${SRC_DIR}" -type l -print -quit) || exit 1\n'
+        '    [ -z "$source_links" ] || exit 1\n'
+        '    for manifest in ' + SOURCE_FILE_LIST + ' ' + SOURCE_CHECKSUMS
+        + ' ' + SOURCE_MODES + '; do\n'
+        '        [ -f "${REPO_ROOT}/$manifest" ] && '
+        '[ ! -L "${REPO_ROOT}/$manifest" ] || exit 1\n'
+        '    done\n'
+        '    [ "$(sha256sum -- "${REPO_ROOT}/' + SOURCE_FILE_LIST
+        + '" | awk \'{print $1}\')" = "' + list_digest + '" ] || exit 1\n'
+        '    [ "$(sha256sum -- "${REPO_ROOT}/' + SOURCE_CHECKSUMS
+        + '" | awk \'{print $1}\')" = "' + checksums_digest + '" ] || exit 1\n'
+        '    [ "$(sha256sum -- "${REPO_ROOT}/' + SOURCE_MODES
+        + '" | awk \'{print $1}\')" = "' + modes_digest + '" ] || exit 1\n'
+        '    while IFS="$(printf \'\\t\')" read -r expected_mode relative_path; do\n'
+        '        [ -n "$relative_path" ] || exit 1\n'
+        '        mode_file="${SRC_DIR}/$relative_path"\n'
+        '        [ -f "$mode_file" ] && [ ! -L "$mode_file" ] || exit 1\n'
+        '        observed_mode=$(stat -c \'%a\' -- "$mode_file") || exit 1\n'
+        '        [ "$observed_mode" = "$expected_mode" ] || exit 1\n'
+        '    done < "${REPO_ROOT}/' + SOURCE_MODES + '"\n'
+        '    rsync -a --files-from="${REPO_ROOT}/' + SOURCE_FILE_LIST
+        + '" "${SRC_DIR}/" "${S}/" || exit 1\n'
+        '    copied_links=$(find "${S}" -type l -print -quit) || exit 1\n'
+        '    [ -z "$copied_links" ] || exit 1\n'
+        '    while IFS="$(printf \'\\t\')" read -r expected_mode relative_path; do\n'
+        '        [ -n "$relative_path" ] || exit 1\n'
+        '        mode_file="${S}/$relative_path"\n'
+        '        [ -f "$mode_file" ] && [ ! -L "$mode_file" ] || exit 1\n'
+        '        observed_mode=$(stat -c \'%a\' -- "$mode_file") || exit 1\n'
+        '        [ "$observed_mode" = "$expected_mode" ] || exit 1\n'
+        '    done < "${REPO_ROOT}/' + SOURCE_MODES + '"\n'
+        '    (cd "${S}" && sha256sum -c -- "${REPO_ROOT}/'
+        + SOURCE_CHECKSUMS + '") || exit 1\n',
+    )
     source = replace_once(source, "inherit systemd\n",
                           'inherit systemd useradd\n\n'
                           'USERADD_PACKAGES = "${PN}"\n'
@@ -205,10 +264,174 @@ def output_path(argument: Path) -> Path:
 
 
 def verify_dstack_checkout(dstack_repo: Path) -> None:
-    head = subprocess.run(["git", "-C", str(dstack_repo), "rev-parse", "HEAD"],
+    head = subprocess.run(["git", "--no-replace-objects", "-C", str(dstack_repo),
+                           "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=False)
     if head.returncode != 0 or head.stdout.strip() != DSTACK_COMMIT:
         raise Refusal("dstack checkout is not at the pinned meta-dstack gitlink")
+
+
+def safe_source_path(raw: bytes) -> Path:
+    try:
+        name = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise Refusal("Git tree contains a non-UTF-8 path") from error
+    path = PurePosixPath(name)
+    if (not name or name.startswith("/") or name != path.as_posix()
+            or any(part in (".", "..") for part in path.parts)
+            or "\\" in name or any(ord(char) < 32 or ord(char) == 127 for char in name)):
+        raise Refusal("Git tree contains an unsafe source path")
+    return Path(name)
+
+
+def git_tree_entries(repo: Path, commit: str) -> tuple[str, dict[Path, tuple[str, str]]]:
+    tree = subprocess.run(["git", "--no-replace-objects", "-C", str(repo),
+                           "rev-parse", f"{commit}^{{tree}}"],
+                          capture_output=True, text=True, check=False)
+    if tree.returncode or not re.fullmatch(r"[0-9a-f]{40}", tree.stdout.strip()):
+        raise Refusal("pinned source tree object unavailable")
+    listing = subprocess.run(["git", "--no-replace-objects", "-C", str(repo),
+                              "ls-tree", "-r", "-z", commit],
+                             capture_output=True, check=False)
+    if listing.returncode or not listing.stdout.endswith(b"\0"):
+        raise Refusal("pinned source tree listing unavailable")
+    entries = {}
+    for row in listing.stdout[:-1].split(b"\0"):
+        try:
+            metadata, raw_path = row.split(b"\t", 1)
+            mode, kind, oid = metadata.decode("ascii").split(" ")
+        except (ValueError, UnicodeDecodeError) as error:
+            raise Refusal("malformed pinned source tree entry") from error
+        path = safe_source_path(raw_path)
+        if (path in entries or mode not in ("100644", "100755", "120000", "160000")
+                or kind != ("commit" if mode == "160000" else "blob")
+                or not re.fullmatch(r"[0-9a-f]{40}", oid)):
+            raise Refusal("unsupported pinned source tree entry")
+        entries[path] = (mode, oid)
+    if not entries:
+        raise Refusal("pinned source tree is empty")
+    return tree.stdout.strip(), entries
+
+
+def git_blobs(repo: Path, entries: dict[Path, tuple[str, str]]) -> dict[str, bytes]:
+    oids = list(dict.fromkeys(oid for mode, oid in entries.values() if mode != "160000"))
+    result = subprocess.run(["git", "--no-replace-objects", "-C", str(repo),
+                             "cat-file", "--batch"],
+                            input=("\n".join(oids) + "\n").encode("ascii"),
+                            capture_output=True, check=False)
+    if result.returncode:
+        raise Refusal("pinned source blob unavailable")
+    stream = BytesIO(result.stdout)
+    blobs = {}
+    for oid in oids:
+        header = stream.readline().rstrip(b"\n")
+        try:
+            observed_oid, kind, size_text = header.decode("ascii").split(" ")
+            size = int(size_text)
+        except (ValueError, UnicodeDecodeError) as error:
+            raise Refusal("malformed pinned source blob header") from error
+        payload = stream.read(size)
+        if (observed_oid != oid or kind != "blob" or size < 0
+                or len(payload) != size or stream.read(1) != b"\n"
+                or hashlib.sha1(b"blob " + str(size).encode() + b"\0" + payload).hexdigest() != oid):
+            raise Refusal("pinned source blob identity mismatch")
+        blobs[oid] = payload
+    if stream.read():
+        raise Refusal("unexpected pinned source blob output")
+    return blobs
+
+
+def stage_git_tree(repo: Path, commit: str, target: Path) -> tuple[str, dict[Path, tuple[str, str]]]:
+    head = subprocess.run(["git", "--no-replace-objects", "-C", str(repo),
+                           "rev-parse", "HEAD"],
+                          capture_output=True, text=True, check=False)
+    if head.returncode or head.stdout.strip() != commit:
+        raise Refusal("source checkout is not at the pinned commit")
+    tree_oid, entries = git_tree_entries(repo, commit)
+    blobs = git_blobs(repo, entries)
+    target.mkdir(parents=True, exist_ok=False)
+    links = []
+    for path, (mode, oid) in entries.items():
+        if mode == "160000":
+            continue
+        destination = target / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() or destination.is_symlink():
+            raise Refusal("pinned source tree paths overlap")
+        payload = blobs[oid]
+        if mode == "120000":
+            try:
+                link = payload.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise Refusal("pinned source symlink target is not UTF-8") from error
+            joined = posixpath.normpath(posixpath.join(path.parent.as_posix(), link))
+            if (not link or link.startswith("/") or "\\" in link
+                    or any(ord(char) < 32 or ord(char) == 127 for char in link)
+                    or joined == ".." or joined.startswith("../")
+                    or Path(joined) not in entries):
+                raise Refusal("pinned source symlink escapes or is unresolved")
+            links.append((destination, link))
+        else:
+            destination.write_bytes(payload)
+            destination.chmod(0o755 if mode == "100755" else 0o644)
+    for destination, link in links:
+        destination.symlink_to(link)
+    return tree_oid, entries
+
+
+def apply_overlay(overlay: Path, target: Path, paths: set[Path]) -> None:
+    for path in sorted(paths):
+        safe_source_path(str(path).encode("utf-8"))
+        source = overlay / path
+        destination = target / path
+        if destination.is_symlink():
+            raise Refusal("overlay destination is a symbolic link")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        old_mode = destination.stat().st_mode if destination.exists() else None
+        destination.write_bytes(source.read_bytes())
+        destination.chmod(0o755 if old_mode is not None and old_mode & stat.S_IXUSR else 0o644)
+
+
+def staged_file_inventory(root: Path) -> tuple[dict[str, dict[str, object]], dict[str, str]]:
+    files = {}
+    links = {}
+    for candidate in sorted(root.rglob("*")):
+        relative = str(candidate.relative_to(root))
+        mode = candidate.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            continue
+        if stat.S_ISLNK(mode):
+            links[relative] = candidate.readlink().as_posix()
+        elif stat.S_ISREG(mode):
+            files[relative] = {
+                "sha256": digest(candidate.read_bytes()),
+                "mode": "100755" if mode & stat.S_IXUSR else "100644",
+            }
+        else:
+            raise Refusal("staged source contains an unsupported file type")
+    return files, links
+
+
+def dstack_copy_manifests(staged_root: Path) -> tuple[str, str, str]:
+    dstack = staged_root / "dstack"
+    if dstack.is_symlink() or not dstack.is_dir():
+        raise Refusal("staged dstack is not a regular directory")
+    files, links = staged_file_inventory(dstack)
+    if links:
+        raise Refusal("staged dstack contains symbolic links")
+    names = sorted(files)
+    listing = "".join(name + "\n" for name in names).encode()
+    checksums = "".join(f"{files[name]['sha256']}  {name}\n" for name in names).encode()
+    modes = "".join(
+        f"{format(stat.S_IMODE((dstack / name).stat().st_mode), 'o')}\t{name}\n"
+        for name in names).encode()
+    if any(stat.S_IMODE((dstack / name).stat().st_mode) not in (0o644, 0o755)
+           for name in names):
+        raise Refusal("staged dstack file mode is not a pinned regular-file mode")
+    (staged_root / SOURCE_FILE_LIST).write_bytes(listing)
+    (staged_root / SOURCE_CHECKSUMS).write_bytes(checksums)
+    (staged_root / SOURCE_MODES).write_bytes(modes)
+    return digest(listing), digest(checksums), digest(modes)
 
 
 def main() -> None:
@@ -231,7 +454,6 @@ def main() -> None:
         bridge = verify_binary(args.quote_proxy, args.quote_proxy_sha256)
         output = output_path(args.output_dir)
         runtime = import_companion("prepare-image-source.py")
-        recipe = candidate_guest_recipe(originals[GUEST_RECIPE], runtime)
         output.mkdir(mode=0o700)
         dstack_overlay = output / "dstack"
         meta_overlay = output / "meta"
@@ -250,23 +472,62 @@ def main() -> None:
             dstack_overlay, guest_paths, DSTACK_COMMIT, "built_image")
         rootfs_manifest = verify_child_manifest(
             meta_overlay, {PROD_RECIPE}, META_COMMIT, "rootfs_built")
+        staged_root = output / STAGED_ROOT
+        meta_tree_oid, meta_entries = stage_git_tree(
+            args.meta_source_git_dir, META_COMMIT, staged_root)
+        gitlinks = {str(path): oid for path, (mode, oid) in meta_entries.items()
+                    if mode == "160000"}
+        if gitlinks.get("dstack") != DSTACK_COMMIT:
+            raise Refusal("staged meta-dstack gitlink is not the pinned dstack commit")
+        dstack_tree_oid, dstack_entries = stage_git_tree(
+            args.dstack_source_git_dir, DSTACK_COMMIT, staged_root / "dstack")
+        if any(mode == "160000" for mode, _ in dstack_entries.values()):
+            raise Refusal("pinned dstack source has unresolved gitlinks")
+        apply_overlay(dstack_overlay, staged_root / "dstack", guest_paths)
+        apply_overlay(meta_overlay, staged_root, {PROD_RECIPE})
         for name, payload in ((GUARD_NAME, guard), (BRIDGE_NAME, bridge)):
-            target = dstack_overlay / "zrpc" / name
-            target.write_bytes(payload)
-            target.chmod(0o755)
+            for root in (dstack_overlay, staged_root / "dstack"):
+                target = root / "zrpc" / name
+                target.write_bytes(payload)
+                target.chmod(0o755)
+        list_digest, checksums_digest, modes_digest = dstack_copy_manifests(staged_root)
+        recipe = candidate_guest_recipe(
+            originals[GUEST_RECIPE], runtime, list_digest, checksums_digest,
+            modes_digest)
         recipe_path = meta_overlay / GUEST_RECIPE
         recipe_path.parent.mkdir(parents=True, exist_ok=True)
         recipe_path.write_text(recipe)
+        staged_recipe_path = staged_root / GUEST_RECIPE
+        staged_recipe_path.write_text(recipe)
+        staged_files, staged_links = staged_file_inventory(staged_root)
         files = {}
+        links = {}
         for candidate in sorted(output.rglob("*")):
-            if candidate.is_file():
-                if not stat.S_ISREG(candidate.lstat().st_mode):
-                    raise Refusal("generated candidate contains a symbolic link")
+            mode = candidate.lstat().st_mode
+            if stat.S_ISREG(mode):
                 files[str(candidate.relative_to(output))] = digest(candidate.read_bytes())
+            elif stat.S_ISLNK(mode):
+                links[str(candidate.relative_to(output))] = candidate.readlink().as_posix()
+            elif not stat.S_ISDIR(mode):
+                raise Refusal("generated candidate contains an unsupported file type")
         (output / "packaging-manifest.json").write_text(json.dumps({
             "meta_source_commit": META_COMMIT,
             "dstack_source_commit": DSTACK_COMMIT,
-            "source_identity_scope": "pinned_meta_objects_and_pinned_dstack_overlay_objects",
+            "meta_source_tree_oid": meta_tree_oid,
+            "dstack_source_tree_oid": dstack_tree_oid,
+            "meta_gitlinks": gitlinks,
+            "materialized_meta_gitlinks": {"dstack": DSTACK_COMMIT},
+            "unresolved_meta_gitlinks": {name: oid for name, oid in gitlinks.items()
+                                         if name != "dstack"},
+            "source_identity_scope": "pinned_meta_tracked_blobs_and_gitlinks_pinned_dstack_blobs_checked_overlays",
+            "staged_source": STAGED_ROOT,
+            "staged_tracked_blob_tree_verified": True,
+            "bitbake_dependency_closure_verified": False,
+            "staged_source_files": staged_files,
+            "staged_source_symlinks": staged_links,
+            "dstack_file_list_sha256": list_digest,
+            "dstack_checksums_sha256": checksums_digest,
+            "dstack_modes_sha256": modes_digest,
             "meta_source_sha256": {str(name): value for name, value in META_HASHES.items()},
             "runtime_guard_sha256": digest(guard),
             "quote_proxy_sha256": digest(bridge),
@@ -277,6 +538,7 @@ def main() -> None:
             "guest_launch_profile_bound": guest_manifest["launch_profile_bound"],
             "rootfs_recipe_source_verified": rootfs_manifest["source_commit_object_verified"],
             "output_sha256": files,
+            "output_symlinks": links,
             "overlay_only": True,
             "bitbake_executed": False,
             "rootfs_built": False,

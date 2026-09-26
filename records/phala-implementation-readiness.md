@@ -128,7 +128,20 @@ sent, and no account credits were spent. Private mode remains blocked.
   SHA-256 hashes and x86_64 ELF headers for supplied binaries. Those checks do
   not establish binary provenance or ABI compatibility. The output manifest
   records that no BitBake build, rootfs, boot, Phala admission or private-mode
-  acceptance occurred; missing binaries refuse a complete candidate.
+  acceptance occurred; missing binaries refuse a complete candidate. The
+  packaging generator now reconstructs every tracked blob from the pinned
+  dstack and meta-dstack Git trees, ignoring Git replacement refs and checking
+  blob identities and modes before applying the hash-checked overlays. It
+  materializes the pinned dstack gitlink in a separate staged source tree; the
+  other six meta-dstack gitlinks remain explicitly unresolved. A checkout at
+  the correct `HEAD` can contain modified
+  or untracked files without contributing them to this staged tree. The staged
+  guest recipe uses a hash-bound file list, content checksums and executable
+  modes instead of copying the mutable checkout. Its unpack task refuses
+  symlinks and stale output, and BitBake's documented `cleandirs` task setting
+  requests a fresh work directory on repeated runs. This is source preparation
+  only: the other BitBake layers, the effective recipe parser/build, binary
+  provenance and an immutable built artifact remain unverified.
 - The native verifier has an opaque `ApprovedRelease` separate from diagnostic
   `WorkloadPolicy`. An external policy can select only a client-embedded release.
   The manifest's launch-config digest must equal the app-compose hash used in
@@ -302,12 +315,22 @@ sent, and no account credits were spent. Private mode remains blocked.
   container has only the `aarch64-unknown-linux-gnu` Rust target and no x86_64
   cross-linker. It cannot produce the required TDX x86_64 binaries without a
   separately reviewed build environment.
-  Five packaging-source tests passed. A managed-container dry run against the
-  cached pinned dstack/meta-dstack checkouts with synthetic ELF-header inputs
-  produced 27 files whose hashes matched the generated manifest; all 11
-  generated service/socket drop-ins had recipe install and package paths. A
-  missing guard input was refused before output. The synthetic binaries were
-  never executed, and the result is not an x86_64 build or image.
+  Nine packaging-source tests passed. They include a same-commit dirty checkout,
+  commit and blob replacement refs, a generated unpack-shell run that excludes
+  untracked files, and refusals for changed bytes, executable modes, symlinks
+  and stale work output. A managed-container dry run against the cached pinned
+  dstack/meta-dstack checkouts, using synthetic ELF-header inputs, recomputed all 883 generated
+  output hashes and all 856 staged file hashes and modes. Its generated unpack
+  task copied the complete staged dstack tree successfully. The cached dstack
+  checkout had a preexisting tracked edit and untracked file, neither of which
+  entered the pinned source stage. The synthetic binaries were never executed,
+  and the result is not a BitBake parse, x86_64 build or image.
+  The final unchanged `CARGO_BUILD_JOBS=1 bash scripts/check.sh` run passed in
+  the managed container. Two earlier runs reached known unrelated intermittent
+  failures: the lifecycle synthetic-file `UnsafePath` race and a temporary
+  permission denial writing a runtime-guard object under `.codex-tmp`. The
+  exact lifecycle test and standalone guard compilation passed before the
+  complete passing rerun; neither failure was treated as a source-code fix.
   One intermediate build attempt
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check
