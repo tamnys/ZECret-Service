@@ -1,5 +1,5 @@
-//! Offline cost arithmetic and explicitly simulated lifecycle decisions.
-//! There is no provider client, credential handling, scheduler, or deploy action.
+//! Cost accounting, local persistence and explicitly invoked provider reads.
+//! No provider mutation, scheduler, deployment or private-query path is exposed.
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
@@ -10,6 +10,10 @@ pub mod amount;
 pub mod controller;
 #[cfg(unix)]
 pub mod persistence;
+pub mod provider_http;
+#[cfg(unix)]
+pub mod provider_inputs;
+mod provider_request;
 pub mod provider_wire;
 
 // Authorities: design section 13 sets the lifetime, preflight ceiling and

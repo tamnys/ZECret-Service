@@ -2817,10 +2817,20 @@ dependencies = [
 name = "zrpc-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
+ "percent-encoding",
+ "rcgen",
+ "rustls",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-rustls",
+ "zeroize",
 ]
 
 [[package]]

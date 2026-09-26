@@ -56,6 +56,7 @@ for name, version, checksum in [
     ("tokio-rustls", "0.26.5", "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"),
     ("rustls-webpki", "0.103.15", "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"),
     ("rcgen", "0.14.10", "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"),
+    ("percent-encoding", "2.3.2", "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"),
     ("zcash_primitives", "0.30.1", "403d5be1e96339534be098e3377fb8a78d68ca7585b1780133d884b810277418"),
     ("zcash_protocol", "0.10.5", "314329b91ec4bbb517441840e47d0b2029bf0b946f086980c96c889c2d92dc5d"),
 ]:

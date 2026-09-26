@@ -10,3 +10,16 @@ libc.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+zeroize.workspace = true
+percent-encoding.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
