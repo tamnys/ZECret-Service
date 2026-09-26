@@ -119,6 +119,9 @@ impl UnverifiedPublicEvidence {
             ));
         }
         let approved = releases.iter().any(|release| {
+            if !release.matches_launch_config(raw_app_compose) {
+                return false;
+            }
             let report = self.inspect_against(collateral_json, raw_app_compose, release.workload());
             report.diagnostic_passed()
         });
