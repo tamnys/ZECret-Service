@@ -74,11 +74,16 @@ sent, and no account credits were spent. Private mode remains blocked.
   and no `$` interpolation. The restricted fields reject `include`, `extends`,
   `env_file`, build contexts, secrets, configs and profiles before the launch
   digest is embedded. [Docker documents JSON Compose input](https://docs.docker.com/compose/support-and-feedback/faq/).
-  Direct bind mounts, commands, ports, image contents and the exact plugin's
-  interpretation still require review. This is not an effective failure test
-  of the exact guest's Compose version or unit graph; the final effective
-  Compose profile and Docker runtime must confirm no automatic restart, and
-  an unhealthy but still running container needs separate liveness handling.
+  The candidate now rejects all service volumes, ports, temporary mounts,
+  process overrides, extra groups, healthchecks and init controls. A later
+  bound profile must explicitly review and add the public Zebra data mount,
+  memory-backed cookie sharing and wrapper port; the currently restricted
+  schema cannot express a deployable application. Image contents and the exact
+  plugin's interpretation still require review. This is not an effective
+  failure test of the exact guest's Compose version or unit graph; the final
+  effective Compose profile and Docker runtime must confirm no automatic
+  restart, and an unhealthy but still running container needs separate
+  liveness handling.
   A read-only extraction from the previously verity-verified stock rootfs found
   a 60,960,216-byte Compose plugin at
   `/usr/lib/docker/cli-plugins/docker-compose`, SHA-256
@@ -248,6 +253,10 @@ sent, and no account credits were spent. Private mode remains blocked.
   now pins the local Docker socket and supplies an empty environment file. The
   exact production Compose plugin, mount set and namespace behavior remain
   untested.
+  After removing unreviewed mount, port and process-control fields, the eight
+  synthetic launch-profile tests, generated Bash syntax/hash checks and full
+  `bash scripts/check.sh --browser` passed again. The generated manifest is
+  unchanged because the source overlay's output did not change.
   One intermediate build attempt
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check

@@ -1,10 +1,10 @@
 """Fail-closed checks for guest image launch-profile input; all data is synthetic."""
 
+import copy
 import hashlib
 import importlib.util
 import json
 import os
-import copy
 import subprocess
 import tempfile
 import unittest
@@ -116,6 +116,18 @@ class LaunchProfileInputTests(unittest.TestCase):
             ("profiles", ["hidden"]),
             ("label_file", "labels.txt"),
             ("privileged", True),
+            ("volumes", ["/run/docker.sock:/run/docker.sock"]),
+            ("ports", ["8443:8443"]),
+            ("tmpfs", ["/run/secrets"]),
+            ("command", ["sh", "-c", "run.sh"]),
+            ("entrypoint", ["/bin/sh"]),
+            ("working_dir", "/data"),
+            ("depends_on", ["other"]),
+            ("group_add", ["0"]),
+            ("healthcheck", {"test": ["CMD", "true"]}),
+            ("init", True),
+            ("stop_signal", "SIGKILL"),
+            ("stop_grace_period", "1h"),
             ("image", "example.invalid/synthetic:latest"),
             ("image", "example.invalid/synthetic@sha256:${DIGEST}"),
             ("user", "0:0"),

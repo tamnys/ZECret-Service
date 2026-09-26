@@ -188,9 +188,7 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 COMPOSE_SERVICE_FIELDS = frozenset({
     "image", "user", "read_only", "cap_drop", "security_opt", "logging",
-    "restart", "command", "entrypoint", "working_dir", "environment",
-    "depends_on", "network_mode", "ports", "volumes", "tmpfs",
-    "group_add", "healthcheck", "init", "stop_signal", "stop_grace_period",
+    "restart", "environment", "network_mode",
 })
 
 
@@ -214,8 +212,8 @@ def reject_interpolation(value: object) -> None:
 def validate_compose_file(content: str) -> None:
     # Docker Compose accepts JSON as YAML. Requiring JSON excludes aliases,
     # merge keys and tag processing, while unique_object rejects shadowed keys.
-    # This is a preimage policy, not a substitute for reviewing final mounts,
-    # ports, commands and the exact production Compose implementation.
+    # Mounts, ports and process overrides need a separately reviewed, exact
+    # profile. This source candidate cannot yet represent them.
     try:
         compose = json.loads(content, object_pairs_hook=unique_object,
                              parse_constant=reject_non_json_constant)
