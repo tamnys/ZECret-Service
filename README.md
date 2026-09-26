@@ -78,11 +78,15 @@ These commands perform local arithmetic or in-memory simulation. They never call
 
 The operator's total experiment budget is **$50**, including all deployment, testing and deletion costs. Planning refuses more than $50 projected usage and requires external deadline/watchdog/deletion evidence references. The watchdog requests deletion at $45 conservative cumulative cost or an absolute deadline no later than 168 hours; modeled detection/deletion costs and fees must fit the remaining $5. **Stopping does not stop disk billing.** Account funding does not authorize spending: obtain explicit operator approval before any billable action. A real deployment also requires authenticated pricing and tested external deletion and deadline jobs. `zrpc deploy` always refuses.
 
+On Unix, `zrpc lifecycle observe` reads Phala inventory, tracked CVM details and usage for an existing initialized ledger. Run `zrpc lifecycle --help` for its required file paths, page sizes, time budget and response/retention bounds. Supply the API key through an owner-private regular file and trust anchors through explicit DER certificate files. The command uses ordinary authenticated HTTPS to the fixed Phala API; it has no private RPC or browser path.
+
+The original ledger determines the workspace, tracked resources and usage start date. Every usage request uses the same cutoff captured from the system clock, including observations after the original deadline. Completed scans are not atomic snapshots. Usage rows remain unjoined and uncharged because their relation to CVM identifiers is unresolved. The report is not persisted and does not modify costs or deletion history. A CVM 404 does not prove storage deletion or billing finality. This command cannot create or delete resources, install jobs, initialize/reset a ledger, or approve deployment.
+
 ## Project map
 
 - `crates/{protocol,verifier,transport,client,server}`: typed boundaries and in-process fixtures.
 - `crates/cli`: native CLI, loopback authorization and bundled UI server.
-- `crates/lifecycle`: offline planning, deadline decisions and fake cleanup.
+- `crates/lifecycle`: cost planning, durable local history, read-only provider observations and simulated cleanup.
 - `tests/fixtures`: synthetic node data plus separately labeled historical upstream hardware evidence in `dcap/`.
 - `docs/implementation-plan.md`, `docs/gates-and-tests.md`: implementation contract and acceptance checklist.
 - `docs/phala-feasibility.md`, `docs/operator-runbook.md`: compatibility gates and operator workflow.

@@ -128,6 +128,9 @@ pub enum CvmDetail {
 }
 
 impl ProviderClient {
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.workspace_id
+    }
     /// Required positive invocation budget and body limit have no defaults.
     /// The same absolute deadline covers construction, authentication, every
     /// read, body collection and parsing; subsequent calls never renew it.
@@ -317,6 +320,70 @@ impl ScopedReads {
         &self.0.workspace_id
     }
 
+    /// Complete the declared pagination under the original invocation deadline.
+    /// The caller supplies the maximum retained item count; it has no default.
+    /// Completion is not an atomic provider snapshot or disk-deletion receipt.
+    pub async fn inventory_scan(
+        &mut self,
+        page_size: u64,
+        max_records: NonZeroUsize,
+    ) -> Result<crate::provider_scan::InventoryScan, ProviderHttpError> {
+        let mut scan = crate::provider_scan::InventoryAccumulator::new(page_size, max_records)
+            .map_err(|_| ProviderHttpError::InvalidConfiguration)?;
+        loop {
+            let page = scan
+                .next_page()
+                .map_err(|_| ProviderHttpError::InvalidResponse)?;
+            let response = self.inventory_page(page, page_size).await?;
+            let complete = self.0.finish(
+                scan.push(response)
+                    .map_err(|_| ProviderHttpError::InvalidResponse),
+            )?;
+            if complete {
+                return self.0.finish(
+                    scan.finish()
+                        .map_err(|_| ProviderHttpError::InvalidResponse),
+                );
+            }
+        }
+    }
+
+    /// Read through an empty page, keeping one explicit date window and the
+    /// original deadline. Rows remain unjoined and cannot be accepted charges.
+    pub async fn usage_scan(
+        &mut self,
+        app_id: &str,
+        start_unix_seconds: u64,
+        end_unix_seconds: u64,
+        limit: u64,
+        max_records: NonZeroUsize,
+    ) -> Result<crate::provider_scan::UsageScan, ProviderHttpError> {
+        let mut scan = crate::provider_scan::UsageAccumulator::new(limit, max_records)
+            .map_err(|_| ProviderHttpError::InvalidConfiguration)?;
+        loop {
+            let offset = scan
+                .next_offset()
+                .map_err(|_| ProviderHttpError::InvalidResponse)?;
+            let response = self
+                .usage_page(app_id, start_unix_seconds, end_unix_seconds, limit, offset)
+                .await?;
+            let complete = self.0.finish(
+                scan.push(response)
+                    .map_err(|_| ProviderHttpError::InvalidResponse),
+            )?;
+            if complete {
+                return self.0.finish(
+                    scan.finish()
+                        .map_err(|_| ProviderHttpError::InvalidResponse),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn check_deadline(&self) -> Result<(), ProviderHttpError> {
+        self.0.finish(Ok(()))
+    }
+
     pub async fn inventory_page(
         &mut self,
         page: u64,
@@ -417,4 +484,4 @@ impl Drop for AbortOnDrop {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -41,6 +41,19 @@ manifest = json.loads((ROOT / "deploy/manifest.fixture.json").read_text())
 assert run("watchdog", "--manifest", "deploy/manifest.fixture.json", "--now", str(manifest["deletion_deadline_unix_seconds"]), "--accrued-microusd", "0")["action"] == "delete_all"
 print("CLI checks passed: fixtures, private refusal, negative scenarios, sanitized errors, exact plan, disabled deployment, deletion decisions.")
 
+# Read-only lifecycle operation has no implicit initialization, clock override,
+# provider URL, mutation, or secret-on-argv option. These rejection paths need
+# neither actual credentials nor a live provider.
+help_result = subprocess.run([str(BIN), "lifecycle", "--help"], capture_output=True, cwd=ROOT)
+assert help_result.returncode == 0 and not help_result.stderr
+assert b"--original-binding" in help_result.stdout and b"--api-key-file" in help_result.stdout
+for args in [("lifecycle",), ("lifecycle", "delete-tracked"), ("lifecycle", "initialize"),
+             ("lifecycle", "observe"), ("lifecycle", "observe", "--api-key", "SYNTHETIC_CREDENTIAL_MARKER")]:
+    report = run(*args, success=False)
+    assert not report["private_accepted"] and not report["query_sent"] and not report["deployment_enabled"]
+    assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(report)
+print("Provider observation CLI checks passed: explicit help, incomplete input and unsupported mutations rejected.")
+
 # The authentic upstream fixture has expired collateral at today's clock. A
 # historical-time override is intentionally absent from the production CLI.
 report = run("inspect-quote", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin", "--collateral", "tests/fixtures/dcap/tdx_quote_collateral.json", success=False)

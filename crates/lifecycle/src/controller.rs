@@ -230,6 +230,11 @@ impl ExperimentLedger {
     }
 
     #[cfg(unix)]
+    pub(crate) fn tracked_cvms(&self) -> impl Iterator<Item = &TrackedCvm> {
+        self.0.resources.values().map(|resource| &resource.cvm)
+    }
+
+    #[cfg(unix)]
     pub(crate) fn append_deletion_intent(
         &mut self,
         reviewed_generation: u64,

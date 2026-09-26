@@ -19,9 +19,12 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
+mod scans;
+
 const WORKSPACE: &str = "wks_synthetic_only";
 const KEY: &str = "SYNTHETIC_API_KEY_MUST_NOT_ESCAPE";
-const AUTH: &str = r#"{"workspace":{"id":"wks_synthetic_only"},"user":{"email":"ACCOUNT_MARKER"}}"#;
+pub(crate) const AUTH: &str =
+    r#"{"workspace":{"id":"wks_synthetic_only"},"user":{"email":"ACCOUNT_MARKER"}}"#;
 const INVENTORY: &str = include_str!("../../../../tests/fixtures/phala-lifecycle/inventory.json");
 const DETAIL: &str = include_str!("../../../../tests/fixtures/phala-lifecycle/cvm-detail.json");
 const USAGE: &str = include_str!("../../../../tests/fixtures/phala-lifecycle/usage.json");
@@ -58,7 +61,7 @@ fn material(name: &str) -> (Arc<ServerConfig>, CertificateDer<'static>) {
     (Arc::new(config), ca.der().clone())
 }
 
-fn response(status: &str, body: &str) -> Vec<u8> {
+pub(crate) fn response(status: &str, body: &str) -> Vec<u8> {
     format!(
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{body}",
         body.len()
@@ -66,10 +69,10 @@ fn response(status: &str, body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-struct Server {
+pub(crate) struct Server {
     address: SocketAddr,
     root: CertificateDer<'static>,
-    requests: Arc<Mutex<Vec<String>>>,
+    pub(crate) requests: Arc<Mutex<Vec<String>>>,
     handshakes: Arc<Mutex<Vec<rustls::HandshakeKind>>>,
     closed: Arc<AtomicUsize>,
     activity: Arc<Notify>,
@@ -77,7 +80,7 @@ struct Server {
 }
 
 impl Server {
-    async fn start(replies: Vec<Vec<u8>>, name: &str) -> Self {
+    pub(crate) async fn start(replies: Vec<Vec<u8>>, name: &str) -> Self {
         let (tls, root) = material(name);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -153,7 +156,7 @@ impl Server {
         }
     }
 
-    fn client(&self, bound: usize) -> ProviderClient {
+    pub(crate) fn client(&self, bound: usize) -> ProviderClient {
         let mut client = ProviderClient::new(
             ApiKey::new(KEY.as_bytes().to_vec()).unwrap(),
             WORKSPACE.into(),

@@ -9,11 +9,14 @@ pub mod activation;
 pub mod amount;
 pub mod controller;
 #[cfg(unix)]
+pub mod observation;
+#[cfg(unix)]
 pub mod persistence;
 pub mod provider_http;
 #[cfg(unix)]
 pub mod provider_inputs;
 mod provider_request;
+pub mod provider_scan;
 pub mod provider_wire;
 
 // Authorities: design section 13 sets the lifetime, preflight ceiling and
