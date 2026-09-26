@@ -1,7 +1,12 @@
 //! Response identity and serialization checks, not chain/consensus validation.
-//! All wire parsing and identifier computation belong to pinned librustzcash.
+//! Pinned librustzcash decodes structures and computes identifiers. A prefix
+//! guard applies its version/branch rule before full transaction decoding.
 use serde_json::Value;
-use zcash_primitives::{block::BlockHeader, transaction::Transaction};
+use std::io::Read;
+use zcash_primitives::{
+    block::BlockHeader,
+    transaction::{Transaction, TxVersion},
+};
 use zcash_protocol::consensus::{BranchId, NetworkUpgrade, Parameters, TEST_NETWORK};
 use zrpc_protocol::{MAX_RESPONSE_BYTES, SafeError};
 
@@ -32,6 +37,24 @@ pub(super) fn header(raw: &Value, expected: &str) -> Result<BlockHeader, SafeErr
 
 pub(super) fn transaction(raw: &Value, expected: &str) -> Result<Transaction, SafeError> {
     let bytes = decode_hex(raw)?;
+    // 0.30.1 computes the identifier during Transaction::read without enforcing
+    // version/branch compatibility. Check the embedded V5/V6 branch first,
+    // using the maintained version decoder and compatibility rule. Earlier
+    // formats carry no branch field; the metadata branch below is not evidence
+    // of their mined height or consensus validity.
+    let mut prefix = bytes.as_slice();
+    let version = TxVersion::read(&mut prefix).map_err(|_| invalid_response())?;
+    if matches!(version, TxVersion::V5 | TxVersion::V6) {
+        let mut encoded_branch = [0; 4];
+        prefix
+            .read_exact(&mut encoded_branch)
+            .map_err(|_| invalid_response())?;
+        let branch = BranchId::try_from(u32::from_le_bytes(encoded_branch))
+            .map_err(|_| invalid_response())?;
+        if !version.valid_in_branch(branch) {
+            return Err(invalid_response());
+        }
+    }
     let mut remaining = bytes.as_slice();
     // For pre-v5 identity, this branch is stored metadata, not a hash input or
     // a statement of mined height. V5+ reads its branch from the wire itself.
@@ -162,6 +185,88 @@ mod tests {
         for (raw, id) in [(V4, V4_ID), (V5, V5_ID), (V5_SMALL, V5_SMALL_ID)] {
             transaction(&json!(raw.trim()), id).unwrap();
             verbose_transaction(&json!({"txid":id, "hex":raw.trim()}), id).unwrap();
+        }
+    }
+
+    // Synthetic empty bundles exercise parsing only, not consensus validity.
+    fn empty_transaction(version: TxVersion, branch: BranchId) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        version.write(&mut bytes).unwrap();
+        bytes.extend_from_slice(&u32::from(branch).to_le_bytes());
+        bytes.extend_from_slice(&[0; 8]); // lock time and expiry height
+        bytes.extend_from_slice(&[0; 5]); // transparent, Sapling and Orchard counts
+        if version == TxVersion::V6 {
+            bytes.push(0); // Ironwood count
+        }
+        bytes
+    }
+
+    #[test]
+    fn matching_identifier_does_not_admit_invalid_embedded_branch() {
+        for (version, branch) in [
+            (TxVersion::V6, BranchId::Sprout),
+            (TxVersion::V6, BranchId::Overwinter),
+            (TxVersion::V6, BranchId::Sapling),
+            (TxVersion::V6, BranchId::Blossom),
+            (TxVersion::V6, BranchId::Heartwood),
+            (TxVersion::V6, BranchId::Canopy),
+            (TxVersion::V6, BranchId::Nu5),
+            (TxVersion::V6, BranchId::Nu6),
+            (TxVersion::V6, BranchId::Nu6_1),
+            (TxVersion::V6, BranchId::Nu6_2),
+            (TxVersion::V5, BranchId::Sprout),
+            (TxVersion::V5, BranchId::Overwinter),
+            (TxVersion::V5, BranchId::Sapling),
+            (TxVersion::V5, BranchId::Blossom),
+            (TxVersion::V5, BranchId::Heartwood),
+            (TxVersion::V5, BranchId::Canopy),
+        ] {
+            let bytes = empty_transaction(version, branch);
+            // The pinned codec accepts this empty form and calculates an ID.
+            // A matching ID must not bypass version/branch rejection.
+            let decoded = Transaction::read(bytes.as_slice(), BranchId::Canopy).unwrap();
+            let id = decoded.txid().to_string();
+            let raw = json!(hex::encode(bytes));
+            assert!(transaction(&raw, &id).is_err(), "{version:?} / {branch:?}");
+            assert!(verbose_transaction(&json!({"txid": id, "hex": raw}), &id).is_err());
+        }
+    }
+
+    #[test]
+    fn supported_embedded_branches_keep_the_full_decode_and_identity_checks() {
+        for (version, branch) in [
+            (TxVersion::V5, BranchId::Nu5),
+            (TxVersion::V5, BranchId::Nu6_3),
+            (TxVersion::V6, BranchId::Nu6_3),
+        ] {
+            let bytes = empty_transaction(version, branch);
+            let decoded = Transaction::read(bytes.as_slice(), BranchId::Canopy).unwrap();
+            let id = decoded.txid().to_string();
+            let raw = json!(hex::encode(&bytes));
+            transaction(&raw, &id).unwrap();
+            verbose_transaction(&json!({"txid": id, "hex": raw}), &id).unwrap();
+            assert!(transaction(&raw, &"00".repeat(32)).is_err());
+            for malformed in [bytes[..bytes.len() - 1].to_vec(), [bytes, vec![0]].concat()] {
+                assert!(transaction(&json!(hex::encode(malformed)), &id).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_unknown_and_invalid_branch_prefixes_are_rejected() {
+        for version in [TxVersion::V5, TxVersion::V6] {
+            let mut prefix = Vec::new();
+            version.write(&mut prefix).unwrap();
+            prefix.extend_from_slice(&u32::from(BranchId::Nu6_3).to_le_bytes());
+            for end in 0..prefix.len() {
+                assert!(transaction(&json!(hex::encode(&prefix[..end])), V5_ID).is_err());
+            }
+            for branch in [u32::MAX, u32::from(BranchId::Canopy)] {
+                let mut prefix = Vec::new();
+                version.write(&mut prefix).unwrap();
+                prefix.extend_from_slice(&branch.to_le_bytes());
+                assert!(transaction(&json!(hex::encode(prefix)), V5_ID).is_err());
+            }
         }
     }
 
