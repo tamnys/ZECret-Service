@@ -124,8 +124,17 @@ fn directory(path: &Path) -> Result<File, StoreError> {
     let mut ancestor = PathBuf::new();
     for component in path.components() {
         ancestor.push(component);
-        let metadata = fs::symlink_metadata(&ancestor).map_err(|_| StoreError::UnsafePath)?;
+        let metadata = fs::symlink_metadata(&ancestor).map_err(|_error| {
+            #[cfg(test)]
+            eprintln!(
+                "path diagnostic: directory metadata: {:?}",
+                _error.raw_os_error()
+            );
+            StoreError::UnsafePath
+        })?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            #[cfg(test)]
+            eprintln!("path diagnostic: directory type");
             return Err(StoreError::UnsafePath);
         }
     }
@@ -133,7 +142,14 @@ fn directory(path: &Path) -> Result<File, StoreError> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
         .open(path)
-        .map_err(|_| StoreError::UnsafePath)
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!(
+                "path diagnostic: directory open: {:?}",
+                _error.raw_os_error()
+            );
+            StoreError::UnsafePath
+        })
 }
 fn regular(path: &Path, write: bool) -> Result<File, StoreError> {
     let file = OpenOptions::new()
@@ -141,8 +157,14 @@ fn regular(path: &Path, write: bool) -> Result<File, StoreError> {
         .write(write)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-        .map_err(|_| StoreError::UnsafePath)?;
+        .map_err(|_error| {
+            #[cfg(test)]
+            eprintln!("path diagnostic: regular open: {:?}", _error.raw_os_error());
+            StoreError::UnsafePath
+        })?;
     if !file.metadata().map_err(|_| StoreError::Io)?.is_file() {
+        #[cfg(test)]
+        eprintln!("path diagnostic: regular type");
         return Err(StoreError::UnsafePath);
     }
     Ok(file)
@@ -236,7 +258,10 @@ fn original(path: &Path) -> Result<(OriginalRecord, File), StoreError> {
     validate_absolute(path)?;
     directory(path.parent().ok_or(StoreError::UnsafePath)?)?;
     let file = regular(path, false)?;
-    if file.metadata().map_err(|_| StoreError::Io)?.mode() & 0o222 != 0 {
+    let original_mode = file.metadata().map_err(|_| StoreError::Io)?.mode();
+    if original_mode & 0o222 != 0 {
+        #[cfg(test)]
+        eprintln!("path diagnostic: writable original: {original_mode:o}");
         return Err(StoreError::UnsafePath);
     }
     let record: OriginalRecord = parse_object(&read_file(path)?)?;
