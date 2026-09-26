@@ -49,7 +49,7 @@ help_result = subprocess.run([str(BIN), "lifecycle", "--help"], capture_output=T
 assert help_result.returncode == 0 and not help_result.stderr
 assert b"--original-binding" in help_result.stdout and b"--api-key-file" in help_result.stdout
 assert b"observe|reconcile" in help_result.stdout and b"no deletion retry authority" in help_result.stdout
-for args in [("lifecycle",), ("lifecycle", "delete-tracked"), ("lifecycle", "initialize"),
+for args in [("lifecycle",), ("lifecycle", "delete-tracked"), ("lifecycle", "retry-tracked"), ("lifecycle", "initialize"),
              ("lifecycle", "observe"), ("lifecycle", "observe", "--api-key", "SYNTHETIC_CREDENTIAL_MARKER"),
              ("lifecycle", "reconcile"), ("lifecycle", "reconcile", "--api-key", "SYNTHETIC_CREDENTIAL_MARKER")]:
     report = run(*args, success=False)
@@ -57,24 +57,36 @@ for args in [("lifecycle",), ("lifecycle", "delete-tracked"), ("lifecycle", "ini
     assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(report)
 print("Provider observation CLI checks passed: explicit help, incomplete input and unsupported mutations rejected.")
 
-# The real deletion entrypoint must be selected explicitly with an exact target
-# and generation. These parser and unavailable-file paths perform no HTTP I/O.
-help_result = subprocess.run([str(BIN), "lifecycle", "delete-tracked", "--help"], capture_output=True, cwd=ROOT)
-assert help_result.returncode == 0 and not help_result.stderr
-assert b"REAL provider deletion" in help_result.stdout and b"--expected-generation" in help_result.stdout
+# Real deletion entrypoints must be selected explicitly with an exact target
+# and generation. Retry also requires the prior intent generation. These parser
+# and unavailable-file paths perform no HTTP I/O.
+for command in ("delete-tracked", "retry-tracked"):
+    help_result = subprocess.run([str(BIN), "lifecycle", command, "--help"], capture_output=True, cwd=ROOT)
+    assert help_result.returncode == 0 and not help_result.stderr
+    assert b"REAL provider deletion" in help_result.stdout and b"--expected-generation" in help_result.stdout
+    if command == "retry-tracked":
+        assert b"--prior-intent-generation" in help_result.stdout and b"no automatic retry" in help_result.stdout
 with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
     directory = Path(temporary)
     delete_args = ["lifecycle", "delete-tracked", "--original-binding", str(directory / "absent-original.json"),
                    "--expected-generation", "0", "--cvm-id", "SYNTHETIC_CVM",
                    "--api-key-file", str(directory / "absent-key"), "--trust-root", str(directory / "absent-root.der"),
                    "--invocation-budget-ms", "1", "--max-response-bytes", "1", "--max-input-file-bytes", "1"]
-    for args in [delete_args, *[delete_args + [flag, "SYNTHETIC_CREDENTIAL_MARKER"] for flag in
-                               ("--api-key", "--endpoint", "--now", "--retry", "--initialize", "--simulate")]]:
+    retry_args = delete_args.copy()
+    retry_args[1] = "retry-tracked"
+    retry_args.extend(["--prior-intent-generation", "1"])
+    for base in (delete_args, retry_args):
+        for args in [base, *[base + [flag, "SYNTHETIC_CREDENTIAL_MARKER"] for flag in
+                            ("--api-key", "--endpoint", "--now", "--retry", "--automatic", "--retry-count",
+                             "--readback", "--evidence", "--initialize", "--simulate")]]:
+            report = run(*args, success=False)
+            assert not report["private_accepted"] and not report["query_sent"] and not report["deployment_enabled"]
+            assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(report)
+    for args in (retry_args[:-2], retry_args[:-1] + ["0"], delete_args + ["--prior-intent-generation", "1"]):
         report = run(*args, success=False)
         assert not report["private_accepted"] and not report["query_sent"] and not report["deployment_enabled"]
-        assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(report)
     assert not list(directory.iterdir())
-print("Tracked deletion CLI checks passed: explicit help, no implicit initialization, sanitized refusal, no live provider calls.")
+print("Tracked deletion CLI checks passed: explicit first/retry selection, required prior intent, sanitized refusal, no live provider calls.")
 
 # Prospective local bookkeeping uses actual process time and caller assertions;
 # no provider credentials or network configuration exist on this command path.

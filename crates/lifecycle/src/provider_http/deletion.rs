@@ -1,13 +1,14 @@
 //! Explicit, single-target deletion preparation and dispatch. The operator CLI
-//! can select an existing target; no scheduler, creation, retry or automatic
-//! activation uses this library capability.
+//! can select an existing target or explicitly retry its latest intent after
+//! fresh detail readback. No scheduler, creation or automatic retry uses it.
 //! A provider status never establishes CVM/disk absence or billing finality.
 
 use super::{CvmDetail, ProviderClient, ProviderHttpError, ScopedReads};
 use crate::{
-    controller::{DeletionIntentRecord, DeletionOutcome, TrackedCvm},
+    controller::{DeletionIntentRecord, DeletionOutcome, DeletionRetryRecord, TrackedCvm},
     persistence::{CommittedDeletionIntent, LedgerStore, StoreError},
     provider_request::ReadRequest,
+    reconciliation::ObservedDetail,
 };
 use std::{
     fmt,
@@ -21,6 +22,7 @@ pub enum DeletionError {
     TargetRejected,
     IdentityConflict,
     PriorIntentNeedsReconciliation,
+    PriorIntentMismatch,
     ClockOrLedgerRejected,
 }
 impl fmt::Display for DeletionError {
@@ -33,7 +35,10 @@ impl fmt::Display for DeletionError {
                 f.write_str("deletion readback conflicts with committed target")
             }
             Self::PriorIntentNeedsReconciliation => {
-                f.write_str("prior deletion intent requires reconciliation")
+                f.write_str("prior deletion intent requires an explicitly selected retry")
+            }
+            Self::PriorIntentMismatch => {
+                f.write_str("retry must select the latest committed intent for this target")
             }
             Self::ClockOrLedgerRejected => {
                 f.write_str("deletion clock or retained ledger rejected")
@@ -66,6 +71,12 @@ pub enum PreparationReadback {
 /// already committed ledger target can mint the dispatch capability.
 pub struct ScopedDeletion(ScopedReads);
 
+#[derive(Clone, Copy)]
+enum Selection {
+    First,
+    Retry(u64),
+}
+
 impl ProviderClient {
     /// Delete one explicitly selected, already committed CVM. Local generation,
     /// workspace, target, intent history and clock checks precede authentication
@@ -77,22 +88,55 @@ impl ProviderClient {
         expected_generation: u64,
         cvm_id: &str,
     ) -> Result<DeletionReport, DeletionError> {
+        self.delete_selected(store, expected_generation, cvm_id, Selection::First)
+            .await
+    }
+
+    /// Explicitly retry the latest intent for this exact committed target.
+    /// This invocation performs its own authentication and detail readback,
+    /// durably appends a linked intent, then sends at most one DELETE. Historical
+    /// observations, provider statuses and elapsed time never trigger a retry.
+    pub async fn retry_tracked(
+        self,
+        store: &mut LedgerStore,
+        expected_generation: u64,
+        cvm_id: &str,
+        prior_intent_generation: u64,
+    ) -> Result<DeletionReport, DeletionError> {
+        self.delete_selected(
+            store,
+            expected_generation,
+            cvm_id,
+            Selection::Retry(prior_intent_generation),
+        )
+        .await
+    }
+
+    async fn delete_selected(
+        self,
+        store: &mut LedgerStore,
+        expected_generation: u64,
+        cvm_id: &str,
+        selection: Selection,
+    ) -> Result<DeletionReport, DeletionError> {
         let (_, began_at) = local_target(
             store,
             expected_generation,
             self.workspace_id(),
             cvm_id,
+            selection,
             wall_time,
         )?;
         self.authenticate_deletion()
             .await?
-            .prepare_with_clock(store, expected_generation, cvm_id, || {
-                let now = wall_time()?;
-                if now < began_at {
-                    return Err(DeletionError::ClockOrLedgerRejected);
-                }
-                Ok(now)
-            })
+            .prepare_selected_with_clock(
+                store,
+                expected_generation,
+                cvm_id,
+                selection,
+                Some(began_at),
+                wall_time,
+            )
             .await?
             .dispatch()
             .await
@@ -136,6 +180,7 @@ pub enum OutcomeJournal {
 pub struct DeletionReport {
     target: TrackedCvm,
     intent_generation: u64,
+    prior_intent_generation: Option<u64>,
     readback: PreparationReadback,
     outcome: DeletionOutcome,
     transport_issue: Option<ProviderHttpError>,
@@ -147,6 +192,9 @@ impl DeletionReport {
     }
     pub fn intent_generation(&self) -> u64 {
         self.intent_generation
+    }
+    pub fn prior_intent_generation(&self) -> Option<u64> {
+        self.prior_intent_generation
     }
     pub fn preparation_readback(&self) -> PreparationReadback {
         self.readback
@@ -185,10 +233,30 @@ impl ScopedDeletion {
     }
 
     async fn prepare_with_clock<'a>(
+        self,
+        store: &'a mut LedgerStore,
+        expected_generation: u64,
+        cvm_id: &str,
+        clock: impl FnMut() -> Result<u64, DeletionError>,
+    ) -> Result<PreparedDeletion<'a>, DeletionError> {
+        self.prepare_selected_with_clock(
+            store,
+            expected_generation,
+            cvm_id,
+            Selection::First,
+            None,
+            clock,
+        )
+        .await
+    }
+
+    async fn prepare_selected_with_clock<'a>(
         mut self,
         store: &'a mut LedgerStore,
         expected_generation: u64,
         cvm_id: &str,
+        selection: Selection,
+        invocation_started_at: Option<u64>,
         mut clock: impl FnMut() -> Result<u64, DeletionError>,
     ) -> Result<PreparedDeletion<'a>, DeletionError> {
         let (target, began_at) = local_target(
@@ -196,9 +264,15 @@ impl ScopedDeletion {
             expected_generation,
             self.0.workspace_id(),
             cvm_id,
+            selection,
             &mut clock,
         )?;
-        let readback = match self.0.cvm_detail(&target.cvm_id).await? {
+        let started_at = invocation_started_at.unwrap_or(began_at);
+        if began_at < started_at {
+            return Err(DeletionError::ClockOrLedgerRejected);
+        }
+        let detail = self.0.cvm_detail(&target.cvm_id).await?;
+        let readback = match &detail {
             CvmDetail::NotFound => PreparationReadback::DetailNotFound,
             CvmDetail::Present(item) => {
                 if item.app_id.as_ref().is_some_and(|id| id != &target.app_id)
@@ -221,12 +295,26 @@ impl ScopedDeletion {
             return Err(DeletionError::ClockOrLedgerRejected);
         }
         self.0.check_deadline()?;
-        let intent = store.prepare_deletion(
-            expected_generation,
-            self.0.workspace_id(),
-            &target.cvm_id,
-            recorded_at,
-        )?;
+        let intent = match selection {
+            Selection::First => store.prepare_deletion(
+                expected_generation,
+                self.0.workspace_id(),
+                &target.cvm_id,
+                recorded_at,
+            )?,
+            Selection::Retry(prior_intent_generation) => store.prepare_deletion_retry(
+                expected_generation,
+                self.0.workspace_id(),
+                &target.cvm_id,
+                DeletionRetryRecord {
+                    prior_intent_generation,
+                    started_at_unix_seconds: started_at,
+                    readback_at_unix_seconds: recorded_at,
+                    detail: ObservedDetail::from_wire(&detail),
+                },
+                recorded_at,
+            )?,
+        };
         // A deadline expiring during synchronous fsync leaves the intent pending
         // rather than authorizing a late request with a renewed network budget.
         self.0.check_deadline()?;
@@ -243,6 +331,7 @@ fn local_target(
     expected_generation: u64,
     workspace_id: &str,
     cvm_id: &str,
+    selection: Selection,
     clock: impl FnOnce() -> Result<u64, DeletionError>,
 ) -> Result<(TrackedCvm, u64), DeletionError> {
     if store.planning_reference()?.generation() != expected_generation {
@@ -257,12 +346,21 @@ fn local_target(
         .find(|cvm| cvm.cvm_id == cvm_id)
         .cloned()
         .ok_or(DeletionError::TargetRejected)?;
-    if ledger
+    let latest = ledger
         .deletion_intents()
         .iter()
-        .any(|intent| intent.target.cvm_id == target.cvm_id)
-    {
-        return Err(DeletionError::PriorIntentNeedsReconciliation);
+        .rev()
+        .find(|intent| intent.target.cvm_id == target.cvm_id);
+    match selection {
+        Selection::First if latest.is_some() => {
+            return Err(DeletionError::PriorIntentNeedsReconciliation);
+        }
+        Selection::Retry(generation)
+            if latest.is_none_or(|intent| intent.committed_generation != generation) =>
+        {
+            return Err(DeletionError::PriorIntentMismatch);
+        }
+        _ => {}
     }
     ReadRequest::Detail {
         cvm_id: &target.cvm_id,
@@ -306,6 +404,12 @@ impl PreparedDeletion<'_> {
         self.client.finish(Ok(()))?;
         let target = self.intent.record().target.clone();
         let intent_generation = self.intent.record().committed_generation;
+        let prior_intent_generation = self
+            .intent
+            .record()
+            .retry
+            .as_ref()
+            .map(|retry| retry.prior_intent_generation);
         let (outcome, transport_issue) = match self.client.delete_status(&self.intent).await {
             Ok(204) => (DeletionOutcome::Initiated204, None),
             Ok(404) => (DeletionOutcome::NotFound404, None),
@@ -324,6 +428,7 @@ impl PreparedDeletion<'_> {
         Ok(DeletionReport {
             target,
             intent_generation,
+            prior_intent_generation,
             readback: self.readback,
             outcome,
             transport_issue,

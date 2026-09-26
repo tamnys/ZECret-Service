@@ -6,7 +6,7 @@
 use crate::{
     DELETE_THRESHOLD_MICROUSD, DeploymentManifest, LifecycleError, MAX_LIFETIME_SECONDS,
     ManifestSource, TOTAL_CEILING_MICROUSD, WatchdogAction, add, duration_cost, nonempty,
-    reconciliation::{ObservationRecord, ObservedUsage},
+    reconciliation::{ObservationRecord, ObservedDetail, ObservedUsage},
     watchdog,
 };
 use serde::{Deserialize, Serialize};
@@ -152,6 +152,41 @@ pub struct DeletionOutcomeRecord {
     pub outcome: DeletionOutcome,
 }
 
+/// Retained narrow readback for a separately selected retry. Deserializing this
+/// history grants no authentication, dispatch or permission for another retry.
+///
+/// ```compile_fail
+/// use zrpc_lifecycle::{controller::DeletionRetryRecord, persistence::LedgerStore};
+/// fn cannot_prepare(store: &mut LedgerStore, restored: DeletionRetryRecord) {
+///     store.prepare_deletion_retry(0, "workspace", "target", restored, 0);
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeletionRetryRecord {
+    pub prior_intent_generation: u64,
+    pub started_at_unix_seconds: u64,
+    pub readback_at_unix_seconds: u64,
+    pub detail: ObservedDetail,
+}
+
+impl DeletionRetryRecord {
+    fn validate(
+        &self,
+        target: &TrackedCvm,
+        workspace: &str,
+        recorded_at: u64,
+    ) -> Result<(), LifecycleError> {
+        if self.started_at_unix_seconds < target.created_at_unix_seconds
+            || self.started_at_unix_seconds > self.readback_at_unix_seconds
+            || self.readback_at_unix_seconds > recorded_at
+        {
+            return Err(LifecycleError("invalid deletion retry readback time"));
+        }
+        self.detail.validate(target, workspace)
+    }
+}
+
 /// Append-only local journal entry. No network dispatch or approval is implied.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -161,6 +196,8 @@ pub struct DeletionIntentRecord {
     pub target: TrackedCvm,
     pub recorded_at_unix_seconds: u64,
     pub outcome: Option<DeletionOutcomeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<DeletionRetryRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -292,6 +329,31 @@ impl ExperimentLedger {
         cvm_id: &str,
         now: u64,
     ) -> Result<usize, LifecycleError> {
+        self.append_deletion_record(reviewed_generation, workspace, cvm_id, None, now)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn append_deletion_retry(
+        &mut self,
+        reviewed_generation: u64,
+        workspace: &str,
+        cvm_id: &str,
+        retry: DeletionRetryRecord,
+        now: u64,
+    ) -> Result<usize, LifecycleError> {
+        self.append_deletion_record(reviewed_generation, workspace, cvm_id, Some(retry), now)
+    }
+
+    #[cfg(unix)]
+    fn append_deletion_record(
+        &mut self,
+        reviewed_generation: u64,
+        workspace: &str,
+        cvm_id: &str,
+        retry: Option<DeletionRetryRecord>,
+        now: u64,
+    ) -> Result<usize, LifecycleError> {
+        self.validate()?;
         if workspace != self.workspace_id() {
             return Err(LifecycleError("deletion workspace differs from experiment"));
         }
@@ -302,30 +364,42 @@ impl ExperimentLedger {
             .ok_or(LifecycleError("deletion target is not already tracked"))?
             .cvm
             .clone();
-        // Retained observations grant no retry authority. No API may silently
-        // turn a persisted request, response, or crash into a retry.
-        if self
+        let prior = self
             .0
             .deletion_intents
             .iter()
-            .any(|intent| intent.target.cvm_id == cvm_id)
-        {
-            return Err(LifecycleError(
-                "prior deletion intent requires reconciliation",
-            ));
+            .rev()
+            .find(|intent| intent.target.cvm_id == cvm_id);
+        match (prior, &retry) {
+            (None, None) => {}
+            (Some(prior), Some(retry))
+                if retry.prior_intent_generation == prior.committed_generation
+                    && retry.started_at_unix_seconds >= self.0.last_observed_at_unix_seconds =>
+            {
+                retry.validate(&target, workspace, now)?;
+            }
+            _ => {
+                return Err(LifecycleError(
+                    "deletion requires first intent or explicit latest-intent reconciliation",
+                ));
+            }
         }
-        self.advance_cost(now)?;
         let committed_generation = reviewed_generation
             .checked_add(1)
             .ok_or(LifecycleError("deletion generation overflow"))?;
         let index = self.0.deletion_intents.len();
-        self.0.deletion_intents.push(DeletionIntentRecord {
+        let mut next = self.clone();
+        next.advance_cost(now)?;
+        next.0.deletion_intents.push(DeletionIntentRecord {
             reviewed_generation,
             committed_generation,
             target,
             recorded_at_unix_seconds: now,
             outcome: None,
+            retry,
         });
+        next.validate()?;
+        *self = next;
         Ok(index)
     }
 
@@ -342,7 +416,12 @@ impl ExperimentLedger {
             .deletion_intents
             .get(index)
             .ok_or(LifecycleError("deletion intent is missing"))?;
-        if intent.outcome.is_some() || now < intent.recorded_at_unix_seconds {
+        if intent.outcome.is_some()
+            || now < intent.recorded_at_unix_seconds
+            || self.0.deletion_intents[index + 1..]
+                .iter()
+                .any(|later| later.target.cvm_id == intent.target.cvm_id)
+        {
             return Err(LifecycleError(
                 "deletion outcome cannot replace prior history",
             ));
@@ -372,12 +451,16 @@ impl ExperimentLedger {
                 .deletion_intents
                 .iter()
                 .zip(&self.0.deletion_intents)
-                .any(|(prior, next)| {
+                .enumerate()
+                .any(|(index, (prior, next))| {
                     let mut expected = prior.clone();
                     if expected.outcome.is_none() {
                         if next.outcome.as_ref().is_some_and(|outcome| {
                             outcome.recorded_at_unix_seconds
                                 < previous.0.last_observed_at_unix_seconds
+                                || self.0.deletion_intents[index + 1..]
+                                    .iter()
+                                    .any(|later| later.target.cvm_id == prior.target.cvm_id)
                         }) {
                             return true;
                         }
@@ -458,12 +541,11 @@ impl ExperimentLedger {
                 return Err(LifecycleError("invalid billing record key"));
             }
         }
-        let mut deletion_targets = BTreeSet::new();
+        let mut deletion_targets: BTreeMap<&str, &DeletionIntentRecord> = BTreeMap::new();
         let mut prior_generation = None;
         for intent in &self.0.deletion_intents {
             if intent.reviewed_generation.checked_add(1) != Some(intent.committed_generation)
                 || prior_generation.is_some_and(|prior| prior >= intent.committed_generation)
-                || !deletion_targets.insert(&intent.target.cvm_id)
                 || self
                     .0
                     .resources
@@ -474,6 +556,27 @@ impl ExperimentLedger {
             {
                 return Err(LifecycleError("invalid deletion journal identity or time"));
             }
+            match (
+                deletion_targets.get(intent.target.cvm_id.as_str()),
+                &intent.retry,
+            ) {
+                (None, None) => {}
+                (Some(prior), Some(retry))
+                    if retry.prior_intent_generation == prior.committed_generation
+                        && retry.started_at_unix_seconds >= prior.recorded_at_unix_seconds
+                        && prior.outcome.as_ref().is_none_or(|outcome| {
+                            retry.started_at_unix_seconds >= outcome.recorded_at_unix_seconds
+                        }) =>
+                {
+                    retry.validate(
+                        &intent.target,
+                        self.workspace_id(),
+                        intent.recorded_at_unix_seconds,
+                    )?;
+                }
+                _ => return Err(LifecycleError("invalid deletion retry history")),
+            }
+            deletion_targets.insert(&intent.target.cvm_id, intent);
             prior_generation = Some(intent.committed_generation);
             if let Some(outcome) = &intent.outcome {
                 outcome.outcome.validate()?;
@@ -1394,5 +1497,161 @@ mod tests {
         let report = tick_mock(&mut ledger, &mut provider, START).unwrap();
         assert!(!report.usage_complete);
         assert_eq!(report.conservative_cost_microusd, 1_000_000);
+    }
+
+    #[cfg(unix)]
+    mod retry {
+        use super::*;
+        use crate::reconciliation::ObservedCvm;
+
+        fn record(prior: u64, at: u64) -> DeletionRetryRecord {
+            DeletionRetryRecord {
+                prior_intent_generation: prior,
+                started_at_unix_seconds: at,
+                readback_at_unix_seconds: at,
+                detail: ObservedDetail::Present(ObservedCvm {
+                    id: "one".into(),
+                    status: "deleting".into(),
+                    app_id: Some("app".into()),
+                    instance_id: Some("instance-one".into()),
+                    vm_uuid: Some("separate-provider-uuid".into()),
+                    workspace_id: Some("workspace".into()),
+                    created_at: None,
+                    deleted_at: None,
+                }),
+            }
+        }
+
+        #[test]
+        fn retry_projection_rejects_conflicts_and_bad_time_without_mutation() {
+            let mut before = ledger();
+            before
+                .append_deletion_intent(0, "workspace", "one", START)
+                .unwrap();
+            for case in [
+                "prior",
+                "start",
+                "readback",
+                "id",
+                "app",
+                "instance",
+                "workspace",
+                "uuid",
+                "status",
+            ] {
+                let mut bad = record(1, START + 1);
+                match case {
+                    "prior" => bad.prior_intent_generation = 0,
+                    "start" => bad.started_at_unix_seconds = START - 1,
+                    "readback" => bad.readback_at_unix_seconds = START + 2,
+                    field => {
+                        let ObservedDetail::Present(cvm) = &mut bad.detail else {
+                            unreachable!()
+                        };
+                        match field {
+                            "id" => cvm.id = "other".into(),
+                            "app" => cvm.app_id = Some("other".into()),
+                            "instance" => cvm.instance_id = Some("other".into()),
+                            "workspace" => cvm.workspace_id = Some("other".into()),
+                            "uuid" => cvm.vm_uuid = Some(" ".into()),
+                            _ => cvm.status.clear(),
+                        }
+                    }
+                }
+                let mut changed = before.clone();
+                assert!(
+                    changed
+                        .append_deletion_retry(1, "workspace", "one", bad, START + 1)
+                        .is_err(),
+                    "{case}"
+                );
+                assert_eq!(
+                    serde_json::to_value(changed).unwrap(),
+                    serde_json::to_value(&before).unwrap()
+                );
+            }
+            for missing in [true, false] {
+                let mut retry = record(1, START + 1);
+                if missing {
+                    let ObservedDetail::Present(cvm) = &mut retry.detail else {
+                        unreachable!()
+                    };
+                    cvm.app_id = None;
+                    cvm.instance_id = None;
+                    cvm.workspace_id = None;
+                } else {
+                    retry.detail = ObservedDetail::NotFound;
+                }
+                let mut changed = before.clone();
+                changed
+                    .append_deletion_retry(1, "workspace", "one", retry, START + 1)
+                    .unwrap();
+                assert_eq!(changed.0.resources["one"].deletion, DeletionState::Tracking);
+                assert_eq!(changed.deletion_intents()[0], before.deletion_intents()[0]);
+            }
+        }
+
+        #[test]
+        fn retry_history_requires_latest_parent_and_keeps_superseded_pending_immutable() {
+            let mut history = ledger();
+            history
+                .append_deletion_intent(0, "workspace", "one", START)
+                .unwrap();
+            let legacy = serde_json::to_value(&history).unwrap();
+            assert!(legacy["deletion_intents"][0].get("retry").is_none());
+            assert!(
+                ExperimentLedger::from_json(
+                    &serde_json::to_vec(&legacy).unwrap(),
+                    history.binding()
+                )
+                .is_ok()
+            );
+            history
+                .append_deletion_retry(1, "workspace", "one", record(1, START + 1), START + 1)
+                .unwrap();
+            assert!(
+                history
+                    .finish_deletion_intent(0, DeletionOutcome::Initiated204, START + 1)
+                    .is_err()
+            );
+            let mut retroactive = history.clone();
+            retroactive.0.deletion_intents[0].outcome = Some(DeletionOutcomeRecord {
+                recorded_at_unix_seconds: START + 1,
+                outcome: DeletionOutcome::NotFound404,
+            });
+            assert!(retroactive.validate().is_ok());
+            assert!(retroactive.validate_successor(&history).is_err());
+            history
+                .append_deletion_retry(2, "workspace", "one", record(2, START + 2), START + 2)
+                .unwrap();
+            let original = serde_json::to_value(&history).unwrap();
+            for case in [
+                "missing_link",
+                "skipped_parent",
+                "first_has_parent",
+                "future_readback",
+            ] {
+                let mut bad = original.clone();
+                let intents = &mut bad["deletion_intents"];
+                match case {
+                    "missing_link" => {
+                        intents[1].as_object_mut().unwrap().remove("retry");
+                    }
+                    "skipped_parent" => intents[2]["retry"]["prior_intent_generation"] = 1.into(),
+                    "first_has_parent" => {
+                        intents[0]["retry"] = serde_json::to_value(record(0, START)).unwrap()
+                    }
+                    _ => intents[2]["retry"]["readback_at_unix_seconds"] = (START + 3).into(),
+                }
+                assert!(
+                    ExperimentLedger::from_json(
+                        &serde_json::to_vec(&bad).unwrap(),
+                        history.binding()
+                    )
+                    .is_err(),
+                    "{case}"
+                );
+            }
+        }
     }
 }

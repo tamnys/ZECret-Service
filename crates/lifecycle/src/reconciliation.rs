@@ -142,6 +142,29 @@ impl ObservedCvm {
     }
 }
 
+impl ObservedDetail {
+    #[cfg(unix)]
+    pub(crate) fn from_wire(detail: &crate::provider_http::CvmDetail) -> Self {
+        match detail {
+            crate::provider_http::CvmDetail::Present(cvm) => {
+                Self::Present(ObservedCvm::from_wire(cvm))
+            }
+            crate::provider_http::CvmDetail::NotFound => Self::NotFound,
+        }
+    }
+
+    pub(crate) fn validate(
+        &self,
+        target: &TrackedCvm,
+        workspace: &str,
+    ) -> Result<(), LifecycleError> {
+        match self {
+            Self::Present(cvm) => cvm.validate(target, workspace),
+            Self::NotFound => Ok(()),
+        }
+    }
+}
+
 impl ObservedUsage {
     #[cfg(unix)]
     fn from_wire(row: &crate::provider_wire::UsageRow) -> Self {
@@ -188,7 +211,6 @@ impl ObservationRecord {
         observation: &crate::observation::ReadObservation,
         recorded_at: u64,
     ) -> Result<Self, LifecycleError> {
-        use crate::provider_http::CvmDetail;
         let source_generation = observation.reference().generation();
         let inventory: BTreeMap<_, _> = observation
             .inventory()
@@ -215,12 +237,7 @@ impl ObservationRecord {
                     inventory: inventory
                         .get(read.target().cvm_id.as_str())
                         .map(|cvm| ObservedCvm::from_wire(cvm)),
-                    detail: match read.detail() {
-                        CvmDetail::Present(cvm) => {
-                            ObservedDetail::Present(ObservedCvm::from_wire(cvm))
-                        }
-                        CvmDetail::NotFound => ObservedDetail::NotFound,
-                    },
+                    detail: ObservedDetail::from_wire(read.detail()),
                 })
                 .collect(),
             usage_by_app: observation
@@ -273,9 +290,7 @@ impl ObservationRecord {
                 cvm.validate(target, workspace)?;
                 inventory_ids.insert(cvm.id.as_str());
             }
-            if let ObservedDetail::Present(cvm) = &observed.detail {
-                cvm.validate(target, workspace)?;
-            }
+            observed.detail.validate(target, workspace)?;
         }
         for id in &self.untracked_inventory_ids {
             if !nonempty(id) || targets.contains(id.as_str()) || !inventory_ids.insert(id.as_str())

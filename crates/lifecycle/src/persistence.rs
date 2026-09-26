@@ -7,7 +7,8 @@
 use crate::{
     LifecycleError,
     controller::{
-        DeletionIntentRecord, DeletionOutcome, ExperimentBinding, ExperimentLedger, TrackedCvm,
+        DeletionIntentRecord, DeletionOutcome, DeletionRetryRecord, ExperimentBinding,
+        ExperimentLedger, TrackedCvm,
     },
     observation::ReadObservation,
     reconciliation::ObservationRecord,
@@ -301,7 +302,7 @@ pub struct LedgerInspection {
 /// This is not operator approval, authenticated provider identity or a network
 /// capability. Provider dispatch additionally requires authenticated scope and
 /// an explicit operator action. Dropping it preserves pending history; retries
-/// require reconciliation support.
+/// require separately selected, fresh authenticated preparation.
 ///
 /// ```compile_fail
 /// fn cannot_clone(intent: zrpc_lifecycle::persistence::CommittedDeletionIntent<'_>) {
@@ -596,6 +597,47 @@ impl LedgerStore {
         self.commit_with_hook(&next, hook)?;
         Ok(CommittedDeletionIntent { store: self, index })
     }
+
+    /// Only the authenticated adapter constructs fresh retry readback. Restored
+    /// historical DTOs and ordinary public persistence cannot mint this token.
+    pub(crate) fn prepare_deletion_retry(
+        &mut self,
+        expected_generation: u64,
+        workspace: &str,
+        cvm_id: &str,
+        retry: DeletionRetryRecord,
+        now: u64,
+    ) -> Result<CommittedDeletionIntent<'_>, StoreError> {
+        self.prepare_deletion_retry_with_hook(
+            expected_generation,
+            workspace,
+            cvm_id,
+            retry,
+            now,
+            &mut |_| Ok(()),
+        )
+    }
+
+    fn prepare_deletion_retry_with_hook(
+        &mut self,
+        expected_generation: u64,
+        workspace: &str,
+        cvm_id: &str,
+        retry: DeletionRetryRecord,
+        now: u64,
+        hook: &mut impl FnMut(CommitPoint) -> Result<(), StoreError>,
+    ) -> Result<CommittedDeletionIntent<'_>, StoreError> {
+        self.ledger()?;
+        self.verify_current()?;
+        if self.generation != expected_generation {
+            return Err(StoreError::InvalidState);
+        }
+        let mut next = self.ledger.clone();
+        let index =
+            next.append_deletion_retry(expected_generation, workspace, cvm_id, retry, now)?;
+        self.commit_with_hook(&next, hook)?;
+        Ok(CommittedDeletionIntent { store: self, index })
+    }
     pub fn planning_reference(&self) -> Result<CommittedLedgerReference, StoreError> {
         self.ledger()?;
         self.verify_current()?;
@@ -842,10 +884,22 @@ fn validate_journal_transition(
     let after = next.deletion_intents();
     // One purpose-specific write appends one intent or records one outcome.
     // This is the operation's atomicity contract, not a resource/request quota.
+    if after == before {
+        return Ok(());
+    }
+    let mut proof = previous.clone();
     if after.len() == before.len() {
-        if before.iter().zip(after).filter(|(a, b)| a != b).count() > 1 {
+        let mut changed = before
+            .iter()
+            .zip(after)
+            .enumerate()
+            .filter(|(_, (a, b))| a != b);
+        let (index, (_, intent)) = changed.next().ok_or(StoreError::InvalidState)?;
+        if changed.next().is_some() {
             return Err(StoreError::InvalidState);
         }
+        let outcome = intent.outcome.as_ref().ok_or(StoreError::InvalidState)?;
+        proof.finish_deletion_intent(index, outcome.outcome, outcome.recorded_at_unix_seconds)?;
     } else if after.len().checked_sub(before.len()) == Some(1) {
         if &after[..before.len()] != before {
             return Err(StoreError::InvalidState);
@@ -855,17 +909,31 @@ fn validate_journal_transition(
             return Err(StoreError::InvalidState);
         }
         // The new target must predate the intent snapshot.
-        let mut proof = previous.clone();
-        proof.append_deletion_intent(
-            prior_generation,
-            previous.workspace_id(),
-            &intent.target.cvm_id,
-            intent.recorded_at_unix_seconds,
-        )?;
-        if proof.deletion_intents().last() != Some(intent) {
-            return Err(StoreError::InvalidState);
+        match &intent.retry {
+            Some(retry) => {
+                proof.append_deletion_retry(
+                    prior_generation,
+                    previous.workspace_id(),
+                    &intent.target.cvm_id,
+                    retry.clone(),
+                    intent.recorded_at_unix_seconds,
+                )?;
+            }
+            None => {
+                proof.append_deletion_intent(
+                    prior_generation,
+                    previous.workspace_id(),
+                    &intent.target.cvm_id,
+                    intent.recorded_at_unix_seconds,
+                )?;
+            }
         }
     } else {
+        return Err(StoreError::InvalidState);
+    }
+    // A journal operation cannot simultaneously change attempts, resources,
+    // charges, observations, or model time/cost beyond that exact operation.
+    if json_bytes(&proof)? != json_bytes(next)? {
         return Err(StoreError::InvalidState);
     }
     Ok(())
@@ -1297,6 +1365,285 @@ mod tests {
             assert!(LedgerStore::open(&temp.original()).is_err(), "{field}");
         }
         fs::write(&path, original_bytes).unwrap();
+        assert!(LedgerStore::open(&temp.original()).is_ok());
+    }
+
+    fn retry_record(prior: u64, at: u64) -> DeletionRetryRecord {
+        DeletionRetryRecord {
+            prior_intent_generation: prior,
+            started_at_unix_seconds: at,
+            readback_at_unix_seconds: at,
+            detail: crate::reconciliation::ObservedDetail::NotFound,
+        }
+    }
+
+    #[test]
+    fn explicit_retry_retains_every_prior_outcome_and_original_expired_policy() {
+        for outcome in [
+            None,
+            Some(DeletionOutcome::TransportUncertain),
+            Some(DeletionOutcome::Rejected { status: 503 }),
+            Some(DeletionOutcome::Initiated204),
+            Some(DeletionOutcome::NotFound404),
+        ] {
+            let temp = Temp::new();
+            let mut store = setup(&temp);
+            let original = fs::read(temp.original()).unwrap();
+            let intent = store.prepare_deletion(0, "workspace", "one", 1000).unwrap();
+            if let Some(outcome) = outcome {
+                intent.finish(outcome, 1001).unwrap();
+            } else {
+                drop(intent);
+            }
+            let prior = store.ledger().unwrap().deletion_intents()[0].clone();
+            let before = serde_json::to_value(store.ledger().unwrap()).unwrap();
+            let expected_generation = store.generation;
+            let now = 1000 + MAX_LIFETIME_SECONDS * 2;
+            let intent = store
+                .prepare_deletion_retry(
+                    expected_generation,
+                    "workspace",
+                    "one",
+                    retry_record(1, now),
+                    now,
+                )
+                .unwrap();
+            assert_eq!(intent.record().retry, Some(retry_record(1, now)));
+            assert!(matches!(
+                LedgerStore::open(&temp.original()),
+                Err(StoreError::Locked)
+            ));
+            let snapshot: Snapshot = parse_object(
+                &fs::read(temp.store().join(snapshot_name(expected_generation + 1))).unwrap(),
+            )
+            .unwrap();
+            let persisted =
+                ledger_from_raw(&snapshot.ledger, intent.store.ledger.binding()).unwrap();
+            assert_eq!(
+                persisted.deletion_intents(),
+                intent.store.ledger.deletion_intents()
+            );
+            assert_eq!(persisted.deletion_intents()[0], prior);
+            drop(intent);
+            let after = serde_json::to_value(store.ledger().unwrap()).unwrap();
+            for field in [
+                "binding",
+                "initial_cost_microusd",
+                "resources",
+                "attempts",
+                "usage",
+                "observations",
+            ] {
+                assert_eq!(before[field], after[field], "{field}");
+            }
+            assert!(
+                store.ledger().unwrap().conservative_cost_floor_microusd()
+                    > crate::TOTAL_CEILING_MICROUSD
+            );
+            assert_eq!(fs::read(temp.original()).unwrap(), original);
+            assert!(
+                store
+                    .prepare_deletion(expected_generation + 1, "workspace", "one", now)
+                    .is_err()
+            );
+            drop(store);
+            let mut store = LedgerStore::open(&temp.original()).unwrap();
+            assert_eq!(store.ledger().unwrap().deletion_intents()[0], prior);
+            let latest = store.ledger().unwrap().deletion_intents()[1].clone();
+            assert!(latest.outcome.is_none());
+            drop(
+                store
+                    .prepare_deletion_retry(
+                        expected_generation + 1,
+                        "workspace",
+                        "one",
+                        retry_record(latest.committed_generation, now),
+                        now,
+                    )
+                    .unwrap(),
+            );
+            assert_eq!(
+                &store.ledger().unwrap().deletion_intents()[..2],
+                &[prior, latest]
+            );
+        }
+    }
+
+    #[test]
+    fn retry_requires_current_scope_latest_same_target_and_new_readback_time() {
+        let temp = Temp::new();
+        let mut store = setup(&temp);
+        assert!(
+            store
+                .prepare_deletion_retry(0, "workspace", "one", retry_record(0, 1000), 1000)
+                .is_err()
+        );
+        drop(store.prepare_deletion(0, "workspace", "one", 1000).unwrap());
+        let mut next = store.ledger().unwrap().clone();
+        next.track_cvm(
+            "workspace",
+            "first",
+            TrackedCvm {
+                cvm_id: "two".into(),
+                app_id: "app2".into(),
+                instance_id: "instance2".into(),
+                created_at_unix_seconds: 1000,
+                compute_and_disk_microusd_per_hour: 243_120,
+            },
+        )
+        .unwrap();
+        store.commit(&next).unwrap();
+        drop(store.prepare_deletion(2, "workspace", "two", 1002).unwrap());
+        let before = json_bytes(store.ledger().unwrap()).unwrap();
+        for (generation, workspace, target, prior, started, readback, now) in [
+            (2, "workspace", "one", 1, 1002, 1002, 1002),
+            (3, "other", "one", 1, 1002, 1002, 1002),
+            (3, "workspace", "missing", 1, 1002, 1002, 1002),
+            (3, "workspace", "one", 3, 1002, 1002, 1002),
+            (3, "workspace", "two", 1, 1002, 1002, 1002),
+            (3, "workspace", "one", 1, 1001, 1002, 1002),
+            (3, "workspace", "one", 1, 1002, 1001, 1002),
+            (3, "workspace", "one", 1, 1002, 1003, 1002),
+        ] {
+            let mut retry = retry_record(prior, started);
+            retry.readback_at_unix_seconds = readback;
+            assert!(
+                store
+                    .prepare_deletion_retry(generation, workspace, target, retry, now)
+                    .is_err()
+            );
+            assert_eq!(json_bytes(store.ledger().unwrap()).unwrap(), before);
+            assert_eq!(store.generation, 3);
+            assert!(!temp.store().join(PENDING).exists());
+        }
+        // The latest intent for another CVM does not supersede this target.
+        drop(
+            store
+                .prepare_deletion_retry(3, "workspace", "one", retry_record(1, 1002), 1002)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn retry_and_retry_outcome_faults_never_replace_prior_intents() {
+        for finishing in [false, true] {
+            for boundary in [
+                CommitPoint::DraftCreated,
+                CommitPoint::DraftWritten,
+                CommitPoint::DraftSynced,
+                CommitPoint::SnapshotLinked,
+                CommitPoint::DirectorySynced,
+                CommitPoint::DraftRemoved,
+            ] {
+                let temp = Temp::new();
+                let mut store = setup(&temp);
+                drop(store.prepare_deletion(0, "workspace", "one", 1000).unwrap());
+                let prior = store.ledger().unwrap().deletion_intents()[0].clone();
+                let mut fail = |point| {
+                    if point == boundary {
+                        Err(StoreError::Io)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let result = if finishing {
+                    store
+                        .prepare_deletion_retry(1, "workspace", "one", retry_record(1, 1001), 1001)
+                        .unwrap()
+                        .finish_with_hook(DeletionOutcome::TransportUncertain, 1002, &mut fail)
+                } else {
+                    store
+                        .prepare_deletion_retry_with_hook(
+                            1,
+                            "workspace",
+                            "one",
+                            retry_record(1, 1001),
+                            1001,
+                            &mut fail,
+                        )
+                        .map(drop)
+                };
+                assert_eq!(result, Err(StoreError::Io));
+                assert!(matches!(store.ledger(), Err(StoreError::ReloadRequired)));
+                drop(store);
+                let restored = LedgerStore::open(&temp.original()).unwrap();
+                let journal = restored.ledger().unwrap().deletion_intents();
+                assert_eq!(journal[0], prior);
+                let published = matches!(
+                    boundary,
+                    CommitPoint::SnapshotLinked
+                        | CommitPoint::DirectorySynced
+                        | CommitPoint::DraftRemoved
+                );
+                if finishing {
+                    assert_eq!(journal.len(), 2);
+                    assert_eq!(journal[1].outcome.is_some(), published);
+                } else {
+                    assert_eq!(journal.len(), 1 + usize::from(published));
+                    assert!(journal.iter().all(|intent| intent.outcome.is_none()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generic_commit_and_history_replay_reject_forged_retry_transitions() {
+        let temp = Temp::new();
+        let mut store = setup(&temp);
+        drop(store.prepare_deletion(0, "workspace", "one", 1000).unwrap());
+        let before = store.ledger().unwrap().clone();
+        let mut forged = before.clone();
+        forged
+            .append_deletion_retry(1, "workspace", "one", retry_record(1, 1001), 1001)
+            .unwrap();
+        assert_eq!(store.commit(&forged), Err(StoreError::InvalidState));
+        let mut combined = forged.clone();
+        add_usage(&mut combined);
+        assert_eq!(
+            validate_journal_transition(&before, &combined, 1),
+            Err(StoreError::InvalidState)
+        );
+        let mut combined_outcome = forged.clone();
+        combined_outcome
+            .finish_deletion_intent(1, DeletionOutcome::Initiated204, 1001)
+            .unwrap();
+        add_usage(&mut combined_outcome);
+        assert_eq!(
+            validate_journal_transition(&forged, &combined_outcome, 2),
+            Err(StoreError::InvalidState)
+        );
+        drop(
+            store
+                .prepare_deletion_retry(1, "workspace", "one", retry_record(1, 1001), 1001)
+                .unwrap(),
+        );
+        store.commit(&store.ledger().unwrap().clone()).unwrap();
+        drop(store);
+        let path = temp.store().join(snapshot_name(3));
+        let bytes = fs::read(&path).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for case in [
+            "old_outcome",
+            "readback_changed",
+            "parent_changed",
+            "intent_removed",
+        ] {
+            let mut bad = original.clone();
+            let intents = &mut bad["ledger"]["deletion_intents"];
+            match case {
+                "old_outcome" => {
+                    intents[0]["outcome"] = serde_json::json!({"recorded_at_unix_seconds":1001,"outcome":"initiated204"})
+                }
+                "readback_changed" => intents[1]["retry"]["started_at_unix_seconds"] = 1000.into(),
+                "parent_changed" => intents[1]["retry"]["prior_intent_generation"] = 2.into(),
+                _ => {
+                    intents.as_array_mut().unwrap().pop();
+                }
+            }
+            fs::write(&path, serde_json::to_vec(&bad).unwrap()).unwrap();
+            assert!(LedgerStore::open(&temp.original()).is_err(), "{case}");
+        }
+        fs::write(&path, bytes).unwrap();
         assert!(LedgerStore::open(&temp.original()).is_ok());
     }
 

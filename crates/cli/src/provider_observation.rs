@@ -68,11 +68,23 @@ pub async fn run(mut args: Vec<String>) -> Result<(), String> {
     if args.as_slice() == ["--help"] {
         println!("{USAGE}");
         println!("{}", super::provider_deletion::USAGE);
+        println!("{}", super::provider_deletion::RETRY_USAGE);
         println!("{}", super::ledger::USAGE);
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("delete-tracked") {
-        return super::provider_deletion::run(args[1..].to_vec()).await;
+        return super::provider_deletion::run(
+            args[1..].to_vec(),
+            super::provider_deletion::Command::FirstAttempt,
+        )
+        .await;
+    }
+    if args.first().map(String::as_str) == Some("retry-tracked") {
+        return super::provider_deletion::run(
+            args[1..].to_vec(),
+            super::provider_deletion::Command::Retry,
+        )
+        .await;
     }
     if args.first().map(String::as_str) == Some("ledger") {
         return super::ledger::run(args[1..].to_vec());
@@ -82,7 +94,7 @@ pub async fn run(mut args: Vec<String>) -> Result<(), String> {
         Some("reconcile") => true,
         _ => {
             return Err(
-                "supported lifecycle commands: ledger, observe, reconcile, delete-tracked; use lifecycle --help".to_owned(),
+                "supported lifecycle commands: ledger, observe, reconcile, delete-tracked, retry-tracked; use lifecycle --help".to_owned(),
             );
         }
     };

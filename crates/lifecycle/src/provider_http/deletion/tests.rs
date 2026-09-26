@@ -135,6 +135,367 @@ fn request_methods(server: &Server) -> Vec<String> {
         .collect()
 }
 
+fn prior_intent(store: &mut LedgerStore, outcome: Option<DeletionOutcome>) -> u64 {
+    let intent = store.prepare_deletion(0, WORKSPACE, CVM, START).unwrap();
+    if let Some(outcome) = outcome {
+        intent.finish(outcome, START).unwrap();
+        2
+    } else {
+        drop(intent);
+        1
+    }
+}
+
+async fn prepare_retry_with_clock<'a>(
+    client: ScopedDeletion,
+    store: &'a mut LedgerStore,
+    generation: u64,
+    clock: impl FnMut() -> Result<u64, DeletionError>,
+) -> Result<PreparedDeletion<'a>, DeletionError> {
+    client
+        .prepare_selected_with_clock(store, generation, CVM, Selection::Retry(1), None, clock)
+        .await
+}
+
+#[tokio::test]
+async fn explicit_retry_preserves_each_prior_outcome_and_commits_link_before_delete() {
+    for outcome in [
+        None,
+        Some(DeletionOutcome::TransportUncertain),
+        Some(DeletionOutcome::Rejected { status: 503 }),
+        Some(DeletionOutcome::Initiated204),
+        Some(DeletionOutcome::NotFound404),
+    ] {
+        let fixture = Fixture::standard();
+        let original_bytes = fs::read(fixture.original()).unwrap();
+        let mut store = fixture.open();
+        let generation = prior_intent(&mut store, outcome);
+        let prior = store.ledger().unwrap().deletion_intents()[0].clone();
+        let retained = prior.clone();
+        let binding = store.ledger().unwrap().binding().clone();
+        let cost = store
+            .ledger()
+            .unwrap()
+            .planning_cost_at(wall_time().unwrap())
+            .unwrap();
+        let original = fixture.original();
+        let snapshot = fixture
+            .store()
+            .join(format!("ledger-{:020}.json", generation + 1));
+        let observed = Arc::new(AtomicBool::new(false));
+        let observation = observed.clone();
+        let server = Server::start_with_observer(
+            vec![
+                response("200 OK", AUTH),
+                response("200 OK", DETAIL),
+                delete_reply(204),
+            ],
+            HOST,
+            move |request| {
+                if !request.starts_with("DELETE ") {
+                    return;
+                }
+                assert!(matches!(
+                    LedgerStore::open(&original),
+                    Err(StoreError::Locked)
+                ));
+                let snapshot: Snapshot =
+                    serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+                assert_eq!(snapshot.generation, generation + 1);
+                let ledger =
+                    ExperimentLedger::from_json(snapshot.ledger.get().as_bytes(), &binding)
+                        .unwrap();
+                let intents = ledger.deletion_intents();
+                assert_eq!(intents.len(), 2);
+                assert_eq!(intents[0], retained);
+                let retry = intents[1].retry.as_ref().unwrap();
+                assert_eq!(retry.prior_intent_generation, 1);
+                assert!(retry.started_at_unix_seconds <= retry.readback_at_unix_seconds);
+                assert!(retry.readback_at_unix_seconds <= intents[1].recorded_at_unix_seconds);
+                assert!(matches!(&retry.detail, ObservedDetail::Present(cvm) if cvm.id == CVM));
+                assert!(intents[1].outcome.is_none());
+                observation.store(true, Ordering::SeqCst);
+            },
+        )
+        .await;
+        let report = server
+            .client(AUTH.len().max(DETAIL.len()))
+            .retry_tracked(&mut store, generation, CVM, 1)
+            .await
+            .unwrap();
+        assert_eq!(report.prior_intent_generation(), Some(1));
+        assert_eq!(report.intent_generation(), generation + 1);
+        assert_eq!(
+            report.preparation_readback(),
+            PreparationReadback::CvmFieldsMatch
+        );
+        assert_eq!(report.provider_outcome(), DeletionOutcome::Initiated204);
+        assert_eq!(report.outcome_journal(), OutcomeJournal::Committed);
+        assert!(!report.cleanup_complete());
+        assert!(!report.independent_disk_deletion_verified());
+        assert!(observed.load(Ordering::SeqCst));
+        server.wait_closed(3).await;
+        assert_eq!(
+            request_methods(&server),
+            [
+                "GET /api/v1/auth/me HTTP/1.1",
+                "GET /api/v1/cvms/synthetic%2Dcvm%2D1 HTTP/1.1",
+                "DELETE /api/v1/cvms/synthetic%2Dcvm%2D1 HTTP/1.1",
+            ]
+        );
+        assert_eq!(fs::read(fixture.original()).unwrap(), original_bytes);
+        assert_eq!(store.ledger().unwrap().deletion_intents()[0], prior);
+        assert!(
+            store
+                .ledger()
+                .unwrap()
+                .planning_cost_at(wall_time().unwrap())
+                .unwrap()
+                >= cost
+        );
+        drop(store);
+        assert_eq!(
+            fixture.open().ledger().unwrap().deletion_intents()[0],
+            prior
+        );
+    }
+}
+
+#[tokio::test]
+async fn retry_link_and_local_ledger_failures_send_no_authentication() {
+    for case in [
+        "missing",
+        "wrong_link",
+        "stale_link",
+        "generation",
+        "untracked",
+        "draft",
+        "history",
+        "future",
+        "workspace",
+    ] {
+        let fixture = Fixture::standard();
+        let mut store = fixture.open();
+        let mut generation = match case {
+            "missing" => 0,
+            "future" => {
+                drop(
+                    store
+                        .prepare_deletion(
+                            0,
+                            WORKSPACE,
+                            CVM,
+                            wall_time().unwrap() + MAX_LIFETIME_SECONDS,
+                        )
+                        .unwrap(),
+                );
+                1
+            }
+            _ => prior_intent(&mut store, None),
+        };
+        if case == "stale_link" {
+            drop(
+                store
+                    .prepare_deletion_retry(
+                        1,
+                        WORKSPACE,
+                        CVM,
+                        DeletionRetryRecord {
+                            prior_intent_generation: 1,
+                            started_at_unix_seconds: START,
+                            readback_at_unix_seconds: START,
+                            detail: ObservedDetail::NotFound,
+                        },
+                        START,
+                    )
+                    .unwrap(),
+            );
+            generation = 2;
+        }
+        if case == "draft" {
+            fs::write(fixture.store().join("pending.json"), b"synthetic draft").unwrap();
+        }
+        if case == "history" {
+            fs::write(
+                fixture.store().join("ledger-00000000000000000000.json"),
+                b"synthetic corruption",
+            )
+            .unwrap();
+        }
+        let server = Server::start(vec![response("200 OK", AUTH)], HOST).await;
+        let mut client = server.client(AUTH.len().max(DETAIL.len()));
+        if case == "workspace" {
+            client.workspace_id = "wrong_workspace".into();
+        }
+        let error = client
+            .retry_tracked(
+                &mut store,
+                if case == "generation" {
+                    generation + 1
+                } else {
+                    generation
+                },
+                if case == "untracked" {
+                    "not_tracked"
+                } else {
+                    CVM
+                },
+                if case == "wrong_link" { 2 } else { 1 },
+            )
+            .await
+            .err()
+            .unwrap();
+        let expected = match case {
+            "missing" | "wrong_link" | "stale_link" => DeletionError::PriorIntentMismatch,
+            "generation" | "history" => DeletionError::Store(StoreError::InvalidState),
+            "draft" => DeletionError::Store(StoreError::PendingRecovery),
+            "untracked" => DeletionError::TargetRejected,
+            "future" => DeletionError::ClockOrLedgerRejected,
+            "workspace" => DeletionError::Provider(ProviderHttpError::WorkspaceMismatch),
+            _ => unreachable!(),
+        };
+        assert_eq!(error, expected, "{case}");
+        assert!(request_methods(&server).is_empty(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn retry_readback_rejects_conflicts_failures_and_clock_reversal_without_new_intent() {
+    for case in [
+        "app",
+        "instance",
+        "workspace",
+        "id",
+        "forbidden",
+        "clock",
+        "preauth_clock",
+    ] {
+        let fixture = Fixture::standard();
+        let mut store = fixture.open();
+        prior_intent(&mut store, None);
+        let prior = store.ledger().unwrap().deletion_intents().to_vec();
+        let detail = match case {
+            "app" => DETAIL.replace(APP, "conflicting_app"),
+            "instance" => DETAIL.replace(INSTANCE, "conflicting_instance"),
+            "workspace" => DETAIL.replace(WORKSPACE, "conflicting_workspace"),
+            "id" => DETAIL.replace(CVM, "conflicting_cvm"),
+            _ => DETAIL.into(),
+        };
+        let server = Server::start(
+            vec![
+                response("200 OK", AUTH),
+                response(
+                    if case == "forbidden" {
+                        "403 Forbidden"
+                    } else {
+                        "200 OK"
+                    },
+                    &detail,
+                ),
+            ],
+            HOST,
+        )
+        .await;
+        let mut calls = 0;
+        let error = server
+            .client(AUTH.len().max(detail.len()))
+            .authenticate_deletion()
+            .await
+            .ok()
+            .unwrap()
+            .prepare_selected_with_clock(
+                &mut store,
+                1,
+                CVM,
+                Selection::Retry(1),
+                if case == "preauth_clock" {
+                    Some(START + 1)
+                } else {
+                    None
+                },
+                || {
+                    calls += 1;
+                    Ok(if case == "clock" && calls == 2 {
+                        START - 1
+                    } else {
+                        START
+                    })
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+        let expected = match case {
+            "workspace" => DeletionError::Provider(ProviderHttpError::WorkspaceMismatch),
+            "id" => DeletionError::Provider(ProviderHttpError::InvalidResponse),
+            "forbidden" => DeletionError::Provider(ProviderHttpError::Forbidden),
+            "clock" | "preauth_clock" => DeletionError::ClockOrLedgerRejected,
+            _ => DeletionError::IdentityConflict,
+        };
+        assert_eq!(error, expected, "{case}");
+        assert_eq!(store.ledger().unwrap().deletion_intents(), prior);
+        assert_eq!(store.planning_reference().unwrap().generation(), 1);
+        server
+            .wait_closed(if case == "preauth_clock" { 1 } else { 2 })
+            .await;
+        assert!(
+            request_methods(&server)
+                .iter()
+                .all(|line| line.starts_with("GET "))
+        );
+    }
+}
+
+#[tokio::test]
+async fn retry_retains_incomplete_or_missing_detail_without_claiming_cleanup() {
+    let incomplete = DETAIL
+        .replace(&format!("\"{APP}\""), "null")
+        .replace(&format!("\"{INSTANCE}\""), "null");
+    for (reply, expected) in [
+        (
+            response("200 OK", &incomplete),
+            PreparationReadback::IncompleteCvmFields,
+        ),
+        (
+            response("404 Not Found", "synthetic detail absent"),
+            PreparationReadback::DetailNotFound,
+        ),
+    ] {
+        let fixture = Fixture::standard();
+        let mut store = fixture.open();
+        prior_intent(&mut store, None);
+        let server = Server::start(
+            vec![response("200 OK", AUTH), reply, delete_reply(404)],
+            HOST,
+        )
+        .await;
+        let prepared =
+            prepare_retry_with_clock(authenticate(&server).await, &mut store, 1, || Ok(START))
+                .await
+                .ok()
+                .unwrap();
+        assert_eq!(prepared.preparation_readback(), expected);
+        match &prepared.intent_record().retry.as_ref().unwrap().detail {
+            ObservedDetail::NotFound => assert_eq!(expected, PreparationReadback::DetailNotFound),
+            ObservedDetail::Present(cvm) => {
+                assert_eq!(expected, PreparationReadback::IncompleteCvmFields);
+                assert!(cvm.app_id.is_none() && cvm.instance_id.is_none());
+            }
+        }
+        let report = prepared.dispatch_with_clock(|| Ok(START)).await.unwrap();
+        assert_eq!(report.provider_outcome(), DeletionOutcome::NotFound404);
+        assert!(!report.cleanup_complete());
+        assert!(!report.independent_disk_deletion_verified());
+        assert!(
+            store.ledger().unwrap().deletion_intents()[0]
+                .outcome
+                .is_none()
+        );
+        server.wait_closed(3).await;
+        assert_eq!(request_methods(&server).len(), 3);
+    }
+}
+
 #[tokio::test]
 async fn explicit_entrypoint_persists_before_one_exact_delete_and_blocks_another_invocation() {
     for status in [204, 404, 403, 302, 429, 503] {
@@ -504,102 +865,239 @@ async fn cancelling_after_delete_transmission_preserves_pending_and_closes_drive
 }
 
 #[tokio::test]
-async fn original_deadline_exhaustion_journals_transport_uncertainty_without_retry() {
+async fn retry_cancellation_preserves_both_intents_without_an_automatic_request() {
+    for after_transmission in [false, true] {
+        let fixture = Fixture::standard();
+        let mut store = fixture.open();
+        prior_intent(&mut store, None);
+        let prior = store.ledger().unwrap().deletion_intents()[0].clone();
+        let server = Server::start(
+            vec![
+                response("200 OK", AUTH),
+                response("200 OK", DETAIL),
+                b"HTTP/1.1 ".to_vec(),
+            ],
+            HOST,
+        )
+        .await;
+        let prepared =
+            prepare_retry_with_clock(authenticate(&server).await, &mut store, 1, || Ok(START))
+                .await
+                .ok()
+                .unwrap();
+        if after_transmission {
+            // Poll the request until the fake provider sees it, then drop its
+            // future just as cancellation would. The borrowed writer lock stays
+            // held until this future is gone.
+            let mut dispatch = Box::pin(prepared.dispatch_with_clock(|| Ok(START)));
+            tokio::select! {
+                _ = &mut dispatch => panic!("synthetic partial response completed"),
+                _ = server.wait_requests(3) => {}
+            }
+            assert!(matches!(
+                LedgerStore::open(&fixture.original()),
+                Err(StoreError::Locked)
+            ));
+            drop(dispatch);
+        } else {
+            drop(prepared.dispatch());
+        }
+        let count = if after_transmission { 3 } else { 2 };
+        server.wait_closed(count).await;
+        assert_eq!(request_methods(&server).len(), count);
+        drop(store);
+        let reopened = fixture.open();
+        let intents = reopened.ledger().unwrap().deletion_intents();
+        assert_eq!(intents.len(), 2);
+        assert_eq!(intents[0], prior);
+        assert_eq!(
+            intents[1].retry.as_ref().unwrap().prior_intent_generation,
+            1
+        );
+        assert!(intents[1].outcome.is_none());
+    }
+}
+
+#[tokio::test]
+async fn retry_with_expired_original_budget_keeps_durable_intent_without_dispatch() {
     let fixture = Fixture::standard();
     let mut store = fixture.open();
+    prior_intent(&mut store, None);
     let server = Server::start(
-        vec![
-            response("200 OK", AUTH),
-            response("200 OK", DETAIL),
-            b"HTTP/1.1 ".to_vec(),
-        ],
+        vec![response("200 OK", AUTH), response("200 OK", DETAIL)],
         HOST,
     )
     .await;
     let client = server.client(AUTH.len().max(DETAIL.len()));
     let deadline = client.deadline;
-    let client = client.authenticate_deletion().await.ok().unwrap();
-    // Spend half the fixture's remaining budget before preparation. A renewed
-    // phase budget would then extend beyond the distinct boundary below.
-    let spent = deadline.saturating_duration_since(Instant::now()) / 2;
-    tokio::time::pause();
-    tokio::time::advance(spent).await;
-    tokio::time::resume();
-    let task = tokio::spawn(async move {
-        let prepared = client
-            .prepare_with_clock(&mut store, 0, CVM, || Ok(START))
-            .await
-            .ok()
-            .unwrap();
-        prepared.dispatch_with_clock(|| Ok(START)).await
-    });
-    server.wait_requests(3).await;
+    let prepared = prepare_retry_with_clock(
+        client.authenticate_deletion().await.ok().unwrap(),
+        &mut store,
+        1,
+        || Ok(START),
+    )
+    .await
+    .ok()
+    .unwrap();
     tokio::time::pause();
     tokio::time::advance(deadline.saturating_duration_since(Instant::now())).await;
-    let report = task.await.unwrap().unwrap();
-    // Allow timer granularity while detecting renewal, using only intervals
-    // derived from the explicit synthetic client budget.
-    assert!(Instant::now() < deadline + spent);
+    assert_eq!(
+        prepared.dispatch_with_clock(|| Ok(START)).await.err(),
+        Some(DeletionError::Provider(ProviderHttpError::DeadlineExceeded))
+    );
     tokio::time::resume();
-    assert_eq!(
-        report.provider_outcome(),
-        DeletionOutcome::TransportUncertain
-    );
-    assert_eq!(
-        report.transport_issue(),
-        Some(ProviderHttpError::DeadlineExceeded)
-    );
-    assert_eq!(report.outcome_journal(), OutcomeJournal::Committed);
-    server.wait_closed(3).await;
-    assert_eq!(
-        fixture.open().ledger().unwrap().deletion_intents()[0]
-            .outcome
-            .as_ref()
-            .unwrap()
-            .outcome,
-        DeletionOutcome::TransportUncertain
-    );
-    assert_eq!(request_methods(&server).len(), 3);
+    server.wait_closed(2).await;
+    assert_eq!(request_methods(&server).len(), 2);
+    drop(store);
+    let reopened = fixture.open();
+    let intents = reopened.ledger().unwrap().deletion_intents();
+    assert_eq!(intents.len(), 2);
+    assert!(intents.iter().all(|intent| intent.outcome.is_none()));
 }
 
 #[tokio::test]
-async fn lost_reply_or_out_of_range_http_status_stays_uncertain_and_durable() {
-    for (reply, expected) in [
-        (Vec::new(), ProviderHttpError::HttpFailed),
-        (delete_reply(700), ProviderHttpError::UnexpectedStatus),
-    ] {
+async fn original_deadline_exhaustion_journals_transport_uncertainty_without_retry() {
+    for retry in [false, true] {
         let fixture = Fixture::standard();
         let mut store = fixture.open();
+        if retry {
+            prior_intent(&mut store, None);
+        }
         let server = Server::start(
-            vec![response("200 OK", AUTH), response("200 OK", DETAIL), reply],
+            vec![
+                response("200 OK", AUTH),
+                response("200 OK", DETAIL),
+                b"HTTP/1.1 ".to_vec(),
+            ],
             HOST,
         )
         .await;
-        let prepared = authenticate(&server)
-            .await
-            .prepare_with_clock(&mut store, 0, CVM, || Ok(START))
-            .await
-            .ok()
-            .unwrap();
-        let report = prepared.dispatch_with_clock(|| Ok(START)).await.unwrap();
+        let client = server.client(AUTH.len().max(DETAIL.len()));
+        let deadline = client.deadline;
+        let client = client.authenticate_deletion().await.ok().unwrap();
+        // Spend half the fixture's remaining budget before preparation. A renewed
+        // phase budget would then extend beyond the distinct boundary below.
+        let spent = deadline.saturating_duration_since(Instant::now()) / 2;
+        tokio::time::pause();
+        tokio::time::advance(spent).await;
+        tokio::time::resume();
+        let task = tokio::spawn(async move {
+            let prepared = client
+                .prepare_selected_with_clock(
+                    &mut store,
+                    u64::from(retry),
+                    CVM,
+                    if retry {
+                        Selection::Retry(1)
+                    } else {
+                        Selection::First
+                    },
+                    None,
+                    || Ok(START),
+                )
+                .await
+                .ok()
+                .unwrap();
+            prepared.dispatch_with_clock(|| Ok(START)).await
+        });
+        server.wait_requests(3).await;
+        tokio::time::pause();
+        tokio::time::advance(deadline.saturating_duration_since(Instant::now())).await;
+        let report = task.await.unwrap().unwrap();
+        // Allow timer granularity while detecting renewal, using only intervals
+        // derived from the explicit synthetic client budget.
+        assert!(Instant::now() < deadline + spent);
+        tokio::time::resume();
         assert_eq!(
             report.provider_outcome(),
             DeletionOutcome::TransportUncertain
         );
-        assert_eq!(report.transport_issue(), Some(expected));
-        assert_eq!(report.outcome_journal(), OutcomeJournal::Committed);
-        assert!(!report.cleanup_complete());
-        server.wait_closed(3).await;
-        assert_eq!(request_methods(&server).len(), 3);
-        drop(store);
         assert_eq!(
-            fixture.open().ledger().unwrap().deletion_intents()[0]
+            report.transport_issue(),
+            Some(ProviderHttpError::DeadlineExceeded)
+        );
+        assert_eq!(report.outcome_journal(), OutcomeJournal::Committed);
+        server.wait_closed(3).await;
+        assert_eq!(
+            fixture.open().ledger().unwrap().deletion_intents()[usize::from(retry)]
                 .outcome
                 .as_ref()
                 .unwrap()
                 .outcome,
             DeletionOutcome::TransportUncertain
         );
+        assert_eq!(request_methods(&server).len(), 3);
+        if retry {
+            assert!(
+                fixture.open().ledger().unwrap().deletion_intents()[0]
+                    .outcome
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn lost_reply_or_out_of_range_http_status_stays_uncertain_and_durable() {
+    for retry in [false, true] {
+        for (reply, expected) in [
+            (Vec::new(), ProviderHttpError::HttpFailed),
+            (delete_reply(700), ProviderHttpError::UnexpectedStatus),
+        ] {
+            let fixture = Fixture::standard();
+            let mut store = fixture.open();
+            if retry {
+                prior_intent(&mut store, None);
+            }
+            let server = Server::start(
+                vec![response("200 OK", AUTH), response("200 OK", DETAIL), reply],
+                HOST,
+            )
+            .await;
+            let prepared = authenticate(&server)
+                .await
+                .prepare_selected_with_clock(
+                    &mut store,
+                    u64::from(retry),
+                    CVM,
+                    if retry {
+                        Selection::Retry(1)
+                    } else {
+                        Selection::First
+                    },
+                    None,
+                    || Ok(START),
+                )
+                .await
+                .ok()
+                .unwrap();
+            let report = prepared.dispatch_with_clock(|| Ok(START)).await.unwrap();
+            assert_eq!(
+                report.provider_outcome(),
+                DeletionOutcome::TransportUncertain
+            );
+            assert_eq!(report.transport_issue(), Some(expected));
+            assert_eq!(report.outcome_journal(), OutcomeJournal::Committed);
+            assert!(!report.cleanup_complete());
+            server.wait_closed(3).await;
+            assert_eq!(request_methods(&server).len(), 3);
+            drop(store);
+            assert_eq!(
+                fixture.open().ledger().unwrap().deletion_intents()[usize::from(retry)]
+                    .outcome
+                    .as_ref()
+                    .unwrap()
+                    .outcome,
+                DeletionOutcome::TransportUncertain
+            );
+            if retry {
+                assert!(
+                    fixture.open().ledger().unwrap().deletion_intents()[0]
+                        .outcome
+                        .is_none()
+                );
+            }
+        }
     }
 }
 
