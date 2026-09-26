@@ -9,6 +9,7 @@ cargo build --locked -p zrpc-server --bins
 python3 scripts/cli-check.py
 python3 scripts/public-inspection-check.py
 python3 scripts/wrapper-check.py
+python3 experiments/ephemeral-runtime/test-launch-profile.py
 mkdir -p .codex-tmp
 rustc --edition=2021 --test experiments/ephemeral-runtime/runtime-guard.rs -o .codex-tmp/runtime-guard-tests
 .codex-tmp/runtime-guard-tests

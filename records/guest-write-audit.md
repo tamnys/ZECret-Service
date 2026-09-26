@@ -1,0 +1,26 @@
+# Guest write-path audit — 2026-09-26
+
+Internal, source and rootfs evidence for the catalog-matched dstack v0.5.9
+artifact. This is a targeted static inventory, not a boot trace or proof that
+all writes stay in memory. The exact artifact and verifier receipts are in
+[rootfs-artifact-inspection.md](rootfs-artifact-inspection.md). The source
+candidate is generated from dstack commit
+`282eeb27d22d8f091ad0fa5a90e638f85cf68751`; it has not been integrated
+into a built guest image. No private mode is approved.
+
+| Surface | Exact stock observation | Candidate control and missing proof |
+| --- | --- | --- |
+| Runtime metadata and image layers | The pinned `dstack-prepare.sh` recursively binds persistent data-disk directories onto `/var/lib/docker`, `/var/lib/containerd` and `/var/lib/sysbox`. Docker/containerd are enabled, and their stock units restart automatically. | The generated preparation script creates fresh tmpfs-backed roots and binds them before orphan cleanup. The guard checks mounts and swap before service starts. Effective service/socket ordering, crash handling and same-boot survival need an exact-image boot test. |
+| dstack work and private configuration | The pinned setup copies `app-compose.json`, `sys-config.json`, instance metadata, encrypted environment and user configuration from host-shared storage to its work directory. It writes app keys, decrypted environment files, `agent.json` and Compose YAML there. | The candidate mounts a fresh tmpfs work directory before setup, rejects nonempty host encrypted environment/user configuration and host registry override, binds both launch and system configuration bytes, removes script execution and generates Compose YAML from the bound JSON. Its exact file set and mounts must be observed after boot; the host-shared source and its KMS implications remain external trust boundaries. |
+| Gateway and network setup | The pinned setup writes `/run/dstack/gateway-cache.json` and `/etc/wireguard/dstack-wg0.conf`; it can write `/etc/docker/daemon.json` from a host registry setting. | The candidate rejects that registry override; `/run` is tmpfs in the stock fstab. The `/etc` overlay backing and gateway/WireGuard configuration lifetime need effective mount inspection and poisoned-input tests. The production gateway may override the guest port policy. |
+| Temporary files and encryption | The pinned storage setup creates a private tmpfs at `/tmp/dstack-luks-header` for a LUKS header. The stock image enables a tmpfs `/tmp.mount`; its fstab mounts `/run` and `/var/volatile` as tmpfs. | The candidate requires encrypted ext4 and zero swap. Before overlays, the guard checks `/var/volatile`, `/run` and `/tmp`; at service startup it rechecks `/run`, `/tmp`, `/dstack`, runtime roots and `/proc/swaps`, rejecting persistent descendants. These static files do not prove the mounted topology in every process or container namespace. |
+| Logs, dumps and diagnostics | The exact rootfs has a `/var/log` directory, tmpfiles rules including a coredump directory, a commented `DefaultLimitCORE` setting, and no inspected coredump policy file. The image has rescue/emergency and hibernation units/generators. | The candidate sets `journald` storage to none and avoids console-forwarded candidate unit output. It now writes an empty `kernel.core_pattern`, zero `core_uses_pid` and zero `fs.suid_dumpable` before KMS; the guard reads these values before launch and on revalidation. The [Linux core(5) contract](https://man7.org/linux/man-pages/man5/core.5.html) says the empty pattern with `core_uses_pid=0` writes no core file and pipe handlers can bypass `RLIMIT_CORE`. Exact-kernel write/read behavior, other loggers, hypervisor capture, hibernation and diagnostic paths are untested. |
+| Public node storage | The design permits persistent encrypted ext4 only for public Zebra chain state. The pinned setup mounts a persistent data disk, but the candidate has no installed Zebra container, namespace layout or write policy limiting that disk to public node data. | Require the final Compose file and effective mount/write inventory to expose a single data path to Zebra, with no executable, configuration, credential or TLS-key reads from it. Test poisoned and rolled-back disks before approval. |
+| Administration and recovery | The exact rootfs contains rescue/emergency targets, `systemd-sulogin-shell`, debug and hibernate generators. The root account password is locked, but that does not establish console, boot-parameter or remote-exec absence. | The source candidate disables runtime-supplied scripts and changes selected units to fail closed. It does not yet prove the absence of console, rescue, privileged update/exec or host-side recovery paths. Phala's production image/KMS contract and live effective tests are required. |
+
+The persistent disk boundary is **not proven**. The next acceptance evidence is
+an exact-image, namespace-by-namespace mount and write trace across successful
+startup, malformed preparation, crash/OOM, reboot and poisoned-disk cases,
+combined with enforced write/mount policy. A clean post-run canary scan alone
+cannot show that no private bytes were written. Do not approve a release from
+this inventory.

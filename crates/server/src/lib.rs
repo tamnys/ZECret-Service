@@ -1,10 +1,12 @@
-//! Fixture wrapper, internal node adapter, and public-attestation-only listener.
-//! No private RPC listener or attestation acceptance authority is provided.
+//! Fixture wrapper, internal node adapter, and TLS attestation listener.
+//! An optional typed RPC route uses the same connection after quote issuance;
+//! the server does not grant client-side release approval.
 #![forbid(unsafe_code)]
 
 pub mod attestation;
 pub mod bootstrap;
 pub mod node;
+pub mod quote_proxy;
 
 use serde_json::{Value, json};
 use std::io::{self, Write};

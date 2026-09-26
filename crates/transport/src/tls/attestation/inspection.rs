@@ -1,10 +1,11 @@
 //! Diagnostic authentication consumes the session but never grants query authority.
 
-use super::UnverifiedPublicEvidence;
+use super::{UnverifiedPublicEvidence, VerifiedRpcSession};
 use crate::tls::MAX_CONNECTION_LIFETIME;
 use serde::Serialize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zrpc_verifier::{
+    ApprovedRelease, ReleasePolicy,
     offline::InspectionStatus,
     workload::{BoundWorkloadInspection, WorkloadPolicy, inspect_workload_and_report_data},
 };
@@ -70,7 +71,12 @@ impl EndpointInspection {
             && self.local_clock == InspectionStatus::Verified
             && self.evidence.as_ref().is_some_and(|evidence| {
                 let quote = &evidence.workload.quote;
-                quote.hardware_authenticity == InspectionStatus::Verified
+                quote.issue.is_none()
+                    && evidence.workload.workload_issue.is_none()
+                    && evidence.workload.runtime_event_integrity == InspectionStatus::Verified
+                    && evidence.workload.os_measurement_policy == InspectionStatus::Verified
+                    && evidence.workload.app_configuration_policy == InspectionStatus::Verified
+                    && quote.hardware_authenticity == InspectionStatus::Verified
                     && quote.security_policy == InspectionStatus::Verified
                     && quote.workload_policy == InspectionStatus::Verified
                     && evidence.authenticated_report_data_match == InspectionStatus::Verified
@@ -89,6 +95,49 @@ impl UnverifiedPublicEvidence {
     /// supplied by callers. No private-query or VerifiedChannel result exists.
     pub fn inspect(
         self,
+        collateral_json: &[u8],
+        raw_app_compose: &[u8],
+        policy: &WorkloadPolicy,
+    ) -> EndpointInspection {
+        self.inspect_against(collateral_json, raw_app_compose, policy)
+    }
+
+    /// Only client-packaged reviewed releases can authorize the retained TLS
+    /// sender. Every selected release is compared against authenticated quote
+    /// claims and the exact session exporter; none are learned from the peer.
+    pub fn authorize(
+        self,
+        collateral_json: &[u8],
+        raw_app_compose: &[u8],
+        selection: &ReleasePolicy,
+    ) -> Result<VerifiedRpcSession, zrpc_protocol::SafeError> {
+        let releases = ApprovedRelease::selected(selection)?;
+        if releases.is_empty() {
+            return Err(zrpc_protocol::SafeError::new(
+                zrpc_protocol::ErrorCode::UnknownRelease,
+                "This client has no selected reviewed release.",
+            ));
+        }
+        let approved = releases.iter().any(|release| {
+            let report = self.inspect_against(collateral_json, raw_app_compose, release.workload());
+            report.diagnostic_passed()
+        });
+        if !approved {
+            return Err(zrpc_protocol::SafeError::new(
+                zrpc_protocol::ErrorCode::PrivateModeUnavailable,
+                "Hardware, workload, freshness or live TLS key did not match a reviewed release.",
+            ));
+        }
+        // Ownership moves, so this is the same sender that received the quote.
+        Ok(VerifiedRpcSession {
+            session: self._session,
+            deadline: self.deadline,
+            authority: self.authority,
+        })
+    }
+
+    fn inspect_against(
+        &self,
         collateral_json: &[u8],
         raw_app_compose: &[u8],
         policy: &WorkloadPolicy,

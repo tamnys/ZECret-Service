@@ -8,15 +8,18 @@ compile_error!("the candidate runtime guard requires Linux procfs semantics");
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::ErrorKind;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const RUNTIME_ROOTS: [&str; 3] = [
+const RUNTIME_ROOTS: [&str; 4] = [
     "/var/lib/docker",
     "/var/lib/containerd",
     "/var/lib/sysbox",
+    "/dstack",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,7 +38,36 @@ enum Denial {
     NonMemoryDescendantMount,
     MalformedSwaps,
     SwapPresent,
+    CrashDumpPolicyUnsafe,
     ObservedStateChanged,
+    StartMarkUnavailable,
+    AlreadyStarted,
+}
+
+const START_SERVICES: [&str; 8] = [
+    "docker", "containerd", "sysbox", "sysbox-mgr", "sysbox-fs",
+    "app-compose", "dstack-guest-agent", "quote-proxy",
+];
+
+enum Mode {
+    Probe,
+    PreOverlay,
+    MarkStart(&'static str),
+}
+
+fn mode() -> Result<Mode, Denial> {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    match args.as_slice() {
+        [_] => Ok(Mode::Probe),
+        [_, flag] if flag == "--pre-overlay" => Ok(Mode::PreOverlay),
+        [_, flag, service] if flag == "--mark-start" => START_SERVICES
+            .iter()
+            .copied()
+            .find(|allowed| service == allowed)
+            .map(Mode::MarkStart)
+            .ok_or(Denial::ArgumentsUnsupported),
+        _ => Err(Denial::ArgumentsUnsupported),
+    }
 }
 
 #[derive(Debug)]
@@ -164,11 +196,33 @@ fn no_swap(input: &[u8]) -> Result<(), Denial> {
     Ok(())
 }
 
+fn no_core_dump(pattern: &[u8], uses_pid: &[u8], suid_dumpable: &[u8]) -> Result<(), Denial> {
+    // Linux core(5): an empty pattern with core_uses_pid=0 writes no dump.
+    // Refuse pipe handlers: RLIMIT_CORE does not constrain their input.
+    if pattern != b"\n" || uses_pid != b"0\n" || suid_dumpable != b"0\n" {
+        return Err(Denial::CrashDumpPolicyUnsafe);
+    }
+    Ok(())
+}
+
+fn live_core_policy() -> Result<[Vec<u8>; 3], Denial> {
+    [
+        "/proc/sys/kernel/core_pattern",
+        "/proc/sys/kernel/core_uses_pid",
+        "/proc/sys/fs/suid_dumpable",
+    ]
+    .map(|path| fs::read(path).map_err(|_| Denial::ProcReadFailed))
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?
+    .try_into()
+    .map_err(|_| Denial::ProcReadFailed)
+}
+
 fn memory_filesystem(mount: &Mount) -> bool {
     matches!(mount.filesystem.as_slice(), b"tmpfs" | b"ramfs")
 }
 
-fn check(mountinfo: &[u8], swaps: &[u8], roots: &[PathBuf; 3]) -> Result<(), Denial> {
+fn check(mountinfo: &[u8], swaps: &[u8], roots: &[PathBuf]) -> Result<(), Denial> {
     no_swap(swaps)?;
     for (index, root) in roots.iter().enumerate() {
         if !root.is_absolute() {
@@ -234,9 +288,9 @@ fn check(mountinfo: &[u8], swaps: &[u8], roots: &[PathBuf; 3]) -> Result<(), Den
     Ok(())
 }
 
-fn live_roots() -> Result<[PathBuf; 3], Denial> {
+fn live_paths(paths: &[&str]) -> Result<Vec<PathBuf>, Denial> {
     let mut roots = Vec::new();
-    for path in RUNTIME_ROOTS {
+    for path in paths {
         let root = fs::canonicalize(path).map_err(|_| Denial::RuntimeRootUnavailable)?;
         if !fs::metadata(&root)
             .map_err(|_| Denial::RuntimeRootUnavailable)?
@@ -246,27 +300,88 @@ fn live_roots() -> Result<[PathBuf; 3], Denial> {
         }
         roots.push(root);
     }
-    roots.try_into().map_err(|_| Denial::RuntimeRootUnavailable)
+    Ok(roots)
+}
+
+fn live_roots() -> Result<[PathBuf; 4], Denial> {
+    live_paths(&RUNTIME_ROOTS)?
+        .try_into()
+        .map_err(|_| Denial::RuntimeRootUnavailable)
 }
 
 fn live_check() -> Result<(), Denial> {
-    if std::env::args_os().len() != 1 {
-        return Err(Denial::ArgumentsUnsupported);
-    }
+    let mode = mode()?;
     let mounts = fs::read("/proc/self/mountinfo").map_err(|_| Denial::ProcReadFailed)?;
     let swaps = fs::read("/proc/swaps").map_err(|_| Denial::ProcReadFailed)?;
+    let core = live_core_policy()?;
+    no_core_dump(&core[0], &core[1], &core[2])?;
+    if matches!(mode, Mode::PreOverlay) {
+        // These are the stock image's memory-backed writable system roots.
+        // Verify them before overlay setup and before reading KMS material.
+        let early = live_paths(&["/var/volatile", "/run", "/tmp"])?;
+        check(&mounts, &swaps, &early)?;
+        if mounts != fs::read("/proc/self/mountinfo").map_err(|_| Denial::ProcReadFailed)?
+            || swaps != fs::read("/proc/swaps").map_err(|_| Denial::ProcReadFailed)?
+            || core != live_core_policy()?
+            || early != live_paths(&["/var/volatile", "/run", "/tmp"])?
+        {
+            return Err(Denial::ObservedStateChanged);
+        }
+        return Ok(());
+    }
+    // Runtime roots alone do not cover sockets, temporary configuration and
+    // other private process files placed beneath /run or /tmp.
+    let scratch = live_paths(&["/run", "/tmp"])?;
+    check(&mounts, &swaps, &scratch)?;
     let roots = live_roots()?;
     check(&mounts, &swaps, &roots)?;
+    if matches!(mode, Mode::MarkStart(_)) {
+        // The denial marker is never a readiness proof. It may only live on
+        // memory-backed /run, so same-boot retries cannot use persistent state.
+        check(&mounts, &swaps, &[PathBuf::from("/run/zrpc-starts")])?;
+    }
 
     // Reject observed changes during this invocation. This is not an atomic
     // mount/swap transaction and cannot prevent changes after the final read.
     if mounts != fs::read("/proc/self/mountinfo").map_err(|_| Denial::ProcReadFailed)?
         || swaps != fs::read("/proc/swaps").map_err(|_| Denial::ProcReadFailed)?
+        || core != live_core_policy()?
+        || scratch != live_paths(&["/run", "/tmp"])?
         || roots != live_roots()?
     {
         return Err(Denial::ObservedStateChanged);
     }
+    if let Mode::MarkStart(service) = mode {
+        mark_start(Path::new("/run/zrpc-starts"), service, 0)?;
+    }
     Ok(())
+}
+
+fn mark_start(directory: &Path, service: &str, required_uid: u32) -> Result<(), Denial> {
+    if !START_SERVICES.contains(&service) {
+        return Err(Denial::ArgumentsUnsupported);
+    }
+    match fs::create_dir(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(Denial::StartMarkUnavailable),
+    }
+    let metadata = fs::symlink_metadata(directory).map_err(|_| Denial::StartMarkUnavailable)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.uid() != required_uid {
+        return Err(Denial::StartMarkUnavailable);
+    }
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+        .map_err(|_| Denial::StartMarkUnavailable)?;
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(service))
+    {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(Denial::AlreadyStarted),
+        Err(_) => Err(Denial::StartMarkUnavailable),
+    }
 }
 
 fn main() -> ExitCode {
@@ -302,6 +417,61 @@ mod tests {
     #[test]
     fn memory_roots_and_optional_fields_pass() {
         assert_eq!(check_text(MEMORY), Ok(()));
+    }
+
+    #[test]
+    fn pre_overlay_storage_must_be_memory_backed_without_swap() {
+        let volatile = [PathBuf::from("/var/volatile")];
+        assert_eq!(check(MEMORY.as_bytes(), NO_SWAP, &volatile), Ok(()));
+        assert_eq!(check(PERSISTENT.as_bytes(), NO_SWAP, &volatile), Err(Denial::NonMemoryDescendantMount));
+        assert_eq!(check(MEMORY.as_bytes(), ACTIVE_SWAP, &volatile), Err(Denial::SwapPresent));
+    }
+
+    #[test]
+    fn run_and_tmp_require_memory_mounts_without_persistent_children() {
+        let early = ["/var/volatile", "/run", "/tmp"].map(PathBuf::from);
+        let run = "3 1 0:3 / /run rw - tmpfs tmpfs rw\n";
+        let tmp = "4 1 0:4 / /tmp rw - tmpfs tmpfs rw\n";
+        let mounts = format!("{MEMORY}{run}{tmp}");
+        assert_eq!(check(mounts.as_bytes(), NO_SWAP, &early), Ok(()));
+        assert_eq!(check(MEMORY.as_bytes(), NO_SWAP, &early), Err(Denial::NonMemoryRuntimeMount));
+        for (original, replacement) in [
+            (run, "3 1 253:0 / /run rw - ext4 /dev/dm-1 rw\n"),
+            (tmp, "4 1 253:0 / /tmp rw - ext4 /dev/dm-1 rw\n"),
+        ] {
+            assert_eq!(
+                check(mounts.replace(original, replacement).as_bytes(), NO_SWAP, &early),
+                Err(Denial::NonMemoryRuntimeMount)
+            );
+        }
+        let nested = format!("{mounts}5 3 253:0 / /run/private rw - ext4 /dev/dm-1 rw\n");
+        assert_eq!(check(nested.as_bytes(), NO_SWAP, &early), Err(Denial::NonMemoryDescendantMount));
+    }
+
+    #[test]
+    fn start_mark_requires_memory_and_refuses_same_boot_retry() {
+        let with_run = MEMORY.to_owned() + "3 1 0:3 / /run rw - tmpfs tmpfs rw\n";
+        let marker = [PathBuf::from("/run/zrpc-starts")];
+        assert_eq!(check(with_run.as_bytes(), NO_SWAP, &marker), Ok(()));
+        assert_eq!(check(MEMORY.as_bytes(), NO_SWAP, &marker), Err(Denial::NonMemoryRuntimeMount));
+
+        let unique = format!(
+            "zrpc-guard-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        fs::create_dir(&base).unwrap();
+        let required_uid = fs::metadata(&base).unwrap().uid();
+        let directory = base.join("starts");
+        assert_eq!(mark_start(&directory, "docker", required_uid), Ok(()));
+        assert_eq!(mark_start(&directory, "docker", required_uid), Err(Denial::AlreadyStarted));
+        assert_eq!(mark_start(&directory, "containerd", required_uid), Ok(()));
+        assert_eq!(mark_start(&directory, "unknown", required_uid), Err(Denial::ArgumentsUnsupported));
+        fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
@@ -375,6 +545,22 @@ mod tests {
         assert_eq!(check(MEMORY.as_bytes(), ACTIVE_SWAP, &roots()), Err(Denial::SwapPresent));
         let zram = b"Filename\tType\tSize\tUsed\tPriority\n/dev/zram0 partition 1024 0 100\n";
         assert_eq!(check(MEMORY.as_bytes(), zram, &roots()), Err(Denial::SwapPresent));
+    }
+
+    #[test]
+    fn any_core_dump_file_or_pipe_policy_is_denied() {
+        assert_eq!(no_core_dump(b"\n", b"0\n", b"0\n"), Ok(()));
+        for (pattern, uses_pid, suid_dumpable) in [
+            (b"core\n".as_slice(), b"0\n".as_slice(), b"0\n".as_slice()),
+            (b"|/usr/lib/systemd/systemd-coredump\n", b"0\n", b"0\n"),
+            (b"/dev/null\n", b"0\n", b"0\n"),
+            (b"\n", b"1\n", b"0\n"),
+            (b"\n", b"0\n", b"2\n"),
+            (b"", b"0\n", b"0\n"),
+        ] {
+            assert_eq!(no_core_dump(pattern, uses_pid, suid_dumpable),
+                       Err(Denial::CrashDumpPolicyUnsafe));
+        }
     }
 
     #[test]

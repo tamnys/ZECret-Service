@@ -1,4 +1,5 @@
-//! Session-owned public attestation. There is no RPC route or private acceptance.
+//! Session-owned attestation and optional typed node RPC on the same TLS stream.
+use crate::node::LocalNode;
 use bytes::Bytes;
 use dstack_sdk_types::dstack::GetQuoteResponse;
 use http_body_util::{BodyExt, Full, Limited};
@@ -28,8 +29,8 @@ use tokio_rustls::server::TlsStream;
 use zrpc_protocol::MAX_CONNECTION_LIFETIME_SECONDS;
 use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, ErrorCode, MAX_ATTESTATION_REQUEST_BYTES,
-    MAX_ATTESTATION_RESPONSE_BYTES, PublicAttestationResponse, SafeError,
-    parse_attestation_request,
+    MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    PublicAttestationResponse, SafeError, parse_attestation_request, parse_request,
 };
 
 fn unavailable() -> SafeError {
@@ -127,6 +128,19 @@ impl QuoteSource for DstackQuoteSource {
     }
 }
 
+/// The quote-only Unix bridge reuses this exact bounded dstack wire operation;
+/// it must not gain a second implementation of guest-agent requests.
+pub(crate) async fn request_dstack_quote(
+    socket: &Path,
+    report_data: [u8; 64],
+) -> Result<GetQuoteResponse, SafeError> {
+    DstackQuoteSource {
+        socket: socket.to_owned(),
+    }
+    .quote(report_data)
+    .await
+}
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -136,6 +150,7 @@ impl Drop for AbortOnDrop {
 
 struct Shared<Q> {
     source: Q,
+    node: Option<LocalNode>,
     connections: Arc<Semaphore>,
     quotes: Semaphore,
     quote_spacing: Duration,
@@ -145,6 +160,7 @@ impl<Q: QuoteSource> Shared<Q> {
     fn new(source: Q, limits: BootstrapLimits) -> Self {
         Self {
             source,
+            node: None,
             connections: Arc::new(Semaphore::new(limits.connections.get())),
             quotes: Semaphore::new(limits.quotes.get()),
             quote_spacing: limits.quote_spacing,
@@ -155,7 +171,8 @@ impl<Q: QuoteSource> Shared<Q> {
 
 /// Public attestation service used by the owned bootstrap listener. The runnable
 /// path generates its TLS identity locally and admits sockets before handshake.
-/// This service provides no private-RPC activation or approved-workload claim.
+/// Node RPC is enabled only when an explicit internal node adapter is supplied.
+/// It does not itself assert that a client approved this workload.
 #[derive(Clone)]
 pub struct AttestationService {
     shared: Arc<Shared<DstackQuoteSource>>,
@@ -177,6 +194,13 @@ impl AttestationService {
                 limits,
             )),
         })
+    }
+    /// Bind the allowlisted loopback node adapter to the same TLS listener.
+    /// Deployment must separately prove the measured image and node isolation.
+    pub fn with_node(mut self, node: LocalNode) -> Result<Self, SafeError> {
+        let shared = Arc::get_mut(&mut self.shared).ok_or_else(unavailable)?;
+        shared.node = Some(node);
+        Ok(self)
     }
     // Only tests may inject a pre-negotiated stream. Production listener owns
     // key generation and admission before negotiating any TLS connection.
@@ -270,6 +294,7 @@ impl AsyncWrite for SessionIo {
 struct Session {
     io: SessionIo,
     challenged: AtomicBool,
+    attestation_issued: AtomicBool,
 }
 
 #[cfg(test)]
@@ -310,6 +335,7 @@ async fn serve_until<Q: QuoteSource>(
     let session = Arc::new(Session {
         io: io.clone(),
         challenged: AtomicBool::new(false),
+        attestation_issued: AtomicBool::new(false),
     });
     let service = hyper::service::service_fn(|request| {
         let shared = shared.clone();
@@ -354,11 +380,15 @@ async fn handle<Q: QuoteSource>(
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     }
     if request.method() != hyper::Method::POST
-        || request.uri().path_and_query().map(|p| p.as_str()) != Some("/attestation")
         || request.uri().authority().is_some()
         || request.version() != Version::HTTP_11
     {
         return failure(StatusCode::NOT_FOUND);
+    }
+    match request.uri().path_and_query().map(|p| p.as_str()) {
+        Some("/rpc") => return handle_rpc(shared, session, request).await,
+        Some("/attestation") => {}
+        _ => return failure(StatusCode::NOT_FOUND),
     }
     if request.headers().contains_key(header::CONTENT_ENCODING)
         || request
@@ -441,6 +471,67 @@ async fn handle<Q: QuoteSource>(
     // Bound while serializing, avoiding a second unbounded response allocation.
     let mut output = BoundedOutput(Vec::new());
     if serde_json::to_writer(&mut output, &response).is_err() {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    session.attestation_issued.store(true, Ordering::SeqCst);
+    reply(StatusCode::OK, Bytes::from(output.0))
+}
+
+async fn handle_rpc<Q: QuoteSource>(
+    shared: Arc<Shared<Q>>,
+    session: Arc<Session>,
+    request: Request<Incoming>,
+) -> Response<Full<Bytes>> {
+    let Some(node) = shared.node.as_ref() else {
+        return failure(StatusCode::NOT_FOUND);
+    };
+    // Reject before reading any body unless this exact TLS session completed
+    // its one nonce/exporter quote exchange. The native client independently
+    // withholds the body until it authenticates and approves that quote.
+    if !session.attestation_issued.load(Ordering::SeqCst) || session.io.check_deadline().is_err() {
+        return failure(StatusCode::FORBIDDEN);
+    }
+    if request.headers().contains_key(header::CONTENT_ENCODING)
+        || request
+            .headers()
+            .get_all(header::CONTENT_TYPE)
+            .iter()
+            .count()
+            != 1
+        || request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_none_or(|h| h != "application/json")
+    {
+        return failure(StatusCode::BAD_REQUEST);
+    }
+    let body = match Limited::new(request.into_body(), MAX_REQUEST_BYTES)
+        .collect()
+        .await
+    {
+        Ok(body) => body.to_bytes(),
+        Err(_) => return failure(StatusCode::PAYLOAD_TOO_LARGE),
+    };
+    let parsed = match parse_request(&body) {
+        Ok(parsed) => parsed,
+        Err(_) => return failure(StatusCode::BAD_REQUEST),
+    };
+    let result = match node.query(&parsed).await {
+        Ok(value) => value,
+        Err(error) => {
+            // SafeError messages are fixed, query-independent literals.
+            let mut output = BoundedOutput(Vec::new());
+            if serde_json::to_writer(&mut output, &serde_json::json!({"error":error})).is_err() {
+                return failure(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            return reply(StatusCode::SERVICE_UNAVAILABLE, Bytes::from(output.0));
+        }
+    };
+    let mut output = BoundedOutput(Vec::new());
+    if serde_json::to_writer(&mut output, &result).is_err()
+        || output.0.len() > MAX_RESPONSE_BYTES
+        || session.io.check_deadline().is_err()
+    {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     }
     reply(StatusCode::OK, Bytes::from(output.0))
