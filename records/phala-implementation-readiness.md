@@ -109,6 +109,18 @@ sent, and no account credits were spent. Private mode remains blocked.
   crash/OOM behavior remain untested. The targeted
   [guest write-path audit](guest-write-audit.md) records other static surfaces
   and the missing effective write-policy proof.
+- `experiments/ephemeral-runtime/prepare-rootfs-source.py` now derives a
+  separate production-rootfs recipe candidate from two hash-checked Git objects
+  at meta-dstack `e3655d1390feee3736476f4bda35c4354b4a12fc`. The pinned
+  production recipe selects `nologin`, but the inspected stock rootfs retains
+  rescue/emergency services, sulogin and mutable boot-command generators. The
+  candidate's rootfs postprocess requires those exact observed paths, confines
+  canonical rootfs and every affected parent to BitBake's work directory,
+  removes the paths, and masks rescue, emergency, debug, hibernation and
+  offline-update units. A changed recipe, missing observed path, symlinked
+  parent or preexisting mask fails closed. This source is not installed in a
+  built image and cannot rule out
+  Phala console, exec, update or recovery controls outside the guest image.
 - The native verifier has an opaque `ApprovedRelease` separate from diagnostic
   `WorkloadPolicy`. An external policy can select only a client-embedded release.
   The manifest's launch-config digest must equal the app-compose hash used in
@@ -269,6 +281,19 @@ sent, and no account credits were spent. Private mode remains blocked.
   `target/debug/deps` write-permission error, despite owner-writable directories;
   this does not establish its cause. The catalog remains empty, so these local
   tests do not demonstrate a genuine private session.
+  Five synthetic rootfs-postprocess tests passed, including root-path and
+  internal-symlink escape refusals and a BitBake-style recipe-variable
+  expansion with those variables absent from the shell environment. The
+  generator read the exact pinned meta-dstack commit and recomputed its output
+  recipe hash. The
+  wrong source commit was refused before output; every required removal path
+  matched the prior verity-verified rootfs inventory. The complete
+  `bash scripts/check.sh --browser` passed in the managed container with Cargo
+  compilation serialized. These tests run on a temporary file tree; no Yocto
+  rootfs, guest boot or effective administrative path was tested. The managed
+  container has only the `aarch64-unknown-linux-gnu` Rust target and no x86_64
+  cross-linker. It cannot produce the required TDX x86_64 binaries without a
+  separately reviewed build environment.
   One intermediate build attempt
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check
