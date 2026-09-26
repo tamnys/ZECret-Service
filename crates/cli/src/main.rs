@@ -7,6 +7,7 @@ use std::{
 };
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
+use zrpc_protocol::Backend;
 
 mod ledger;
 mod provider_deletion;
@@ -15,7 +16,23 @@ mod provider_schedule;
 mod provider_settings;
 mod provider_watchdog;
 
-const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc inspect-endpoint --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --policy FILE\nzrpc verify --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --release-policy FILE\nzrpc query --stdin --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --release-policy FILE\nzrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]\nzrpc dashboard --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --release-policy FILE [--no-open]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nzrpc lifecycle --help\nThe compiled approved-release catalog is empty; private queries remain blocked.";
+const USAGE: &str = "zrpc doctor
+zrpc inspect-quote --quote FILE --collateral FILE
+zrpc inspect-workload [--platform gcp-tdx|phala-dstack] --quote FILE --collateral FILE --event-log FILE --policy FILE
+zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --policy FILE
+zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --release-policy FILE
+zrpc query --stdin [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --release-policy FILE
+zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
+zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --release-policy FILE [--no-open]
+zrpc demo [--no-open]
+zrpc plan --input FILE
+zrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER
+zrpc teardown --simulate --manifest FILE
+zrpc lifecycle --help
+GCP operator tooling: zrpc-gcp-lifecycle --help
+The default platform is gcp-tdx. Phala commands additionally require --app-compose FILE.
+All remote endpoints use the configured local Tor SOCKS; no direct mode exists.
+The compiled approved-release catalog is empty; private queries remain blocked.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
@@ -56,6 +73,31 @@ fn exhausted(args: &[String]) -> Result<(), String> {
     }
 }
 
+fn platform(args: &mut Vec<String>) -> Result<Backend, String> {
+    match take_value(args, "--platform")?
+        .as_deref()
+        .unwrap_or("gcp-tdx")
+    {
+        "gcp-tdx" => Ok(Backend::GcpTdx),
+        "phala-dstack" => Ok(Backend::PhalaDstack),
+        _ => Err("platform must be gcp-tdx or phala-dstack".into()),
+    }
+}
+
+fn compose_input(args: &mut Vec<String>, backend: Backend) -> Result<Vec<u8>, String> {
+    let path = take_value(args, "--app-compose")?;
+    match (backend, path) {
+        (Backend::GcpTdx, None) => Ok(Vec::new()),
+        (Backend::GcpTdx, Some(_)) => {
+            Err("--app-compose is only valid with --platform phala-dstack".into())
+        }
+        (Backend::PhalaDstack, Some(path)) => {
+            fs::read(path).map_err(|_| "app-compose unavailable".into())
+        }
+        (Backend::PhalaDstack, None) => Err("required option: --app-compose".into()),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -75,7 +117,7 @@ async fn run() -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str(){
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
-        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"tor":"not_checked; public inspection requires explicit loopback SOCKS","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"tor":"not_checked; requires explicitly configured local Tor SOCKS","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-endpoint"=>inspect_endpoint_command(args).await,
         "lifecycle"=>provider_observation::run(args).await,
         "inspect-quote"=>{
@@ -91,21 +133,31 @@ async fn run() -> Result<(), String> {
             Ok(())
         },
         "inspect-workload"=>{
+            let backend=platform(&mut args)?;
             let quote_path=required(&mut args,"--quote")?;
             let collateral_path=required(&mut args,"--collateral")?;
             let event_log_path=required(&mut args,"--event-log")?;
-            let app_compose_path=required(&mut args,"--app-compose")?;
+            let app_compose=compose_input(&mut args,backend)?;
             let policy_path=required(&mut args,"--policy")?;
             exhausted(&args)?;
             let policy_bytes=fs::read(policy_path).map_err(|_|"workload policy file unavailable")?;
-            let policy=zrpc_verifier::workload::WorkloadPolicy::from_json(&policy_bytes).map_err(|_|"workload policy rejected")?;
             let quote=fs::read(quote_path).map_err(|_|"quote file unavailable")?;
             let collateral=fs::read(collateral_path).map_err(|_|"collateral file unavailable")?;
             let event_log=fs::read(event_log_path).map_err(|_|"event log file unavailable")?;
-            let app_compose=fs::read(app_compose_path).map_err(|_|"app-compose file unavailable")?;
-            let report=zrpc_verifier::workload::inspect_workload(&quote,&collateral,&event_log,&app_compose,&policy);
-            let rejected=report.quote.issue.is_some() || report.workload_issue.is_some();
-            print_json(report)?;
+            let rejected=match backend {
+                Backend::PhalaDstack => {
+                    let policy=zrpc_verifier::workload::WorkloadPolicy::from_json(&policy_bytes).map_err(|_|"workload policy rejected")?;
+                    let report=zrpc_verifier::workload::inspect_workload(&quote,&collateral,&event_log,&app_compose,&policy);
+                    let rejected=report.quote.issue.is_some() || report.workload_issue.is_some();
+                    print_json(report)?; rejected
+                },
+                Backend::GcpTdx => {
+                    let policy=zrpc_verifier::gcp::GcpWorkloadPolicy::from_json(&policy_bytes).map_err(|_|"GCP workload policy rejected")?;
+                    let report=zrpc_verifier::gcp::inspect_gcp_workload(&quote,&collateral,&event_log,&policy);
+                    let rejected=report.quote.issue.is_some() || report.workload_issue.is_some();
+                    print_json(report)?; rejected
+                }
+            };
             if rejected { std::process::exit(1) }
             Ok(())
         },
@@ -223,22 +275,23 @@ struct LiveInputs {
 }
 
 fn live_inputs(args: &mut Vec<String>) -> Result<LiveInputs, String> {
+    let backend = platform(args)?;
     let host = required(args, "--endpoint-host")?;
     let port = required(args, "--endpoint-port")?
         .parse::<u16>()
         .map_err(|_| "invalid endpoint port")?;
     let socks = required(args, "--socks")?;
     let collateral_path = required(args, "--collateral")?;
-    let compose_path = required(args, "--app-compose")?;
+    let compose = compose_input(args, backend)?;
     let release_path = required(args, "--release-policy")?;
-    let config = zrpc_client::inspection::PublicInspectionConfig::new(&host, port, &socks)
-        .map_err(|error| error.to_string())?;
+    let config =
+        zrpc_client::inspection::PublicInspectionConfig::for_platform(backend, &host, port, &socks)
+            .map_err(|error| error.to_string())?;
     let policy = zrpc_verifier::ReleasePolicy::from_json(
         &fs::read(release_path).map_err(|_| "release policy unavailable")?,
     )
     .map_err(|_| "release policy rejected")?;
     let collateral = fs::read(collateral_path).map_err(|_| "collateral unavailable")?;
-    let compose = fs::read(compose_path).map_err(|_| "app-compose unavailable")?;
     Ok(LiveInputs {
         config,
         collateral,
@@ -304,30 +357,41 @@ async fn serve_dashboard(live: Option<LiveInputs>, no_open: bool) -> Result<(), 
 }
 
 async fn inspect_endpoint_command(mut args: Vec<String>) -> Result<(), String> {
+    let backend = platform(&mut args)?;
     let hostname = required(&mut args, "--endpoint-host")?;
     let port = required(&mut args, "--endpoint-port")?
         .parse::<u16>()
         .map_err(|_| "invalid endpoint port")?;
     let socks = required(&mut args, "--socks")?;
     let collateral_path = required(&mut args, "--collateral")?;
-    let compose_path = required(&mut args, "--app-compose")?;
+    let compose = compose_input(&mut args, backend)?;
     let policy_path = required(&mut args, "--policy")?;
     exhausted(&args)?;
     // Validate local settings and parse policy before opening any network socket.
-    let config = zrpc_client::inspection::PublicInspectionConfig::new(&hostname, port, &socks)
-        .map_err(|error| error.to_string())?;
+    let config = zrpc_client::inspection::PublicInspectionConfig::for_platform(
+        backend, &hostname, port, &socks,
+    )
+    .map_err(|error| error.to_string())?;
     let policy_bytes = fs::read(policy_path).map_err(|_| "workload policy file unavailable")?;
-    let policy = zrpc_verifier::workload::WorkloadPolicy::from_json(&policy_bytes)
-        .map_err(|_| "workload policy rejected")?;
     let collateral = fs::read(collateral_path).map_err(|_| "collateral file unavailable")?;
-    let compose = fs::read(compose_path).map_err(|_| "app-compose file unavailable")?;
-    let report = zrpc_client::inspection::inspect_endpoint(&config, &collateral, &compose, &policy)
-        .await
-        .map_err(|error| error.to_string())?;
+    let report = match backend {
+        Backend::PhalaDstack => {
+            let policy = zrpc_verifier::workload::WorkloadPolicy::from_json(&policy_bytes)
+                .map_err(|_| "workload policy rejected")?;
+            zrpc_client::inspection::inspect_endpoint(&config, &collateral, &compose, &policy).await
+        }
+        Backend::GcpTdx => {
+            let policy = zrpc_verifier::gcp::GcpWorkloadPolicy::from_json(&policy_bytes)
+                .map_err(|_| "GCP workload policy rejected")?;
+            zrpc_client::inspection::inspect_gcp_endpoint(&config, &collateral, &policy).await
+        }
+    }
+    .map_err(|error| error.to_string())?;
     let passed = report.diagnostic_passed();
     print_json(json!({
         "mode":"public_endpoint_inspection",
-        "transport":"configured_loopback_socks_with_hostname_forwarding",
+        "platform":backend,
+        "transport":"configured_loopback_socks; remote DNS for hostnames",
         "tor_process_identity_verified":false,
         "approved_release":null,
         "private_accepted":false,

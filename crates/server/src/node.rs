@@ -1,6 +1,8 @@
 //! Internal Zebra JSON-RPC over an explicit loopback socket. This module grants
 //! no customer transport or attestation authority and has no public listener.
 mod cookie_file;
+#[cfg(target_os = "linux")]
+pub use cookie_file::stage_gcp_cookie;
 mod identity;
 
 use base64::{Engine, engine::general_purpose::STANDARD};

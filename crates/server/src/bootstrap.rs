@@ -202,6 +202,22 @@ async fn connect_quote_watch(path: &Path) -> Result<UnixStream, SafeError> {
 }
 
 impl BoundNodeListener {
+    /// Google guest profile: same owned TLS/key lifecycle, separate quote ABI.
+    pub async fn bind_gcp(
+        address: SocketAddr,
+        limits: BootstrapLimits,
+        node: LocalNode,
+    ) -> Result<Self, SafeError> {
+        let path = Path::new(crate::gcp_quote::GCP_QUOTE_SOCKET);
+        probe_private_quote_socket(path).await?;
+        let watch = connect_quote_watch(Path::new(crate::gcp_quote::GCP_WATCH_SOCKET)).await?;
+        let service = AttestationService::new_gcp(path, limits)?.with_node(node)?;
+        Ok(Self {
+            listener: BoundPublicListener::bind_service(address, service).await?,
+            bridge_watch: Some(watch),
+        })
+    }
+
     pub async fn bind(
         address: SocketAddr,
         limits: BootstrapLimits,

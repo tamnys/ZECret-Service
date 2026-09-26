@@ -1,0 +1,34 @@
+[Unit]
+Description=Local TDX ConfigFS quote broker
+Requires=sys-kernel-config.mount systemd-tmpfiles-setup.service
+After=sys-kernel-config.mount systemd-tmpfiles-setup.service local-fs.target
+OnFailure=poweroff.target
+OnFailureJobMode=replace-irreversibly
+SuccessAction=poweroff
+RefuseManualStart=yes
+
+[Service]
+Type=notify
+User=root
+Group=zrpc-wrapper
+ExecStartPre=+/usr/lib/zrpc/zrpc-gcp-guard --mark-start broker
+ExecStartPre=/usr/lib/zrpc/zrpc-gcp-guard --check broker
+ExecStart=/usr/lib/zrpc/zrpc-gcp-quote-broker
+Restart=no
+KillMode=control-group
+OOMPolicy=kill
+UMask=0077
+LimitCORE=0
+StandardOutput=null
+StandardError=null
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ReadWritePaths=/run /sys/kernel/config/tsm/report
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

@@ -6,9 +6,13 @@ python3 scripts/check-verifier-features.py
 cargo test --locked --workspace
 cargo build --locked -p zrpc-cli --bins --examples
 cargo build --locked -p zrpc-server --bins
+cargo build --locked -p zrpc-lifecycle --bins
+"${CARGO_TARGET_DIR:-target}/debug/zrpc-gcp-lifecycle" --help >/dev/null
 python3 scripts/cli-check.py
 python3 scripts/public-inspection-check.py
+python3 scripts/public-inspection-check.py --platform gcp-tdx
 python3 scripts/wrapper-check.py
+python3 tools/gcp-guest/test_prepare.py
 python3 experiments/ephemeral-runtime/test-launch-profile.py
 python3 experiments/ephemeral-runtime/test-rootfs-source.py
 python3 experiments/ephemeral-runtime/test-packaging-source.py

@@ -1,0 +1,96 @@
+# Google Cloud operator lifecycle
+
+The Rust operator tool prepares local, hash-bound packages and keeps an
+append-only experiment journal. It is separate from the confidential guest and
+private-query client. Keep its files and Google credentials on the external
+Linux controller.
+
+```sh
+cargo run --locked -p zrpc-lifecycle --bin zrpc-gcp-lifecycle -- --help
+```
+
+Run build and test commands through the project's managed container.
+
+## Prepare a package
+
+Supply a `DeploymentSpec` JSON object matching
+`crates/lifecycle/src/gcp/package.rs`. Its artifact fields are objects containing
+an absolute `path` and lowercase `sha256`. Required inputs include the raw disk
+archive, release manifest, boot policy, memory measurements, reproducibility
+report, and DER Secure Boot public certificates. Keep signing private keys
+outside this package.
+
+Specify the project, C3 machine type, region/zone, boot/data disk capacities,
+private subnet CIDR, wrapper port, and an existing private staging bucket.
+The package creates its own network, subnet, ingress rule, image, separate boot
+and public-data disks, and VM. It does not delete the shared staging bucket.
+
+Provide a dated pricing record with its supporting artifact and separate
+compute, boot disk, public data disk, image, staging, external IP, network, and
+tax components. These values describe the selected configuration; they are not
+a spending authorization or a hard billing cap. The original start and deadline
+must be no more than 168 hours apart.
+
+```sh
+zrpc-gcp-lifecycle prepare \
+  --spec /operator/evaluation/spec.json \
+  --package /operator/evaluation/package.json \
+  --state /operator/evaluation/journal
+```
+
+Preparation creates new local files only and refuses existing outputs. Save the
+reported package SHA-256 for the later explicit operator action. Protect the
+original journal: copying a new deadline into a replacement journal is not a
+recovery procedure.
+
+## External controller
+
+`Runtime` selects an operator-installed Google CLI and its reviewed distribution
+receipt, private CLI configuration directory, explicit DER TLS roots, and
+operator-selected invocation/response bounds. OAuth token minting uses the
+Google CLI; tokens are never printed or written to the journal.
+
+`Controls` binds the package, controller executable, runtime file, non-root
+controller UID, Linux machine identity, measured cleanup timings, deletion
+rehearsal, and independent backstop. Export its units with:
+
+```sh
+zrpc-gcp-lifecycle export-watchdog \
+  --state /operator/evaluation/journal \
+  --controls /operator/evaluation/controls.json \
+  --output /operator/evaluation/units
+```
+
+Export does not install or activate systemd. Operator installation must enable
+the startup reconciliation service and both timers. Deployment checks the
+effective unit files, absence of drop-ins, active/enabled timers, synchronized
+clock, executable identity, and local permissions. The deadline reserves an
+in-flight invocation, poll interval, measured deletion duration, and manager
+delay. Timers and reminders cannot guarantee a spending cap.
+
+## Cloud commands and cleanup
+
+`deploy`, `observe`, `teardown`, and `watchdog-once` are separate commands.
+`deploy` additionally requires `--approve-package` with the frozen package
+SHA-256 and live external-control validation. Each invocation makes one bounded
+pass; `pending` means another pass is needed. The watchdog never creates
+resources.
+
+Live creation currently fails closed because the Compute adapter cannot safely
+delete a specific resource incarnation when another actor replaces its name
+between observation and deletion. Compute deletion also fails closed. Resolve
+that provider contract before using this tool for a hosted experiment.
+Cloud Storage deletion uses the recorded generation and a generation
+precondition. Staging buckets must have public access prevention enabled and
+must not retain deleted objects through versioning, soft delete, or retention
+policies.
+
+Read local history with `status --state DIRECTORY`. For an interrupted journal
+publication, `recover --state DIRECTORY` can finish a complete pending snapshot;
+it rejects truncated or inconsistent snapshots. Never delete pending files to
+force progress.
+
+Cleanup does not depend on an unexpired price quote or continued availability
+of the image files. Resource absence remains separate from final billing
+reconciliation. The tool never reports private-mode approval or a guaranteed
+zero balance.

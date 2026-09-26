@@ -1,0 +1,10 @@
+{
+  "classification": "UPSTREAM_REPLAY_FIXTURE_ONLY_NOT_RELEASE_EVIDENCE",
+  "source": "https://github.com/google/go-eventlog",
+  "commit": "65d54cb8f3fb1a6ccb3f0a0a6e247e5c13a4bc04",
+  "file": "testdata/eventlogs/ccel/cos-113-intel-tdx.bin",
+  "sha256": "090dc18758380a5cc03014bf2fe354788a4f4222671e1e38f85b772d2fd344b5",
+  "expected_registers_source": "ccel/cceventlog_test.go: COS113TDX",
+  "license": "Apache-2.0",
+  "limitation": "No authenticated quote/collateral tuple accompanies this CCEL. Replaying it cannot authenticate hardware, freshness, this project's image, or any private session."
+}

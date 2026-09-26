@@ -7,8 +7,9 @@ async fn main() {
         .await
         .unwrap();
     let session = if std::env::var_os("ZRPC_BROWSER_LIVE").is_some() {
-        let config = zrpc_client::inspection::PublicInspectionConfig::new(
-            "fixture.invalid",
+        let config = zrpc_client::inspection::PublicInspectionConfig::for_platform(
+            zrpc_protocol::Backend::GcpTdx,
+            "192.0.2.1",
             443,
             "127.0.0.1:9",
         )
@@ -18,7 +19,7 @@ async fn main() {
             zrpc_cli::LiveConfiguration::new(
                 config,
                 b"{}".to_vec(),
-                b"{}".to_vec(),
+                Vec::new(),
                 zrpc_verifier::ReleasePolicy::default(),
             ),
         )

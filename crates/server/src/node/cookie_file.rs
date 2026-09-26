@@ -60,12 +60,17 @@ fn on_tmpfs(file: &File) -> bool {
 
 #[cfg(target_os = "linux")]
 pub(super) fn read(path: &Path) -> Result<CookieAuth, SafeError> {
+    let bytes = read_owned(path, rustix::process::geteuid().as_raw())?;
+    CookieAuth::from_cookie(&*bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn read_owned(path: &Path, owner: u32) -> Result<Zeroizing<[u8; COOKIE_BYTES]>, SafeError> {
     let mut file = open_checked(path)?;
     let metadata = file.metadata().map_err(|_| unavailable())?;
-    let euid = rustix::process::geteuid().as_raw();
     if !metadata.is_file()
         || metadata.mode() & 0o777 != 0o600
-        || metadata.uid() != euid
+        || metadata.uid() != owner
         || metadata.len() != COOKIE_BYTES as u64
         || !on_tmpfs(&file)
     {
@@ -89,7 +94,52 @@ pub(super) fn read(path: &Path) -> Result<CookieAuth, SafeError> {
     if canonical.as_bytes() != &bytes[PREFIX.len()..] {
         return Err(unavailable());
     }
-    CookieAuth::from_cookie(&*bytes)
+    Ok(bytes)
+}
+
+/// Immutable GCP startup handoff between the separate node and wrapper UIDs.
+/// All opens are fd-relative/NOFOLLOW; contents and both mounts are checked.
+/// A pre-existing destination is denied, prohibiting same-boot cookie refresh.
+#[cfg(target_os = "linux")]
+pub fn stage_gcp_cookie(
+    node_uid: u32,
+    wrapper_uid: u32,
+    wrapper_gid: u32,
+) -> Result<(), SafeError> {
+    use std::io::Write;
+    if rustix::process::geteuid().as_raw() != 0
+        || node_uid == 0
+        || wrapper_uid == 0
+        || node_uid == wrapper_uid
+    {
+        return Err(unavailable());
+    }
+    let bytes = read_owned(Path::new("/run/zrpc-node/.cookie"), node_uid)?;
+    let parent = open_checked(Path::new("/run/zrpc-wrapper"))?;
+    let metadata = parent.metadata().map_err(|_| unavailable())?;
+    if !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o027 != 0
+        || !on_tmpfs(&parent)
+    {
+        return Err(unavailable());
+    }
+    let fd = openat(
+        &parent,
+        ".cookie",
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|_| unavailable())?;
+    let mut file = File::from(fd);
+    file.write_all(&*bytes).map_err(|_| unavailable())?;
+    rustix::fs::fchown(
+        &file,
+        Some(rustix::process::Uid::from_raw(wrapper_uid)),
+        Some(rustix::process::Gid::from_raw(wrapper_gid)),
+    )
+    .map_err(|_| unavailable())?;
+    Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -152,6 +202,13 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write(&valid());
         let auth = read(&fixture.cookie()).unwrap();
+        assert!(
+            read_owned(
+                &fixture.cookie(),
+                rustix::process::geteuid().as_raw().wrapping_add(1)
+            )
+            .is_err()
+        );
         assert!(!format!("{auth:?}").contains("BwcH"));
     }
 

@@ -18,6 +18,7 @@ const COOKIE_PATH: &str = "/run/zrpc-node/.cookie";
 const USAGE: &str = "zrpc-node-wrapper --listen NUMERIC_IP:PORT --node LOOPBACK_IPV4:PORT --max-connections COUNT --max-quotes COUNT --quote-spacing-ms INTEGER\nMeasured guest only. The Zebra cookie must be at /run/zrpc-node/.cookie on tmpfs; the quote-only socket path is compiled in. This launcher does not approve client private mode.";
 
 struct Config {
+    gcp: bool,
     listen: SocketAddr,
     node: SocketAddrV4,
     limits: BootstrapLimits,
@@ -36,6 +37,15 @@ fn take(args: &mut Vec<String>, name: &str) -> Result<String, &'static str> {
 }
 
 fn parse(mut args: Vec<String>) -> Result<Config, &'static str> {
+    let gcp = if args.iter().any(|arg| arg == "--platform") {
+        match take(&mut args, "--platform")?.as_str() {
+            "gcp-tdx" => true,
+            "phala-dstack" => false,
+            _ => return Err("unsupported quote platform"),
+        }
+    } else {
+        false
+    };
     let listen: SocketAddr = take(&mut args, "--listen")?
         .parse()
         .map_err(|_| "invalid numeric listen address")?;
@@ -63,6 +73,7 @@ fn parse(mut args: Vec<String>) -> Result<Config, &'static str> {
     let limits = BootstrapLimits::new(connections, quotes, Duration::from_millis(spacing))
         .map_err(|_| "invalid explicit bootstrap limits")?;
     Ok(Config {
+        gcp,
         listen,
         node,
         limits,
@@ -79,7 +90,12 @@ async fn run() -> Result<(), &'static str> {
     if rustix::process::geteuid().as_raw() == 0 {
         return Err("node wrapper must run as a non-root user");
     }
-    let cookie = CookieAuth::from_tmpfs_file(Path::new(COOKIE_PATH))
+    let cookie_path = if config.gcp {
+        "/run/zrpc-wrapper/.cookie"
+    } else {
+        COOKIE_PATH
+    };
+    let cookie = CookieAuth::from_tmpfs_file(Path::new(cookie_path))
         .map_err(|_| "memory-backed Zebra cookie unavailable")?;
     let node = LocalNode::new(config.node, cookie).map_err(|_| "invalid node configuration")?;
 
@@ -89,9 +105,12 @@ async fn run() -> Result<(), &'static str> {
         .map_err(|_| "shutdown signal unavailable")?;
     // The production constructor has no caller-supplied quote socket: it
     // probes only the local quote-only bridge before binding TCP.
-    let listener = BoundNodeListener::bind(config.listen, config.limits, node)
-        .await
-        .map_err(|_| "node listener unavailable")?;
+    let listener = if config.gcp {
+        BoundNodeListener::bind_gcp(config.listen, config.limits, node).await
+    } else {
+        BoundNodeListener::bind(config.listen, config.limits, node).await
+    }
+    .map_err(|_| "node listener unavailable")?;
     listener
         .run(async move {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
@@ -153,5 +172,15 @@ mod tests {
         let mut missing = valid();
         missing.truncate(2);
         assert!(parse(missing).is_err());
+    }
+
+    #[test]
+    fn platform_is_explicit_and_never_falls_back() {
+        let mut args = valid();
+        args.extend(["--platform".into(), "gcp-tdx".into()]);
+        assert!(parse(args).unwrap().gcp);
+        let mut args = valid();
+        args.extend(["--platform".into(), "unknown".into()]);
+        assert!(parse(args).is_err());
     }
 }

@@ -3,9 +3,12 @@
 //! An embedded entry requires review of the exact manifest bytes and digest as
 //! part of a new native-client release. No runtime file, fixture, provider flag,
 //! or first-seen quote can append to this table. It is deliberately empty until
-//! production image, KMS, administration, disk and hardware gates are complete.
+//! provider-specific image, administration, disk and hardware gates are complete
+//! (including KMS policy for the Phala backend).
 use crate::{
-    ReleasePolicy, invalid_policy,
+    ReleasePolicy,
+    gcp::GcpWorkloadPolicy,
+    invalid_policy,
     workload::{StorageFs, WorkloadPolicy},
 };
 use ez_hash::{Hasher, Sha256};
@@ -14,15 +17,41 @@ use serde::{
     de::{self, MapAccess, Visitor},
 };
 use std::{collections::BTreeMap, fmt};
-use zrpc_protocol::{ErrorCode, SafeError};
+use zrpc_protocol::{Backend, ErrorCode, SafeError};
 
 struct EmbeddedRelease {
+    backend: Backend,
     id: &'static str,
     manifest_sha256: [u8; 32],
     manifest_json: &'static [u8],
 }
 
 const EMBEDDED_RELEASES: &[EmbeddedRelease] = &[];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GcpReleaseManifest {
+    schema_version: u32,
+    platform: Backend,
+    release_id: String,
+    source_commit: String,
+    workload: GcpWorkloadPolicy,
+}
+
+impl GcpReleaseManifest {
+    fn validate(&self, embedded_id: &str) -> Result<(), SafeError> {
+        if self.schema_version != 2
+            || self.platform != Backend::GcpTdx
+            || self.release_id != embedded_id
+            || self.source_commit.len() != 40
+            || !self.source_commit.bytes().all(|b| b.is_ascii_hexdigit())
+            || self.workload.validate().is_err()
+        {
+            return Err(invalid_policy());
+        }
+        Ok(())
+    }
+}
 
 pub(crate) fn is_embedded(id: &str) -> bool {
     EMBEDDED_RELEASES.iter().any(|release| release.id == id)
@@ -212,8 +241,15 @@ impl ReleaseManifest {
 pub struct ApprovedRelease {
     id: String,
     manifest_sha256: [u8; 32],
-    workload: WorkloadPolicy,
-    container_digests: Vec<String>,
+    workload: ApprovedWorkload,
+}
+
+enum ApprovedWorkload {
+    Phala {
+        policy: WorkloadPolicy,
+        container_digests: Vec<String>,
+    },
+    Gcp(GcpWorkloadPolicy),
 }
 
 impl ApprovedRelease {
@@ -234,14 +270,27 @@ impl ApprovedRelease {
         if Sha256::hash(embedded.manifest_json) != embedded.manifest_sha256 {
             return Err(invalid_policy());
         }
-        let manifest: ReleaseManifest =
-            serde_json::from_slice(embedded.manifest_json).map_err(|_| invalid_policy())?;
-        manifest.validate(id)?;
+        let workload = match embedded.backend {
+            Backend::PhalaDstack => {
+                let manifest: ReleaseManifest =
+                    serde_json::from_slice(embedded.manifest_json).map_err(|_| invalid_policy())?;
+                manifest.validate(id)?;
+                ApprovedWorkload::Phala {
+                    policy: manifest.workload,
+                    container_digests: manifest.container_digests,
+                }
+            }
+            Backend::GcpTdx => {
+                let manifest: GcpReleaseManifest =
+                    serde_json::from_slice(embedded.manifest_json).map_err(|_| invalid_policy())?;
+                manifest.validate(id)?;
+                ApprovedWorkload::Gcp(manifest.workload)
+            }
+        };
         Ok(Self {
-            id: manifest.release_id,
+            id: id.to_owned(),
             manifest_sha256: embedded.manifest_sha256,
-            workload: manifest.workload,
-            container_digests: manifest.container_digests,
+            workload,
         })
     }
 
@@ -253,21 +302,45 @@ impl ApprovedRelease {
         self.manifest_sha256
     }
 
-    pub fn workload(&self) -> &WorkloadPolicy {
-        &self.workload
+    pub fn backend(&self) -> Backend {
+        match &self.workload {
+            ApprovedWorkload::Phala { .. } => Backend::PhalaDstack,
+            ApprovedWorkload::Gcp(_) => Backend::GcpTdx,
+        }
+    }
+
+    pub fn workload(&self) -> Option<&WorkloadPolicy> {
+        match &self.workload {
+            ApprovedWorkload::Phala { policy, .. } => Some(policy),
+            _ => None,
+        }
+    }
+
+    pub fn gcp_workload(&self) -> Option<&GcpWorkloadPolicy> {
+        match &self.workload {
+            ApprovedWorkload::Gcp(policy) => Some(policy),
+            _ => None,
+        }
     }
 
     /// The manifest's image list must describe the exact launch bytes whose
     /// digest is authenticated by the workload event log. The list is a
     /// multiset: two services using one digest require two manifest entries.
     pub fn matches_launch_config(&self, raw_app_compose: &[u8]) -> bool {
-        if Sha256::hash(raw_app_compose) != self.workload.compose_hash {
+        let ApprovedWorkload::Phala {
+            policy,
+            container_digests,
+        } = &self.workload
+        else {
+            return false;
+        };
+        if Sha256::hash(raw_app_compose) != policy.compose_hash {
             return false;
         }
         let Some(actual) = launch_container_digests(raw_app_compose) else {
             return false;
         };
-        let mut expected = self.container_digests.clone();
+        let mut expected = container_digests.clone();
         expected.sort_unstable();
         actual == expected
     }
@@ -297,6 +370,40 @@ mod tests {
         policy.approved_release_ids.push("SYNTHETIC".into());
         assert!(ApprovedRelease::selected(&policy).is_err());
         assert!(EMBEDDED_RELEASES.is_empty());
+    }
+
+    #[test]
+    fn gcp_manifest_and_policy_do_not_require_or_accept_fake_phala_fields() {
+        let workload = GcpWorkloadPolicy::from_json(include_bytes!(
+            "../../../tests/fixtures/gcp/policy.synthetic.json"
+        ))
+        .unwrap();
+        let mut manifest = GcpReleaseManifest {
+            schema_version: 2,
+            platform: Backend::GcpTdx,
+            release_id: "SYNTHETIC_NOT_APPROVED".into(),
+            source_commit: "1".repeat(40),
+            workload: workload.clone(),
+        };
+        assert!(manifest.validate("SYNTHETIC_NOT_APPROVED").is_ok());
+        manifest.platform = Backend::PhalaDstack;
+        assert!(manifest.validate("SYNTHETIC_NOT_APPROVED").is_err());
+        let release = ApprovedRelease {
+            id: "SYNTHETIC_NOT_APPROVED".into(),
+            manifest_sha256: [0; 32],
+            workload: ApprovedWorkload::Gcp(workload),
+        };
+        assert_eq!(release.backend(), Backend::GcpTdx);
+        assert!(release.workload().is_none());
+        assert!(release.gcp_workload().is_some());
+        assert!(!release.matches_launch_config(b"{}"));
+        assert!(!is_embedded(release.id()));
+        let mut value = serde_json::json!({
+            "schema_version": 2, "platform": "gcp-tdx", "release_id": "synthetic",
+            "source_commit": "1".repeat(40), "workload": release.gcp_workload(),
+        });
+        value["kms_policy_sha256"] = serde_json::json!("0".repeat(64));
+        assert!(serde_json::from_value::<GcpReleaseManifest>(value).is_err());
     }
 
     #[test]
@@ -345,24 +452,26 @@ mod tests {
         ApprovedRelease {
             id: "SYNTHETIC".into(),
             manifest_sha256: [0; 32],
-            workload: WorkloadPolicy {
-                schema_version: 1,
-                mrtd: [0; 48],
-                rtmr0: [0; 48],
-                rtmr1: [0; 48],
-                rtmr2: [0; 48],
-                os_image_hash: [0; 32],
-                compose_hash: Sha256::hash(raw),
-                mr_kms: [0; 32],
-                app_id: [0; 20],
-                instance_id: [0; 20],
-                storage_fs: StorageFs::Ext4,
-                key_provider: KeyProviderPolicy {
-                    name: "kms".into(),
-                    id: "synthetic-kms".into(),
+            workload: ApprovedWorkload::Phala {
+                policy: WorkloadPolicy {
+                    schema_version: 1,
+                    mrtd: [0; 48],
+                    rtmr0: [0; 48],
+                    rtmr1: [0; 48],
+                    rtmr2: [0; 48],
+                    os_image_hash: [0; 32],
+                    compose_hash: Sha256::hash(raw),
+                    mr_kms: [0; 32],
+                    app_id: [0; 20],
+                    instance_id: [0; 20],
+                    storage_fs: StorageFs::Ext4,
+                    key_provider: KeyProviderPolicy {
+                        name: "kms".into(),
+                        id: "synthetic-kms".into(),
+                    },
                 },
+                container_digests,
             },
-            container_digests,
         }
     }
 

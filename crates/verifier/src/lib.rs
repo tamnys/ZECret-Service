@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod approved;
+pub mod gcp;
 pub mod offline;
 pub mod workload;
 pub use approved::ApprovedRelease;

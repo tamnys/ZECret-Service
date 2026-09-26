@@ -11,6 +11,32 @@ pub const MAX_CONNECTION_LIFETIME_SECONDS: u64 = 300;
 // ADR 0002: RFC 8446 exporter label, raw 32-byte context, 64-byte output.
 pub const ATTESTATION_EXPORTER_LABEL: &[u8] = b"EXPORTER-zrpc-attestation-v1";
 
+/// Explicit evidence format selection. It is not a trust assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Backend {
+    PhalaDstack,
+    GcpTdx,
+}
+
+/// GCP v1 carries raw Intel evidence, never a provider verification Boolean.
+/// The legacy Phala object remains a distinct, unchanged wire format.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcpAttestationResponse {
+    pub schema_version: u32,
+    pub platform: Backend,
+    pub nonce: [u8; 32],
+    pub quote: String,
+    pub ccel: String,
+}
+
+impl fmt::Debug for GcpAttestationResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GcpAttestationResponse([unverified public evidence])")
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicAttestationRequest {
@@ -70,9 +96,56 @@ pub fn parse_attestation_response(bytes: &[u8]) -> Result<PublicAttestationRespo
     parse(bytes, MAX_ATTESTATION_RESPONSE_BYTES)
 }
 
+pub fn parse_gcp_attestation_response(bytes: &[u8]) -> Result<GcpAttestationResponse, SafeError> {
+    let evidence: GcpAttestationResponse = parse(bytes, MAX_ATTESTATION_RESPONSE_BYTES)?;
+    let hex_bytes = |value: &str| {
+        !value.is_empty() && value.len() % 2 == 0 && value.bytes().all(|b| b.is_ascii_hexdigit())
+    };
+    if evidence.schema_version != 1
+        || evidence.platform != Backend::GcpTdx
+        || !hex_bytes(&evidence.quote)
+        || !hex_bytes(&evidence.ccel)
+    {
+        return Err(SafeError::new(
+            ErrorCode::InvalidRequest,
+            "Invalid GCP TDX evidence envelope.",
+        ));
+    }
+    Ok(evidence)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gcp_and_phala_envelopes_are_not_interchangeable() {
+        let valid = serde_json::to_vec(&GcpAttestationResponse {
+            schema_version: 1,
+            platform: Backend::GcpTdx,
+            nonce: [0; 32],
+            quote: "0001".into(),
+            ccel: "0203".into(),
+        })
+        .unwrap();
+        assert!(parse_gcp_attestation_response(&valid).is_ok());
+        assert!(parse_attestation_response(&valid).is_err());
+        for (field, value) in [
+            ("schema_version", serde_json::json!(2)),
+            ("platform", serde_json::json!("phala-dstack")),
+            ("quote", serde_json::json!("0")),
+            ("ccel", serde_json::json!("zz")),
+            ("verified", serde_json::json!(true)),
+        ] {
+            let mut object: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+            object[field] = value;
+            assert!(parse_gcp_attestation_response(&serde_json::to_vec(&object).unwrap()).is_err());
+        }
+        let duplicate =
+            String::from_utf8(valid)
+                .unwrap()
+                .replacen('{', "{\"schema_version\":1,", 1);
+        assert!(parse_gcp_attestation_response(duplicate.as_bytes()).is_err());
+    }
     #[test]
     fn only_exact_nonce_request_and_required_evidence_fields_are_supported() {
         let nonce = serde_json::to_string(&[0u8; 32]).unwrap();

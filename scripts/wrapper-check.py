@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "target/debug/zrpc-wrapper"
+BINARY = ROOT / os.environ.get("CARGO_TARGET_DIR", "target") / "debug/zrpc-wrapper"
 
 
 def options(socket_path):

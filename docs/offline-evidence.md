@@ -23,7 +23,7 @@ The customer OS and clock remain trusted. Collateral expiry checks do not prove 
 To compare supplied evidence with an explicit local policy:
 
 ```sh
-./target/debug/zrpc inspect-workload --quote quote.bin --collateral collateral.json --event-log event-log.json --app-compose app-compose.json --policy workload-policy.json
+./target/debug/zrpc inspect-workload --platform phala-dstack --quote quote.bin --collateral collateral.json --event-log event-log.json --app-compose app-compose.json --policy workload-policy.json
 ```
 
 This command uses the same hardware and strict security checks before comparing workload evidence. It replays every runtime event with the maintained dstack `cc-eventlog` implementation pinned to commit `282eeb27d22d8f091ad0fa5a90e638f85cf68751`, including events after `system-ready`, and compares the result with authenticated RTMR3. It then checks the supported v0.5.9 KMS boot sequence and explicit expected measurements and configuration.

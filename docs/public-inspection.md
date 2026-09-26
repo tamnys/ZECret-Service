@@ -8,6 +8,7 @@ From the managed development shell, after building the CLI:
 
 ```sh
 ./target/debug/zrpc inspect-endpoint \
+  --platform phala-dstack \
   --endpoint-host "$ZRPC_ENDPOINT_HOST" \
   --endpoint-port "$ZRPC_ENDPOINT_PORT" \
   --socks "$ZRPC_SOCKS_ADDRESS" \
@@ -19,8 +20,8 @@ From the managed development shell, after building the CLI:
 Set the endpoint variables to the hostname and port of an operator-selected
 compatible diagnostic endpoint. No endpoint is deployed by this repository.
 `ZRPC_SOCKS_ADDRESS` must be an explicit numeric IPv4 loopback address and nonzero
-port for your Tor SOCKS listener. Endpoint IP addresses and URLs are rejected;
-the hostname is sent to SOCKS for remote resolution. There is no direct fallback
+port for your Tor SOCKS listener. Numeric endpoint IP addresses also use SOCKS;
+hostnames are sent to SOCKS for remote resolution. URLs are rejected. There is no direct fallback
 or environment-proxy discovery. Each invocation generates a fresh stream-isolation
 credential. The command cannot establish that the local SOCKS process is Tor;
 the output reports `tor_process_identity_verified: false`.
@@ -49,6 +50,9 @@ Failures return a nonzero exit status without printing raw evidence or session
 secrets.
 
 The operation includes connection setup and inspection within the design's
-five-minute connection budget. The local OS and clock remain trusted. The local
-dashboard continues to use its fixture client; it exposes no endpoint inspection
-or browser-to-cloud query path.
+five-minute connection budget. The local OS and clock remain trusted. `dashboard`
+uses the same native private client, while `demo` uses fixtures. Neither exposes a
+browser-to-cloud query path.
+
+Google Cloud TDX is the default platform. Its binary CCEL and workload policy
+are distinct from dstack evidence; follow the [Google TDX guide](gcp-tdx.md).

@@ -1,0 +1,40 @@
+[Unit]
+Description=Zebra testnet public node
+Requires=systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/zebra /run
+OnFailure=poweroff.target
+OnFailureJobMode=replace-irreversibly
+SuccessAction=poweroff
+RefuseManualStart=yes
+
+[Service]
+Type=simple
+User=zrpc-node
+Group=zrpc-node
+SupplementaryGroups=zrpc-cookie
+ExecStartPre=+/usr/lib/zrpc/zrpc-gcp-guard --mark-start zebra
+ExecStartPre=/usr/lib/zrpc/zrpc-gcp-guard --check zebra
+ExecStart=/usr/lib/zrpc/zebrad -c /etc/zrpc/zebra.toml start
+Restart=no
+KillMode=control-group
+OOMPolicy=kill
+UMask=0027
+LimitCORE=0
+StandardOutput=null
+StandardError=null
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/zebra /run/zrpc-node
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+InaccessiblePaths=/run/zrpc-gcp-quote /sys/kernel/config /sys/firmware

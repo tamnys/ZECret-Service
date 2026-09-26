@@ -1,0 +1,7 @@
+[Unit]
+Description=Immutable ZRPC evaluation appliance
+Requires=multi-user.target zrpc-node.service zrpc-gcp-quote.service zrpc-cookie.service
+After=multi-user.target
+AllowIsolate=no
+OnFailure=poweroff.target
+OnFailureJobMode=replace-irreversibly

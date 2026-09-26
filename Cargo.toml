@@ -38,6 +38,7 @@ cc-eventlog = { git = "https://github.com/Dstack-TEE/dstack", rev = "282eeb27d22
 dstack-sdk-types = { git = "https://github.com/Dstack-TEE/dstack", rev = "282eeb27d22d8f091ad0fa5a90e638f85cf68751", version = "=0.1.2" }
 ez-hash = "=1.1.0"
 hex = "=0.4.3"
+sha2 = "=0.10.9"
 
 # Offline quote verification only: no PCCS/HTTP fetch or permissive TCB override.
 dcap-qvl = { version = "=0.6.3", default-features = false, features = ["std", "ring", "default-x509"] }

@@ -27,10 +27,11 @@ function show(report, elapsed) {
     byId('latency').textContent = `${elapsed.toFixed(1)} ms`;
     byId('result-label').textContent = mode === 'simulation'
         ? (report.error ? 'SIMULATED REJECTION' : 'SYNTHETIC RESULT')
-        : (report.error ? 'PRIVATE MODE BLOCKED' : 'VERIFIED RESPONSE');
+        : (report.private_accepted === true && report.query_sent === true && !report.error
+            ? 'VERIFIED RESPONSE' : report.private_accepted === true ? 'QUERY FAILED' : 'PRIVATE MODE BLOCKED');
     const evidence = byId('evidence');
     evidence.replaceChildren();
-    const labels = { transport: 'Transport', hardware: 'Hardware authenticity', application: 'Application policy', key_binding: 'Connection key', freshness: 'Freshness' };
+    const labels = { transport: 'Transport', hardware: 'Hardware authenticity', application: 'Application policy', key_binding: 'Connection key', freshness: 'Freshness', release: 'Release approval' };
     for (const [key, label] of Object.entries(labels)) {
         const row = document.createElement('div');
         const name = document.createElement('dt');
@@ -78,7 +79,7 @@ async function start() {
                     option.disabled = true;
             }
             run.firstChild.textContent = 'Try verified query ';
-            byId('release-note').textContent = 'Native client: no approved production release is packaged yet. Private mode stays blocked.';
+            byId('release-note').textContent = `${result.platform === 'gcp-tdx' ? 'Google Cloud TDX' : 'Phala dstack'}: no approved production release is packaged yet. Private mode stays blocked.`;
             session.textContent = 'Local session ready. Private mode requires independent verification.';
         }
         else {

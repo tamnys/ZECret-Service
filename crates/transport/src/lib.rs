@@ -22,7 +22,7 @@ use zrpc_verifier::VerifiedChannel;
 mod tls;
 pub use tls::{
     EndpointInspection, EndpointInspectionIssue, PendingChallenge, PublicBootstrapTls,
-    UnverifiedPublicEvidence, VerifiedRpcSession,
+    UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
 };
 
 /// A configuration value is not evidence that Tor is connected or functional.
@@ -83,12 +83,15 @@ impl TorConfig {
         Ok(UnverifiedChannel {
             socket: Some(socket),
             server_name: Some(endpoint.hostname.clone()),
-            authority: Some(format!("{}:{}", endpoint.hostname, endpoint.port)),
+            authority: Some(match endpoint.hostname.parse::<IpAddr>() {
+                Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", endpoint.port),
+                _ => format!("{}:{}", endpoint.hostname, endpoint.port),
+            }),
         })
     }
 }
 
-/// A DNS hostname and port, never a URL, IP literal, or locally resolved address.
+/// A DNS hostname or numeric IP and port, always sent through SOCKS.
 #[derive(Clone)]
 pub struct RemoteEndpoint {
     hostname: String,
@@ -101,24 +104,30 @@ impl RemoteEndpoint {
         let labels = hostname.strip_suffix('.').unwrap_or(&hostname);
         // SOCKS5 encodes its domain length in one octet (RFC1928); DNS labels
         // have at most 63 octets (RFC1035). These are protocol bounds.
+        let numeric = hostname.parse::<IpAddr>().is_ok();
         let valid = port != 0
-            && !hostname.is_empty()
-            && hostname.len() <= u8::MAX as usize
-            && hostname.is_ascii()
-            && labels.parse::<IpAddr>().is_err()
-            && labels.split('.').all(|label| {
-                !label.is_empty()
-                    && label.len() <= 63
-                    && label.as_bytes()[0].is_ascii_alphanumeric()
-                    && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
-                    && label
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            });
+            && (numeric
+                || (
+                    // Reject numeric-looking names with a trailing dot: do not silently
+                    // turn a mistyped IP into a DNS lookup.
+                    labels.parse::<IpAddr>().is_err()
+                        && !hostname.is_empty()
+                        && hostname.len() <= u8::MAX as usize
+                        && hostname.is_ascii()
+                        && labels.split('.').all(|label| {
+                            !label.is_empty()
+                                && label.len() <= 63
+                                && label.as_bytes()[0].is_ascii_alphanumeric()
+                                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                                && label
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        })
+                ));
         if !valid {
             return Err(SafeError::new(
                 ErrorCode::InvalidParameters,
-                "A DNS hostname and nonzero port are required; URLs and IP literals are not accepted.",
+                "A DNS hostname or numeric IP and nonzero port are required; URLs are not accepted.",
             ));
         }
         Ok(Self { hostname, port })
@@ -312,9 +321,7 @@ mod tests {
     fn endpoint_and_isolation_types_reject_invalid_values_and_redact_debug() {
         for host in [
             "",
-            "127.0.0.1",
             "127.0.0.1.",
-            "::1",
             "[::1]",
             "https://rpc.example",
             "rpc.example/path",
@@ -392,13 +399,14 @@ mod tests {
         }
         let mut header = [0; 4];
         socket.read_exact(&mut header).await.unwrap();
-        assert_eq!(
-            header,
-            [5, 1, 0, 3],
-            "CONNECT must carry a hostname, never a resolved IP"
-        );
-        let hostname_len = socket.read_u8().await.unwrap();
-        observed.hostname.resize(hostname_len as usize, 0);
+        assert_eq!(&header[..3], &[5, 1, 0]);
+        let hostname_len = match header[3] {
+            3 => socket.read_u8().await.unwrap() as usize,
+            1 => 4,
+            4 => 16,
+            _ => panic!("unexpected SOCKS address type"),
+        };
+        observed.hostname.resize(hostname_len, 0);
         socket.read_exact(&mut observed.hostname).await.unwrap();
         observed.port = socket.read_u16().await.unwrap();
         socket.write_all(&reply.connect).await.unwrap();
@@ -444,6 +452,33 @@ mod tests {
         assert_eq!(seen.hostname, b"unresolved-fixture.invalid");
         assert_eq!(seen.port, 443);
         assert!(seen.remaining.is_empty());
+    }
+
+    #[tokio::test]
+    async fn numeric_endpoints_use_socks_address_fields_without_direct_dialing() {
+        for (host, expected) in [
+            ("192.0.2.1", vec![192, 0, 2, 1]),
+            (
+                "2001:db8::1",
+                "2001:db8::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets()
+                    .to_vec(),
+            ),
+        ] {
+            let (config, proxy) = fake_proxy(vec![ProxyReply::success()]).await;
+            let endpoint = RemoteEndpoint::new(host, 443).unwrap();
+            let channel = config
+                .connect_bootstrap(&endpoint, IsolationLabel::new("numeric-fixture").unwrap())
+                .await
+                .unwrap();
+            drop(channel);
+            let seen = proxy.await.unwrap().pop().unwrap();
+            assert_eq!(seen.hostname, expected);
+            assert_eq!(seen.port, 443);
+            assert!(seen.remaining.is_empty());
+        }
     }
 
     #[tokio::test]

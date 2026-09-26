@@ -165,7 +165,11 @@ async fn bootstrap(State(session): State<LocalSession>, headers: HeaderMap) -> R
         DashboardMode::Simulation => "simulation",
         DashboardMode::Live(_) => "live_unverified",
     };
-    Json(json!({"capability":session.capability,"mode":mode})).into_response()
+    let platform = match session.mode.as_ref() {
+        DashboardMode::Simulation => None,
+        DashboardMode::Live(live) => Some(live.config.platform()),
+    };
+    Json(json!({"capability":session.capability,"mode":mode,"platform":platform})).into_response()
 }
 async fn query(State(session): State<LocalSession>, headers: HeaderMap, body: Bytes) -> Response {
     if !exactly(&headers, "content-type", "application/json") {
@@ -190,7 +194,8 @@ async fn query(State(session): State<LocalSession>, headers: HeaderMap, body: By
             Ok(session) => session,
             Err(error) => return Json(json!({"mode":"private_blocked","simulation":false,
                 "private_accepted":false,"query_sent":false,"error":error,
-                "verification":{"transport":"not_approved"},"chain_readiness":"not_checked","result":null})).into_response(),
+                "platform":live.config.platform(),
+                "verification":{"transport":"not_approved","hardware":"not_checked","application":"not_checked","key_binding":"not_checked","freshness":"not_checked","release":"not_approved"},"chain_readiness":"not_checked","result":null})).into_response(),
         };
         let request = match zrpc_protocol::parse_request(&body) {
             Ok(request) => request,
@@ -205,6 +210,8 @@ async fn query(State(session): State<LocalSession>, headers: HeaderMap, body: By
         return match session.query(&request).await {
             Ok(result) => Json(
                 json!({"mode":"private","simulation":false,"private_accepted":true,
+                "platform":live.config.platform(),
+                "verification":{"transport":"verified","hardware":"verified","application":"verified","key_binding":"verified","freshness":"verified","release":"approved"},
                 "query_sent":true,"error":null,"result":result}),
             )
             .into_response(),
@@ -227,8 +234,10 @@ async fn query(State(session): State<LocalSession>, headers: HeaderMap, body: By
 async fn status(State(session): State<LocalSession>) -> Response {
     match session.mode.as_ref() {
         DashboardMode::Simulation => Json(json!(PrivateClient::new().verify())).into_response(),
-        DashboardMode::Live(_) => Json(json!({"mode":"live_unverified","simulation":false,
-            "private_accepted":false,"query_sent":false,"verification":"not_checked"}))
+        DashboardMode::Live(live) => Json(
+            json!({"mode":"live_unverified","simulation":false,"platform":live.config.platform(),
+            "private_accepted":false,"query_sent":false,"verification":"not_checked"}),
+        )
         .into_response(),
     }
 }
@@ -393,31 +402,42 @@ mod tests {
     }
     #[tokio::test]
     async fn live_dashboard_uses_empty_reviewed_catalog_and_never_queries() {
-        let live = LiveConfiguration::new(
-            PublicInspectionConfig::new("fixture.invalid", 443, "127.0.0.1:9").unwrap(),
-            b"{}".to_vec(),
-            b"{}".to_vec(),
-            ReleasePolicy::default(),
-        );
-        let state = LocalSession::new_live("127.0.0.1:32123".parse().unwrap(), live).unwrap();
-        let app = dashboard(state.clone());
-        let response = app
-            .oneshot(call(
-                "/api/query",
-                &state.host,
-                &state.origin,
-                &state.capability,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
-        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(report["mode"], "private_blocked");
-        assert_eq!(report["query_sent"], false);
-        assert_eq!(report["private_accepted"], false);
-        assert_eq!(report["simulation"], false);
-        assert_eq!(report["error"]["code"], "unknown_release");
+        for platform in [
+            zrpc_protocol::Backend::PhalaDstack,
+            zrpc_protocol::Backend::GcpTdx,
+        ] {
+            let live = LiveConfiguration::new(
+                PublicInspectionConfig::for_platform(platform, "192.0.2.1", 443, "127.0.0.1:9")
+                    .unwrap(),
+                b"{}".to_vec(),
+                if platform == zrpc_protocol::Backend::PhalaDstack {
+                    b"{}".to_vec()
+                } else {
+                    Vec::new()
+                },
+                ReleasePolicy::default(),
+            );
+            let state = LocalSession::new_live("127.0.0.1:32123".parse().unwrap(), live).unwrap();
+            let app = dashboard(state.clone());
+            let response = app
+                .oneshot(call(
+                    "/api/query",
+                    &state.host,
+                    &state.origin,
+                    &state.capability,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+            let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(report["mode"], "private_blocked");
+            assert_eq!(report["query_sent"], false);
+            assert_eq!(report["private_accepted"], false);
+            assert_eq!(report["simulation"], false);
+            assert_eq!(report["error"]["code"], "unknown_release");
+            assert_eq!(report["platform"], serde_json::to_value(platform).unwrap());
+        }
     }
     #[test]
     fn refuses_public_bind_address() {
