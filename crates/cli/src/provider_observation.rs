@@ -69,6 +69,7 @@ pub async fn run(mut args: Vec<String>) -> Result<(), String> {
         println!("{USAGE}");
         println!("{}", super::provider_deletion::USAGE);
         println!("{}", super::provider_deletion::RETRY_USAGE);
+        println!("{}", super::provider_watchdog::USAGE);
         println!("{}", super::ledger::USAGE);
         return Ok(());
     }
@@ -89,12 +90,15 @@ pub async fn run(mut args: Vec<String>) -> Result<(), String> {
     if args.first().map(String::as_str) == Some("ledger") {
         return super::ledger::run(args[1..].to_vec());
     }
+    if args.first().map(String::as_str) == Some("watchdog-once") {
+        return super::provider_watchdog::run(args[1..].to_vec()).await;
+    }
     let persist = match args.first().map(String::as_str) {
         Some("observe") => false,
         Some("reconcile") => true,
         _ => {
             return Err(
-                "supported lifecycle commands: ledger, observe, reconcile, delete-tracked, retry-tracked; use lifecycle --help".to_owned(),
+                "supported lifecycle commands: ledger, observe, reconcile, delete-tracked, retry-tracked, watchdog-once; use lifecycle --help".to_owned(),
             );
         }
     };

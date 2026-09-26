@@ -24,6 +24,10 @@ pub struct ExperimentBinding {
 }
 
 impl ExperimentBinding {
+    pub fn experiment_id(&self) -> &str {
+        &self.experiment_id
+    }
+
     /// The original operator-bound workspace; this is not provider authentication.
     pub fn workspace_id(&self) -> &str {
         &self.workspace_id

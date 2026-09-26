@@ -99,12 +99,23 @@ impl ApiKey {
 /// Unauthenticated control-plane configuration. Only `authenticate` can produce
 /// `ScopedReads`; prepared deletion requires its separate capability.
 /// Construction opens no socket and reads no environment.
+///
+/// Phase configuration is internal to the lifecycle implementation, not a
+/// public way to duplicate or renew a provider invocation.
+///
+/// ```compile_fail
+/// use zrpc_lifecycle::provider_http::ProviderClient;
+/// fn fork(client: &ProviderClient) {
+///     let _ = client.for_phase(tokio::time::Instant::now());
+/// }
+/// ```
 pub struct ProviderClient {
     api_key: ApiKey,
     workspace_id: String,
     workspace_header: header::HeaderValue,
     tls: Arc<ClientConfig>,
     deadline: Instant,
+    original_budget: Duration,
     body_limit: NonZeroUsize,
     #[cfg(test)]
     test_address: Option<std::net::SocketAddr>,
@@ -137,6 +148,39 @@ impl ProviderClient {
     pub(crate) fn workspace_id(&self) -> &str {
         &self.workspace_id
     }
+
+    pub(crate) fn invocation_deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// The original configured budget, not remaining time or a phase extension.
+    pub(crate) fn invocation_budget(&self) -> Duration {
+        self.original_budget
+    }
+
+    /// Fork unauthenticated configuration for one bounded phase. Every child
+    /// authenticates independently and remains bounded by its parent's fixed
+    /// deadline. This makes no provider call and never rereads credentials.
+    pub(crate) fn for_phase(&self, requested_deadline: Instant) -> Result<Self, ProviderHttpError> {
+        let deadline = self.deadline.min(requested_deadline);
+        if Instant::now() >= deadline {
+            return Err(ProviderHttpError::DeadlineExceeded);
+        }
+        let child = Self {
+            api_key: ApiKey(self.api_key.0.clone()),
+            workspace_id: self.workspace_id.clone(),
+            workspace_header: self.workspace_header.clone(),
+            tls: self.tls.clone(),
+            deadline,
+            original_budget: self.original_budget,
+            body_limit: self.body_limit,
+            #[cfg(test)]
+            test_address: self.test_address,
+        };
+        child.finish(Ok(()))?;
+        Ok(child)
+    }
+
     /// Required positive invocation budget and body limit have no defaults.
     /// The same absolute deadline covers construction, authentication, every
     /// read, body collection and parsing; subsequent calls never renew it.
@@ -183,6 +227,7 @@ impl ProviderClient {
             workspace_header,
             tls: Arc::new(tls),
             deadline,
+            original_budget: invocation_budget,
             body_limit,
             #[cfg(test)]
             test_address: None,

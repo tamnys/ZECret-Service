@@ -471,6 +471,113 @@ async fn invocation_expiry_and_postparse_check_never_renew_or_release_results() 
     assert_eq!(server.requests.lock().unwrap().len(), 1);
 }
 
+#[tokio::test(start_paused = true)]
+async fn phase_forks_preserve_original_budget_scope_and_sensitive_configuration() {
+    let (_, root) = material(HOST);
+    let parent = ProviderClient::new(
+        ApiKey::new(KEY.as_bytes().to_vec()).unwrap(),
+        WORKSPACE.into(),
+        vec![root],
+        TEST_BUDGET,
+        NonZeroUsize::new(AUTH.len()).unwrap(),
+    )
+    .unwrap();
+    let original = parent.invocation_deadline();
+    let later = parent.for_phase(original + TEST_BUDGET).unwrap();
+    assert_eq!(later.invocation_deadline(), original);
+    assert_eq!(later.invocation_budget(), TEST_BUDGET);
+    // Half of the existing synthetic interval separates the two phase bounds;
+    // it is not a production phase budget or a provider timing assumption.
+    let earlier = Instant::now() + TEST_BUDGET / 2;
+    let child = parent.for_phase(earlier).unwrap();
+    assert_eq!(child.invocation_deadline(), earlier);
+    assert_eq!(child.invocation_budget(), TEST_BUDGET);
+    let descendant = child.for_phase(original + TEST_BUDGET).unwrap();
+    assert_eq!(descendant.invocation_deadline(), earlier);
+    assert_eq!(descendant.invocation_budget(), TEST_BUDGET);
+    assert_eq!(parent.invocation_deadline(), original);
+    assert_eq!(parent.workspace_id(), child.workspace_id());
+    assert_eq!(parent.workspace_header, child.workspace_header);
+    assert_eq!(parent.body_limit, child.body_limit);
+    assert!(Arc::ptr_eq(&parent.tls, &child.tls));
+    assert!(child.api_key.0.is_sensitive());
+    assert!(!format!("{:?}", child.api_key.0).contains(KEY));
+}
+
+#[tokio::test]
+async fn earlier_phase_expires_during_http_without_spending_the_parent_budget() {
+    let partial = b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n".to_vec();
+    let server = Server::start(vec![partial], HOST).await;
+    let parent = server.client(AUTH.len());
+    let original = parent.invocation_deadline();
+    let phase = Instant::now() + TEST_BUDGET / 2;
+    let child = parent.for_phase(phase).unwrap();
+    let task = tokio::spawn(child.authenticate());
+    server.wait_requests(1).await;
+    tokio::time::pause();
+    tokio::time::advance(phase.saturating_duration_since(Instant::now())).await;
+    assert_eq!(
+        task.await.unwrap().err(),
+        Some(ProviderHttpError::DeadlineExceeded)
+    );
+    assert!(Instant::now() < original);
+    assert_eq!(parent.invocation_deadline(), original);
+    assert!(parent.for_phase(original).is_ok());
+    tokio::time::resume();
+    server.wait_closed(1).await;
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_phases_and_parent_cannot_fork_or_open_a_socket() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (_, root) = material(HOST);
+    let mut parent = ProviderClient::new(
+        ApiKey::new(KEY.as_bytes().to_vec()).unwrap(),
+        WORKSPACE.into(),
+        vec![root],
+        TEST_BUDGET,
+        NonZeroUsize::new(AUTH.len()).unwrap(),
+    )
+    .unwrap();
+    parent.test_address = Some(listener.local_addr().unwrap());
+    let original = parent.invocation_deadline();
+    let phase = Instant::now() + TEST_BUDGET / 2;
+    let child = parent.for_phase(phase).unwrap();
+    assert_eq!(
+        parent.for_phase(Instant::now()).err(),
+        Some(ProviderHttpError::DeadlineExceeded)
+    );
+    tokio::time::advance(TEST_BUDGET / 2).await;
+    assert_eq!(
+        parent.for_phase(phase).err(),
+        Some(ProviderHttpError::DeadlineExceeded)
+    );
+    assert_eq!(
+        child.authenticate().await.err(),
+        Some(ProviderHttpError::DeadlineExceeded)
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    let bounded = parent.for_phase(original + TEST_BUDGET).unwrap();
+    tokio::time::advance(original.saturating_duration_since(Instant::now())).await;
+    assert_eq!(
+        parent.for_phase(original + TEST_BUDGET).err(),
+        Some(ProviderHttpError::DeadlineExceeded)
+    );
+    assert_eq!(
+        bounded.authenticate().await.err(),
+        Some(ProviderHttpError::DeadlineExceeded)
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
 #[tokio::test]
 async fn cancellation_aborts_the_http_driver_and_closes_the_socket() {
     let partial = b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n".to_vec();

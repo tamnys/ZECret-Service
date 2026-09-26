@@ -12,6 +12,7 @@ mod ledger;
 mod provider_deletion;
 mod provider_observation;
 mod provider_settings;
+mod provider_watchdog;
 
 const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc inspect-endpoint --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --policy FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nzrpc lifecycle --help\nM0 plus public endpoint diagnostics, lifecycle observations and explicit tracked deletion; private mode and deployment are unavailable.";
 

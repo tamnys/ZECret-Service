@@ -20,6 +20,8 @@ mod provider_request;
 pub mod provider_scan;
 pub mod provider_wire;
 pub mod reconciliation;
+#[cfg(unix)]
+pub mod watchdog;
 
 // Authorities: design section 13 sets the lifetime, preflight ceiling and
 // deletion trigger. The operator's subsequent $50 total cap supersedes its

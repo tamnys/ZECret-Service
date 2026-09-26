@@ -88,6 +88,43 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
     assert not list(directory.iterdir())
 print("Tracked deletion CLI checks passed: explicit first/retry selection, required prior intent, sanitized refusal, no live provider calls.")
 
+# Watchdog is a real provider action selected explicitly for the entire retained
+# experiment. Exercise help and pre-I/O refusals only; absent originals prevent
+# valid synthetic parser inputs from reaching credentials or the provider.
+help_result = subprocess.run([str(BIN), "lifecycle", "watchdog-once", "--help"], capture_output=True, cwd=ROOT)
+assert help_result.returncode == 0 and not help_result.stderr
+assert b"REAL provider watchdog action" in help_result.stdout
+assert b"--experiment-id" in help_result.stdout and b"--deletion-dispatch-budget-ms" in help_result.stdout
+assert b"authorizes no future run" in help_result.stdout
+report = run("lifecycle", "watchdog-once", success=False)
+assert not report["private_accepted"] and not report["query_sent"] and not report["deployment_enabled"]
+with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
+    directory = Path(temporary)
+    options = ["--original-binding", str(directory / "absent-original.json"),
+               "--experiment-id", "SYNTHETIC_WATCHDOG_ONLY", "--api-key-file", str(directory / "absent-key"),
+               "--trust-root", str(directory / "absent-root.der"), "--invocation-budget-ms", "2",
+               "--max-response-bytes", "1", "--max-input-file-bytes", "1", "--inventory-page-size", "30",
+               "--usage-page-size", "500", "--max-inventory-records", "1", "--max-usage-records-per-app", "1",
+               "--maximum-detection-interval-ms", "1", "--deletion-latency-upper-bound-ms", "1",
+               "--scheduler-delay-allowance-ms", "0", "--reconciliation-budget-ms", "1",
+               "--deletion-dispatch-budget-ms", "1", "--fee-upper-bounds-microusd", "0"]
+    unavailable = run("lifecycle", "watchdog-once", *options, success=False)
+    for flag in ("--now", "--endpoint", "--target", "--cvm-id", "--expected-generation", "--install-jobs",
+                 "--retry-count", "--simulate", "--api-key", "--initialize", "--reset"):
+        refused = run("lifecycle", "watchdog-once", *options, flag, "SYNTHETIC_CREDENTIAL_MARKER", success=False)
+        assert refused["error"] == "unknown or repeated argument"
+        assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(refused)
+    for flag in ("--experiment-id", "--reconciliation-budget-ms", "--fee-upper-bounds-microusd"):
+        value = options[options.index(flag) + 1]
+        refused = run("lifecycle", "watchdog-once", *options, flag, value, success=False)
+        assert refused["error"] == "unknown or repeated argument"
+    invalid_budget = options.copy()
+    invalid_budget[invalid_budget.index("--invocation-budget-ms") + 1] = "1"
+    refused = run("lifecycle", "watchdog-once", *invalid_budget, success=False)
+    assert refused["error"] != unavailable["error"]  # Policy validation precedes file loading.
+    assert not list(directory.iterdir())
+print("Watchdog CLI checks passed: explicit help, complete required inputs, duplicate/unsupported flags and phase-budget refusal; no live invocation.")
+
 # Prospective local bookkeeping uses actual process time and caller assertions;
 # no provider credentials or network configuration exist on this command path.
 help_result = subprocess.run([str(BIN), "lifecycle", "ledger", "--help"], capture_output=True, cwd=ROOT)

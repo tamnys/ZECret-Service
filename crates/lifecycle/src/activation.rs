@@ -286,7 +286,7 @@ pub fn generate(
             ],
         },
         command_contract: CommandContract {
-            implementation_status: "unimplemented live command; specification cannot be activated",
+            implementation_status: "one-shot watchdog command implemented; this proposal has no executable arguments or installed jobs and cannot be activated",
             executable: None,
             arguments: None,
             required_behaviors: vec![
