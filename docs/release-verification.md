@@ -1,8 +1,9 @@
 # Unsigned local build reproduction
 
-`scripts/reproduce-release.py` builds the M0 CLI (`zrpc`) and RPC wrapper
-(`zrpc-wrapper`) from an exact committed source revision. It builds twice in
-separate source and target directories and compares the resulting bytes. The
+`scripts/reproduce-release.py` builds the CLI (`zrpc`), public attestation
+wrapper (`zrpc-wrapper`), typed node wrapper (`zrpc-node-wrapper`) and quote-only
+bridge (`zrpc-quote-proxy`) from an exact committed source revision. It builds
+twice in separate source and target directories and compares the resulting bytes. The
 outputs are unsigned scaffold binaries. Their checksums do not approve a
 release, identify an accepted attestation measurement, or enable private mode.
 
@@ -40,7 +41,8 @@ After success, check the delivered files from the output directory:
 sha256sum --check SHA256SUMS
 ```
 
-`artifacts/zrpc` and `artifacts/zrpc-wrapper` are the compared binaries.
+`artifacts/` contains all four compared binaries, named above. The
+`selected_binaries` and `artifact_sha256` entries identify the complete set.
 `manifest.json` records the source revision, build inputs, toolchain identities,
 settings and hashes. It also records the invoking script separately, so a
 workflow from a different revision is visible. Keep the manifest, checksums and
