@@ -11,11 +11,31 @@
     "distribution_package_version": "25.3-7"
   },
   "downloaded_metadata": {
-    "authentication": "unverified-signature-not-a-trust-input",
+    "mkosi_dsc_authentication": "unverified-signature-not-a-trust-input",
     "mkosi_25.3-7.dsc_sha256": "05241915b6d7d0e633eafdde1248acb4cc734c06e19c41436e82e457a034a07f",
     "mkosi_25.3.orig.tar.gz_sha256_from_dsc": "7b039fb3b34e1680173a7f4af1bc24b475465afe335c8b21c213167734061e35",
     "mkosi_25.3-7.debian.tar.xz_sha256_from_dsc": "2d91b18e25cf2906b874cda68240e03f5fac3eafc60ca5fadb609f9969b80ec6",
-    "trixie_inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675"
+    "trixie_snapshot_candidate": {
+      "url": "https://snapshot.debian.org/archive/debian/20260926T000000Z/",
+      "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+      "main_binary_amd64_packages_xz_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
+      "main_binary_amd64_packages_xz_size": 9678380,
+      "signed_release_date_epoch": 1789199741,
+      "archive_signer_primary_fingerprint": "04B54C3CDCA79751B16BC6B5225629DF75B188BD",
+      "local_verification": "reviewed-key GnuPG and checksum-bound extracted gpgv matched signatures; complete builder toolchain remains unreviewed"
+    },
+    "debian_public_key_sources": {
+      "archive_key_12_asc_sha256": "c2a9a16fde95e037bafd0fa6b7e31f41b4ff1e85851de5558f19a2a2f0e955e2",
+      "archive_key_13_asc_sha256": "6f1d277429dd7ffedcc6f8688a7ad9a458859b1139ffa026d1eeaadcbffb0da7",
+      "release_13_asc_sha256": "4d097bb93f83d731f475c5b92a0c2fcf108cfce1d4932792fca72d00b48d198b",
+      "combined_gpg_keyring_sha256": "c042cf3ba41a234f709a6f50053ce3c23031d2d4f109a563ffc1193403b26895"
+    },
+    "gpgv_tool_candidate": {
+      "version": "2.4.7-21+deb13u1+b5",
+      "debian_package_sha256_from_signed_index": "104e4c57b98f0b883aa94c68fbe7ec7b48bcdec7c0f9dedf2a51a5054aaeb5ae",
+      "extracted_executable_sha256": "3f29dddc10e4089aeac5b2675313f4e5fe822abe5ab3bf7898d238c32d758304",
+      "dynamic_library_closure": "unreviewed"
+    }
   },
   "required_local_inputs": [
     "authenticated_snapshot_and_full_package_closure",
