@@ -121,6 +121,14 @@ sent, and no account credits were spent. Private mode remains blocked.
   parent or preexisting mask fails closed. This source is not installed in a
   built image and cannot rule out
   Phala console, exec, update or recovery controls outside the guest image.
+- `experiments/ephemeral-runtime/prepare-packaging-source.py` now checks the
+  exact pinned meta-dstack recipe objects and dstack gitlink, combines both
+  source overlays, and adds guest-package install entries for the runtime
+  guard, quote proxy, service and generated drop-ins. It requires explicit
+  SHA-256 hashes and x86_64 ELF headers for supplied binaries. Those checks do
+  not establish binary provenance or ABI compatibility. The output manifest
+  records that no BitBake build, rootfs, boot, Phala admission or private-mode
+  acceptance occurred; missing binaries refuse a complete candidate.
 - The native verifier has an opaque `ApprovedRelease` separate from diagnostic
   `WorkloadPolicy`. An external policy can select only a client-embedded release.
   The manifest's launch-config digest must equal the app-compose hash used in
@@ -294,6 +302,12 @@ sent, and no account credits were spent. Private mode remains blocked.
   container has only the `aarch64-unknown-linux-gnu` Rust target and no x86_64
   cross-linker. It cannot produce the required TDX x86_64 binaries without a
   separately reviewed build environment.
+  Five packaging-source tests passed. A managed-container dry run against the
+  cached pinned dstack/meta-dstack checkouts with synthetic ELF-header inputs
+  produced 27 files whose hashes matched the generated manifest; all 11
+  generated service/socket drop-ins had recipe install and package paths. A
+  missing guard input was refused before output. The synthetic binaries were
+  never executed, and the result is not an x86_64 build or image.
   One intermediate build attempt
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check
