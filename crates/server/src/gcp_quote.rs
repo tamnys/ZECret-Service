@@ -5,7 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     future::Future,
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -116,7 +116,7 @@ impl TsmReport {
     }
 }
 
-fn wrapper_uid(passwd: &str) -> Result<u32, SafeError> {
+fn wrapper_identity(passwd: &str) -> Result<(u32, u32), SafeError> {
     let matches: Vec<_> = passwd
         .lines()
         .filter(|line| line.split(':').next() == Some("zrpc-wrapper"))
@@ -128,15 +128,42 @@ fn wrapper_uid(passwd: &str) -> Result<u32, SafeError> {
     if fields.len() != 7 || fields[6] != "/usr/sbin/nologin" {
         return Err(unavailable());
     }
-    fields[2]
+    let uid = fields[2]
         .parse::<u32>()
         .ok()
         .filter(|uid| *uid != 0)
-        .ok_or_else(unavailable)
+        .ok_or_else(unavailable)?;
+    let gid = fields[3]
+        .parse::<u32>()
+        .ok()
+        .filter(|gid| *gid != 0)
+        .ok_or_else(unavailable)?;
+    Ok((uid, gid))
 }
 
 fn allowed_peer(socket: &UnixStream, uid: u32) -> bool {
     socket.peer_cred().is_ok_and(|peer| peer.uid() == uid)
+}
+
+fn checked_socket_directory(path: &Path, uid: u32, gid: u32) -> Result<(), SafeError> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
+        .open(path)
+        .map_err(|_| unavailable())?;
+    let metadata = directory.metadata().map_err(|_| unavailable())?;
+    if !metadata.is_dir()
+        || metadata.uid() != uid
+        || metadata.gid() != gid
+        || metadata.mode() & 0o777 != 0o750
+        || rustix::fs::fstatfs(&directory)
+            .map_err(|_| unavailable())?
+            .f_type as u64
+            != libc::TMPFS_MAGIC as u64
+    {
+        return Err(unavailable());
+    }
+    Ok(())
 }
 
 pub struct GcpQuoteBroker {
@@ -150,27 +177,21 @@ impl GcpQuoteBroker {
         if rustix::process::geteuid().as_raw() != 0 {
             return Err(unavailable());
         }
-        let uid = wrapper_uid(
+        let (uid, gid) = wrapper_identity(
             std::str::from_utf8(&read_bound(
                 Path::new("/etc/passwd"),
                 MAX_ATTESTATION_RESPONSE_BYTES,
             )?)
             .map_err(|_| unavailable())?,
         )?;
+        checked_socket_directory(Path::new(GCP_QUOTE_DIRECTORY), 0, gid)?;
         let report = TsmReport::open()?;
-        let directory = Path::new(GCP_QUOTE_DIRECTORY);
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(directory)
-            .map_err(|_| unavailable())?;
         let listener = UnixListener::bind(GCP_QUOTE_SOCKET).map_err(|_| unavailable())?;
         let watch = UnixListener::bind(GCP_WATCH_SOCKET).map_err(|_| unavailable())?;
         for path in [GCP_QUOTE_SOCKET, GCP_WATCH_SOCKET] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o660))
                 .map_err(|_| unavailable())?;
         }
-        fs::set_permissions(directory, fs::Permissions::from_mode(0o750))
-            .map_err(|_| unavailable())?;
         Ok(Self {
             listener,
             watch,
@@ -279,19 +300,21 @@ pub(crate) async fn request_gcp_quote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
     #[test]
     fn peer_identity_requires_unique_nonroot_locked_account() {
         assert_eq!(
-            wrapper_uid("zrpc-wrapper:x:612:612::/:/usr/sbin/nologin\n").unwrap(),
-            612
+            wrapper_identity("zrpc-wrapper:x:612:613::/:/usr/sbin/nologin\n").unwrap(),
+            (612, 613)
         );
         for input in [
             "",
             "zrpc-wrapper:x:0:612::/:/usr/sbin/nologin",
+            "zrpc-wrapper:x:612:0::/:/usr/sbin/nologin",
             "zrpc-wrapper:x:612:612::/:/bin/sh",
             "zrpc-wrapper:x:612:612::/:/usr/sbin/nologin\nzrpc-wrapper:x:613:613::/:/usr/sbin/nologin",
         ] {
-            assert!(wrapper_uid(input).is_err());
+            assert!(wrapper_identity(input).is_err());
         }
     }
     #[test]
@@ -308,6 +331,26 @@ mod tests {
         let uid = rustix::process::geteuid().as_raw();
         assert!(allowed_peer(&socket, uid));
         assert!(!allowed_peer(&socket, uid.wrapping_add(1)));
+    }
+
+    #[test]
+    fn socket_directory_requires_private_tmpfs_and_rejects_symlinks() {
+        let path = Path::new("/dev/shm").join(format!("zrpc-gcp-socket-{}", std::process::id()));
+        fs::DirBuilder::new().mode(0o750).create(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let uid = metadata.uid();
+        let gid = metadata.gid();
+        assert!(checked_socket_directory(&path, uid, gid).is_ok());
+        assert!(checked_socket_directory(&path, uid.wrapping_add(1), gid).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(checked_socket_directory(&path, uid, gid).is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o750)).unwrap();
+        let alias = path.with_extension("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert!(checked_socket_directory(&alias, uid, gid).is_err());
+        fs::remove_file(alias).unwrap();
+        fs::remove_dir(path).unwrap();
     }
 
     #[tokio::test]
