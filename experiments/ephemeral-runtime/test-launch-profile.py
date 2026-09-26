@@ -274,7 +274,19 @@ class LaunchProfileInputTests(unittest.TestCase):
         candidate = guest_source.candidate_app_unit(original.decode())
         self.assertIn("Type=simple\n", candidate)
         self.assertNotIn("RemainAfterExit=true", candidate)
+        self.assertIn("BindsTo=zrpc-quote-proxy.service\n", candidate)
+        self.assertIn(
+            "After=docker.service dstack-prepare.service dstack-guest-agent.service "
+            "zrpc-quote-proxy.service\n", candidate,
+        )
         self.assertIn("StandardOutput=null\n", candidate)
+
+    def test_quote_bridge_must_signal_socket_readiness_before_compose(self) -> None:
+        candidate = guest_source.quote_proxy_unit()
+        self.assertIn("Before=app-compose.service\n", candidate)
+        self.assertIn("BindsTo=app-compose.service ", candidate)
+        self.assertIn("Type=notify\nNotifyAccess=main\n", candidate)
+        self.assertNotIn("After=dstack-prepare.service app-compose.service", candidate)
 
 
 if __name__ == "__main__":

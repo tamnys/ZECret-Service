@@ -1,7 +1,7 @@
 {
   "built_image": false,
   "candidate_sha256": {
-    "basefiles/app-compose.service": "6abf6e60346c0c802fdd89438d313e43f1d030afaf5aa81a97aa82fee5181d94",
+    "basefiles/app-compose.service": "8b1a7161fa65ac7bb95531779af6801e977e73f3b6284910445ec22d1422b0b5",
     "basefiles/app-compose.service.d/zrpc-private-profile.conf": "0732c91e3531b58c7348f1efc291cc0adcc5f80ca97d826ce0659e4bffeb1258",
     "basefiles/app-compose.sh": "433b2fd819b312db923267bc650022c73ac9845bd47802d8ead5eee3b97ff764",
     "basefiles/containerd.service.d/zrpc-private-profile.conf": "6fc0d1b16786fe3fdd735da9d05f418ae8aeabbee93f1a0e0e813b1df3346ba6",
@@ -19,7 +19,7 @@
     "basefiles/sysbox-mgr.service.d/zrpc-private-profile.conf": "1424ed1605276944b3dd72e7445284213057b56859440f8b04438fc8229df9bc",
     "basefiles/sysbox.service.d/zrpc-private-profile.conf": "6e681e111e26254450813eae61b694de46c0a29121313adc0379b79a72922173",
     "basefiles/tappd.socket.d/zrpc-private-profile.conf": "bb6c7e32fc7ce3e7af19de8c46e54514d77c7237bc7aeb9261f3d7c63551b643",
-    "basefiles/zrpc-quote-proxy.service": "1d4ff280e2ca8c4bf2e71e0ed3ece5487c7ff7e7f4305e1cb8e25e6ee966fd86",
+    "basefiles/zrpc-quote-proxy.service": "0904cead99978df1531c803eb8c5e2fcf7f9f7008288aca5ecbd4c53e5d0a3a9",
     "dstack-util/src/system_setup.rs": "6b488d6528933fbfae672a435044928ba7f4986cdd7b38b9a748f699f669df08",
     "zrpc/phala-runtime-guard.rs": "e1c4eca1aa37ad4016184549d5c90d9dd2a6635c9154a28c5f6745350a765eec"
   },
