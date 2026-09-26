@@ -6,7 +6,9 @@
 
 use crate::{
     LifecycleError,
-    controller::{DeletionIntentRecord, DeletionOutcome, ExperimentBinding, ExperimentLedger},
+    controller::{
+        DeletionIntentRecord, DeletionOutcome, ExperimentBinding, ExperimentLedger, TrackedCvm,
+    },
     observation::ReadObservation,
     reconciliation::ObservationRecord,
 };
@@ -283,6 +285,18 @@ pub struct CommittedLedgerReference {
     generation: u64,
 }
 
+/// A local, revalidated view. A pending draft is reported but never interpreted
+/// as committed history. The evaluated cost is modeled at inspection time and
+/// does not mutate the ledger or authenticate provider billing.
+#[derive(Debug, Serialize)]
+pub struct LedgerInspection {
+    pub reference: CommittedLedgerReference,
+    pub ledger: ExperimentLedger,
+    pub has_uncommitted_draft: bool,
+    pub evaluated_at_unix_seconds: u64,
+    pub conservative_cost_floor_microusd: u64,
+}
+
 /// Proof of a locally committed intent while its writer lock is retained.
 /// This is not operator approval, authenticated provider identity or a network
 /// capability. Provider dispatch additionally requires authenticated scope and
@@ -355,6 +369,151 @@ enum CommitPoint {
 }
 
 impl LedgerStore {
+    /// Start the original local experiment window at the actual current time.
+    /// This is prospective bookkeeping before any resources are created, not
+    /// deployment permission. Partial or existing outputs are never resumed.
+    pub fn initialize_experiment(
+        original_path: &Path,
+        store_directory: &Path,
+        experiment_id: String,
+        workspace_id: String,
+        deletion_deadline_unix_seconds: u64,
+        initial_cost_microusd: u64,
+    ) -> Result<Self, StoreError> {
+        Self::initialize_experiment_at(
+            original_path,
+            store_directory,
+            experiment_id,
+            workspace_id,
+            deletion_deadline_unix_seconds,
+            initial_cost_microusd,
+            wall_clock()?,
+        )
+    }
+
+    fn initialize_experiment_at(
+        original_path: &Path,
+        store_directory: &Path,
+        experiment_id: String,
+        workspace_id: String,
+        deletion_deadline_unix_seconds: u64,
+        initial_cost_microusd: u64,
+        now: u64,
+    ) -> Result<Self, StoreError> {
+        let binding = ExperimentBinding::new(
+            experiment_id,
+            workspace_id,
+            now,
+            deletion_deadline_unix_seconds,
+        )?;
+        let ledger = ExperimentLedger::new(binding, initial_cost_microusd)?;
+        create_original_binding(original_path, store_directory, &ledger)?;
+        Self::initialize(original_path)
+    }
+
+    /// Commit a local attempt at the actual time after the operator has reviewed
+    /// this exact generation. This does not create or authorize any resource.
+    pub fn record_attempt(
+        &mut self,
+        expected_generation: u64,
+        attempt_id: String,
+    ) -> Result<CommittedLedgerReference, StoreError> {
+        self.record_attempt_at_with_hook(
+            expected_generation,
+            attempt_id,
+            wall_clock()?,
+            &mut |_| Ok(()),
+        )
+    }
+
+    fn record_attempt_at_with_hook(
+        &mut self,
+        expected_generation: u64,
+        attempt_id: String,
+        now: u64,
+        hook: &mut impl FnMut(CommitPoint) -> Result<(), StoreError>,
+    ) -> Result<CommittedLedgerReference, StoreError> {
+        self.require_generation(expected_generation)?;
+        let mut next = self.ledger()?.clone();
+        next.begin_attempt(attempt_id, now)?;
+        self.commit_with_hook(&next, hook)?;
+        self.planning_reference()
+    }
+
+    /// Commit an explicitly supplied, already-created CVM to an existing
+    /// attempt. The creation timestamp is historical data, never a clock
+    /// override. Late resources remain recordable when deletion is overdue.
+    pub fn record_cvm(
+        &mut self,
+        expected_generation: u64,
+        attempt_id: &str,
+        cvm: TrackedCvm,
+    ) -> Result<CommittedLedgerReference, StoreError> {
+        self.record_cvm_at_with_hook(
+            expected_generation,
+            attempt_id,
+            cvm,
+            wall_clock()?,
+            &mut |_| Ok(()),
+        )
+    }
+
+    fn record_cvm_at_with_hook(
+        &mut self,
+        expected_generation: u64,
+        attempt_id: &str,
+        cvm: TrackedCvm,
+        now: u64,
+        hook: &mut impl FnMut(CommitPoint) -> Result<(), StoreError>,
+    ) -> Result<CommittedLedgerReference, StoreError> {
+        self.require_generation(expected_generation)?;
+        let mut next = self.ledger()?.clone();
+        next.record_cvm_at(attempt_id, cvm, now)?;
+        self.commit_with_hook(&next, hook)?;
+        self.planning_reference()
+    }
+
+    fn require_generation(&self, expected_generation: u64) -> Result<(), StoreError> {
+        if self.planning_reference()?.generation() != expected_generation {
+            return Err(StoreError::InvalidState);
+        }
+        Ok(())
+    }
+
+    /// Inspect every committed generation and report any uncommitted draft
+    /// without recovery or writes. A poisoned writer must be reopened first.
+    pub fn inspect(&self) -> Result<LedgerInspection, StoreError> {
+        self.inspect_at(wall_clock()?)
+    }
+
+    fn inspect_at(&self, now: u64) -> Result<LedgerInspection, StoreError> {
+        self.ledger()?;
+        let pending = self.verify_current_allow_draft()?;
+        Ok(LedgerInspection {
+            reference: self.current_reference(),
+            ledger: self.ledger.clone(),
+            has_uncommitted_draft: pending,
+            evaluated_at_unix_seconds: now,
+            conservative_cost_floor_microusd: self.ledger.planning_cost_at(now)?,
+        })
+    }
+
+    /// Explicit recovery selected against the exact current generation. Only
+    /// the reserved draft is discarded; committed history is never promoted,
+    /// removed, or reset.
+    pub fn discard_uncommitted_draft_at(
+        &mut self,
+        expected_generation: u64,
+    ) -> Result<CommittedLedgerReference, StoreError> {
+        self.ledger()?;
+        self.verify_current_allow_draft()?;
+        if self.generation != expected_generation {
+            return Err(StoreError::InvalidState);
+        }
+        self.discard_uncommitted_draft()?;
+        self.planning_reference()
+    }
+
     /// Persist one completed authenticated read against the exact original and
     /// snapshot that produced it. The observation remains unjoined evidence;
     /// this operation does not accept provider charges or establish cleanup.
@@ -440,14 +599,18 @@ impl LedgerStore {
     pub fn planning_reference(&self) -> Result<CommittedLedgerReference, StoreError> {
         self.ledger()?;
         self.verify_current()?;
-        Ok(CommittedLedgerReference {
+        Ok(self.current_reference())
+    }
+
+    fn current_reference(&self) -> CommittedLedgerReference {
+        CommittedLedgerReference {
             original_binding_path: self.original_path.clone(),
             snapshot_path: self
                 .original
                 .store_directory
                 .join(snapshot_name(self.generation)),
             generation: self.generation,
-        })
+        }
     }
 
     /// A create-new initialization receipt lives beside the trusted original.
@@ -535,6 +698,13 @@ impl LedgerStore {
     }
 
     fn verify_current(&self) -> Result<(), StoreError> {
+        if self.verify_current_allow_draft()? {
+            return Err(StoreError::PendingRecovery);
+        }
+        Ok(())
+    }
+
+    fn verify_current_allow_draft(&self) -> Result<bool, StoreError> {
         let (record, _) = original(&self.original_path)?;
         if json_bytes(&record)? != json_bytes(&self.original)? {
             return Err(StoreError::InvalidState);
@@ -550,10 +720,7 @@ impl LedgerStore {
         if generation != self.generation || json_bytes(&ledger)? != json_bytes(&self.ledger)? {
             return Err(StoreError::InvalidState);
         }
-        if pending {
-            return Err(StoreError::PendingRecovery);
-        }
-        Ok(())
+        Ok(pending)
     }
 
     pub fn commit(&mut self, next: &ExperimentLedger) -> Result<(), StoreError> {
@@ -644,10 +811,7 @@ impl LedgerStore {
         if self.poisoned {
             return Err(StoreError::ReloadRequired);
         }
-        let (generation, ledger, pending) = load_history(&self.original)?;
-        if generation != self.generation || json_bytes(&ledger)? != json_bytes(&self.ledger)? {
-            return Err(StoreError::InvalidState);
-        }
+        let pending = self.verify_current_allow_draft()?;
         if !pending {
             return Ok(());
         }
@@ -660,6 +824,13 @@ impl LedgerStore {
         self.pending = false;
         Ok(())
     }
+}
+
+fn wall_clock() -> Result<u64, StoreError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| StoreError::InvalidState)
 }
 
 fn validate_journal_transition(
@@ -791,6 +962,9 @@ fn load_history(original: &OriginalRecord) -> Result<(u64, ExperimentLedger, boo
 
 #[cfg(test)]
 mod observation_tests;
+
+#[cfg(test)]
+mod operator_tests;
 
 #[cfg(test)]
 mod tests {

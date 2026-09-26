@@ -8,6 +8,7 @@ use std::{
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
 
+mod ledger;
 mod provider_deletion;
 mod provider_observation;
 mod provider_settings;

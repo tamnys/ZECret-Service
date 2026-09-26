@@ -588,7 +588,6 @@ impl ExperimentLedger {
             || !nonempty(&cvm.app_id)
             || !nonempty(&cvm.instance_id)
             || cvm.created_at_unix_seconds < attempt.started_at_unix_seconds
-            || cvm.created_at_unix_seconds >= self.0.binding.deletion_deadline_unix_seconds
             || cvm.compute_and_disk_microusd_per_hour == 0
         {
             return Err(LifecycleError("invalid explicitly tracked CVM"));
@@ -626,6 +625,28 @@ impl ExperimentLedger {
         // Recording a partially created resource is allowed even at the deletion
         // threshold: refusing its identity would make cleanup less complete.
         self.advance_cost(self.0.last_observed_at_unix_seconds)
+    }
+
+    /// Retain an explicitly supplied resource even if creation finished after
+    /// the original deadline. This only records cleanup scope; it cannot start
+    /// an attempt, renew the deadline, or authorize provider creation.
+    #[cfg(unix)]
+    pub(crate) fn record_cvm_at(
+        &mut self,
+        attempt_id: &str,
+        cvm: TrackedCvm,
+        now: u64,
+    ) -> Result<(), LifecycleError> {
+        if cvm.created_at_unix_seconds > now {
+            return Err(LifecycleError("resource creation is in the future"));
+        }
+        let mut next = self.clone();
+        let workspace = next.0.binding.workspace_id.clone();
+        next.track_cvm(&workspace, attempt_id, cvm)?;
+        next.advance_cost(now)?;
+        next.validate()?;
+        *self = next;
+        Ok(())
     }
 
     fn validate_usage(&self, usage: &UsageRecord) -> Result<u64, LifecycleError> {

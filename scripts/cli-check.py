@@ -2,6 +2,7 @@
 import json
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,66 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
         assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(report)
     assert not list(directory.iterdir())
 print("Tracked deletion CLI checks passed: explicit help, no implicit initialization, sanitized refusal, no live provider calls.")
+
+# Prospective local bookkeeping uses actual process time and caller assertions;
+# no provider credentials or network configuration exist on this command path.
+help_result = subprocess.run([str(BIN), "lifecycle", "ledger", "--help"], capture_output=True, cwd=ROOT)
+assert help_result.returncode == 0 and not help_result.stderr
+assert b"discard-draft" in help_result.stdout and b"no network request" in help_result.stdout
+with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
+    directory = Path(temporary)
+    original, store = directory / "original.json", directory / "store"
+    deadline = int(time.time()) + 168 * 3600  # Design's maximum, used only in this local fixture.
+    init = ("lifecycle", "ledger", "init", "--original-binding", str(original), "--store-directory", str(store),
+            "--experiment-id", "SYNTHETIC_CLI_ONLY", "--workspace-id", "SYNTHETIC_WORKSPACE",
+            "--deletion-deadline", str(deadline), "--initial-cost-microusd", "17")
+    report = run(*init)
+    assert report["inspection"]["reference"]["generation"] == 0
+    binding = report["inspection"]["ledger"]["binding"]
+    assert binding["deletion_deadline_unix_seconds"] == deadline
+    assert binding["total_ceiling_microusd"] == 50_000_000
+    assert binding["delete_threshold_microusd"] == 45_000_000
+    run(*init, success=False)  # Never overwrite or silently resume initialization.
+    common = ("--original-binding", str(original))
+    attempt = ("lifecycle", "ledger", "record-attempt", *common, "--expected-generation", "0", "--attempt-id", "first")
+    report = run(*attempt)
+    assert report["inspection"]["reference"]["generation"] == 1
+    run(*attempt, success=False)
+    created = int(time.time())
+    track = ("lifecycle", "ledger", "record-cvm", *common, "--expected-generation", "1", "--attempt-id", "first",
+             "--cvm-id", "SYNTHETIC_CVM", "--app-id", "SYNTHETIC_APP", "--instance-id", "SYNTHETIC_INSTANCE",
+             "--created-at", str(created), "--compute-and-disk-microusd-per-hour", "243120")
+    report = run(*track)
+    assert report["inspection"]["reference"]["generation"] == 2
+    assert report["inspection"]["ledger"]["resources"]["SYNTHETIC_CVM"]["cvm"]["created_at_unix_seconds"] == created
+    assert report["inspection"]["ledger"]["binding"] == binding
+    for field in ("provider_authenticated", "network_used", "provider_mutations_performed", "private_accepted",
+                  "query_sent", "deployment_enabled", "deletion_retry_authorized", "billing_reconciled", "cleanup_complete"):
+        assert report[field] is False
+    assert report["operator_assertions_only"] is True
+    def retained_bytes():
+        return {str(path): path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+    before = retained_bytes()
+    inspected = run("lifecycle", "ledger", "inspect", *common)
+    assert inspected["inspection"]["reference"]["generation"] == 2
+    assert retained_bytes() == before
+    pending = store / "pending.json"
+    # Even a complete-looking draft cannot be promoted by recovery.
+    pending.write_bytes(Path(report["inspection"]["reference"]["snapshot_path"]).read_bytes())
+    inspected = run("lifecycle", "ledger", "inspect", *common)
+    assert inspected["inspection"]["has_uncommitted_draft"] is True
+    run("lifecycle", "ledger", "discard-draft", *common, "--expected-generation", "1", success=False)
+    assert pending.exists()
+    recovered = run("lifecycle", "ledger", "discard-draft", *common, "--expected-generation", "2")
+    assert recovered["pending_draft_discarded"] is True
+    assert recovered["inspection"]["reference"]["generation"] == 2
+    assert not recovered["inspection"]["has_uncommitted_draft"]
+    assert retained_bytes() == before
+    for flag in ("--now", "--started-at", "--reset", "--api-key", "--ledger-json"):
+        failed = run("lifecycle", "ledger", "inspect", *common, flag, "SENSITIVE_MARKER", success=False)
+        assert "SENSITIVE_MARKER" not in json.dumps(failed)
+        assert retained_bytes() == before
+print("Local ledger CLI checks passed: create-new setup, generation-bound recording, read-only inspection and discard-only recovery.")
 
 # The authentic upstream fixture has expired collateral at today's clock. A
 # historical-time override is intentionally absent from the production CLI.
