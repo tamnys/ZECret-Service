@@ -141,16 +141,23 @@ sent, and no account credits were spent. Private mode remains blocked.
   packaging generator now reconstructs every tracked blob from the pinned
   dstack and meta-dstack Git trees, ignoring Git replacement refs and checking
   blob identities and modes before applying the hash-checked overlays. It
-  materializes the pinned dstack gitlink in a separate staged source tree; the
-  other six meta-dstack gitlinks remain explicitly unresolved. A checkout at
-  the correct `HEAD` can contain modified
-  or untracked files without contributing them to this staged tree. The staged
+  materializes all seven pinned meta-dstack gitlinks in a separate staged
+  source tree and refuses a missing, changed or nested gitlink. A checkout at
+  the correct `HEAD` can contain modified or untracked files without
+  contributing them to this staged tree. The staged
   guest recipe uses a hash-bound file list, content checksums and executable
   modes instead of copying the mutable checkout. Its unpack task refuses
   symlinks and stale output, and BitBake's documented `cleandirs` task setting
-  requests a fresh work directory on repeated runs. This is source preparation
-  only: the other BitBake layers, the effective recipe parser/build, binary
-  provenance and an immutable built artifact remain unverified.
+  requests a fresh work directory on repeated runs. In a managed-container
+  source-only dry run, both runs contained 14,215 staged files and 27 symlinks,
+  including the checked overlays, and produced identical packaging-manifest SHA-256
+  `41222583e744b7dae3db54b246da0173aa7b439084d39589d7811ed6e87d93b4`.
+  Both runs used the same synthetic ELF-header file for the guard and proxy;
+  neither establishes binary provenance. A fetcher-offline BitBake parse setup
+  was attempted against this staged tree, but the pinned BitBake server requires
+  `en_US.UTF-8`, which the managed container lacks. The layer setup stopped
+  before adding project layers, so parser validation and dependency closure
+  remain unverified. No rootfs, immutable image or Phala admission exists.
 - The native verifier has an opaque `ApprovedRelease` separate from diagnostic
   `WorkloadPolicy`. An external policy can select only a client-embedded release.
   The manifest's launch-config digest must equal the app-compose hash used in
