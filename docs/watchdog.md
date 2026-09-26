@@ -105,3 +105,78 @@ stop storage billing.** Disk-deletion evidence, billing reconciliation, an
 external deadline controller and an independent backstop are still required
 before deployment. Private mode remains unavailable, and watchdog results do
 not approve hardware/workload identity, TLS-key binding or private queries.
+
+## Prepare an offline scheduler bundle
+
+`zrpc lifecycle export-watchdog` creates uninstalled systemd files for review.
+It reads the existing original-bound ledger and writes only a new private output
+directory. It does not read the API key, trust roots or selected executable, and
+does not contact Phala or a systemd manager. Show its required options with:
+
+```sh
+./target/debug/zrpc lifecycle export-watchdog --help
+```
+
+Supply all `watchdog-once` options above, plus:
+
+| Option | Meaning |
+| --- | --- |
+| `--executable ABSOLUTE_PATH` | Native `zrpc` binary selected for the external Linux host. |
+| `--service-user UID` | Existing nonroot numeric UID on that host; zero and the invalid UID sentinel are rejected. |
+| `--unit-name STEM` | Unique literal name using ASCII letters, digits, hyphens or underscores; begin with a letter or digit. |
+| `--process-runtime-bound-ms T` | Positive whole-service timeout, including local work; must be at least `B`. |
+| `--manager-delay-allowance-ms J` | Explicit nonnegative allowance for manager/launch delays, timer slack and timeout-to-inactive overshoot outside `T`. |
+| `--output-directory ABSOLUTE_NEW_DIRECTORY` | New private review directory outside the retained ledger. |
+
+The destination's parent must already exist and be operator-controlled. Export
+refuses existing output, symlink replacements and output inside the ledger,
+including through a parent alias. Keep the bundle in private operator storage;
+it contains account identifiers and local paths. API-key contents never belong
+in unit text or command arguments. On export failure, inspect the retained
+partial directory and choose a new destination; no history or output is reset.
+
+The four files are `STEM.service`, `STEM-periodic.timer`, `STEM-deadline.timer`
+and `manifest.json`. The manifest records the original binding, reviewed
+generation, exact command arguments, timing calculation and file contents. The
+future command loads the latest committed ledger under its writer lock; it does
+not freeze that reviewed generation or accept new targets from a timer. The
+service uses the original absolute paths, which must be accessible to the
+selected UID on the external host. Export does not check host account existence,
+binary provenance, file ownership, installed systemd configuration or availability.
+
+Both timers target one service and request a startup check. Its explicit
+`Type=oneshot` timeout is `T`, with immediate final-signal handling on timeout,
+no restart loop and no inherited start-rate suppression. The periodic timer
+counts from service inactivity, including failure. The deadline timer retains
+the exact original `deadline − L − S` time in UTC and uses `Persistent=true`
+for missed calendar events after reactivation. Unit syntax targets systemd 257;
+validate the complete files and effective configuration on the selected host.
+
+For this bundle, `S` must cover a skipped timer event while the service is
+already active, as well as scheduling delays. The periodic gap is derived as:
+
+```text
+A = 1 microsecond (configured timer accuracy)
+I = S − T − J − R − A  > 0
+T + I + J + R + A = S
+R + S <= P
+```
+
+This leaves room for the active process, the next interval, manager delay and
+observation before deletion must begin. `B` alone is insufficient because it
+does not bound ledger loading or synchronous filesystem work. A configuration
+that fits a standalone watchdog invocation can therefore fail bundle export.
+No example timing values are production defaults.
+
+The derivation is conditional on measured host/provider bounds. A timeout
+cannot guarantee prompt termination during uninterruptible kernel I/O, a
+calendar timer cannot eliminate downtime, and an event does not restart an
+already-active service. Persistent state and the periodic catch-up policy do
+not replace the independent external backstop.
+
+Before any separately approved installation, verify the selected binary's
+checksums, input ownership and permissions, service account, effective unit
+configuration and host clock. Validate timing with local fixtures and then the
+approved live deletion test. Both timers, the independent backstop, storage
+deletion evidence and billing reconciliation remain required. Export grants no
+installation, deployment or spending permission and emits no activation receipt.

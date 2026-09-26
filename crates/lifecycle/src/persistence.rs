@@ -354,6 +354,14 @@ impl CommittedDeletionIntent<'_> {
 }
 
 impl CommittedLedgerReference {
+    pub(crate) fn original_binding_path(&self) -> &Path {
+        &self.original_binding_path
+    }
+
+    pub(crate) fn snapshot_path(&self) -> &Path {
+        &self.snapshot_path
+    }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }

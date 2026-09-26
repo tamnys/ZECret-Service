@@ -43,11 +43,11 @@ Failure can leave committed observations, intents or outcomes. Inspect the retai
 One invocation installs no jobs, authorizes no future run, and creates no resources. Deployment remains disabled.";
 
 #[cfg(unix)]
-struct Settings {
-    provider: ProviderSettings,
-    experiment_id: String,
-    limits: ObservationLimits,
-    policy: WatchdogPolicy,
+pub(super) struct Settings {
+    pub(super) provider: ProviderSettings,
+    pub(super) experiment_id: String,
+    pub(super) limits: ObservationLimits,
+    pub(super) policy: WatchdogPolicy,
 }
 
 #[cfg(unix)]
@@ -62,7 +62,7 @@ fn duration(args: &mut Vec<String>, flag: &str, allow_zero: bool) -> Result<Dura
 }
 
 #[cfg(unix)]
-fn parse_settings(mut args: Vec<String>) -> Result<Settings, String> {
+pub(super) fn parse_settings(mut args: Vec<String>) -> Result<Settings, String> {
     let provider = ProviderSettings::parse(&mut args)?;
     let experiment_id = required(&mut args, "--experiment-id")?;
     if experiment_id.trim().is_empty() {

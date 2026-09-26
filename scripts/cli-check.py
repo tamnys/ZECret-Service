@@ -125,6 +125,79 @@ with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
     assert not list(directory.iterdir())
 print("Watchdog CLI checks passed: explicit help, complete required inputs, duplicate/unsupported flags and phase-budget refusal; no live invocation.")
 
+# Bundle export only writes reviewable files. Its referenced credential, trust
+# and executable paths deliberately do not exist, so success requires no load.
+help_result = subprocess.run([str(BIN), "lifecycle", "export-watchdog", "--help"], capture_output=True, cwd=ROOT)
+assert help_result.returncode == 0 and not help_result.stderr
+assert b"OFFLINE export" in help_result.stdout and b"uninstalled systemd files" in help_result.stdout
+assert b"--output-directory" in help_result.stdout and b"--service-user" in help_result.stdout
+assert b"installs or activates no jobs" in help_result.stdout
+
+def export_options(directory):
+    # Arithmetic/parser fixture only, never deployment timing defaults.
+    return ["--original-binding", str(directory / "original.json"),
+            "--experiment-id", "SYNTHETIC_EXPORT_ONLY", "--api-key-file", str(directory / "absent-key"),
+            "--trust-root", str(directory / "absent-root.der"), "--invocation-budget-ms", "2",
+            "--max-response-bytes", "1", "--max-input-file-bytes", "1", "--inventory-page-size", "30",
+            "--usage-page-size", "500", "--max-inventory-records", "1", "--max-usage-records-per-app", "1",
+            "--maximum-detection-interval-ms", "5", "--deletion-latency-upper-bound-ms", "1",
+            "--scheduler-delay-allowance-ms", "4", "--reconciliation-budget-ms", "1",
+            "--deletion-dispatch-budget-ms", "1", "--fee-upper-bounds-microusd", "0",
+            "--executable", str(directory / "absent-zrpc"), "--service-user", "1000",
+            "--unit-name", "synthetic-watchdog", "--process-runtime-bound-ms", "2",
+            "--manager-delay-allowance-ms", "0", "--output-directory", str(directory / "bundle")]
+
+with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
+    directory = Path(temporary)
+    options = export_options(directory)
+    unavailable = run("lifecycle", "export-watchdog", *options, success=False)
+    for flag in ("--install", "--activate", "--endpoint", "--now", "--api-key", "--initialize", "--simulate"):
+        refused = run("lifecycle", "export-watchdog", *options, flag, "SYNTHETIC_CREDENTIAL_MARKER", success=False)
+        assert refused["error"] == "unknown or repeated argument"
+        assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(refused)
+    for flag in ("--executable", "--service-user", "--output-directory", "--process-runtime-bound-ms"):
+        value = options[options.index(flag) + 1]
+        refused = run("lifecycle", "export-watchdog", *options, flag, value, success=False)
+        assert refused["error"] == "unknown or repeated argument"
+    for flag, value in (("--service-user", "0"), ("--process-runtime-bound-ms", "1"),
+                        ("--executable", "relative"), ("--output-directory", "relative")):
+        invalid = options.copy()
+        invalid[invalid.index(flag) + 1] = value
+        refused = run("lifecycle", "export-watchdog", *invalid, success=False)
+        assert refused["error"] != unavailable["error"]
+    assert not list(directory.iterdir())
+
+    # Only synthetic local bookkeeping is initialized; no resource or provider
+    # credential is created. Export must retain every original ledger byte.
+    run("lifecycle", "ledger", "init", "--original-binding", str(directory / "original.json"),
+        "--store-directory", str(directory / "store"), "--experiment-id", "SYNTHETIC_EXPORT_ONLY",
+        "--workspace-id", "SYNTHETIC_WORKSPACE", "--deletion-deadline", str(int(time.time()) + 168 * 3600),
+        "--initial-cost-microusd", "17")
+    before = {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+    exported = run("lifecycle", "export-watchdog", *options)
+    assert exported["mode"] == "offline_uninstalled_watchdog_bundle"
+    for field in ("jobs_installed", "credentials_read", "network_used", "timing_verified",
+                  "activation_authorized", "deployment_enabled", "private_accepted"):
+        assert exported[field] is False
+    assert exported["service_user"] == 1000
+    assert all(path.read_bytes() == content for path, content in before.items())
+    output = directory / "bundle"
+    assert {path.name for path in output.iterdir()} == {
+        "synthetic-watchdog.service", "synthetic-watchdog-periodic.timer",
+        "synthetic-watchdog-deadline.timer", "manifest.json"}
+    assert json.loads((output / "manifest.json").read_text()) == exported
+    assert output.stat().st_mode & 0o777 == 0o700
+    for name, content in exported["files"].items():
+        assert (output / name).read_text() == content
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in output.iterdir())
+    assert not (directory / "absent-key").exists()
+    assert not (directory / "absent-root.der").exists()
+    assert not (directory / "absent-zrpc").exists()
+    retained = {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+    run("lifecycle", "export-watchdog", *options, success=False)
+    assert {path: path.read_bytes() for path in directory.rglob("*") if path.is_file()} == retained
+print("Watchdog export CLI checks passed: offline synthetic export, unchanged ledger, no credential/executable loading, new private files, no overwrite or activation.")
+
 # Prospective local bookkeeping uses actual process time and caller assertions;
 # no provider credentials or network configuration exist on this command path.
 help_result = subprocess.run([str(BIN), "lifecycle", "ledger", "--help"], capture_output=True, cwd=ROOT)

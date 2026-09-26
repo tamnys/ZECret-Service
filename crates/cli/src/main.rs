@@ -11,6 +11,7 @@ use zrpc_lifecycle::{DeploymentManifest, PlanInput};
 mod ledger;
 mod provider_deletion;
 mod provider_observation;
+mod provider_schedule;
 mod provider_settings;
 mod provider_watchdog;
 

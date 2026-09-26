@@ -96,6 +96,8 @@ For another explicit **real deletion attempt**, use `zrpc lifecycle retry-tracke
 
 For a single **real watchdog invocation**, run `zrpc lifecycle watchdog-once --help` and follow the [watchdog operator guide](docs/watchdog.md). The command selects the entire retained experiment by its exact ID and may delete each tracked CVM once, including a linked retry of its latest intent. It uses the original deadline and cost history with explicit observation, dispatch, latency and scheduling assumptions. Cleanup already due at startup skips optional scans. All pages and targets share one invocation budget. The command creates no resources, installs no periodic/deadline jobs and authorizes no future run; an external scheduler and independent deadline backstop remain deployment prerequisites. Its report cannot establish disk deletion, billing finality or private-mode acceptance.
 
+`zrpc lifecycle export-watchdog --help` describes the **offline** export of a service, periodic timer, absolute UTC timer and review manifest. Export reads the existing ledger and writes a new private directory. It does not load credentials, execute the selected binary or install jobs. See [bundle preparation](docs/watchdog.md#prepare-an-offline-scheduler-bundle) for the additional required timing and host inputs.
+
 ## Project map
 
 - `crates/{protocol,verifier,transport,client,server}`: typed boundaries and in-process fixtures.
