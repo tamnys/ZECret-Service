@@ -14,11 +14,13 @@ import shutil
 import subprocess
 import sys
 
+import debian_snapshot
+
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "deploy/gcp/guest"
 SOURCE_COMMIT = "54c625c380ef5500f17460981a3c67b109b6a847"
 BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
-ROLES = set(BINARIES) | {"base_tree", "kernel", "initrd", "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "boot_policy"}
+ROLES = set(BINARIES) | {"base_tree", "kernel", "initrd", "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
 
@@ -50,7 +52,7 @@ def preflight():
     return {"schema_version": 1, "status": "blocked" if blockers else "capabilities-present-input-review-required", "architecture": platform.machine(), "tools": tools, "blockers": blockers, "image_built": False, "private_mode_approved": False}
 
 def validate_lock(lock, source):
-    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 1 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
+    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 2 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
         raise ValueError("unsupported or incomplete input lock")
     if type(lock["source_date_epoch"]) is not int or lock["source_date_epoch"] <= 0:
         raise ValueError("source date must derive from authenticated inputs")
@@ -82,7 +84,7 @@ def validate_lock(lock, source):
         raise ValueError("complete Debian package manifest required")
     names = set()
     for package in manifest:
-        if set(package) != {"name", "version", "sha256"} or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package["name"]) or not package["version"] or not re.fullmatch("[0-9a-f]{64}", package["sha256"]) or package["name"] in names:
+        if set(package) != {"name", "version", "architecture", "filename", "size", "sha256", "path"} or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package["name"]) or not re.fullmatch(r"[0-9][A-Za-z0-9.+:~-]*", package["version"]) or not re.fullmatch("[0-9a-f]{64}", package["sha256"]) or package["name"] in names:
             raise ValueError("invalid package identity")
         names.add(package["name"])
     if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup"} <= names:
@@ -90,11 +92,12 @@ def validate_lock(lock, source):
     runtime = lock["runtime"]
     if set(runtime) != {"listen_port", "max_connections", "max_quotes", "quote_spacing_ms", "node_startup_timeout_secs", "node_poll_interval_ms"} or any(type(value) is not int or value <= 0 for value in runtime.values()) or runtime["listen_port"] > 65535:
         raise ValueError("explicit measured runtime limits required")
-    return paths
+    snapshot, packages = debian_snapshot.verify_snapshot(lock, paths, source, manifest)
+    return paths, manifest, snapshot, packages
 
 def stage(lock_path, source, destination):
     lock = read_json(lock_path)
-    paths = validate_lock(lock, source)
+    paths, package_manifest, snapshot, packages = validate_lock(lock, source)
     destination = destination.resolve()
     if not destination.is_relative_to(ROOT.resolve()) or destination.exists():
         raise ValueError("fresh output directory on the managed workspace volume required")
@@ -111,6 +114,14 @@ def stage(lock_path, source, destination):
         shutil.copyfile(path, target)
         if digest(target) != lock["artifacts"][role]["sha256"]:
             raise ValueError("artifact changed during staging")
+    package_directory = destination / "packages"
+    package_directory.mkdir()
+    for package in package_manifest:
+        source_archive = packages[(package["name"], package["version"], package["architecture"])]
+        target = package_directory / (package["sha256"] + ".deb")
+        shutil.copyfile(source_archive, target)
+        if digest(target) != package["sha256"]:
+            raise ValueError("Debian package changed during staging")
     rootfs = destination / "rootfs"
     binaries = rootfs / "usr/lib/zrpc"
     binaries.mkdir(parents=True)
@@ -138,7 +149,8 @@ def stage(lock_path, source, destination):
         (masks / "multi-user.target.wants" / name).symlink_to("/usr/lib/systemd/system/" + name)
     (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
     with (destination / "mkosi.conf").open("a") as stream:
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nBaseTrees=artifacts/base_tree.tar\nInitrds=artifacts/initrd\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\n[Build]\nWorkspaceDirectory=work\n')
+        pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nBaseTrees=artifacts/base_tree.tar\nInitrds=artifacts/initrd\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\n[Build]\nWorkspaceDirectory=work\n')
     shutil.copyfile(lock_path, destination / "inputs.lock.json")
     entries = {}
     for path in sorted(destination.rglob("*")):
@@ -149,7 +161,7 @@ def stage(lock_path, source, destination):
         else:
             entry = {"type": "directory", "mode": path.stat().st_mode & 0o777}
         entries[str(path.relative_to(destination))] = entry
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "entries": entries, "remaining_gates": ["Debian signature and closure verification", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["complete installed package closure comparison after build", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     (destination / "candidate-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
@@ -168,8 +180,8 @@ def main():
         if args.command == "preflight":
             report = preflight()
         elif args.command == "inspect-inputs":
-            validate_lock(read_json(args.lock), args.inputs)
-            report = {"status": "local-hashes-match-authentication-still-required", "private_mode_approved": False}
+            _, _, snapshot, _ = validate_lock(read_json(args.lock), args.inputs)
+            report = {"status": "offline-debian-signature-and-hashes-matched-toolchain-review-pending", "debian_snapshot": snapshot, "image_built": False, "private_mode_approved": False}
         else:
             report = stage(args.lock, args.inputs, args.output)
         print(json.dumps(report, indent=2))

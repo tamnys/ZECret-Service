@@ -12,6 +12,8 @@ RefuseManualStart=yes
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=+/usr/lib/zrpc/zrpc-gcp-guard --mark-start cookie
+ExecStartPre=/usr/lib/zrpc/zrpc-gcp-guard --check cookie
 # ExecStart and TimeoutStartSec are generated from measured startup timing inputs.
 Restart=no
 LimitCORE=0
@@ -20,6 +22,7 @@ StandardOutput=null
 StandardError=null
 ProtectSystem=strict
 ReadWritePaths=/run/zrpc-wrapper
+InaccessiblePaths=/run/zrpc-gcp-quote /var/lib/zebra /sys/kernel/config /sys/firmware
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

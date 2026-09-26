@@ -241,6 +241,65 @@ async fn create_intents_are_durable_and_cleanup_tracks_every_owned_resource() {
     assert!(store.journal().billing_evidence_sha256.is_none());
 }
 #[tokio::test]
+async fn billing_reference_is_post_cleanup_append_only_and_never_changes_status() {
+    let f = Fixture::new();
+    let mut store = Store::open(&f.state).unwrap();
+    let mut provider = f.mock();
+    let hash = digest(b"synthetic billing evidence, not reconciliation");
+
+    let mut early = store.journal().clone();
+    early.billing_evidence_sha256 = Some(hash.clone());
+    assert!(store.commit(early).is_err());
+
+    deploy_all(&mut store, &mut provider, &f.package).await;
+    let mut before_cleanup = store.journal().clone();
+    before_cleanup.teardown_started = true;
+    before_cleanup.billing_evidence_sha256 = Some(hash.clone());
+    assert!(store.commit(before_cleanup).is_err());
+
+    for _ in &f.package.resources {
+        assert_eq!(
+            teardown_once(&mut store, &mut provider, 1001)
+                .await
+                .unwrap(),
+            Progress::Pending
+        );
+    }
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1002)
+            .await
+            .unwrap(),
+        Progress::ResourcesAbsentBillingUnreconciled
+    );
+    let mut malformed = store.journal().clone();
+    malformed.billing_evidence_sha256 = Some("not-a-sha256".into());
+    assert!(store.commit(malformed).is_err());
+
+    let mut recorded = store.journal().clone();
+    recorded.billing_evidence_sha256 = Some(hash.clone());
+    store.commit(recorded).unwrap();
+    let mut replaced = store.journal().clone();
+    replaced.billing_evidence_sha256 = Some(digest(b"replacement"));
+    assert!(store.commit(replaced).is_err());
+    let mut removed = store.journal().clone();
+    removed.billing_evidence_sha256 = None;
+    assert!(store.commit(removed).is_err());
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1002)
+            .await
+            .unwrap(),
+        Progress::ResourcesAbsentBillingUnreconciled
+    );
+    drop(store);
+    assert_eq!(
+        Store::open(&f.state)
+            .unwrap()
+            .journal()
+            .billing_evidence_sha256,
+        Some(hash)
+    );
+}
+#[tokio::test]
 async fn interrupted_creation_resumes_from_original_intent_after_restart() {
     let f = Fixture::new();
     let mut provider = f.mock();

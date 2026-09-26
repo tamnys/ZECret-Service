@@ -8,8 +8,10 @@ pub const MAX_ATTESTATION_REQUEST_BYTES: usize = MAX_REQUEST_BYTES;
 pub const MAX_ATTESTATION_RESPONSE_BYTES: usize = MAX_RESPONSE_BYTES;
 // Design §7 connection lifetime, including any public attestation exchange.
 pub const MAX_CONNECTION_LIFETIME_SECONDS: u64 = 300;
-// ADR 0002: RFC 8446 exporter label, raw 32-byte context, 64-byte output.
-pub const ATTESTATION_EXPORTER_LABEL: &[u8] = b"EXPORTER-zrpc-attestation-v1";
+// ADR 0002: RFC 5705 private-use label with the RFC 8446 TLS 1.3 exporter,
+// raw 32-byte challenge context and 64-byte output. No release uses the old
+// unregistered label; changing this candidate cannot approve private mode.
+pub const ATTESTATION_EXPORTER_LABEL: &[u8] = b"EXPERIMENTAL-zrpc-attestation-v1";
 
 /// Explicit evidence format selection. It is not a trust assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

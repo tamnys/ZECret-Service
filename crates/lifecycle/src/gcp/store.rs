@@ -1,6 +1,6 @@
 //! Append-only, fsync-backed journal with an exclusive cooperating-writer lock.
 //! Hostile rollback by the operator UID is outside the external-host trust model.
-use super::{Error, Result, digest, package::Package, read_regular, valid_uuid};
+use super::{Error, Result, digest, package::Package, read_regular, valid_digest, valid_uuid};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, DirBuilder, File, OpenOptions},
@@ -37,7 +37,8 @@ pub struct Journal {
     pub original_start: u64,
     pub original_deadline: u64,
     pub resources: Vec<ResourceState>,
-    /// Separate evidence: absence does not prove final billing reconciliation.
+    /// Immutable audit reference only. A digest cannot establish that delayed
+    /// charges, corrections, or invoices have finished arriving.
     pub billing_evidence_sha256: Option<String>,
     pub teardown_started: bool,
 }
@@ -270,6 +271,28 @@ fn validate_transition(previous: &Journal, next: &Journal) -> Result<()> {
         || previous.teardown_started && !next.teardown_started
     {
         return Err(Error("journal original experiment cannot be reset"));
+    }
+    if previous.billing_evidence_sha256.is_some()
+        && previous.billing_evidence_sha256 != next.billing_evidence_sha256
+    {
+        return Err(Error(
+            "billing evidence reference cannot be changed or removed",
+        ));
+    }
+    if let Some(hash) = &next.billing_evidence_sha256 {
+        if !valid_digest(hash)
+            || !next.teardown_started
+            || next.resources.iter().any(|r| {
+                r.create
+                    .as_ref()
+                    .is_some_and(|i| !i.done || !r.observed_absent)
+                    || r.delete.as_ref().is_some_and(|i| !i.done)
+            })
+        {
+            return Err(Error(
+                "billing evidence requires a digest and observed completed teardown",
+            ));
+        }
     }
     for (a, b) in previous.resources.iter().zip(&next.resources) {
         if a.identity.is_some() && a.identity != b.identity {
