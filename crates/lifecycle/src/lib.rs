@@ -6,9 +6,11 @@ use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
 
 #[cfg(unix)]
 pub mod activation;
+pub mod amount;
 pub mod controller;
 #[cfg(unix)]
 pub mod persistence;
+pub mod provider_wire;
 
 // Authorities: design section 13 sets the lifetime, preflight ceiling and
 // deletion trigger. The operator's subsequent $50 total cap supersedes its

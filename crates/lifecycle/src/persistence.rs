@@ -6,7 +6,7 @@
 
 use crate::{
     LifecycleError,
-    controller::{ExperimentBinding, ExperimentLedger},
+    controller::{DeletionIntentRecord, DeletionOutcome, ExperimentBinding, ExperimentLedger},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::value::{RawValue, to_raw_value};
@@ -184,6 +184,9 @@ pub fn create_original_binding(
     store_directory: &Path,
     initial: &ExperimentLedger,
 ) -> Result<(), StoreError> {
+    if !initial.deletion_intents().is_empty() {
+        return Err(StoreError::InvalidState);
+    }
     validate_absolute(path)?;
     validate_absolute(store_directory)?;
     if path.starts_with(store_directory) {
@@ -198,7 +201,12 @@ pub fn create_original_binding(
         store_directory: store_directory.to_path_buf(),
         initial_ledger: to_raw_value(initial).map_err(|_| StoreError::InvalidState)?,
     };
-    ledger_from_raw(&record.initial_ledger, &record.binding)?;
+    if !ledger_from_raw(&record.initial_ledger, &record.binding)?
+        .deletion_intents()
+        .is_empty()
+    {
+        return Err(StoreError::InvalidState);
+    }
     let pending = sibling(path, ".pending")?;
     let mut file = create_file(&pending)?;
     file.write_all(&json_bytes(&record)?)
@@ -232,7 +240,12 @@ fn original(path: &Path) -> Result<(OriginalRecord, File), StoreError> {
     if path.starts_with(&record.store_directory) {
         return Err(StoreError::UnsafePath);
     }
-    ledger_from_raw(&record.initial_ledger, &record.binding)?;
+    if !ledger_from_raw(&record.initial_ledger, &record.binding)?
+        .deletion_intents()
+        .is_empty()
+    {
+        return Err(StoreError::InvalidState);
+    }
     Ok((record, file))
 }
 
@@ -271,6 +284,48 @@ pub struct CommittedLedgerReference {
     generation: u64,
 }
 
+/// Proof of a locally committed intent while its writer lock is retained.
+/// This is not operator approval, authenticated provider identity or a network
+/// capability. No live adapter accepts it yet. Dropping it preserves pending
+/// history; retries require future reconciliation support.
+///
+/// ```compile_fail
+/// fn cannot_clone(intent: zrpc_lifecycle::persistence::CommittedDeletionIntent<'_>) {
+///     let replay = intent.clone();
+/// }
+/// ```
+/// ```compile_fail
+/// fn cannot_restore(bytes: &[u8]) {
+///     let intent: zrpc_lifecycle::persistence::CommittedDeletionIntent<'_> =
+///         serde_json::from_slice(bytes).unwrap();
+/// }
+/// ```
+pub struct CommittedDeletionIntent<'a> {
+    store: &'a mut LedgerStore,
+    index: usize,
+}
+impl CommittedDeletionIntent<'_> {
+    pub fn workspace_id(&self) -> &str {
+        self.store.ledger.workspace_id()
+    }
+    pub fn record(&self) -> &DeletionIntentRecord {
+        &self.store.ledger.deletion_intents()[self.index]
+    }
+    pub fn finish(self, outcome: DeletionOutcome, now: u64) -> Result<(), StoreError> {
+        self.finish_with_hook(outcome, now, &mut |_| Ok(()))
+    }
+    fn finish_with_hook(
+        self,
+        outcome: DeletionOutcome,
+        now: u64,
+        hook: &mut impl FnMut(CommitPoint) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut next = self.store.ledger()?.clone();
+        next.finish_deletion_intent(self.index, outcome, now)?;
+        self.store.commit_with_hook(&next, hook)
+    }
+}
+
 impl CommittedLedgerReference {
     pub fn generation(&self) -> u64 {
         self.generation
@@ -288,6 +343,45 @@ enum CommitPoint {
 }
 
 impl LedgerStore {
+    /// Record an explicit first cleanup intent for an already committed target.
+    /// No provider request is made; generation/workspace arguments are local
+    /// consistency checks, not provider authentication or spending permission.
+    pub fn prepare_deletion(
+        &mut self,
+        expected_generation: u64,
+        workspace: &str,
+        cvm_id: &str,
+        now: u64,
+    ) -> Result<CommittedDeletionIntent<'_>, StoreError> {
+        self.prepare_deletion_with_hook(
+            expected_generation,
+            workspace,
+            cvm_id,
+            now,
+            &mut |_| Ok(()),
+        )
+    }
+
+    fn prepare_deletion_with_hook(
+        &mut self,
+        expected_generation: u64,
+        workspace: &str,
+        cvm_id: &str,
+        now: u64,
+        hook: &mut impl FnMut(CommitPoint) -> Result<(), StoreError>,
+    ) -> Result<CommittedDeletionIntent<'_>, StoreError> {
+        self.ledger()?;
+        self.verify_current()?;
+        if self.generation != expected_generation {
+            return Err(StoreError::InvalidState);
+        }
+        let mut next = self.ledger.clone();
+        let index = next.append_deletion_intent(expected_generation, workspace, cvm_id, now)?;
+        // All snapshot/file/directory synchronization finishes before the
+        // borrowed token can be constructed or observed by a future adapter.
+        self.commit_with_hook(&next, hook)?;
+        Ok(CommittedDeletionIntent { store: self, index })
+    }
     pub fn planning_reference(&self) -> Result<CommittedLedgerReference, StoreError> {
         self.ledger()?;
         self.verify_current()?;
@@ -408,6 +502,11 @@ impl LedgerStore {
     }
 
     pub fn commit(&mut self, next: &ExperimentLedger) -> Result<(), StoreError> {
+        // Ordinary callers may supply restored JSON. They cannot synthesize an
+        // intent or fill/erase a pending outcome through generic persistence.
+        if next.deletion_intents() != self.ledger()?.deletion_intents() {
+            return Err(StoreError::InvalidState);
+        }
         self.commit_with_hook(next, &mut |_| Ok(()))
     }
 
@@ -426,6 +525,7 @@ impl LedgerStore {
             return Err(error);
         }
         next.validate_successor(&self.ledger)?;
+        validate_journal_transition(&self.ledger, next, self.generation)?;
         let generation = self
             .generation
             .checked_add(1)
@@ -504,6 +604,44 @@ impl LedgerStore {
     }
 }
 
+fn validate_journal_transition(
+    previous: &ExperimentLedger,
+    next: &ExperimentLedger,
+    prior_generation: u64,
+) -> Result<(), StoreError> {
+    let before = previous.deletion_intents();
+    let after = next.deletion_intents();
+    // One purpose-specific write appends one intent or records one outcome.
+    // This is the operation's atomicity contract, not a resource/request quota.
+    if after.len() == before.len() {
+        if before.iter().zip(after).filter(|(a, b)| a != b).count() > 1 {
+            return Err(StoreError::InvalidState);
+        }
+    } else if after.len().checked_sub(before.len()) == Some(1) {
+        if &after[..before.len()] != before {
+            return Err(StoreError::InvalidState);
+        }
+        let intent = after.last().ok_or(StoreError::InvalidState)?;
+        if intent.reviewed_generation != prior_generation || intent.outcome.is_some() {
+            return Err(StoreError::InvalidState);
+        }
+        // The new target must predate the intent snapshot.
+        let mut proof = previous.clone();
+        proof.append_deletion_intent(
+            prior_generation,
+            previous.workspace_id(),
+            &intent.target.cvm_id,
+            intent.recorded_at_unix_seconds,
+        )?;
+        if proof.deletion_intents().last() != Some(intent) {
+            return Err(StoreError::InvalidState);
+        }
+    } else {
+        return Err(StoreError::InvalidState);
+    }
+    Ok(())
+}
+
 fn acquire_lock(lock: &File) -> Result<(), StoreError> {
     match lock.try_lock() {
         Ok(()) => Ok(()),
@@ -545,7 +683,9 @@ fn load_history(original: &OriginalRecord) -> Result<(u64, ExperimentLedger, boo
                 return Err(StoreError::InvalidState);
             }
             ledger.validate_successor(prior)?;
+            validate_journal_transition(prior, &ledger, *prior_generation)?;
         } else if generation != 0
+            || !ledger.deletion_intents().is_empty()
             || json_bytes(&ledger)?
                 != json_bytes(&ledger_from_raw(
                     &original.initial_ledger,
@@ -640,6 +780,233 @@ mod tests {
     fn setup(temp: &Temp) -> LedgerStore {
         create_original_binding(&temp.original(), &temp.store(), &ledger()).unwrap();
         LedgerStore::initialize(&temp.original()).unwrap()
+    }
+
+    #[test]
+    fn deletion_intent_rejects_scope_generation_and_time_without_writing() {
+        let temp = Temp::new();
+        let mut store = setup(&temp);
+        for (generation, workspace, id, now) in [
+            (1, "workspace", "one", 1000),
+            (0, "other", "one", 1000),
+            (0, "workspace", "untracked", 1000),
+            (0, "workspace", "one", 999),
+        ] {
+            assert!(
+                store
+                    .prepare_deletion(generation, workspace, id, now)
+                    .is_err()
+            );
+            assert_eq!(store.generation, 0);
+            assert!(store.ledger().unwrap().deletion_intents().is_empty());
+            assert!(!temp.store().join(snapshot_name(1)).exists());
+        }
+    }
+
+    #[test]
+    fn intent_is_durable_before_token_and_drop_retains_pending_without_retry() {
+        let temp = Temp::new();
+        let mut store = setup(&temp);
+        let intent = store.prepare_deletion(0, "workspace", "one", 1000).unwrap();
+        assert_eq!(intent.workspace_id(), "workspace");
+        assert_eq!(intent.record().committed_generation, 1);
+        assert!(intent.record().outcome.is_none());
+        let snapshot: Snapshot =
+            parse_object(&fs::read(temp.store().join(snapshot_name(1))).unwrap()).unwrap();
+        let durable = ledger_from_raw(&snapshot.ledger, intent.store.ledger.binding()).unwrap();
+        assert_eq!(durable.deletion_intents(), &[intent.record().clone()]);
+        assert!(matches!(
+            LedgerStore::open(&temp.original()),
+            Err(StoreError::Locked)
+        ));
+        drop(intent);
+        drop(store);
+        let mut store = LedgerStore::open(&temp.original()).unwrap();
+        assert!(
+            store.ledger().unwrap().deletion_intents()[0]
+                .outcome
+                .is_none()
+        );
+        assert!(store.prepare_deletion(1, "workspace", "one", 1001).is_err());
+        // Pending work for one CVM does not hide another committed resource.
+        let mut next = store.ledger().unwrap().clone();
+        next.track_cvm(
+            "workspace",
+            "first",
+            TrackedCvm {
+                cvm_id: "two".into(),
+                app_id: "app2".into(),
+                instance_id: "instance2".into(),
+                created_at_unix_seconds: 1000,
+                compute_and_disk_microusd_per_hour: 243_120,
+            },
+        )
+        .unwrap();
+        store.commit(&next).unwrap();
+        drop(store.prepare_deletion(2, "workspace", "two", 1001).unwrap());
+        assert_eq!(store.ledger().unwrap().deletion_intents().len(), 2);
+    }
+
+    #[test]
+    fn deletion_outcomes_never_prove_absence_or_renew_overdue_policy() {
+        for outcome in [
+            DeletionOutcome::Initiated204,
+            DeletionOutcome::NotFound404,
+            DeletionOutcome::TransportUncertain,
+            DeletionOutcome::Rejected { status: 403 },
+        ] {
+            let temp = Temp::new();
+            let mut store = setup(&temp);
+            let original = store.ledger().unwrap().binding().clone();
+            // Beyond the original deadline and above the overall expense cap:
+            // cleanup intent must still be possible, without another attempt.
+            let now = 1000 + MAX_LIFETIME_SECONDS * 2;
+            store
+                .prepare_deletion(0, "workspace", "one", now)
+                .unwrap()
+                .finish(outcome, now)
+                .unwrap();
+            assert_eq!(store.generation, 2);
+            assert_eq!(store.ledger().unwrap().binding(), &original);
+            assert!(
+                store.ledger().unwrap().planning_cost_at(now).unwrap()
+                    > crate::TOTAL_CEILING_MICROUSD
+            );
+            let record = &store.ledger().unwrap().deletion_intents()[0];
+            assert_eq!(record.outcome.as_ref().unwrap().outcome, outcome);
+            let view = serde_json::to_value(store.ledger().unwrap()).unwrap();
+            assert_eq!(view["resources"]["one"]["deletion"], "tracking");
+            assert!(store.prepare_deletion(2, "workspace", "one", now).is_err());
+            drop(store);
+            let restored = LedgerStore::open(&temp.original()).unwrap();
+            assert_eq!(
+                restored.ledger().unwrap().deletion_intents()[0]
+                    .outcome
+                    .as_ref()
+                    .unwrap()
+                    .outcome,
+                outcome
+            );
+        }
+    }
+
+    #[test]
+    fn generic_commit_cannot_forge_journal_or_outcomes_and_original_cannot_contain_intent() {
+        let temp = Temp::new();
+        let mut store = setup(&temp);
+        let mut forged = store.ledger().unwrap().clone();
+        forged
+            .append_deletion_intent(0, "workspace", "one", 1000)
+            .unwrap();
+        let forged =
+            ExperimentLedger::from_json(&json_bytes(&forged).unwrap(), forged.binding()).unwrap();
+        assert_eq!(store.commit(&forged), Err(StoreError::InvalidState));
+        let elsewhere = Temp::new();
+        assert_eq!(
+            create_original_binding(&elsewhere.original(), &elsewhere.store(), &forged),
+            Err(StoreError::InvalidState)
+        );
+        drop(store.prepare_deletion(0, "workspace", "one", 1000).unwrap());
+        let mut forged = store.ledger().unwrap().clone();
+        forged
+            .finish_deletion_intent(0, DeletionOutcome::Initiated204, 1000)
+            .unwrap();
+        assert_eq!(store.commit(&forged), Err(StoreError::InvalidState));
+        assert_eq!(store.generation, 1);
+    }
+
+    #[test]
+    fn intent_and_outcome_write_failures_preserve_published_history() {
+        for finishing in [false, true] {
+            for boundary in [
+                CommitPoint::DraftCreated,
+                CommitPoint::DraftWritten,
+                CommitPoint::DraftSynced,
+                CommitPoint::SnapshotLinked,
+                CommitPoint::DirectorySynced,
+                CommitPoint::DraftRemoved,
+            ] {
+                let temp = Temp::new();
+                let mut store = setup(&temp);
+                let mut fail = |point| {
+                    if point == boundary {
+                        Err(StoreError::Io)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let result = if finishing {
+                    store
+                        .prepare_deletion(0, "workspace", "one", 1000)
+                        .unwrap()
+                        .finish_with_hook(DeletionOutcome::TransportUncertain, 1001, &mut fail)
+                } else {
+                    store
+                        .prepare_deletion_with_hook(0, "workspace", "one", 1000, &mut fail)
+                        .map(drop)
+                };
+                assert_eq!(result, Err(StoreError::Io));
+                assert!(matches!(store.ledger(), Err(StoreError::ReloadRequired)));
+                drop(store);
+                let restored = LedgerStore::open(&temp.original()).unwrap();
+                let published = matches!(
+                    boundary,
+                    CommitPoint::SnapshotLinked
+                        | CommitPoint::DirectorySynced
+                        | CommitPoint::DraftRemoved
+                );
+                let journal = restored.ledger().unwrap().deletion_intents();
+                if finishing {
+                    assert_eq!(journal.len(), 1);
+                    assert_eq!(journal[0].outcome.is_some(), published);
+                } else {
+                    assert_eq!(journal.len(), usize::from(published));
+                    assert!(journal.iter().all(|intent| intent.outcome.is_none()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replay_rejects_changed_intent_generation_target_or_prior_outcome() {
+        let temp = Temp::new();
+        let mut store = setup(&temp);
+        store
+            .prepare_deletion(0, "workspace", "one", 1000)
+            .unwrap()
+            .finish(DeletionOutcome::Initiated204, 1001)
+            .unwrap();
+        store.commit(&store.ledger().unwrap().clone()).unwrap();
+        drop(store);
+        let path = temp.store().join(snapshot_name(3));
+        let original_bytes = fs::read(&path).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&original_bytes).unwrap();
+        for field in [
+            "removed",
+            "generation",
+            "target",
+            "retroactive_outcome",
+            "changed_outcome",
+            "erased_outcome",
+        ] {
+            let mut changed = original.clone();
+            let journal = &mut changed["ledger"]["deletion_intents"];
+            match field {
+                "removed" => *journal = serde_json::json!([]),
+                "generation" => {
+                    journal[0]["reviewed_generation"] = 1.into();
+                    journal[0]["committed_generation"] = 2.into();
+                }
+                "target" => journal[0]["target"]["cvm_id"] = "other".into(),
+                "changed_outcome" => journal[0]["outcome"]["outcome"] = "not_found404".into(),
+                "erased_outcome" => journal[0]["outcome"] = serde_json::Value::Null,
+                _ => journal[0]["outcome"]["recorded_at_unix_seconds"] = 999.into(),
+            }
+            fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            assert!(LedgerStore::open(&temp.original()).is_err(), "{field}");
+        }
+        fs::write(&path, original_bytes).unwrap();
+        assert!(LedgerStore::open(&temp.original()).is_ok());
     }
 
     #[test]

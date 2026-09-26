@@ -112,43 +112,49 @@ pub struct UsageRecord {
     pub cost_usd_decimal: String,
 }
 
-/// Nonnegative plain decimal USD, rounded up to an integer microdollar.
+/// Nonnegative JSON decimal USD, rounded up to an integer microdollar.
 /// Rejects unsupported syntax and overflow rather than estimating a value.
 pub fn decimal_usd_to_microusd(value: &str) -> Result<u64, LifecycleError> {
-    let invalid = LifecycleError("invalid or overflowing decimal USD amount");
-    let mut parts = value.split('.');
-    let whole = parts.next().ok_or_else(|| invalid.clone())?;
-    let fraction = parts.next();
-    if parts.next().is_some()
-        || whole.is_empty()
-        || !whole.bytes().all(|b| b.is_ascii_digit())
-        || fraction.is_some_and(|f| f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()))
-    {
-        return Err(invalid);
+    crate::amount::ExactUsd::parse_json_number(value)?.ceil_microusd()
+}
+
+/// An observation about one attempted request, never proof of resource or disk
+/// disappearance. The local store does not authenticate these observations.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeletionOutcome {
+    Initiated204,
+    NotFound404,
+    Rejected { status: u16 },
+    TransportUncertain,
+}
+impl DeletionOutcome {
+    fn validate(self) -> Result<(), LifecycleError> {
+        if let Self::Rejected { status } = self {
+            if !(100..=599).contains(&status) || matches!(status, 204 | 404) {
+                return Err(LifecycleError("invalid deletion response classification"));
+            }
+        }
+        Ok(())
     }
-    let mut amount = whole
-        .parse::<u64>()
-        .map_err(|_| invalid.clone())?
-        .checked_mul(1_000_000)
-        .ok_or_else(|| invalid.clone())?;
-    let fraction = fraction.unwrap_or("");
-    // Six decimal places are the existing microUSD accounting unit.
-    let mut fractional_microusd = 0_u64;
-    for index in 0..6 {
-        fractional_microusd = fractional_microusd * 10
-            + u64::from(fraction.as_bytes().get(index).copied().unwrap_or(b'0') - b'0');
-    }
-    amount = amount
-        .checked_add(fractional_microusd)
-        .ok_or_else(|| invalid.clone())?;
-    if fraction
-        .as_bytes()
-        .get(6..)
-        .is_some_and(|tail| tail.iter().any(|b| *b != b'0'))
-    {
-        amount = amount.checked_add(1).ok_or(invalid)?;
-    }
-    Ok(amount)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeletionOutcomeRecord {
+    pub recorded_at_unix_seconds: u64,
+    pub outcome: DeletionOutcome,
+}
+
+/// Append-only local journal entry. No network dispatch or approval is implied.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeletionIntentRecord {
+    pub reviewed_generation: u64,
+    pub committed_generation: u64,
+    pub target: TrackedCvm,
+    pub recorded_at_unix_seconds: u64,
+    pub outcome: Option<DeletionOutcomeRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +167,8 @@ struct LedgerData {
     attempts: BTreeMap<String, Attempt>,
     resources: BTreeMap<String, TrackedResource>,
     usage: BTreeMap<String, UsageRecord>,
+    #[serde(default)]
+    deletion_intents: Vec<DeletionIntentRecord>,
 }
 
 /// Fields are private; attempt APIs cannot replace the original policy or
@@ -205,11 +213,91 @@ impl ExperimentLedger {
             attempts: BTreeMap::new(),
             resources: BTreeMap::new(),
             usage: BTreeMap::new(),
+            deletion_intents: Vec::new(),
         }))
     }
 
     pub fn binding(&self) -> &ExperimentBinding {
         &self.0.binding
+    }
+
+    pub fn deletion_intents(&self) -> &[DeletionIntentRecord] {
+        &self.0.deletion_intents
+    }
+
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.0.binding.workspace_id
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn append_deletion_intent(
+        &mut self,
+        reviewed_generation: u64,
+        workspace: &str,
+        cvm_id: &str,
+        now: u64,
+    ) -> Result<usize, LifecycleError> {
+        if workspace != self.workspace_id() {
+            return Err(LifecycleError("deletion workspace differs from experiment"));
+        }
+        let target = self
+            .0
+            .resources
+            .get(cvm_id)
+            .ok_or(LifecycleError("deletion target is not already tracked"))?
+            .cvm
+            .clone();
+        // Reconciliation and retry authority are not implemented. No API may
+        // silently turn a persisted request, response, or crash into a retry.
+        if self
+            .0
+            .deletion_intents
+            .iter()
+            .any(|intent| intent.target.cvm_id == cvm_id)
+        {
+            return Err(LifecycleError(
+                "prior deletion intent requires reconciliation",
+            ));
+        }
+        self.advance_cost(now)?;
+        let committed_generation = reviewed_generation
+            .checked_add(1)
+            .ok_or(LifecycleError("deletion generation overflow"))?;
+        let index = self.0.deletion_intents.len();
+        self.0.deletion_intents.push(DeletionIntentRecord {
+            reviewed_generation,
+            committed_generation,
+            target,
+            recorded_at_unix_seconds: now,
+            outcome: None,
+        });
+        Ok(index)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn finish_deletion_intent(
+        &mut self,
+        index: usize,
+        outcome: DeletionOutcome,
+        now: u64,
+    ) -> Result<(), LifecycleError> {
+        outcome.validate()?;
+        let intent = self
+            .0
+            .deletion_intents
+            .get(index)
+            .ok_or(LifecycleError("deletion intent is missing"))?;
+        if intent.outcome.is_some() || now < intent.recorded_at_unix_seconds {
+            return Err(LifecycleError(
+                "deletion outcome cannot replace prior history",
+            ));
+        }
+        self.advance_cost(now)?;
+        self.0.deletion_intents[index].outcome = Some(DeletionOutcomeRecord {
+            recorded_at_unix_seconds: now,
+            outcome,
+        });
+        Ok(())
     }
 
     /// Persistence may append history, never replace known identities, costs,
@@ -218,6 +306,28 @@ impl ExperimentLedger {
     pub(crate) fn validate_successor(&self, previous: &Self) -> Result<(), LifecycleError> {
         self.validate()?;
         previous.validate()?;
+        if self.0.deletion_intents.len() < previous.0.deletion_intents.len()
+            || previous
+                .0
+                .deletion_intents
+                .iter()
+                .zip(&self.0.deletion_intents)
+                .any(|(prior, next)| {
+                    let mut expected = prior.clone();
+                    if expected.outcome.is_none() {
+                        if next.outcome.as_ref().is_some_and(|outcome| {
+                            outcome.recorded_at_unix_seconds
+                                < previous.0.last_observed_at_unix_seconds
+                        }) {
+                            return true;
+                        }
+                        expected.outcome = next.outcome.clone();
+                    }
+                    &expected != next
+                })
+        {
+            return Err(LifecycleError("deletion journal would alter prior history"));
+        }
         if self.0.binding != previous.0.binding
             || self.0.initial_cost_microusd != previous.0.initial_cost_microusd
             || self.0.conservative_cost_floor_microusd < previous.0.conservative_cost_floor_microusd
@@ -286,6 +396,32 @@ impl ExperimentLedger {
             self.validate_usage(usage)?;
             if key != &usage.billing_key {
                 return Err(LifecycleError("invalid billing record key"));
+            }
+        }
+        let mut deletion_targets = BTreeSet::new();
+        let mut prior_generation = None;
+        for intent in &self.0.deletion_intents {
+            if intent.reviewed_generation.checked_add(1) != Some(intent.committed_generation)
+                || prior_generation.is_some_and(|prior| prior >= intent.committed_generation)
+                || !deletion_targets.insert(&intent.target.cvm_id)
+                || self
+                    .0
+                    .resources
+                    .get(&intent.target.cvm_id)
+                    .is_none_or(|resource| resource.cvm != intent.target)
+                || intent.recorded_at_unix_seconds < intent.target.created_at_unix_seconds
+                || intent.recorded_at_unix_seconds > self.0.last_observed_at_unix_seconds
+            {
+                return Err(LifecycleError("invalid deletion journal identity or time"));
+            }
+            prior_generation = Some(intent.committed_generation);
+            if let Some(outcome) = &intent.outcome {
+                outcome.outcome.validate()?;
+                if outcome.recorded_at_unix_seconds < intent.recorded_at_unix_seconds
+                    || outcome.recorded_at_unix_seconds > self.0.last_observed_at_unix_seconds
+                {
+                    return Err(LifecycleError("invalid deletion outcome time"));
+                }
             }
         }
         if self.modeled_cost(self.0.last_observed_at_unix_seconds)?
@@ -387,7 +523,12 @@ impl ExperimentLedger {
     pub fn record_usage(&mut self, usage: UsageRecord) -> Result<(), LifecycleError> {
         self.validate_usage(&usage)?;
         if let Some(existing) = self.0.usage.get(&usage.billing_key) {
-            if existing != &usage {
+            if existing.app_id != usage.app_id
+                || existing.instance_id != usage.instance_id
+                || existing.usage_type != usage.usage_type
+                || crate::amount::ExactUsd::parse_json_number(&existing.cost_usd_decimal)?
+                    != crate::amount::ExactUsd::parse_json_number(&usage.cost_usd_decimal)?
+            {
                 return Err(LifecycleError("conflicting duplicate billing record"));
             }
             return Ok(());
@@ -851,10 +992,11 @@ mod tests {
         assert_eq!(decimal_usd_to_microusd("40.84416").unwrap(), 40_844_160);
         assert_eq!(decimal_usd_to_microusd("0.0000001").unwrap(), 1);
         assert_eq!(decimal_usd_to_microusd("45.000000000").unwrap(), 45_000_000);
+        assert_eq!(decimal_usd_to_microusd("4.084416E1").unwrap(), 40_844_160);
         for invalid in [
             "-1",
             "NaN",
-            "1e2",
+            "01",
             "1.",
             ".1",
             " 1",
@@ -863,6 +1005,18 @@ mod tests {
         ] {
             assert!(decimal_usd_to_microusd(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn billing_dedup_compares_exact_values_without_rewriting_original_lexemes() {
+        let mut ledger = ledger();
+        ledger.record_usage(usage("same", "1e-7")).unwrap();
+        let before = serde_json::to_vec(&ledger).unwrap();
+        ledger.record_usage(usage("same", "0.00000010")).unwrap();
+        assert_eq!(before, serde_json::to_vec(&ledger).unwrap());
+        // Both round to one microUSD but represent different provider charges.
+        assert!(ledger.record_usage(usage("same", "2e-7")).is_err());
+        assert_eq!(before, serde_json::to_vec(&ledger).unwrap());
     }
 
     #[test]

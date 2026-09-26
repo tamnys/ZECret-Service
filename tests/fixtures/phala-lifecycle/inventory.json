@@ -1,0 +1,35 @@
+{
+  "fixture_only": true,
+  "items": [
+    {
+      "id": "synthetic-cvm-1",
+      "name": "synthetic-running",
+      "status": "running",
+      "app_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "instance_id": "1111111111111111111111111111111111111111",
+      "vm_uuid": "00000000-0000-4000-8000-000000000001",
+      "workspace": {"object_type": "workspace", "id": "wks_synthetic_only", "name": "Synthetic fixture workspace"},
+      "resource": {"vcpu": 4, "memory_in_gb": 8, "disk_in_gb": 80},
+      "gateway": {},
+      "created_at": "2026-01-01T00:00:00Z",
+      "deleted_at": null
+    },
+    {
+      "id": "synthetic-cvm-partial",
+      "name": "synthetic-creating",
+      "status": "creating",
+      "app_id": null,
+      "instance_id": null,
+      "vm_uuid": null,
+      "workspace": null,
+      "resource": {},
+      "gateway": {},
+      "created_at": null,
+      "deleted_at": null
+    }
+  ],
+  "total": 2,
+  "page": 1,
+  "page_size": 30,
+  "pages": 1
+}

@@ -1,0 +1,39 @@
+{
+  "fixture_only": true,
+  "usage": [
+    {
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": 11,
+      "team_id": 22,
+      "timestamp": "2026-01-01T01:00:00Z",
+      "event_type": "synthetic_charge",
+      "cost": 0.1234561,
+      "details": "synthetic-provider-details-not-retained",
+      "usage_type": "compute",
+      "billing_start": "2026-01-01",
+      "billing_end": "2026-01-02",
+      "duration_minutes": 60,
+      "billing_key": "synthetic-compute-1",
+      "billing_hour": "2026-01-01T00:00:00Z",
+      "billing_day": "2026-01-01"
+    },
+    {
+      "instance_id": "00000000-0000-4000-8000-000000000001",
+      "project_id": 11,
+      "team_id": 22,
+      "timestamp": "2026-01-01T01:00:00Z",
+      "event_type": "synthetic_charge",
+      "cost": 2e-7,
+      "details": null,
+      "usage_type": "storage",
+      "billing_start": "2026-01-01",
+      "billing_end": "2026-01-02",
+      "duration_minutes": 60,
+      "billing_key": "synthetic-storage-1",
+      "billing_hour": "2026-01-01T00:00:00Z",
+      "billing_day": "2026-01-01"
+    }
+  ],
+  "total": 2,
+  "total_cost": 0.1234563
+}

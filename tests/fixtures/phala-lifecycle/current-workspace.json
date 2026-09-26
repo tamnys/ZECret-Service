@@ -1,0 +1,26 @@
+{
+  "fixture_only": true,
+  "user": {
+    "username": "synthetic-user",
+    "email": "account-data-must-not-be-retained@example.invalid",
+    "role": "user",
+    "avatar": "",
+    "email_verified": false,
+    "totp_enabled": false,
+    "has_backup_codes": false,
+    "flag_has_password": false
+  },
+  "workspace": {
+    "id": "wks_synthetic_only",
+    "name": "Synthetic fixture workspace",
+    "slug": null,
+    "tier": "fixture",
+    "role": "OWNER"
+  },
+  "credits": {
+    "balance": "50.00",
+    "granted_balance": "0",
+    "is_post_paid": false,
+    "outstanding_amount": null
+  }
+}

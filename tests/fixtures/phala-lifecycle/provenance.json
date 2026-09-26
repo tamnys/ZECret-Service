@@ -1,0 +1,24 @@
+{
+  "fixture_only": true,
+  "origin": "Locally authored synthetic objects, not captured provider responses",
+  "purpose": "Exercise a critical-field projection of pinned Phala lifecycle response shapes without an account or provider connection",
+  "api_version": "2026-06-23",
+  "sdk_commit": "ee941461e05004e4f80c26694f43c833bbc208b6",
+  "openapi_commit": "5176d4c53fcee5aec3a8ccbbb05840a0a678c553",
+  "openapi_url": "https://github.com/Phala-Network/phala-docs/blob/5176d4c53fcee5aec3a8ccbbb05840a0a678c553/openapi.json",
+  "sdk_base_url": "https://github.com/Phala-Network/phala-cloud/blob/ee941461e05004e4f80c26694f43c833bbc208b6/js/src/",
+  "schema_files": [
+    "credentials/current_user_v20260121.ts",
+    "types/cvm_info_v20260121.ts",
+    "types/version-mappings.ts"
+  ],
+  "identifiers": "All resource, workspace, billing, account and instance identifiers are synthetic. UUID-like formatting is illustrative, not evidence of a supported billing join.",
+  "detail_timestamp": "The contradictory running status and non-null deleted_at intentionally demonstrate that neither is a disk-deletion receipt.",
+  "amounts": "Row costs have seven decimal places or exponent notation. Individually rounded row costs differ from the rounded summary. The summary must not be charged a second time.",
+  "sha256": {
+    "current-workspace.json": "885d870c26e841604e8f11116b1aacc90e4f5927e269470e5ed1b08c656b7276",
+    "cvm-detail.json": "5a1af955817544365dbf41084b23f97dee9863b5f5e3af7b42830655ca7aac4b",
+    "inventory.json": "915f52657cd376b18bf3fe0c2382d29079f9cf6fe0724211ec228a30ed725c00",
+    "usage.json": "e1a18d905f7b830125216526200eda5196fda026e235a12ade2f21efb830b1f4"
+  }
+}
