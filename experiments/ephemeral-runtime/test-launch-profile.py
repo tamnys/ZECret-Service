@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import copy
 import subprocess
 import tempfile
 import unittest
@@ -25,6 +26,18 @@ class LaunchProfileInputTests(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.path = Path(self.scratch.name) / "synthetic-app-compose.json"
         self.sys_path = Path(self.scratch.name) / "synthetic-sys-config.json"
+        self.compose = {
+            "services": {
+                "synthetic": {
+                    "image": "example.invalid/synthetic@sha256:" + "0" * 64,
+                    "user": "10001:10001",
+                    "read_only": True,
+                    "cap_drop": ["ALL"],
+                    "security_opt": ["no-new-privileges:true"],
+                    "logging": {"driver": "none"},
+                }
+            }
+        }
         self.profile = {
             "manifest_version": 2,
             "name": "SYNTHETIC_ONLY",
@@ -41,10 +54,7 @@ class LaunchProfileInputTests(unittest.TestCase):
                 "restrict_mode": True,
                 "ports": [{"port": 8443, "pp": False}],
             },
-            "docker_compose_file": (
-                "services:\n  synthetic:\n    image: example.invalid/synthetic@sha256:"
-                + "0" * 64
-            ),
+            "docker_compose_file": json.dumps(self.compose, separators=(",", ":")),
         }
 
     def write(self, value: object) -> bytes:
@@ -98,6 +108,51 @@ class LaunchProfileInputTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     guest_source.launch_config_digest(self.path)
 
+    def test_compose_profile_rejects_indirect_and_privileged_inputs(self) -> None:
+        for field, value in (
+            ("build", "."),
+            ("extends", {"file": "other.yaml", "service": "other"}),
+            ("env_file", "private.env"),
+            ("profiles", ["hidden"]),
+            ("label_file", "labels.txt"),
+            ("privileged", True),
+            ("image", "example.invalid/synthetic:latest"),
+            ("image", "example.invalid/synthetic@sha256:${DIGEST}"),
+            ("user", "0:0"),
+            ("read_only", False),
+            ("cap_drop", []),
+            ("security_opt", []),
+            ("logging", {"driver": "json-file"}),
+            ("restart", "always"),
+            ("network_mode", "host"),
+            ("environment", {"TOKEN": None}),
+        ):
+            with self.subTest(field=field, value=value):
+                compose = copy.deepcopy(self.compose)
+                compose["services"]["synthetic"][field] = value
+                self.write({**self.profile, "docker_compose_file": json.dumps(compose)})
+                with self.assertRaises(ValueError):
+                    guest_source.launch_config_digest(self.path)
+        for content in (
+            "services:\n  synthetic:\n    image: example.invalid/synthetic:latest\n",
+            '{"services":{},"services":{}}',
+            json.dumps({**self.compose, "include": ["other.yaml"]}),
+            json.dumps({**self.compose, "networks": {"outside": {"external": True}}}),
+        ):
+            with self.subTest(content=content):
+                self.write({**self.profile, "docker_compose_file": content})
+                with self.assertRaises(ValueError):
+                    guest_source.launch_config_digest(self.path)
+
+    def test_compose_service_network_sharing_is_explicit(self) -> None:
+        compose = copy.deepcopy(self.compose)
+        compose["services"]["wrapper"] = {
+            **copy.deepcopy(compose["services"]["synthetic"]),
+            "network_mode": "service:synthetic",
+        }
+        self.write({**self.profile, "docker_compose_file": json.dumps(compose)})
+        self.assertIsNotNone(guest_source.launch_config_digest(self.path))
+
     def test_ambiguous_or_missing_input_is_rejected(self) -> None:
         self.path.write_text('{"runner":"docker-compose","runner":"bash"}')
         with self.assertRaises(ValueError):
@@ -149,6 +204,7 @@ class LaunchProfileInputTests(unittest.TestCase):
             (work / name).write_text(
                 "services:\n  unreviewed:\n    image: example.invalid/poison\n"
             )
+        (work / ".env").write_text("COMPOSE_FILE=compose.yaml\nCOMPOSE_PROFILES=hidden\n")
         launcher = work / "app-compose.sh"
         launcher.write_text(
             guest_source.candidate_app_launch(
@@ -182,7 +238,7 @@ class LaunchProfileInputTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(
                     log.read_text().splitlines(),
-                    ["compose -f docker-compose.yaml up --remove-orphans --abort-on-container-exit "
+                    ["--host unix:///run/docker.sock compose --env-file /dev/null -f docker-compose.yaml up --remove-orphans --abort-on-container-exit "
                      "--no-build --pull never"],
                 )
 

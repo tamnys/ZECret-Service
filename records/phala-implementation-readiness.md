@@ -54,20 +54,30 @@ sent, and no account credits were spent. Private mode remains blocked.
   deactivation of one of those effective units would stop the bridge and close
   the wrapper's liveness connection under [systemd's documented dependency
   semantics](https://github.com/systemd/systemd/blob/main/man/systemd.unit.xml).
-  The candidate app launcher now stays attached to `docker compose -f
-  docker-compose.yaml up --abort-on-container-exit`, and its unit is
+  The candidate app launcher now stays attached to `docker --host
+  unix:///run/docker.sock compose --env-file /dev/null -f docker-compose.yaml
+  up --abort-on-container-exit`, and its unit is
   `Type=simple` rather than a detached oneshot. Any Compose return, including a
   successful return after a container stops, makes the launcher fail, which
   should deactivate the bound quote bridge.
   [Docker documents](https://docs.docker.com/reference/cli/docker/compose/up/)
   that this attached option stops all containers when one stops. The explicit
-  file selection excludes Compose's automatic override-file discovery;
+  file selection excludes Compose's automatic override-file discovery, while
+  the explicit empty environment file replaces its default `.env` input. The
+  [Docker CLI host flag](https://docs.docker.com/reference/cli/docker/) selects
+  the local daemon socket instead of an ambient context or `DOCKER_HOST`;
   [Docker's file-selection rules](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/)
-  explain the default merge. This still does not reject `include`, `extends`,
-  environment interpolation or other external Compose inputs in a future
-  bound profile. It is not an effective failure test of the exact guest's
-  Compose version or unit graph;
-  the final Compose profile must prohibit automatic container restart, and
+  explain the default merge, and [its environment-file rules](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/)
+  document the override. The candidate generator now requires JSON Compose
+  content with unique keys, a restricted service field set, exact image digests,
+  non-root read-only services, dropped capabilities, disabled logs and restarts,
+  and no `$` interpolation. The restricted fields reject `include`, `extends`,
+  `env_file`, build contexts, secrets, configs and profiles before the launch
+  digest is embedded. [Docker documents JSON Compose input](https://docs.docker.com/compose/support-and-feedback/faq/).
+  Direct bind mounts, commands, ports, image contents and the exact plugin's
+  interpretation still require review. This is not an effective failure test
+  of the exact guest's Compose version or unit graph; the final effective
+  Compose profile and Docker runtime must confirm no automatic restart, and
   an unhealthy but still running container needs separate liveness handling.
   A read-only extraction from the previously verity-verified stock rootfs found
   a 60,960,216-byte Compose plugin at
@@ -231,6 +241,13 @@ sent, and no account credits were spent. Private mode remains blocked.
   `bash scripts/check.sh --browser` passed in the managed container. All
   generated candidate-file hashes matched the regenerated unbound manifest;
   only the app launcher hash changed. No exact-guest Compose execution ran.
+  After restricting the inner Compose document to unambiguous JSON and the
+  private runtime field set, eight synthetic launch-profile tests and the full
+  `bash scripts/check.sh --browser` passed. The generated unbound manifest's
+  file hashes were recomputed; only the launch script hash changed because it
+  now pins the local Docker socket and supplies an empty environment file. The
+  exact production Compose plugin, mount set and namespace behavior remain
+  untested.
   One intermediate build attempt
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check
