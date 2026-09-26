@@ -9,7 +9,11 @@ use crate::{
     workload::{StorageFs, WorkloadPolicy},
 };
 use ez_hash::{Hasher, Sha256};
-use serde::Deserialize;
+use serde::{
+    Deserialize,
+    de::{self, MapAccess, Visitor},
+};
+use std::{collections::BTreeMap, fmt};
 use zrpc_protocol::{ErrorCode, SafeError};
 
 struct EmbeddedRelease {
@@ -38,6 +42,143 @@ struct ReleaseManifest {
     workload: WorkloadPolicy,
 }
 
+#[derive(Deserialize)]
+struct LaunchImages {
+    docker_compose_file: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComposeImages {
+    name: Option<String>,
+    services: UniqueServices,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceImage {
+    image: String,
+    user: String,
+    read_only: bool,
+    cap_drop: Vec<String>,
+    security_opt: Vec<String>,
+    logging: ServiceLogging,
+    restart: Option<String>,
+    environment: Option<BTreeMap<String, String>>,
+    network_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceLogging {
+    driver: String,
+}
+
+struct UniqueServices(BTreeMap<String, ServiceImage>);
+
+impl<'de> Deserialize<'de> for UniqueServices {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ServicesVisitor;
+
+        impl<'de> Visitor<'de> for ServicesVisitor {
+            type Value = UniqueServices;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a nonempty Compose service map with unique names")
+            }
+
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut services = BTreeMap::new();
+                while let Some((name, service)) = map.next_entry::<String, ServiceImage>()? {
+                    if name.is_empty() || services.insert(name, service).is_some() {
+                        return Err(de::Error::custom("duplicate or empty Compose service"));
+                    }
+                }
+                if services.is_empty() {
+                    return Err(de::Error::custom("Compose services are empty"));
+                }
+                Ok(UniqueServices(services))
+            }
+        }
+
+        deserializer.deserialize_map(ServicesVisitor)
+    }
+}
+
+fn lower_hex32(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn nonroot_numeric_user(user: &str) -> bool {
+    fn positive_decimal(value: &str) -> bool {
+        value
+            .as_bytes()
+            .first()
+            .is_some_and(|first| (b'1'..=b'9').contains(first))
+            && value.bytes().all(|byte| byte.is_ascii_digit())
+    }
+    match user.split_once(':') {
+        Some((uid, gid)) => positive_decimal(uid) && positive_decimal(gid),
+        None => positive_decimal(user),
+    }
+}
+
+fn launch_container_digests(raw_app_compose: &[u8]) -> Option<Vec<String>> {
+    // The pinned dstack copy step caps the guest-owned launch document here.
+    if raw_app_compose.len() > 256 * 1024 {
+        return None;
+    }
+    let launch: LaunchImages = serde_json::from_slice(raw_app_compose).ok()?;
+    let compose: ComposeImages = serde_json::from_str(&launch.docker_compose_file).ok()?;
+    if compose
+        .name
+        .as_ref()
+        .is_some_and(|name| name.is_empty() || name.contains('$'))
+    {
+        return None;
+    }
+    let mut digests = Vec::with_capacity(compose.services.0.len());
+    for (name, service) in &compose.services.0 {
+        if name.contains('$')
+            || !nonroot_numeric_user(&service.user)
+            || !service.read_only
+            || service.cap_drop != ["ALL"]
+            || service.security_opt != ["no-new-privileges:true"]
+            || service.logging.driver != "none"
+            || service
+                .restart
+                .as_deref()
+                .is_some_and(|restart| restart != "no")
+            || service.environment.as_ref().is_some_and(|environment| {
+                environment
+                    .iter()
+                    .any(|(key, value)| key.contains('$') || value.contains('$'))
+            })
+            || service.network_mode.as_ref().is_some_and(|mode| {
+                mode.strip_prefix("service:")
+                    .is_none_or(|other| other == name || !compose.services.0.contains_key(other))
+            })
+        {
+            return None;
+        }
+        let (reference, digest) = service.image.split_once("@sha256:")?;
+        if reference.is_empty()
+            || !reference.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
+            })
+            || !lower_hex32(digest)
+        {
+            return None;
+        }
+        digests.push(format!("sha256:{digest}"));
+    }
+    digests.sort_unstable();
+    Some(digests)
+}
+
 impl ReleaseManifest {
     fn validate(&self, embedded_id: &str) -> Result<(), SafeError> {
         let mut launch_config_hash = [0u8; 32];
@@ -54,7 +195,7 @@ impl ReleaseManifest {
             || !self
                 .container_digests
                 .iter()
-                .all(|digest| digest.strip_prefix("sha256:").is_some_and(hex32))
+                .all(|digest| digest.strip_prefix("sha256:").is_some_and(lower_hex32))
             || self.workload.storage_fs != StorageFs::Ext4
             || self.workload.key_provider.name != "kms"
             || self.workload.validate().is_err()
@@ -72,6 +213,7 @@ pub struct ApprovedRelease {
     id: String,
     manifest_sha256: [u8; 32],
     workload: WorkloadPolicy,
+    container_digests: Vec<String>,
 }
 
 impl ApprovedRelease {
@@ -99,6 +241,7 @@ impl ApprovedRelease {
             id: manifest.release_id,
             manifest_sha256: embedded.manifest_sha256,
             workload: manifest.workload,
+            container_digests: manifest.container_digests,
         })
     }
 
@@ -112,6 +255,21 @@ impl ApprovedRelease {
 
     pub fn workload(&self) -> &WorkloadPolicy {
         &self.workload
+    }
+
+    /// The manifest's image list must describe the exact launch bytes whose
+    /// digest is authenticated by the workload event log. The list is a
+    /// multiset: two services using one digest require two manifest entries.
+    pub fn matches_launch_config(&self, raw_app_compose: &[u8]) -> bool {
+        if Sha256::hash(raw_app_compose) != self.workload.compose_hash {
+            return false;
+        }
+        let Some(actual) = launch_container_digests(raw_app_compose) else {
+            return false;
+        };
+        let mut expected = self.container_digests.clone();
+        expected.sort_unstable();
+        actual == expected
     }
 }
 
@@ -180,6 +338,107 @@ mod tests {
         manifest.workload.compose_hash = [7; 32];
         manifest.sys_config_sha256.clear();
         assert!(manifest.validate("SYNTHETIC").is_err());
+        assert!(EMBEDDED_RELEASES.is_empty());
+    }
+
+    fn synthetic_release(raw: &[u8], container_digests: Vec<String>) -> ApprovedRelease {
+        ApprovedRelease {
+            id: "SYNTHETIC".into(),
+            manifest_sha256: [0; 32],
+            workload: WorkloadPolicy {
+                schema_version: 1,
+                mrtd: [0; 48],
+                rtmr0: [0; 48],
+                rtmr1: [0; 48],
+                rtmr2: [0; 48],
+                os_image_hash: [0; 32],
+                compose_hash: Sha256::hash(raw),
+                mr_kms: [0; 32],
+                app_id: [0; 20],
+                instance_id: [0; 20],
+                storage_fs: StorageFs::Ext4,
+                key_provider: KeyProviderPolicy {
+                    name: "kms".into(),
+                    id: "synthetic-kms".into(),
+                },
+            },
+            container_digests,
+        }
+    }
+
+    #[test]
+    fn embedded_image_list_must_equal_images_in_exact_launch_bytes() {
+        let first = format!("sha256:{}", "a".repeat(64));
+        let second = format!("sha256:{}", "b".repeat(64));
+        let inner = serde_json::json!({"services": {
+            "zebra": {
+                "image": format!("example.invalid/zebra@{first}"),
+                "user": "10001:10001", "read_only": true,
+                "cap_drop": ["ALL"],
+                "security_opt": ["no-new-privileges:true"],
+                "logging": {"driver": "none"}
+            },
+            "wrapper": {
+                "image": format!("example.invalid/wrapper@{second}"),
+                "user": "10002:10002", "read_only": true,
+                "cap_drop": ["ALL"],
+                "security_opt": ["no-new-privileges:true"],
+                "logging": {"driver": "none"},
+                "network_mode": "service:zebra"
+            },
+        }});
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "runner": "docker-compose",
+            "docker_compose_file": inner.to_string(),
+        }))
+        .unwrap();
+        let release = synthetic_release(&raw, vec![second.clone(), first.clone()]);
+        assert!(release.matches_launch_config(&raw));
+        assert!(!release.matches_launch_config(&[raw.as_slice(), b" "].concat()));
+        assert!(
+            !synthetic_release(&raw, vec![first.clone(), first.clone()])
+                .matches_launch_config(&raw)
+        );
+        assert!(!synthetic_release(&raw, vec![first.clone()]).matches_launch_config(&raw));
+
+        for changed in [
+            serde_json::json!({
+                "services": inner["services"],
+                "include": ["unreviewed.json"],
+            }),
+            serde_json::json!({
+                "services": {
+                    "zebra": {
+                        "image": format!("example.invalid/zebra@{first}"),
+                        "user": "10001:10001", "read_only": true,
+                        "cap_drop": ["ALL"],
+                        "security_opt": ["no-new-privileges:true"],
+                        "logging": {"driver": "none"},
+                        "volumes": ["/run/docker.sock:/run/docker.sock"]
+                    }
+                }
+            }),
+        ] {
+            let changed = serde_json::to_vec(&serde_json::json!({
+                "docker_compose_file": changed.to_string(),
+            }))
+            .unwrap();
+            assert!(
+                !synthetic_release(&changed, vec![first.clone(), second.clone()])
+                    .matches_launch_config(&changed)
+            );
+        }
+
+        let service = inner["services"]["zebra"].to_string();
+        let duplicate_service = format!(r#"{{"services":{{"one":{service},"one":{service}}}}}"#);
+        let duplicate_launch = serde_json::to_vec(&serde_json::json!({
+            "docker_compose_file": duplicate_service,
+        }))
+        .unwrap();
+        assert!(
+            !synthetic_release(&duplicate_launch, vec![first])
+                .matches_launch_config(&duplicate_launch)
+        );
         assert!(EMBEDDED_RELEASES.is_empty());
     }
 }

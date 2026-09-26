@@ -113,6 +113,10 @@ sent, and no account credits were spent. Private mode remains blocked.
   `WorkloadPolicy`. An external policy can select only a client-embedded release.
   The manifest's launch-config digest must equal the app-compose hash used in
   authenticated workload appraisal; a mismatched pair is rejected locally.
+  The client now also extracts the pinned image digests from that exact launch
+  document and requires the embedded manifest's container-digest multiset to
+  match. It rejects ambiguous service names and unreviewed Compose fields in
+  this approval check, including external includes and bind mounts.
   It also requires a reviewed system-config digest, enforced by the measured
   image candidate rather than a separate event-log field.
   **The embedded catalog is empty.** Neither synthetic fixtures, a provider
@@ -257,6 +261,14 @@ sent, and no account credits were spent. Private mode remains blocked.
   synthetic launch-profile tests, generated Bash syntax/hash checks and full
   `bash scripts/check.sh --browser` passed again. The generated manifest is
   unchanged because the source overlay's output did not change.
+  The container-digest approval check was exercised with matching, missing,
+  duplicate, changed-byte and external-Compose-input cases; focused verifier
+  and transport tests passed. The complete `bash scripts/check.sh --browser`
+  then passed in the managed container with Cargo compilation serialized. Two
+  preceding concurrent runs stopped at the previously observed intermittent
+  `target/debug/deps` write-permission error, despite owner-writable directories;
+  this does not establish its cause. The catalog remains empty, so these local
+  tests do not demonstrate a genuine private session.
   One intermediate build attempt
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check
