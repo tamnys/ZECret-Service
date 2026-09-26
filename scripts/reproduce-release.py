@@ -25,6 +25,16 @@ class Refusal(Exception):
     pass
 
 
+# Keep the client and every guest-facing executable in one reviewed artifact
+# set. A matching pair of builds must account for all of them before delivery.
+ARTIFACTS = (
+    ("zrpc-cli", "zrpc"),
+    ("zrpc-server", "zrpc-wrapper"),
+    ("zrpc-server", "zrpc-node-wrapper"),
+    ("zrpc-server", "zrpc-quote-proxy"),
+)
+
+
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -211,6 +221,8 @@ def reproduce(args):
                 "simulation_available": True, "approved_release": False,
                 "private_accepted": False, "deployment_enabled": False,
                 "published": False, "signed": False, "reproducible": False,
+                "selected_binaries": [{"package": package, "name": name}
+                                      for package, name in ARTIFACTS],
                 "source_commit": args.revision, "source_tree": tree,
                 "source_commit_timestamp": epoch, "script_sha256": digest(script),
                 "script_in_source_sha256": None, "script_matches_source": None,
@@ -246,8 +258,9 @@ def reproduce(args):
                 raise Refusal("independent source exports differ")
             manifest["input_sha256"] = input_hashes
             build_env, settings = build_environment(env, source, target, temporary, selected_toolchain, tools, epoch)
-            argv = [tools["cargo"]["path"], "build", "--locked", "--offline", "--release",
-                    "-p", "zrpc-cli", "--bin", "zrpc", "-p", "zrpc-server", "--bin", "zrpc-wrapper"]
+            argv = [tools["cargo"]["path"], "build", "--locked", "--offline", "--release"]
+            for package, name in ARTIFACTS:
+                argv.extend(("-p", package, "--bin", name))
             record = {"directory": label, "command": argv, "settings": settings,
                       "cargo_configuration_sha256": config_hashes(source, build_env)}
             manifest["builds"].append(record)
@@ -259,7 +272,7 @@ def reproduce(args):
             if result.returncode:
                 raise Refusal(f"{label} failed (exit {result.returncode}); retained build.log has diagnostics")
             record["artifact_sha256"] = {name: digest(target / "release" / name)
-                                          for name in ("zrpc", "zrpc-wrapper")}
+                                          for _, name in ARTIFACTS}
         first, second = manifest["builds"]
         if first["artifact_sha256"] != second["artifact_sha256"]:
             raise Refusal("independent binary checksums differ; outputs retained, reproducibility not established")
