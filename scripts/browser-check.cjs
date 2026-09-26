@@ -5,13 +5,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { chromium } = require(require.resolve('playwright-core', { paths: ['/opt/codex-browser-helper'] }));
+let browserStage='startup';
 
 (async () => {
   const root = path.resolve(__dirname, '..');
   const output = path.join(process.env.CODEX_TMP_DIR, 'playwright');
   fs.mkdirSync(output, { recursive: true });
   const child = spawn(path.join(root, 'target/debug/examples/ui_fixture'), [], {stdio:['ignore','ignore','inherit','pipe']});
-  let browser, publicServer;
+  let browser, publicServer, liveChild;
   try {
     const url = await new Promise((resolve,reject) => {
       let address='';
@@ -20,6 +21,7 @@ const { chromium } = require(require.resolve('playwright-core', { paths: ['/opt/
       child.once('error',reject);
     });
     const origin = new URL(url).origin;
+    browserStage='simulation';
     browser = await chromium.launch({executablePath:'/usr/bin/chromium',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
     const context = await browser.newContext({viewport:{width:1440,height:1100}});
     const page=await context.newPage();
@@ -62,7 +64,44 @@ const { chromium } = require(require.resolve('playwright-core', { paths: ['/opt/
     assert.deepEqual(errors,[]);
     assert.equal(await page.evaluate(()=>localStorage.length+sessionStorage.length),0);
     assert.equal((await context.serviceWorkers()).length,0);
+    // Live dashboard uses the same native core. With no reviewed release it
+    // must show blocked status and never contact the configured SOCKS port.
+    browserStage='live-startup';
+    liveChild=spawn(path.join(root,'target/debug/examples/ui_fixture'), [], {
+      env:{...process.env,ZRPC_BROWSER_LIVE:'1'},stdio:['ignore','ignore','inherit','pipe']
+    });
+    const liveUrl=await new Promise((resolve,reject)=>{
+      let address='';
+      liveChild.stdio[3].on('data',data=>{address+=data.toString();if(address.includes('\n'))resolve(address.trim());});
+      liveChild.once('exit',code=>reject(new Error(`live fixture exited (${code})`)));
+      liveChild.once('error',reject);
+    });
+    const liveOrigin=new URL(liveUrl).origin;
+    const livePage=await context.newPage(); const liveRequests=[]; const liveErrors=[];
+    livePage.on('request',req=>liveRequests.push(req.url()));
+    livePage.on('pageerror',()=>liveErrors.push('browser exception'));
+    await livePage.goto(liveUrl);
+    browserStage='live-bootstrap';
+    await livePage.getByText('Local session ready.',{exact:false}).waitFor();
+    assert.equal(await livePage.locator('#mode-label').textContent(),'LIVE CLIENT · UNVERIFIED');
+    assert.equal(await livePage.locator('#scenario').isHidden(),true);
+    await livePage.locator('#run').click();
+    browserStage='live-query';
+    await livePage.locator('#result-label').filter({hasText:'PRIVATE MODE BLOCKED'}).waitFor();
+    const blocked=JSON.parse(await livePage.locator('#result').textContent());
+    assert.equal(blocked.private_accepted,false);
+    assert.equal(blocked.query_sent,false);
+    assert.equal(blocked.simulation,false);
+    assert.equal(blocked.error.code,'unknown_release');
+    await livePage.screenshot({path:path.join(output,'live-blocked-desktop.png'),fullPage:true});
+    browserStage='live-mobile';
+    await livePage.setViewportSize({width:390,height:844});
+    assert.ok(await livePage.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+    await livePage.screenshot({path:path.join(output,'live-blocked-mobile.png'),fullPage:true});
+    assert.ok(liveRequests.every(address=>new URL(address).origin===liveOrigin));
+    assert.deepEqual(liveErrors,[]);
     // Static public site: scripts/remote resources are absent, even on interaction.
+    browserStage='public-site';
     publicServer=http.createServer((request,response)=>{
       const file=request.url==='/'?'index.html':request.url==='/style.css'?'style.css':null;
       if(!file){response.writeHead(404);return response.end();}
@@ -85,6 +124,7 @@ const { chromium } = require(require.resolve('playwright-core', { paths: ['/opt/
   } finally {
     if(browser)await browser.close();
     if(publicServer)await new Promise(resolve=>publicServer.close(resolve));
+    if(liveChild)liveChild.kill();
     child.kill();
   }
-})().catch(()=>{console.error('Browser contract check failed; bootstrap capability intentionally omitted from diagnostics.');process.exitCode=1;});
+})().catch(()=>{console.error(`Browser contract check failed at ${browserStage}; bootstrap capability intentionally omitted from diagnostics.`);process.exitCode=1;});

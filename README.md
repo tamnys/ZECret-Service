@@ -1,6 +1,6 @@
 # ZRPC — local foundation and offline evidence inspection
 
-A Rust scaffold for a Phala Intel TDX Zcash testnet RPC experiment. **Private mode is unavailable and every private verification attempt fails closed.** The dashboard and CLI RPC path remain local simulations. Separate offline and public endpoint diagnostics inspect Intel hardware evidence. The public diagnostic uses explicit loopback SOCKS and TLS; no cloud deployment or live Zebra node is included.
+A Rust scaffold for a Phala Intel TDX Zcash testnet RPC experiment. **Private mode is unavailable and every private verification attempt fails closed:** the native client has no embedded approved release. The CLI and local dashboard contain a shared live verification and typed RPC path, but cannot send a private query until an independently reviewed release is packaged into the client. Offline and public endpoint diagnostics inspect Intel hardware evidence. Public inspection uses explicit loopback SOCKS and TLS; no cloud deployment or live Zebra node is included.
 
 The native CLI and its bundled loopback dashboard share the same client core. Synthetic evidence cannot create a verified channel. The public documentation preview is static and has no private-query path.
 
@@ -18,17 +18,9 @@ cargo build --locked -p zrpc-cli
 
 `demo` binds `127.0.0.1` on an ephemeral port and deliberately opens the local browser using `xdg-open`. On a terminal without a browser opener, `demo --no-open` displays a one-time link directly on the controlling terminal; do not share or record it. It is never written to application stdout/stderr logs. A Linux container's loopback is inside the container: use its browser profile for UI checks, rather than exposing the dashboard on a LAN interface.
 
-Under `/Users/j/Code`, open the managed shell first and execute all builds/tests there:
+Run builds and tests in a reviewed Linux environment with locked dependencies. `bash scripts/check.sh --browser` includes the browser checks when its browser-profile dependencies are available.
 
-```sh
-cd /Users/j/Code/phala-zcash-rpc
-/Users/j/.codex/bin/codex-in-container --trust untrusted --profile browser --shell
-cargo build --locked -p zrpc-cli
-./target/debug/zrpc doctor
-bash scripts/check.sh --browser
-```
-
-Private mode is the default. `zrpc query --stdin` refuses before reading standard input. Fixture requests use `--simulate --stdin`; transaction selections need not enter command arguments or shell history. Each query or verify invocation emits one JSON report; rejection returns a nonzero exit code. No environment variable enables genuine acceptance or a direct fallback.
+Private mode is the default. With the shipped empty approval catalog, `zrpc query --stdin` refuses before reading standard input. Fixture requests use `--simulate --stdin`; transaction selections need not enter command arguments or shell history. Each query or verify invocation emits one JSON report; rejection returns a nonzero exit code. No environment variable enables genuine acceptance or a direct fallback.
 
 ## Offline evidence inspection
 
@@ -40,7 +32,7 @@ This uses pinned `dcap-qvl` 0.6.3, Intel's production root, supplied signed coll
 
 For a compatible operator-selected endpoint, [public endpoint inspection](docs/public-inspection.md) adds a nonce-only SOCKS/TLS exchange and compares authenticated quote REPORTDATA with that connection's proposed exporter binding. Diagnostic matches do not authorize private queries or establish release approval.
 
-The [local public wrapper](docs/public-wrapper.md) provides the corresponding attestation-only TLS listener with a fresh process-local key and an explicit dstack Unix socket. It binds only loopback through its CLI and exposes no RPC route or private acceptance.
+The [local public wrapper](docs/public-wrapper.md) provides the corresponding attestation-only TLS listener with a fresh process-local key and an explicit dstack Unix socket. Its CLI binds only loopback and exposes no RPC route or private acceptance. A separate source-only node-wrapper launcher provides a typed `/rpc` route after its attestation exchange; it is not deployed or an approved release.
 
 ## Local UI and public preview
 
@@ -62,9 +54,9 @@ cargo build --locked -p zrpc-cli
 
 The strict fixture protocol supports `getblockchaininfo`, `getblockcount`, `getblockhash`, `getblockheader` and `getrawtransaction`. It rejects notifications, batches, unknown/duplicate fields, write methods, wallet methods, arbitrary upstream URLs, and malformed or oversized input. Header/transaction verbosity is an explicit boolean in this fixture model; live compatibility must be established against the selected Zebra release.
 
-Requests are bounded at 16 KiB and encoded responses at 16 MiB, from design §9. The internal loopback-node library implements the two-executing/four-queued/15-second backend policy and testnet checks. It is not exposed through a private-query listener. Synthetic raw data is deliberately not valid Zcash wire data.
+Requests are bounded at 16 KiB and encoded responses at 16 MiB, from design §9. The internal loopback-node library implements the two-executing/four-queued/15-second backend policy and testnet checks. The source-only node wrapper exposes its typed methods through a same-connection TLS listener after the attestation exchange; no live Zebra node is packaged or deployed. Synthetic raw data is deliberately not valid Zcash wire data.
 
-`PrivateSession<UnverifiedChannel>` exposes no query method. `VerifiedChannel` cannot be constructed or deserialized in M0. The fixture client is a separate type and has no conversion to it. `verified: true` provider assertions never authorize a query.
+`PrivateSession<UnverifiedChannel>` exposes no query method. A connection-owned `VerifiedRpcSession` is the only transport type that can send a private body; its construction requires local quote and event verification, freshness, live TLS-key binding and an embedded approved release. The embedded release catalog is empty, so M0 fixtures and external policies cannot authorize it. `verified: true` provider assertions never authorize a query.
 
 ## Cost and lifecycle tools
 

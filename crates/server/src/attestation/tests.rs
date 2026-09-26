@@ -1,5 +1,6 @@
 //! Real loopback TLS and Unix-socket tests; quote contents remain synthetic.
 use super::*;
+use crate::node::CookieAuth;
 use rustls::{
     ClientConfig, ServerConfig,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -215,6 +216,62 @@ async fn quote_uses_own_live_session_exporter_and_connection_nonce_only_once() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn optional_rpc_route_requires_attestation_then_enforces_method_allowlist() {
+    let source = FakeQuote::new();
+    let mut shared = Shared::new(source, limits(1, 1, Duration::from_nanos(1)));
+    shared.node = Some(
+        LocalNode::new(
+            "127.0.0.1:1".parse().unwrap(),
+            CookieAuth::from_cookie(b"fixture:fixture").unwrap(),
+        )
+        .unwrap(),
+    );
+    let shared = Arc::new(shared);
+    let nonce = [13; 32];
+    let (mut client, _, _driver, _server) = connect(shared, &nonce).await;
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#;
+    let (status, _) = read(
+        client
+            .send_request(request("/rpc", body.to_vec()))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = read(
+        client
+            .send_request(request("/attestation", nonce_body(nonce)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let forbidden =
+        br#"{"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":["PRIVATE_MARKER"]}"#;
+    let (status, reply) = read(
+        client
+            .send_request(request("/rpc", forbidden.to_vec()))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        !reply
+            .windows(b"PRIVATE_MARKER".len())
+            .any(|window| window == b"PRIVATE_MARKER")
+    );
+    let (status, _) = read(
+        client
+            .send_request(request("/rpc", body.to_vec()))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

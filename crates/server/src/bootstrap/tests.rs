@@ -1,5 +1,6 @@
 //! Real local TLS/Unix-socket plumbing; all quote evidence is synthetic.
 use super::*;
+use crate::node::CookieAuth;
 use bytes::Bytes;
 use dstack_sdk_types::dstack::GetQuoteResponse;
 use http_body_util::{BodyExt, Full};
@@ -11,16 +12,79 @@ use rustls::{
     crypto::CryptoProvider,
     pki_types::{CertificateDer, ServerName, UnixTime},
 };
-use std::{convert::Infallible, io, num::NonZeroUsize, path::PathBuf};
+use std::{convert::Infallible, io, num::NonZeroUsize, path::PathBuf, sync::Mutex};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    net::{TcpStream, UnixListener},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UnixListener},
     sync::oneshot,
 };
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, PublicAttestationRequest, parse_attestation_response,
 };
+
+#[tokio::test]
+async fn node_startup_rejects_missing_stale_symlinked_and_public_quote_sockets() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "zrpc-private-quote-probe-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    assert!(probe_private_quote_socket(&path).await.is_err());
+    let listener = UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(probe_private_quote_socket(&path).await.is_err());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+    assert!(probe_private_quote_socket(&path).await.is_ok());
+    let alias = path.with_extension("alias");
+    symlink(&path, &alias).unwrap();
+    assert!(probe_private_quote_socket(&alias).await.is_err());
+    std::fs::remove_file(alias).unwrap();
+    drop(listener);
+    assert!(probe_private_quote_socket(&path).await.is_err());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn node_startup_requires_private_live_watch_and_exact_acknowledgement() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "zrpc-watch-probe-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    assert!(connect_quote_watch(&path).await.is_err());
+    let listener = UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(connect_quote_watch(&path).await.is_err());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+    let alias = path.with_extension("alias");
+    symlink(&path, &alias).unwrap();
+    assert!(connect_quote_watch(&alias).await.is_err());
+    std::fs::remove_file(alias).unwrap();
+
+    let incorrect = tokio::spawn(async move {
+        let (mut peer, _) = listener.accept().await.unwrap();
+        peer.write_all(b"X").await.unwrap();
+        let (peer, _) = listener.accept().await.unwrap();
+        drop(peer);
+        let (mut peer, _) = listener.accept().await.unwrap();
+        peer.write_all(b"W").await.unwrap();
+        let mut byte = [0u8; 1];
+        assert_eq!(peer.read(&mut byte).await.unwrap(), 0);
+    });
+    assert!(connect_quote_watch(&path).await.is_err());
+    assert!(connect_quote_watch(&path).await.is_err());
+    let watch = connect_quote_watch(&path).await.unwrap();
+    drop(watch);
+    incorrect.await.unwrap();
+    std::fs::remove_file(path).unwrap();
+}
 
 #[derive(Debug)]
 struct NoPki(Arc<CryptoProvider>);
@@ -395,6 +459,141 @@ async fn listener_serves_only_public_attestation_bound_to_its_generated_tls_sess
     running.stop().await;
     let _ = driver.await;
     guest_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn node_listener_uses_same_tls_session_and_only_typed_loopback_rpc() {
+    let quote_path = SocketPath::new();
+    let guest = UnixListener::bind(&quote_path.0).unwrap();
+    let quote_task = tokio::spawn(async move {
+        let (stream, _) = guest.accept().await.unwrap();
+        let service = hyper::service::service_fn(|request: Request<Incoming>| async move {
+            assert_eq!(request.uri(), "/GetQuote");
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let report_data = value["report_data"].as_str().unwrap().to_owned();
+            let reply = GetQuoteResponse {
+                quote: "SYNTHETIC_NOT_A_HARDWARE_QUOTE".into(),
+                event_log: "[]".into(),
+                report_data,
+                vm_config: "{}".into(),
+            };
+            Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(
+                serde_json::to_vec(&reply).unwrap(),
+            ))))
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let zebra = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let zebra_address = match zebra.local_addr().unwrap() {
+        SocketAddr::V4(address) => address,
+        _ => unreachable!(),
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_by_node = seen.clone();
+    let zebra_task = tokio::spawn(async move {
+        let (stream, _) = zebra.accept().await.unwrap();
+        let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+            let seen = seen_by_node.clone();
+            async move {
+                assert_eq!(request.uri(), "/");
+                assert!(request.headers().contains_key(header::AUTHORIZATION));
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let method = value["method"].as_str().unwrap();
+                seen.lock().unwrap().push(method.to_owned());
+                let result = match method {
+                    "getblockchaininfo" => serde_json::json!({
+                        "chain":"test", "blocks":42, "bestblockhash":"ab".repeat(32)
+                    }),
+                    "getblockcount" => serde_json::json!(42),
+                    _ => panic!("unapproved method reached the node"),
+                };
+                let reply = serde_json::json!({
+                    "jsonrpc":"2.0", "id":value["id"], "result":result
+                });
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Full::new(Bytes::from(serde_json::to_vec(&reply).unwrap())))
+                        .unwrap(),
+                )
+            }
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let node = LocalNode::new(
+        zebra_address,
+        CookieAuth::from_cookie(b"__cookie__:SYNTHETIC_ONLY").unwrap(),
+    )
+    .unwrap();
+    let (bridge_watch, bridge_peer) = UnixStream::pair().unwrap();
+    let listener = BoundNodeListener::bind_fixture(
+        "127.0.0.1:0".parse().unwrap(),
+        &quote_path.0,
+        limits(1),
+        node,
+        Some(bridge_watch),
+    )
+    .await
+    .unwrap();
+    let address = listener.local_addr().unwrap();
+    assert!(!format!("{listener:?}").contains(&address.to_string()));
+    let listener_task = tokio::spawn(listener.run(std::future::pending()));
+    let tls = connect(address, client_config()).await;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    let driver = tokio::spawn(connection);
+    let rpc_body =
+        br#"{"jsonrpc":"2.0","id":"SYNTHETIC_REQUEST","method":"getblockcount","params":[]}"#;
+    let rpc = || {
+        Request::post("/rpc")
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from_static(rpc_body)))
+            .unwrap()
+    };
+    let denied = sender.send_request(rpc()).await.unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    denied.into_body().collect().await.unwrap();
+    let attestation = sender
+        .send_request(request("/attestation", [17; 32]))
+        .await
+        .unwrap();
+    assert_eq!(attestation.status(), StatusCode::OK);
+    let evidence = attestation.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        parse_attestation_response(&evidence).unwrap().quote,
+        "SYNTHETIC_NOT_A_HARDWARE_QUOTE"
+    );
+    let allowed = sender.send_request(rpc()).await.unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let body = allowed.into_body().collect().await.unwrap().to_bytes();
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], "SYNTHETIC_REQUEST");
+    assert_eq!(response["result"], 42);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["getblockchaininfo", "getblockcount"]
+    );
+    drop(bridge_peer);
+    assert!(listener_task.await.unwrap().is_err());
+    let _ = driver.await;
+    assert!(sender.send_request(rpc()).await.is_err());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["getblockchaininfo", "getblockcount"]
+    );
+    quote_task.await.unwrap();
+    zebra_task.await.unwrap();
 }
 
 #[tokio::test]

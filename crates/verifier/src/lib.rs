@@ -1,14 +1,16 @@
 //! Fail-closed M0 integration boundary. No synthetic fact can mint an approval.
 #![forbid(unsafe_code)]
 
+mod approved;
 pub mod offline;
 pub mod workload;
+pub use approved::ApprovedRelease;
 
 use serde::{Deserialize, Serialize};
 use zrpc_protocol::{ErrorCode, Network, SafeError};
 
-/// M0 has no approved release measurements. An empty policy is deliberately
-/// non-operational; selecting genuine measurement fields awaits gates A–D.
+/// Operator selection can only narrow releases compiled into this client.
+/// The current client contains no approved production release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReleasePolicy {
@@ -45,11 +47,19 @@ impl ReleasePolicy {
     }
 
     pub fn validate(&self) -> Result<(), SafeError> {
-        if self.schema_version != 1
-            || self.private_mode_enabled
-            || !self.approved_release_ids.is_empty()
-        {
+        if self.schema_version != 1 || self.network != Network::Testnet {
             return Err(invalid_policy());
+        }
+        if self.private_mode_enabled != !self.approved_release_ids.is_empty() {
+            return Err(invalid_policy());
+        }
+        for (index, id) in self.approved_release_ids.iter().enumerate() {
+            if id.is_empty()
+                || self.approved_release_ids[..index].contains(id)
+                || !approved::is_embedded(id)
+            {
+                return Err(invalid_policy());
+            }
         }
         Ok(())
     }
@@ -58,7 +68,7 @@ impl ReleasePolicy {
 fn invalid_policy() -> SafeError {
     SafeError::new(
         ErrorCode::InvalidPolicy,
-        "M0 requires the disabled testnet policy with no approved releases.",
+        "Policy must select only reviewed releases embedded in this testnet client.",
     )
 }
 

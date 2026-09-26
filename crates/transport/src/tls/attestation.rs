@@ -5,11 +5,14 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Request, StatusCode, Version, client::conn::http1, header};
 use hyper_util::rt::TokioIo;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use std::{fmt, time::Instant};
 use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, ErrorCode, MAX_ATTESTATION_REQUEST_BYTES,
-    MAX_ATTESTATION_RESPONSE_BYTES, PublicAttestationRequest, PublicAttestationResponse, SafeError,
-    parse_attestation_response,
+    MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Method,
+    PublicAttestationRequest, PublicAttestationResponse, Request as RpcRequest, RequestId,
+    SafeError, Verbosity, parse_attestation_response,
 };
 
 mod inspection;
@@ -70,6 +73,7 @@ impl PendingChallenge {
     async fn exchange(self) -> Result<UnverifiedPublicEvidence, SafeError> {
         let nonce = self.nonce;
         let established = self.tls.established;
+        let authority = self.tls.authority.clone();
         let deadline = established
             .checked_add(MAX_CONNECTION_LIFETIME)
             .ok_or_else(expired)?;
@@ -172,6 +176,7 @@ impl PendingChallenge {
         Ok(UnverifiedPublicEvidence {
             evidence,
             _session: session,
+            authority,
             expected_report_data,
             established,
             deadline,
@@ -204,12 +209,127 @@ impl PendingChallenge {
 pub struct UnverifiedPublicEvidence {
     evidence: PublicAttestationResponse,
     _session: OwnedHttpSession,
+    authority: String,
     // Retained for the future authenticated verifier boundary, never exported
     // through the raw evidence accessor or treated as acceptance in this API.
     expected_report_data: [u8; 64],
     established: Instant,
     deadline: Instant,
     nonce: [u8; 32],
+}
+
+/// The original TLS connection, retained only after local hardware, workload,
+/// collateral, freshness, reviewed-release and exporter-binding checks pass.
+/// It is neither serializable nor constructible from caller-supplied evidence.
+/// One query consumes it; reconnects must obtain a new quote and fresh approval.
+pub struct VerifiedRpcSession {
+    session: OwnedHttpSession,
+    deadline: Instant,
+    authority: String,
+}
+
+impl VerifiedRpcSession {
+    pub async fn query(mut self, request: &RpcRequest) -> Result<Value, SafeError> {
+        if Instant::now() >= self.deadline
+            || self.session.sender.is_closed()
+            || self.session.driver.is_finished()
+        {
+            return Err(expired());
+        }
+        let body = encode_request(request)?;
+        let http = Request::post("/rpc")
+            .header(header::HOST, self.authority)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|_| unavailable())?;
+        // The only sender here is the one retained from POST /attestation.
+        tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {
+            let response = self
+                .session
+                .sender
+                .send_request(http)
+                .await
+                .map_err(|_| unavailable())?;
+            if response.status() != StatusCode::OK || response.version() != Version::HTTP_11 {
+                return Err(unavailable());
+            }
+            let headers = response.headers();
+            if headers.contains_key(header::CONTENT_ENCODING)
+                || headers.get_all(header::CONTENT_TYPE).iter().count() != 1
+                || headers
+                    .get(header::CONTENT_TYPE)
+                    .is_none_or(|h| h != "application/json")
+                || headers.get_all(header::CONTENT_LENGTH).iter().count() > 1
+                || headers
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+            {
+                return Err(invalid_response());
+            }
+            let body = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
+                .collect()
+                .await
+                .map_err(|_| too_large())?
+                .to_bytes();
+            if body
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                != Some(b'{')
+            {
+                return Err(invalid_response());
+            }
+            let response: WireRpcResponse =
+                serde_json::from_slice(&body).map_err(|_| invalid_response())?;
+            if response.jsonrpc != "2.0"
+                || response.id != *request.id()
+                || response.result.is_none()
+                || response.error.is_some()
+            {
+                return Err(invalid_response());
+            }
+            Ok(response.result.unwrap())
+        })
+        .await
+        .map_err(|_| expired())?
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRpcResponse {
+    jsonrpc: String,
+    id: RequestId,
+    result: Option<Value>,
+    error: Option<Value>,
+}
+
+fn encode_request(request: &RpcRequest) -> Result<Vec<u8>, SafeError> {
+    let params = match request.method() {
+        Method::GetBlockchainInfo | Method::GetBlockCount => json!([]),
+        Method::GetBlockHash { height } => json!([height]),
+        Method::GetBlockHeader { hash, verbosity } => {
+            json!([hash.as_str(), matches!(verbosity, Verbosity::Verbose)])
+        }
+        Method::GetRawTransaction { txid, verbosity } => {
+            json!([txid.as_str(), matches!(verbosity, Verbosity::Verbose)])
+        }
+    };
+    let body = serde_json::to_vec(&json!({
+        "jsonrpc":"2.0", "id":request.id(), "method":request.method().name(), "params":params
+    }))
+    .map_err(|_| unavailable())?;
+    if body.len() > MAX_REQUEST_BYTES {
+        return Err(SafeError::new(
+            ErrorCode::RequestTooLarge,
+            "Typed RPC request exceeds the configured body limit.",
+        ));
+    }
+    Ok(body)
 }
 
 impl UnverifiedPublicEvidence {

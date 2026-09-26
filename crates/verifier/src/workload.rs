@@ -83,7 +83,7 @@ impl WorkloadPolicy {
         Ok(policy)
     }
 
-    fn validate(&self) -> Result<(), WorkloadIssue> {
+    pub(crate) fn validate(&self) -> Result<(), WorkloadIssue> {
         if self.schema_version != 1
             || self.key_provider.name != "kms"
             || self.key_provider.id.is_empty()

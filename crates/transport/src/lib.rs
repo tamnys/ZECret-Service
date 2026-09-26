@@ -1,4 +1,6 @@
-//! A standalone SOCKS/TLS bootstrap transport; no private RPC path is enabled.
+//! SOCKS/TLS bootstrap and a connection-owned verified RPC path.
+//! The compiled reviewed-release catalog is currently empty, so no genuine
+//! private session can be constructed in this client release.
 //! Connections go only to the configured numeric loopback socket. A successful
 //! SOCKS handshake does not establish that the proxy is Tor or attest its peer.
 #![forbid(unsafe_code)]
@@ -20,7 +22,7 @@ use zrpc_verifier::VerifiedChannel;
 mod tls;
 pub use tls::{
     EndpointInspection, EndpointInspectionIssue, PendingChallenge, PublicBootstrapTls,
-    UnverifiedPublicEvidence,
+    UnverifiedPublicEvidence, VerifiedRpcSession,
 };
 
 /// A configuration value is not evidence that Tor is connected or functional.

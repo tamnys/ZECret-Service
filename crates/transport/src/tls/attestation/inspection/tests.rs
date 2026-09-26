@@ -9,9 +9,30 @@ use crate::tls::{
 };
 use tokio::io::AsyncWriteExt;
 use zrpc_verifier::{
+    ReleasePolicy,
     offline::InspectionStatus,
     workload::{KeyProviderPolicy, StorageFs},
 };
+
+#[tokio::test]
+async fn synthetic_evidence_and_local_policy_cannot_send_a_private_body() {
+    let (evidence, close, peer) = received_fixture().await;
+    let error = evidence
+        .authorize(b"{}", b"{}", &ReleasePolicy::default())
+        .err()
+        .expect("empty reviewed catalog must reject");
+    assert_eq!(error.code, zrpc_protocol::ErrorCode::UnknownRelease);
+    drop(close);
+    peer.await.unwrap();
+
+    let (evidence, close, peer) = received_fixture().await;
+    let mut policy = ReleasePolicy::default();
+    policy.private_mode_enabled = true;
+    policy.approved_release_ids.push("SYNTHETIC".into());
+    assert!(evidence.authorize(b"{}", b"{}", &policy).is_err());
+    drop(close);
+    peer.await.unwrap();
+}
 
 fn synthetic_policy() -> WorkloadPolicy {
     // Explicit fabricated comparison input only. No release expectation or

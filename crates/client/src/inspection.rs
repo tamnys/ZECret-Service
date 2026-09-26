@@ -1,11 +1,15 @@
-//! Shared native public diagnostic. No private query input or authorization API.
+//! Shared native Tor/bootstrap core for diagnostics and reviewed private sessions.
+use serde_json::Value;
 use std::{
     net::SocketAddrV4,
     time::{Duration, Instant},
 };
-use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
-use zrpc_transport::{EndpointInspection, IsolationLabel, RemoteEndpoint, TorConfig};
-use zrpc_verifier::workload::WorkloadPolicy;
+use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError, parse_request};
+use zrpc_transport::{
+    EndpointInspection, IsolationLabel, RemoteEndpoint, TorConfig, UnverifiedPublicEvidence,
+    VerifiedRpcSession,
+};
+use zrpc_verifier::{ReleasePolicy, workload::WorkloadPolicy};
 
 /// Explicit endpoint and numeric loopback SOCKS address. No discovery, defaults,
 /// direct mode, proxy environment or caller-supplied stream-isolation secret.
@@ -46,6 +50,47 @@ pub async fn inspect_endpoint(
     raw_app_compose: &[u8],
     policy: &WorkloadPolicy,
 ) -> Result<EndpointInspection, SafeError> {
+    let evidence = request_evidence(config).await?;
+    Ok(evidence.inspect(collateral_json, raw_app_compose, policy))
+}
+
+/// This is the only native promotion to a private-capable connection. It
+/// retains the original Tor/TLS socket and cannot accept a diagnostic policy.
+pub async fn connect_verified(
+    config: &PublicInspectionConfig,
+    collateral_json: &[u8],
+    raw_app_compose: &[u8],
+    selection: &ReleasePolicy,
+) -> Result<VerifiedRpcSession, SafeError> {
+    // Reject unapproved local policy before dialing or receiving evidence.
+    if zrpc_verifier::ApprovedRelease::selected(selection)?.is_empty() {
+        return Err(SafeError::new(
+            ErrorCode::UnknownRelease,
+            "This client has no selected reviewed release.",
+        ));
+    }
+    request_evidence(config)
+        .await?
+        .authorize(collateral_json, raw_app_compose, selection)
+}
+
+/// Build/read query bytes only after approval, then parse the typed allowlist
+/// and transmit through the retained original TLS sender.
+pub async fn query_endpoint(
+    config: &PublicInspectionConfig,
+    collateral_json: &[u8],
+    raw_app_compose: &[u8],
+    selection: &ReleasePolicy,
+    body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
+) -> Result<Value, SafeError> {
+    let session = connect_verified(config, collateral_json, raw_app_compose, selection).await?;
+    let request = parse_request(&body()?)?;
+    session.query(&request).await
+}
+
+async fn request_evidence(
+    config: &PublicInspectionConfig,
+) -> Result<UnverifiedPublicEvidence, SafeError> {
     // Fresh OS randomness per native session; its encoded isolation label is
     // never returned or logged. RFC1929's one-byte length accommodates 64 hex bytes.
     let mut isolation = [0u8; 32];
@@ -66,8 +111,7 @@ pub async fn inspect_endpoint(
             .connect_bootstrap(&config.endpoint, isolation)
             .await?;
         let pending = channel.start_tls().await?.prepare_challenge()?;
-        let evidence = pending.request_attestation().await?;
-        Ok(evidence.inspect(collateral_json, raw_app_compose, policy))
+        pending.request_attestation().await
     };
     let result = tokio::time::timeout(lifetime, operation)
         .await
@@ -96,5 +140,15 @@ mod tests {
         ] {
             assert!(PublicInspectionConfig::new(host, port, socks).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn empty_reviewed_catalog_never_reads_query_or_opens_tor() {
+        let config = PublicInspectionConfig::new("fixture.invalid", 443, "127.0.0.1:9").unwrap();
+        let result = query_endpoint(&config, b"{}", b"{}", &ReleasePolicy::default(), || {
+            panic!("private body read before approval")
+        })
+        .await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::UnknownRelease);
     }
 }

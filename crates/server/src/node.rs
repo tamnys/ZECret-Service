@@ -1,5 +1,6 @@
 //! Internal Zebra JSON-RPC over an explicit loopback socket. This module grants
 //! no customer transport or attestation authority and has no public listener.
+mod cookie_file;
 mod identity;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 use std::{
     fmt,
     net::SocketAddrV4,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -39,11 +41,18 @@ impl CookieAuth {
         if split == 0 || split + 1 == bytes.len() || bytes.iter().any(u8::is_ascii_control) {
             return Err(unavailable());
         }
-        let mut header =
-            header::HeaderValue::from_str(&format!("Basic {}", STANDARD.encode(bytes)))
-                .map_err(|_| unavailable())?;
+        let encoded = zeroize::Zeroizing::new(STANDARD.encode(bytes));
+        let value = zeroize::Zeroizing::new(format!("Basic {}", encoded.as_str()));
+        let mut header = header::HeaderValue::from_str(&value).map_err(|_| unavailable())?;
         header.set_sensitive(true);
         Ok(Self(header))
+    }
+
+    /// Read Zebra's pinned 32-byte cookie format from a non-symlink regular
+    /// file on tmpfs. The measured container profile must mount the same
+    /// memory-backed cookie directory into Zebra and this wrapper.
+    pub fn from_tmpfs_file(path: &Path) -> Result<Self, SafeError> {
+        cookie_file::read(path)
     }
 }
 

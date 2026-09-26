@@ -15,7 +15,7 @@ mod provider_schedule;
 mod provider_settings;
 mod provider_watchdog;
 
-const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc inspect-endpoint --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --policy FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nzrpc lifecycle --help\nM0 plus public endpoint diagnostics, lifecycle observations and explicit tracked deletion; private mode and deployment are unavailable.";
+const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc inspect-endpoint --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --policy FILE\nzrpc verify --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --release-policy FILE\nzrpc query --stdin --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --release-policy FILE\nzrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]\nzrpc dashboard --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --release-policy FILE [--no-open]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nzrpc lifecycle --help\nThe compiled approved-release catalog is empty; private queries remain blocked.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
@@ -110,28 +110,66 @@ async fn run() -> Result<(), String> {
             Ok(())
         },
         "verify"=>{
-            let _endpoint=take_value(&mut args,"--endpoint")?;
-            let policy=take_value(&mut args,"--policy")?;
-            exhausted(&args)?;
-            if let Some(path)=policy {
-                let bytes=fs::read(path).map_err(|_|"policy unavailable")?;
-                zrpc_verifier::ReleasePolicy::from_json(&bytes).map_err(|_|"policy rejected")?;
+            if args.is_empty() {
+                print_json(PrivateClient::new().verify())?;
+                std::process::exit(1)
             }
-            print_json(PrivateClient::new().verify())?;
-            std::process::exit(1)
+            if args.first().is_some_and(|arg| arg == "--policy") {
+                let path=required(&mut args,"--policy")?;
+                exhausted(&args)?;
+                let policy=zrpc_verifier::ReleasePolicy::from_json(
+                    &fs::read(path).map_err(|_|"policy unavailable")?
+                ).map_err(|_|"policy rejected")?;
+                print_json(PrivateClient::with_policy(policy).map_err(|error|error.to_string())?.verify())?;
+                std::process::exit(1)
+            }
+            let live=live_inputs(&mut args)?;
+            exhausted(&args)?;
+            let session=zrpc_client::inspection::connect_verified(&live.config,&live.collateral,&live.compose,&live.policy)
+                .await.map_err(|error|error.to_string())?;
+            drop(session);
+            print_json(json!({"mode":"private_verified","simulation":false,"private_accepted":true,"query_sent":false}))
         },
         "query"=>{
             let simulation=take_flag(&mut args,"--simulate");
             let stdin=take_flag(&mut args,"--stdin");
             let method=take_value(&mut args,"--method")?;
             let scenario=take_value(&mut args,"--scenario")?;
-            exhausted(&args)?;
             if stdin && method.is_some(){return Err("choose stdin or method".into())}
             if !simulation {
-                // Do not even read a customer body before authorization.
-                print_json(PrivateClient::new().verify())?;
-                std::process::exit(1);
+                if scenario.is_some(){return Err("scenario is simulation-only".into())}
+                if args.is_empty() {
+                    // Do not even read a customer body before authorization.
+                    print_json(PrivateClient::new().verify())?;
+                    std::process::exit(1);
+                }
+                let live=live_inputs(&mut args)?;
+                exhausted(&args)?;
+                if !stdin && method.is_none(){return Err("private query requires --stdin or --method".into())}
+                let session=zrpc_client::inspection::connect_verified(&live.config,&live.collateral,&live.compose,&live.policy)
+                    .await.map_err(|error|error.to_string())?;
+                // Read/serialize only after genuine local approval of this socket.
+                let bytes=if stdin {
+                    let mut bytes=Vec::new();
+                    io::stdin().take((zrpc_protocol::MAX_REQUEST_BYTES+1) as u64).read_to_end(&mut bytes)
+                        .map_err(|_|"stdin unavailable")?;
+                    bytes
+                } else {
+                    serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":method.unwrap(),"params":[]}))
+                        .map_err(|_|"request unavailable")?
+                };
+                let request=zrpc_protocol::parse_request(&bytes).map_err(|error|error.to_string())?;
+                match session.query(&request).await {
+                    Ok(result)=>print_json(json!({"mode":"private","simulation":false,"private_accepted":true,"query_sent":true,"result":result})),
+                    Err(error)=>{
+                        // The sender may have transmitted before a response failed.
+                        print_json(json!({"mode":"private_error","private_accepted":true,"query_sent":"unknown","error":error}))?;
+                        std::process::exit(1)
+                    }
+                }?;
+                return Ok(());
             }
+            exhausted(&args)?;
             let scenario=scenario.unwrap_or_else(||"fixture".into()).parse::<Scenario>().map_err(|_|"unknown simulation scenario")?;
             let bytes=if stdin {
                 let mut bytes=Vec::new();
@@ -145,21 +183,13 @@ async fn run() -> Result<(), String> {
         },
         "demo"=>{
             let no_open=take_flag(&mut args,"--no-open");exhausted(&args)?;
-            let listener=tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST,0)).await.map_err(|_|"loopback bind failed")?;
-            let address=listener.local_addr().map_err(|_|"loopback address unavailable")?;
-            let session=zrpc_cli::LocalSession::new(address)?;
-            let url=session.bootstrap_url()?;
-            if no_open {
-                // Deliberate terminal delivery only, never stdout/stderr/log files.
-                let mut tty=fs::OpenOptions::new().write(true).open("/dev/tty").map_err(|_|"interactive terminal required for --no-open")?;
-                writeln!(tty,"Open this one-time local simulation link privately:\n{url}").map_err(|_|"terminal unavailable")?;
-            }else{
-                #[cfg(target_os="macos")] let opener="open";
-                #[cfg(not(target_os="macos"))] let opener="xdg-open";
-                Command::new(opener).arg(&url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|_|"browser opener unavailable; use demo --no-open in a terminal")?;
-            }
-            println!("SIMULATION ONLY — local dashboard on http://{address}. Press Ctrl-C to close.");
-            axum::serve(listener,zrpc_cli::dashboard(session)).with_graceful_shutdown(async {let _=tokio::signal::ctrl_c().await;}).await.map_err(|_|"local server failed".into())
+            serve_dashboard(None,no_open).await
+        },
+        "dashboard"=>{
+            let no_open=take_flag(&mut args,"--no-open");
+            let live=live_inputs(&mut args)?;
+            exhausted(&args)?;
+            serve_dashboard(Some(live),no_open).await
         },
         "plan"=>{
             let path=required(&mut args,"--input")?;exhausted(&args)?;
@@ -183,6 +213,94 @@ async fn run() -> Result<(), String> {
         "deploy"=>Err("deployment is disabled in M0; Gates A–E, external deletion proof and explicit operator deployment action are required".into()),
         _=>Err("unknown command; run zrpc help".into())
     }
+}
+
+struct LiveInputs {
+    config: zrpc_client::inspection::PublicInspectionConfig,
+    collateral: Vec<u8>,
+    compose: Vec<u8>,
+    policy: zrpc_verifier::ReleasePolicy,
+}
+
+fn live_inputs(args: &mut Vec<String>) -> Result<LiveInputs, String> {
+    let host = required(args, "--endpoint-host")?;
+    let port = required(args, "--endpoint-port")?
+        .parse::<u16>()
+        .map_err(|_| "invalid endpoint port")?;
+    let socks = required(args, "--socks")?;
+    let collateral_path = required(args, "--collateral")?;
+    let compose_path = required(args, "--app-compose")?;
+    let release_path = required(args, "--release-policy")?;
+    let config = zrpc_client::inspection::PublicInspectionConfig::new(&host, port, &socks)
+        .map_err(|error| error.to_string())?;
+    let policy = zrpc_verifier::ReleasePolicy::from_json(
+        &fs::read(release_path).map_err(|_| "release policy unavailable")?,
+    )
+    .map_err(|_| "release policy rejected")?;
+    let collateral = fs::read(collateral_path).map_err(|_| "collateral unavailable")?;
+    let compose = fs::read(compose_path).map_err(|_| "app-compose unavailable")?;
+    Ok(LiveInputs {
+        config,
+        collateral,
+        compose,
+        policy,
+    })
+}
+
+async fn serve_dashboard(live: Option<LiveInputs>, no_open: bool) -> Result<(), String> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|_| "loopback bind failed")?;
+    let address = listener
+        .local_addr()
+        .map_err(|_| "loopback address unavailable")?;
+    let (session, label) = match live {
+        Some(live) => (
+            zrpc_cli::LocalSession::new_live(
+                address,
+                zrpc_cli::LiveConfiguration::new(
+                    live.config,
+                    live.collateral,
+                    live.compose,
+                    live.policy,
+                ),
+            )?,
+            "LIVE CLIENT — private mode requires reviewed release acceptance",
+        ),
+        None => (zrpc_cli::LocalSession::new(address)?, "SIMULATION ONLY"),
+    };
+    let url = session.bootstrap_url()?;
+    if no_open {
+        // Deliberate terminal delivery only, never stdout/stderr/log files.
+        let mut tty = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|_| "interactive terminal required for --no-open")?;
+        writeln!(
+            tty,
+            "Open this one-time local dashboard link privately:\n{url}"
+        )
+        .map_err(|_| "terminal unavailable")?;
+    } else {
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(not(target_os = "macos"))]
+        let opener = "xdg-open";
+        Command::new(opener)
+            .arg(&url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "browser opener unavailable; use --no-open in a terminal")?;
+    }
+    println!("{label} — local dashboard on http://{address}. Press Ctrl-C to close.");
+    axum::serve(listener, zrpc_cli::dashboard(session))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .map_err(|_| "local server failed".into())
 }
 
 async fn inspect_endpoint_command(mut args: Vec<String>) -> Result<(), String> {

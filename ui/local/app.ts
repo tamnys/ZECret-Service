@@ -1,8 +1,8 @@
 export {};
 
 type Report = {
-  simulation: boolean; query_sent: boolean; fixture_dispatched: boolean;
-  verification: Record<string, unknown>; chain_readiness: unknown;
+  simulation: boolean; query_sent: boolean | string; fixture_dispatched?: boolean;
+  verification?: Record<string, unknown>; chain_readiness?: unknown;
   error: unknown; result: unknown;
 };
 const byId = <T extends HTMLElement>(id: string): T => {
@@ -13,6 +13,7 @@ const byId = <T extends HTMLElement>(id: string): T => {
 const run = byId<HTMLButtonElement>('run');
 const session = byId('session');
 let capability = '';
+let mode: 'simulation' | 'live_unverified' = 'simulation';
 let bootstrap = location.hash.slice(1);
 history.replaceState(null, '', location.pathname);
 
@@ -27,10 +28,12 @@ async function api(path: string, body?: string, scenario?: string): Promise<unkn
 }
 function show(report: Report, elapsed: number): void {
   byId('result').textContent = JSON.stringify(report, null, 2);
-  byId('sent').textContent = report.query_sent ? 'Unexpected dispatch' : 'No';
-  byId('chain').textContent = String(report.chain_readiness).replaceAll('_', ' ');
+  byId('sent').textContent = report.query_sent === true ? 'Yes' : report.query_sent === false ? 'No' : 'Unknown';
+  byId('chain').textContent = String(report.chain_readiness ?? 'not_checked').replaceAll('_', ' ');
   byId('latency').textContent = `${elapsed.toFixed(1)} ms`;
-  byId('result-label').textContent = report.error ? 'SIMULATED REJECTION' : 'SYNTHETIC RESULT';
+  byId('result-label').textContent = mode === 'simulation'
+    ? (report.error ? 'SIMULATED REJECTION' : 'SYNTHETIC RESULT')
+    : (report.error ? 'PRIVATE MODE BLOCKED' : 'VERIFIED RESPONSE');
   const evidence = byId('evidence');
   evidence.replaceChildren();
   const labels: Record<string,string> = {transport:'Transport',hardware:'Hardware authenticity',application:'Application policy',key_binding:'Connection key',freshness:'Freshness'};
@@ -38,8 +41,8 @@ function show(report: Report, elapsed: number): void {
     const row = document.createElement('div');
     const name = document.createElement('dt'); name.textContent = label;
     const value = document.createElement('dd');
-    const status = report.verification[key];
-    value.textContent = typeof status === 'string' ? status.replaceAll('_',' ') : JSON.stringify(status ?? 'not_checked');
+    const status = report.verification?.[key];
+    value.textContent = typeof status === 'string' ? status.replaceAll('_',' ') : 'not checked';
     row.append(name, value); evidence.append(row);
   }
 }
@@ -49,18 +52,35 @@ run.addEventListener('click', async () => {
   const params = method === 'getblockhash' ? [42] : ['getblockheader','getrawtransaction'].includes(method) ? [method === 'getrawtransaction' ? 'b'.repeat(64) : 'a'.repeat(64), true] : [];
   const request = JSON.stringify({jsonrpc:'2.0',id:1,method,params});
   const started = performance.now();
-  try { show(await api('/api/query', request, byId<HTMLSelectElement>('scenario').value) as Report, performance.now()-started); }
+  try { show(await api('/api/query', request, mode === 'simulation' ? byId<HTMLSelectElement>('scenario').value : undefined) as Report, performance.now()-started); }
   catch (error) { session.textContent = error instanceof Error ? error.message : 'Local request failed'; }
   finally { run.disabled = false; }
 });
 async function start(): Promise<void> {
   try {
-    if (!/^[a-f0-9]{64}$/.test(bootstrap)) throw new Error('Open this dashboard from zrpc demo to establish a local session.');
+    if (!/^[a-f0-9]{64}$/.test(bootstrap)) throw new Error('Open this dashboard from the zrpc CLI to establish a local session.');
     capability = bootstrap;
-    const result = await api('/api/bootstrap') as {capability:string};
+    const result = await api('/api/bootstrap') as {capability:string;mode:'simulation'|'live_unverified'};
     capability = result.capability;
+    mode = result.mode;
     bootstrap = '';
-    session.textContent = 'Local session ready. All requests stay on this device.';
+    if (mode === 'live_unverified') {
+      byId('mode-label').textContent = 'LIVE CLIENT · UNVERIFIED';
+      byId('mode-description').textContent = 'This dashboard can ask the native client to verify a remote endpoint. No private query is sent unless the independently reviewed release and live connection pass every check.';
+      byId('method-label').textContent = 'Typed testnet request';
+      byId('scenario-label').style.display = 'none';
+      byId('scenario').style.display = 'none';
+      for (const option of Array.from(byId<HTMLSelectElement>('method').options)) {
+        if (!['getblockcount','getblockchaininfo'].includes(option.value)) option.disabled = true;
+      }
+      run.firstChild!.textContent = 'Try verified query ';
+      byId('release-note').textContent = 'Native client: no approved production release is packaged yet. Private mode stays blocked.';
+      session.textContent = 'Local session ready. Private mode requires independent verification.';
+    } else {
+      byId('mode-label').textContent = 'SIMULATION ONLY';
+      byId('mode-description').textContent = 'No hardware attestation, Tor connection, cloud service or live blockchain. Fixtures never authorize private mode.';
+      session.textContent = 'Local session ready. Simulation fixtures stay on this device.';
+    }
     run.disabled = false;
   } catch (error) {
     capability = ''; bootstrap = '';

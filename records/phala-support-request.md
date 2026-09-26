@@ -39,7 +39,10 @@ changes require separate approval.
 
 1. **Measured boot and memory-only runtime.** For the supported image, provide
    artifact digests, source/build references and the measured configuration
-   format. Which immutable units or equivalent controls cover Docker,
+   format. Does the host-supplied `sys-config.json` change across boots or node
+   placement? We need its production schema and exact KMS, gateway and VM
+   configuration values, or a supported immutable way to constrain them in
+   the measured image. Which immutable units or equivalent controls cover Docker,
    containerd, Sysbox, any additional runtime roots, socket activation, orphan
    cleanup and restarts? How are preparation failure, retained disk state and
    active swap prevented from permitting execution? We need the exact artifact
@@ -50,11 +53,18 @@ changes require separate approval.
    privileged-workload paths? For the compatible production KMS, provide its
    attestation/configuration evidence and the applicable key-release policy,
    including who can change that policy and whether changed OS/workload code
-   can receive the same disk key. Which supported TLS-passthrough and dstack
+   can receive the same disk key. Please provide the production
+   `key_provider_id` and its encoding: the matching dstack source skips KMS
+   identity comparison when that field is empty, so our measured profile will
+   require a nonempty value. Which supported TLS-passthrough and dstack
    interfaces let our application bind a fresh client challenge to its own
    process-local TLS key and prove possession on the same connection? Provider
    `verified: true` responses will not substitute for local quote, measurement
-   and connection verification.
+   and connection verification. The matching gateway source lets an
+   administrator override the CVM's port policy. Does that path exist on the
+   production gateway, and can it be disabled or fixed for this deployment so
+   that only the attested TLS wrapper port is reachable? We need to rule out an
+   override that could expose Zebra's loopback RPC directly.
 
 3. **Deletion and accounting contract.** For API version `2026-06-23`, how does
    metered usage `instance_id` map to CVM `id`, `instance_id` and `vm_uuid`?
