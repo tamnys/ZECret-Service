@@ -1,4 +1,4 @@
-//! Explicit operator-controlled inputs for the read-only provider client.
+//! Explicit operator-controlled inputs for the provider connection configuration.
 //! No environment credential lookup, OS trust discovery or provider connection.
 use crate::{
     LifecycleError,

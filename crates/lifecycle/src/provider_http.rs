@@ -1,8 +1,13 @@
-//! Narrow operator control-plane reads over ordinarily authenticated HTTPS.
+//! Narrow operator control-plane operations over ordinarily authenticated HTTPS.
 //!
-//! This transport cannot create, alter, stop, or delete resources. It is separate
-//! from the Tor/private-query transport and never accepts an endpoint URL. A
-//! completed read is neither an atomic inventory nor a disk/billing receipt.
+//! `ScopedReads` provides only reads; prepared deletion uses a separate
+//! capability. No operation creates, starts, stops, or resizes resources. This
+//! module is separate from the Tor/private-query transport and never accepts an
+//! endpoint URL. A completed read is neither an atomic inventory nor a
+//! disk/billing receipt.
+
+#[cfg(unix)]
+pub mod deletion;
 
 use crate::{provider_request::ReadRequest, provider_wire};
 use bytes::Bytes;
@@ -91,8 +96,9 @@ impl ApiKey {
     }
 }
 
-/// Unauthenticated read configuration. Only `authenticate` can produce the
-/// scoped capability. Construction opens no socket and reads no environment.
+/// Unauthenticated control-plane configuration. Only `authenticate` can produce
+/// `ScopedReads`; prepared deletion requires its separate capability.
+/// Construction opens no socket and reads no environment.
 pub struct ProviderClient {
     api_key: ApiKey,
     workspace_id: String,
@@ -219,7 +225,15 @@ impl ProviderClient {
         self.finish(result)
     }
 
-    async fn exchange(&self, path: String) -> Result<Vec<u8>, ProviderHttpError> {
+    // Private shared transport: callers select only their own fixed operation
+    // vocabulary and apply the original invocation deadline. The response and
+    // driver guard travel together so cancellation drops the live connection.
+    async fn exchange_headers(
+        &self,
+        path: String,
+        method: hyper::Method,
+    ) -> Result<(hyper::Response<hyper::body::Incoming>, AbortOnDrop), ProviderHttpError> {
+        self.finish(Ok(()))?;
         #[cfg(test)]
         let socket = match self.test_address {
             Some(address) => TcpStream::connect(address).await,
@@ -251,11 +265,11 @@ impl ProviderClient {
         let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
             .await
             .map_err(|_| ProviderHttpError::HttpFailed)?;
-        let _driver = AbortOnDrop(tokio::spawn(async move {
+        let driver = AbortOnDrop(tokio::spawn(async move {
             let _ = connection.await;
         }));
         let request = Request::builder()
-            .method(hyper::Method::GET)
+            .method(method)
             .uri(path)
             .header(header::HOST, HOST)
             .header(header::ACCEPT, "application/json")
@@ -271,6 +285,11 @@ impl ProviderClient {
             .send_request(request)
             .await
             .map_err(|_| ProviderHttpError::HttpFailed)?;
+        Ok((response, driver))
+    }
+
+    async fn exchange(&self, path: String) -> Result<Vec<u8>, ProviderHttpError> {
+        let (response, _driver) = self.exchange_headers(path, hyper::Method::GET).await?;
         if response.status() != StatusCode::OK {
             // Drop all error bodies without decoding/logging them. In particular,
             // never follow Location, Retry-After, authentication or provider URLs.

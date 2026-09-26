@@ -1,5 +1,6 @@
 //! Cost accounting, local persistence and explicitly invoked provider reads.
-//! No provider mutation, scheduler, deployment or private-query path is exposed.
+//! A separate library capability prepares a tracked deletion before dispatch.
+//! No scheduler, deployment or private-query path is exposed.
 
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};

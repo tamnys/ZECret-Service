@@ -286,8 +286,9 @@ pub struct CommittedLedgerReference {
 
 /// Proof of a locally committed intent while its writer lock is retained.
 /// This is not operator approval, authenticated provider identity or a network
-/// capability. No live adapter accepts it yet. Dropping it preserves pending
-/// history; retries require future reconciliation support.
+/// capability. Provider dispatch additionally requires authenticated scope and
+/// an explicit operator action. Dropping it preserves pending history; retries
+/// require reconciliation support.
 ///
 /// ```compile_fail
 /// fn cannot_clone(intent: zrpc_lifecycle::persistence::CommittedDeletionIntent<'_>) {
@@ -310,6 +311,18 @@ impl CommittedDeletionIntent<'_> {
     }
     pub fn record(&self) -> &DeletionIntentRecord {
         &self.store.ledger.deletion_intents()[self.index]
+    }
+    pub(crate) fn verify_for_dispatch(&self) -> Result<(), StoreError> {
+        let ledger = self.store.ledger()?;
+        self.store.verify_current()?;
+        let intent = ledger
+            .deletion_intents()
+            .get(self.index)
+            .ok_or(StoreError::InvalidState)?;
+        if intent.outcome.is_some() {
+            return Err(StoreError::InvalidState);
+        }
+        Ok(())
     }
     pub fn finish(self, outcome: DeletionOutcome, now: u64) -> Result<(), StoreError> {
         self.finish_with_hook(outcome, now, &mut |_| Ok(()))
@@ -811,6 +824,7 @@ mod tests {
         assert_eq!(intent.workspace_id(), "workspace");
         assert_eq!(intent.record().committed_generation, 1);
         assert!(intent.record().outcome.is_none());
+        assert_eq!(intent.verify_for_dispatch(), Ok(()));
         let snapshot: Snapshot =
             parse_object(&fs::read(temp.store().join(snapshot_name(1))).unwrap()).unwrap();
         let durable = ledger_from_raw(&snapshot.ledger, intent.store.ledger.binding()).unwrap();
@@ -845,6 +859,30 @@ mod tests {
         store.commit(&next).unwrap();
         drop(store.prepare_deletion(2, "workspace", "two", 1001).unwrap());
         assert_eq!(store.ledger().unwrap().deletion_intents().len(), 2);
+    }
+
+    #[test]
+    fn dispatch_revalidation_rejects_draft_or_history_changes_after_token_creation() {
+        for pending_draft in [true, false] {
+            let temp = Temp::new();
+            let mut store = setup(&temp);
+            let intent = store.prepare_deletion(0, "workspace", "one", 1000).unwrap();
+            assert_eq!(intent.verify_for_dispatch(), Ok(()));
+            if pending_draft {
+                fs::write(temp.store().join(PENDING), b"external unfinished draft").unwrap();
+                assert_eq!(
+                    intent.verify_for_dispatch(),
+                    Err(StoreError::PendingRecovery)
+                );
+            } else {
+                fs::write(
+                    temp.store().join(snapshot_name(1)),
+                    b"external history change",
+                )
+                .unwrap();
+                assert!(intent.verify_for_dispatch().is_err());
+            }
+        }
     }
 
     #[test]

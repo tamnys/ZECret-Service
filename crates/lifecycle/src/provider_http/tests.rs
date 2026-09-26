@@ -81,6 +81,14 @@ pub(crate) struct Server {
 
 impl Server {
     pub(crate) async fn start(replies: Vec<Vec<u8>>, name: &str) -> Self {
+        Self::start_with_observer(replies, name, |_| {}).await
+    }
+
+    pub(crate) async fn start_with_observer(
+        replies: Vec<Vec<u8>>,
+        name: &str,
+        observe: impl Fn(&str) + Send + 'static,
+    ) -> Self {
         let (tls, root) = material(name);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -122,6 +130,7 @@ impl Server {
                     }
                 }
                 if !request.is_empty() {
+                    observe(std::str::from_utf8(&request).unwrap());
                     record
                         .lock()
                         .unwrap()
@@ -130,6 +139,14 @@ impl Server {
                     let reply = replies
                         .pop_front()
                         .expect("unexpected extra provider request");
+                    // Test-only lost-response fixture: receive the complete
+                    // request and close without sending an HTTP response.
+                    if reply.is_empty() {
+                        drop(tls);
+                        closed_count.fetch_add(1, Ordering::SeqCst);
+                        notify.notify_one();
+                        continue;
+                    }
                     // A rejected over-bound body may close while this fixture
                     // is writing; that is an expected transport cancellation.
                     let _ = tls.write_all(&reply).await;
@@ -169,13 +186,13 @@ impl Server {
         client
     }
 
-    async fn wait_requests(&self, count: usize) {
+    pub(crate) async fn wait_requests(&self, count: usize) {
         while self.requests.lock().unwrap().len() < count {
             self.activity.notified().await;
         }
     }
 
-    async fn wait_closed(&self, count: usize) {
+    pub(crate) async fn wait_closed(&self, count: usize) {
         while self.closed.load(Ordering::SeqCst) < count {
             self.activity.notified().await;
         }
