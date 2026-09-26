@@ -1,7 +1,7 @@
 //! Loopback dashboard. Live mode delegates only to the shared native client.
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::to_bytes,
     extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
@@ -171,7 +171,11 @@ async fn bootstrap(State(session): State<LocalSession>, headers: HeaderMap) -> R
     };
     Json(json!({"capability":session.capability,"mode":mode,"platform":platform})).into_response()
 }
-async fn query(State(session): State<LocalSession>, headers: HeaderMap, body: Bytes) -> Response {
+async fn query(State(session): State<LocalSession>, request: Request) -> Response {
+    // Retain the local body stream without polling it. In live mode the Rust
+    // client must approve the remote connection before it reads the request.
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
     if !exactly(&headers, "content-type", "application/json") {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -196,6 +200,12 @@ async fn query(State(session): State<LocalSession>, headers: HeaderMap, body: By
                 "private_accepted":false,"query_sent":false,"error":error,
                 "platform":live.config.platform(),
                 "verification":{"transport":"not_approved","hardware":"not_checked","application":"not_checked","key_binding":"not_checked","freshness":"not_checked","release":"not_approved"},"chain_readiness":"not_checked","result":null})).into_response(),
+        };
+        let body = match to_bytes(body, MAX_BODY).await {
+            Ok(body) => body,
+            Err(_) => {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "request body unavailable").into_response();
+            }
         };
         let request = match zrpc_protocol::parse_request(&body) {
             Ok(request) => request,
@@ -228,6 +238,12 @@ async fn query(State(session): State<LocalSession>, headers: HeaderMap, body: By
         .unwrap_or("fixture");
     let Ok(scenario) = scenario.parse::<Scenario>() else {
         return (StatusCode::BAD_REQUEST, "unknown simulation scenario").into_response();
+    };
+    let body = match to_bytes(body, MAX_BODY).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "request body unavailable").into_response();
+        }
     };
     Json(SimulationClient::query(&body, scenario)).into_response()
 }
@@ -419,15 +435,12 @@ mod tests {
             );
             let state = LocalSession::new_live("127.0.0.1:32123".parse().unwrap(), live).unwrap();
             let app = dashboard(state.clone());
-            let response = app
-                .oneshot(call(
-                    "/api/query",
-                    &state.host,
-                    &state.origin,
-                    &state.capability,
-                ))
-                .await
-                .unwrap();
+            let mut request = call("/api/query", &state.host, &state.origin, &state.capability);
+            // Rejection must happen before the live handler reads even an
+            // oversized private body. The simulation route still enforces its
+            // normal local body limit.
+            *request.body_mut() = Body::from(vec![b'X'; MAX_BODY + 1]);
+            let response = app.oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
             let report: serde_json::Value = serde_json::from_slice(&body).unwrap();

@@ -17,7 +17,7 @@ pub(super) mod attestation_tests;
 
 // Candidate encoding in ADR 0002, used only in tests until attestation protocol
 // review. These are exporter inputs, not a fabricated expected TLS output.
-const EXPORTER_LABEL: &[u8] = b"EXPORTER-zrpc-attestation-v1";
+const EXPORTER_LABEL: &[u8] = zrpc_protocol::ATTESTATION_EXPORTER_LABEL;
 const VECTOR_NONCE: [u8; 32] = [
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
     0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
@@ -236,7 +236,7 @@ fn proposed_exporter_encoding_vector_has_exact_bytes() {
         .collect();
     assert_eq!(
         label_hex,
-        "4558504f525445522d7a7270632d6174746573746174696f6e2d7631"
+        "4558504552494d454e54414c2d7a7270632d6174746573746174696f6e2d7631"
     );
     assert_eq!(
         nonce_hex,

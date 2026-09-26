@@ -70,8 +70,8 @@ The candidate inputs are:
 
 | Field | Exact bytes or value |
 | --- | --- |
-| Label | ASCII `EXPORTER-zrpc-attestation-v1` |
-| Label hex | `4558504f525445522d7a7270632d6174746573746174696f6e2d7631` |
+| Label | ASCII `EXPERIMENTAL-zrpc-attestation-v1` |
+| Label hex | `4558504552494d454e54414c2d7a7270632d6174746573746174696f6e2d7631` |
 | Context | Exactly the native client's 32 challenge bytes, without encoding or prefix |
 | Output length | 64 bytes, matching TDX `REPORTDATA` |
 | Maintained operation | `export_keying_material([0u8; 64], label, Some(&nonce))` |
@@ -82,20 +82,23 @@ This vector defines encoding only. Exporter output depends on the negotiated TLS
 secrets and cannot be specified from this nonce alone. The client retains its
 exporter output, original nonce, and original connection time/deadline privately
 before handing the TLS stream to Hyper. The server computes its own same-session
-exporter output for its quote request. Client quote acceptance and comparison
-against authenticated `REPORTDATA` are unavailable. Neither equal exporter
-results nor a matching unauthenticated `report_data` field establishes a genuine
-private channel. This encoding vector is not a cross-implementation known-answer
-vector for exporter output.
+exporter output for its quote request. RFC 5705 permits private-use labels
+beginning with `EXPERIMENTAL`; the earlier unregistered `EXPORTER-zrpc-attestation-v1`
+candidate was never part of an approved release. The native client compares its
+exporter against authenticated quote `REPORTDATA` before promoting a retained
+connection, but the packaged approved-release list remains empty. Neither equal
+exporter results nor a matching unauthenticated `report_data` field establishes a
+genuine private channel. This encoding vector is not a cross-implementation
+known-answer vector for exporter output.
 
 The experimental public attestation service accepts the nonce only. Its server
 computes the exporter from its own active TLS connection and requests a quote
 for those exact 64 bytes. It cannot accept caller-selected report data or keys.
-The native client must eventually authenticate the quote and workload, compare its
-authenticated `REPORTDATA` with its own same-session exporter, enforce challenge
-and connection lifetime, and consume this one pending challenge before private
-serialization becomes possible. TLS termination and this quoting operation must
-belong to the approved workload. A remote frontend that supplies arbitrary
+The native client authenticates the quote and workload, compares authenticated
+`REPORTDATA` with its own same-session exporter, enforces challenge and connection
+lifetime, and consumes this one pending challenge before private serialization.
+It can only promote a client-packaged, approved release; that catalog is currently
+empty. TLS termination and quoting must belong to the approved workload. A remote frontend that supplies arbitrary
 exporter bytes to the guest would not establish that property.
 
 At dstack 0.5.9 commit
