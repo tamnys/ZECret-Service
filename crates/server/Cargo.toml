@@ -18,6 +18,7 @@ hex.workspace = true
 libc.workspace = true
 rustix.workspace = true
 rustls.workspace = true
+sd-notify = "=0.4.5"
 tokio-rustls.workspace = true
 rcgen.workspace = true
 zeroize.workspace = true

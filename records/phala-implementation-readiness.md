@@ -49,11 +49,20 @@ sent, and no account credits were spent. Private mode remains blocked.
   installed in a guest image. The overlay emits service/socket drop-ins with
   preparation dependencies, pre-start guards, `Restart=no` and
   `FailureAction=poweroff-force` for preparation, runtime and socket failures.
-  The quote bridge candidate unit now has `BindsTo` and `After` edges for the
-  app launcher, Docker, containerd, Sysbox services and guest agent, so
-  deactivation of one of those effective units would stop the bridge and close
-  the wrapper's liveness connection under [systemd's documented dependency
+  The quote bridge candidate unit retains `BindsTo` for the app launcher,
+  Docker, containerd, Sysbox services and guest agent, so deactivation of one
+  of those effective units should stop the bridge and close the wrapper's
+  liveness connection under [systemd's documented dependency
   semantics](https://github.com/systemd/systemd/blob/main/man/systemd.unit.xml).
+  It now starts before the app launcher and uses `Type=notify`: the main bridge
+  process sends readiness only after publishing both Unix sockets. The app
+  unit binds to and starts after that notification. This removes a source-level
+  race in which Compose could launch the wrapper before the bridge bound its
+  sockets. The bridge reuses dstack's pinned `sd-notify` 0.4.5 and refuses a
+  missing, non-path or unreachable `NOTIFY_SOCKET`; that version does not
+  support systemd's abstract-socket form. The exact unit graph and notification
+  socket remain untested on the production guest, so this is not a boot or
+  availability claim.
   The candidate app launcher now stays attached to `docker --host
   unix:///run/docker.sock compose --env-file /dev/null -f docker-compose.yaml
   up --abort-on-container-exit`, and its unit is
@@ -335,6 +344,15 @@ sent, and no account credits were spent. Private mode remains blocked.
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check
   passed on rerun. The cause of that transient artifact error is unknown.
+  For the quote-bridge readiness correction, nine launch-profile tests and
+  nine packaging-source tests passed. Two Rust bridge tests covered a real
+  local notification datagram after both sockets were published, plus absent,
+  malformed and unreachable notification addresses and bridge-bind failure.
+  `CARGO_BUILD_JOBS=1 CODEX_ALLOW_REVIEWED_PACKAGE_BUILD=1 bash scripts/check.sh`
+  then passed in the managed container. The generated unbound overlay's changed
+  unit hashes match this record's candidate manifest. These are synthetic
+  process and source tests, not an effective systemd boot or target-guest
+  notification-socket compatibility result.
   No local test is hardware acceptance.
 - No production image/verity commitment or reconstructed measurements exist for
   this overlay. No guest namespace, systemd boot/failure, console/exec, KMS
@@ -351,7 +369,8 @@ sent, and no account credits were spent. Private mode remains blocked.
    image/custom-image admission and compatible KMS policy. Integrate the overlay
    and guard into that immutable build, inventory all units and write paths,
    disable guest console/rescue/exec/update controls, prohibit same-boot runtime
-   recovery, install and measure the quote bridge and non-root node launcher,
+   recovery, confirm the guest uses a pathname systemd notification socket,
+   install and measure the quote bridge and non-root node launcher,
    share only a tmpfs cookie directory and the quote-only socket with the
    wrapper, keep the guest agent's key/signing sockets out of the wrapper and
    node, prove that the production gateway cannot administratively override

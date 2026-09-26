@@ -596,6 +596,13 @@ def candidate_app_unit(source: str) -> str:
     # A detached oneshot cannot observe later container death. This service
     # stays active only while its attached Compose supervisor is running.
     source = replace_once(source, "Type=oneshot\nRemainAfterExit=true\n", "Type=simple\n")
+    source = replace_once(
+        source,
+        "After=docker.service dstack-prepare.service dstack-guest-agent.service\n",
+        "BindsTo=zrpc-quote-proxy.service\n"
+        "After=docker.service dstack-prepare.service dstack-guest-agent.service "
+        "zrpc-quote-proxy.service\n",
+    )
     return candidate_private_unit(source)
 
 
@@ -652,11 +659,13 @@ def quote_proxy_unit() -> str:
 Description=Quote-only dstack bridge for the Zcash RPC wrapper
 Requires=dstack-prepare.service
 BindsTo=app-compose.service docker.service containerd.service sysbox.service sysbox-mgr.service sysbox-fs.service dstack-guest-agent.service
-After=dstack-prepare.service app-compose.service docker.service containerd.service sysbox.service sysbox-mgr.service sysbox-fs.service dstack-guest-agent.service
+After=dstack-prepare.service docker.service containerd.service sysbox.service sysbox-mgr.service sysbox-fs.service dstack-guest-agent.service
+Before=app-compose.service
 FailureAction=poweroff-force
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStartPre=/usr/bin/phala-runtime-guard --mark-start quote-proxy
 ExecStart=/usr/bin/zrpc-quote-proxy
 User=root
