@@ -22,6 +22,15 @@ import sys
 
 META_COMMIT = "e3655d1390feee3736476f4bda35c4354b4a12fc"
 DSTACK_COMMIT = "282eeb27d22d8f091ad0fa5a90e638f85cf68751"
+META_GITLINKS = {
+    "dstack": DSTACK_COMMIT,
+    "meta-confidential-compute": "6d1355e0c684f7fdfb688ecfef0ed63feb2aac4c",
+    "meta-openembedded": "72018ca1b1a471226917e8246e8bbf9a374ccf97",
+    "meta-rust-bin": "79c077fac9694eb5fbcee7b15e800c21e887bb5d",
+    "meta-security": "bc63d95746ef4f0ac6820165e5041d83647e8c9c",
+    "meta-virtualization": "52cd8a290cf3989bc99bd9eb475b5db88000245a",
+    "poky": "cd44e6bd40b0c1f498b3feaeb5e9b72f8bf32d41",
+}
 GUEST_RECIPE = Path("meta-dstack/recipes-core/dstack-guest/dstack-guest.bb")
 SYSBOX_RECIPE = Path("meta-dstack/recipes-core/dstack-sysbox/dstack-sysbox_0.6.7.bb")
 BASE_RECIPE = Path("meta-dstack/recipes-core/images/dstack-rootfs-base.inc")
@@ -379,6 +388,24 @@ def stage_git_tree(repo: Path, commit: str, target: Path) -> tuple[str, dict[Pat
     return tree_oid, entries
 
 
+def stage_direct_gitlinks(staged_root: Path, observed: dict[str, str],
+                          source_repos: dict[str, Path],
+                          expected: dict[str, str] = META_GITLINKS) -> dict[str, dict[str, object]]:
+    if observed != expected or source_repos.keys() != expected.keys():
+        raise Refusal("pinned meta-dstack gitlink set changed or source checkout missing")
+    identities = {}
+    for name, commit in expected.items():
+        tree_oid, entries = stage_git_tree(source_repos[name], commit, staged_root / name)
+        if any(mode == "160000" for mode, _ in entries.values()):
+            raise Refusal(f"pinned {name} source has unresolved nested gitlinks")
+        identities[name] = {
+            "commit_oid": commit,
+            "tree_oid": tree_oid,
+            "tracked_entry_count": len(entries),
+        }
+    return identities
+
+
 def apply_overlay(overlay: Path, target: Path, paths: set[Path]) -> None:
     for path in sorted(paths):
         safe_source_path(str(path).encode("utf-8"))
@@ -443,6 +470,10 @@ def main() -> None:
     parser.add_argument("--runtime-guard-sha256", required=True)
     parser.add_argument("--quote-proxy", type=Path, required=True)
     parser.add_argument("--quote-proxy-sha256", required=True)
+    for name in META_GITLINKS:
+        if name != "dstack":
+            parser.add_argument(f"--{name}-source", type=Path, required=True,
+                                help=f"checkout at the pinned {name} meta-dstack gitlink")
     parser.add_argument("--launch-config", type=Path)
     parser.add_argument("--sys-config", type=Path)
     args = parser.parse_args()
@@ -477,12 +508,12 @@ def main() -> None:
             args.meta_source_git_dir, META_COMMIT, staged_root)
         gitlinks = {str(path): oid for path, (mode, oid) in meta_entries.items()
                     if mode == "160000"}
-        if gitlinks.get("dstack") != DSTACK_COMMIT:
-            raise Refusal("staged meta-dstack gitlink is not the pinned dstack commit")
-        dstack_tree_oid, dstack_entries = stage_git_tree(
-            args.dstack_source_git_dir, DSTACK_COMMIT, staged_root / "dstack")
-        if any(mode == "160000" for mode, _ in dstack_entries.values()):
-            raise Refusal("pinned dstack source has unresolved gitlinks")
+        source_repos = {"dstack": args.dstack_source_git_dir}
+        source_repos.update({
+            name: getattr(args, name.replace("-", "_") + "_source")
+            for name in META_GITLINKS if name != "dstack"
+        })
+        gitlink_identities = stage_direct_gitlinks(staged_root, gitlinks, source_repos)
         apply_overlay(dstack_overlay, staged_root / "dstack", guest_paths)
         apply_overlay(meta_overlay, staged_root, {PROD_RECIPE})
         for name, payload in ((GUARD_NAME, guard), (BRIDGE_NAME, bridge)):
@@ -514,12 +545,12 @@ def main() -> None:
             "meta_source_commit": META_COMMIT,
             "dstack_source_commit": DSTACK_COMMIT,
             "meta_source_tree_oid": meta_tree_oid,
-            "dstack_source_tree_oid": dstack_tree_oid,
+            "dstack_source_tree_oid": gitlink_identities["dstack"]["tree_oid"],
             "meta_gitlinks": gitlinks,
-            "materialized_meta_gitlinks": {"dstack": DSTACK_COMMIT},
-            "unresolved_meta_gitlinks": {name: oid for name, oid in gitlinks.items()
-                                         if name != "dstack"},
-            "source_identity_scope": "pinned_meta_tracked_blobs_and_gitlinks_pinned_dstack_blobs_checked_overlays",
+            "materialized_meta_gitlinks": gitlinks,
+            "unresolved_meta_gitlinks": {},
+            "gitlink_source_identities": gitlink_identities,
+            "source_identity_scope": "pinned_meta_and_all_direct_gitlink_tracked_blobs_checked_overlays",
             "staged_source": STAGED_ROOT,
             "staged_tracked_blob_tree_verified": True,
             "bitbake_dependency_closure_verified": False,

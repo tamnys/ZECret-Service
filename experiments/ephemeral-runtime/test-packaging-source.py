@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -46,7 +47,33 @@ def synthetic_elf(machine=62):
     return bytes(data)
 
 
+def committed_source(root: Path, name: str, payload: str) -> tuple[Path, str]:
+    repo = root / name
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "tracked.txt").write_text(payload)
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.invalid", "commit", "-qm", "pinned"],
+                   check=True)
+    commit = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    return repo, commit
+
+
 class PackagingSourceTests(unittest.TestCase):
+    def test_cli_requires_exact_direct_gitlink_sources(self):
+        result = subprocess.run(
+            [sys.executable, str(HERE / "prepare-packaging-source.py"), "--help"],
+            capture_output=True, text=True, check=True)
+        self.assertEqual(set(packaging.META_GITLINKS), {
+            "dstack", "poky", "meta-confidential-compute", "meta-openembedded",
+            "meta-rust-bin", "meta-security", "meta-virtualization",
+        })
+        for name in packaging.META_GITLINKS:
+            if name != "dstack":
+                self.assertIn(f"--{name}-source", result.stdout)
+
     def test_recipe_accounts_for_each_generated_dropin_and_binary(self):
         candidate = packaging.candidate_guest_recipe(
             RECIPE, runtime, "a" * 64, "b" * 64, "c" * 64)
@@ -193,6 +220,69 @@ class PackagingSourceTests(unittest.TestCase):
             self.assertTrue((staged / "basefiles" / "guest.sh").stat().st_mode & 0o100)
             self.assertFalse((staged / "basefiles" / "untracked.sh").exists())
             self.assertEqual((staged / "guest-link").readlink(), Path("basefiles/guest.sh"))
+
+    def test_direct_gitlinks_stage_every_exact_pinned_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first_repo, first_commit = committed_source(root, "first-repo", "first pinned\n")
+            second_repo, second_commit = committed_source(root, "second-repo", "second pinned\n")
+            expected = {"first": first_commit, "second": second_commit}
+            sources = {"first": first_repo, "second": second_repo}
+            (first_repo / "tracked.txt").write_text("dirty checkout\n")
+            (first_repo / "untracked.txt").write_text("untracked\n")
+            staged = root / "staged"
+            staged.mkdir()
+            for observed, supplied in (
+                ({"first": first_commit}, sources),
+                ({**expected, "unexpected": first_commit}, sources),
+                ({**expected, "second": first_commit}, sources),
+                (expected, {"first": first_repo}),
+            ):
+                with self.assertRaisesRegex(packaging.Refusal, "gitlink set changed"):
+                    packaging.stage_direct_gitlinks(staged, observed, supplied, expected)
+            self.assertEqual(list(staged.iterdir()), [])
+            identities = packaging.stage_direct_gitlinks(staged, expected, sources, expected)
+            self.assertEqual(set(identities), set(expected))
+            for name, commit in expected.items():
+                self.assertEqual(identities[name]["commit_oid"], commit)
+                self.assertEqual(identities[name]["tree_oid"], subprocess.check_output(
+                    ["git", "--no-replace-objects", "-C", str(sources[name]),
+                     "rev-parse", f"{commit}^{{tree}}"], text=True).strip())
+                self.assertEqual(identities[name]["tracked_entry_count"], 1)
+            self.assertEqual((staged / "first" / "tracked.txt").read_text(), "first pinned\n")
+            self.assertEqual((staged / "second" / "tracked.txt").read_text(), "second pinned\n")
+            self.assertFalse((staged / "first" / "untracked.txt").exists())
+            staged_files, staged_links = packaging.staged_file_inventory(staged)
+            self.assertEqual(set(staged_files), {"first/tracked.txt", "second/tracked.txt"})
+            self.assertEqual(staged_links, {})
+
+    def test_direct_gitlinks_refuse_wrong_head_and_nested_gitlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, pinned = committed_source(root, "source", "original\n")
+            (repo / "tracked.txt").write_text("later commit\n")
+            subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit", "-qm", "later"],
+                           check=True)
+            wrong_head_stage = root / "wrong-head-stage"
+            wrong_head_stage.mkdir()
+            with self.assertRaisesRegex(packaging.Refusal, "not at the pinned commit"):
+                packaging.stage_direct_gitlinks(
+                    wrong_head_stage, {"source": pinned}, {"source": repo}, {"source": pinned})
+
+            subprocess.run(["git", "-C", str(repo), "update-index", "--add", "--cacheinfo",
+                            "160000", pinned, "nested"], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit", "-qm", "gitlink"],
+                           check=True)
+            with_nested = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+            nested_stage = root / "nested-stage"
+            nested_stage.mkdir()
+            with self.assertRaisesRegex(packaging.Refusal, "unresolved nested gitlinks"):
+                packaging.stage_direct_gitlinks(nested_stage, {"source": with_nested},
+                                                {"source": repo}, {"source": with_nested})
 
     def test_replace_refs_cannot_substitute_pinned_tree_or_blob(self):
         with tempfile.TemporaryDirectory() as temporary:
