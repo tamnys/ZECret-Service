@@ -145,6 +145,10 @@ class LaunchProfileInputTests(unittest.TestCase):
         work = Path(self.scratch.name)
         (work / "app-compose.json").write_bytes(payload)
         (work / "docker-compose.yaml").write_text(self.profile["docker_compose_file"] + "\n")
+        for name in ("compose.yaml", "compose.override.yaml", "docker-compose.override.yaml"):
+            (work / name).write_text(
+                "services:\n  unreviewed:\n    image: example.invalid/poison\n"
+            )
         launcher = work / "app-compose.sh"
         launcher.write_text(
             guest_source.candidate_app_launch(
@@ -178,7 +182,7 @@ class LaunchProfileInputTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(
                     log.read_text().splitlines(),
-                    ["compose up --remove-orphans --abort-on-container-exit "
+                    ["compose -f docker-compose.yaml up --remove-orphans --abort-on-container-exit "
                      "--no-build --pull never"],
                 )
 

@@ -486,7 +486,9 @@ fi
     fi
     # Keep Compose attached: a stopped container ends this process and fails
     # app-compose.service. Never treat a zero Compose exit as healthy recovery.
-    docker compose up --remove-orphans --abort-on-container-exit --no-build --pull never >/dev/null 2>&1
+    # Select the checked base file explicitly. Compose otherwise discovers
+    # neighboring files without changing this file's hash.
+    docker compose -f docker-compose.yaml up --remove-orphans --abort-on-container-exit --no-build --pull never >/dev/null 2>&1
     dstack-util notify-host -e "boot.error" -d "container supervision ended" || true
     exit 1
 """,

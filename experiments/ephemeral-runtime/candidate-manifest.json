@@ -3,7 +3,7 @@
   "candidate_sha256": {
     "basefiles/app-compose.service": "6abf6e60346c0c802fdd89438d313e43f1d030afaf5aa81a97aa82fee5181d94",
     "basefiles/app-compose.service.d/zrpc-private-profile.conf": "0732c91e3531b58c7348f1efc291cc0adcc5f80ca97d826ce0659e4bffeb1258",
-    "basefiles/app-compose.sh": "b89fada5573e820ca7f1414c96973af7185ba911ce8685d0b8083807c63360ad",
+    "basefiles/app-compose.sh": "743ea4d9cc91129513881a50cff1fe46eb61fb082fb7c917c21985acedcc279c",
     "basefiles/containerd.service.d/zrpc-private-profile.conf": "6fc0d1b16786fe3fdd735da9d05f418ae8aeabbee93f1a0e0e813b1df3346ba6",
     "basefiles/docker.service.d/zrpc-private-profile.conf": "404f414fd29b9efafea3a16c59bd6bf55bb37ba8b5d5b510ae45b85eabb5dd77",
     "basefiles/docker.socket.d/zrpc-private-profile.conf": "bb6c7e32fc7ce3e7af19de8c46e54514d77c7237bc7aeb9261f3d7c63551b643",

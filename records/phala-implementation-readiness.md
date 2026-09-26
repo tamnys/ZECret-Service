@@ -54,13 +54,19 @@ sent, and no account credits were spent. Private mode remains blocked.
   deactivation of one of those effective units would stop the bridge and close
   the wrapper's liveness connection under [systemd's documented dependency
   semantics](https://github.com/systemd/systemd/blob/main/man/systemd.unit.xml).
-  The candidate app launcher now stays attached to `docker compose up
-  --abort-on-container-exit`, and its unit is `Type=simple` rather than a
-  detached oneshot. Any Compose return, including a successful return after a
-  container stops, makes the launcher fail, which should deactivate the bound
-  quote bridge. [Docker documents](https://docs.docker.com/reference/cli/docker/compose/up/)
-  that this attached option stops all containers when one stops. This is not
-  an effective failure test of the exact guest's Compose version or unit graph;
+  The candidate app launcher now stays attached to `docker compose -f
+  docker-compose.yaml up --abort-on-container-exit`, and its unit is
+  `Type=simple` rather than a detached oneshot. Any Compose return, including a
+  successful return after a container stops, makes the launcher fail, which
+  should deactivate the bound quote bridge.
+  [Docker documents](https://docs.docker.com/reference/cli/docker/compose/up/)
+  that this attached option stops all containers when one stops. The explicit
+  file selection excludes Compose's automatic override-file discovery;
+  [Docker's file-selection rules](https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/)
+  explain the default merge. This still does not reject `include`, `extends`,
+  environment interpolation or other external Compose inputs in a future
+  bound profile. It is not an effective failure test of the exact guest's
+  Compose version or unit graph;
   the final Compose profile must prohibit automatic container restart, and
   an unhealthy but still running container needs separate liveness handling.
   A read-only extraction from the previously verity-verified stock rootfs found
@@ -220,6 +226,11 @@ sent, and no account credits were spent. Private mode remains blocked.
   updated guard and attached launcher, were recomputed. The full check after
   the attached-Compose change also passed `bash scripts/check.sh` in the
   managed container.
+  After pinning Compose to the checked file with `-f`, the six synthetic
+  launch-profile tests, generated Bash syntax check and full
+  `bash scripts/check.sh --browser` passed in the managed container. All
+  generated candidate-file hashes matched the regenerated unbound manifest;
+  only the app launcher hash changed. No exact-guest Compose execution ran.
   One intermediate build attempt
   reported a temporary-file permission error under generated `target/debug/deps`;
   the workspace directory was owner-writable, and the unmodified full check
