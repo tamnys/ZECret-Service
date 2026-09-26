@@ -8,9 +8,11 @@ use std::{
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
 
+mod provider_deletion;
 mod provider_observation;
+mod provider_settings;
 
-const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc inspect-endpoint --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --policy FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nzrpc lifecycle --help\nM0 plus public endpoint diagnostics and read-only lifecycle observations; private mode and deployment are unavailable.";
+const USAGE: &str = "zrpc doctor\nzrpc inspect-quote --quote FILE --collateral FILE\nzrpc inspect-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE\nzrpc inspect-endpoint --endpoint-host HOST --endpoint-port PORT --socks IPV4:PORT --collateral FILE --app-compose FILE --policy FILE\nzrpc verify [--endpoint HOST] [--policy FILE]\nzrpc query [--stdin | --method METHOD] [--simulate] [--scenario SCENARIO]\nzrpc demo [--no-open]\nzrpc plan --input FILE\nzrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER\nzrpc teardown --simulate --manifest FILE\nzrpc lifecycle --help\nM0 plus public endpoint diagnostics, lifecycle observations and explicit tracked deletion; private mode and deployment are unavailable.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
@@ -170,7 +172,7 @@ async fn run() -> Result<(), String> {
             print_json(zrpc_lifecycle::watchdog(&manifest,now,accrued).map_err(|e|e.to_string())?)
         },
         "teardown"=>{
-            if !take_flag(&mut args,"--simulate"){return Err("M0 teardown requires --simulate; provider deletion is unavailable".into())}
+            if !take_flag(&mut args,"--simulate"){return Err("teardown requires --simulate; explicit tracked deletion uses lifecycle delete-tracked".into())}
             let path=required(&mut args,"--manifest")?;exhausted(&args)?;
             let mut manifest:DeploymentManifest=read_json(&path)?;
             print_json(zrpc_lifecycle::simulated_teardown(&mut manifest).map_err(|e|e.to_string())?)

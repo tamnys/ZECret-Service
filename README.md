@@ -84,6 +84,10 @@ The original ledger determines the workspace, tracked resources and usage start 
 
 Use `zrpc lifecycle reconcile` with the same required options to save a completed observation against its exact source ledger snapshot. It retains earlier observations and advances the conservative modeled cost through the local commit time. Conflicting reappearances of a billing row are rejected; omitted rows do not erase earlier evidence. The report distinguishes the scan's cost floor from the committed cost floor. Reconciliation does not modify deletion outcomes or authorize retries. A CVM 404 does not prove storage deletion or billing finality. Neither command can create or delete resources, install jobs, initialize/reset a ledger, or approve deployment.
 
+For an explicit **real deletion request**, `zrpc lifecycle delete-tracked` selects one CVM already in the original ledger. Run `zrpc lifecycle delete-tracked --help` for the required exact CVM ID, expected ledger generation, credential/trust files and network bounds. It checks local history and target selection before authentication, records durable intent before DELETE, and records the observed outcome afterward. Cleanup remains available after the original deadline or cost ceiling. It cannot create resources, initialize/reset a ledger, install jobs or enable deployment.
+
+Exit 0 means a DELETE 204 or 404 response was durably recorded; **it does not prove disk deletion or billing finality**. Rejections, transport uncertainty and uncertain outcome writes exit unsuccessfully. A failed command can leave a committed intent or outcome. Inspect the retained ledger and use `reconcile` for fresh observations; do not reset history. Any prior intent blocks another DELETE for that CVM, including after reconciliation. Retries and automatic external teardown are unavailable.
+
 ## Project map
 
 - `crates/{protocol,verifier,transport,client,server}`: typed boundaries and in-process fixtures.

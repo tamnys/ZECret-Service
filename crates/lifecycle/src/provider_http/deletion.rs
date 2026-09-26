@@ -1,5 +1,6 @@
-//! Explicit, single-target deletion preparation and dispatch. No CLI, scheduler,
-//! creation, retry, or automatic activation uses this library capability.
+//! Explicit, single-target deletion preparation and dispatch. The operator CLI
+//! can select an existing target; no scheduler, creation, retry or automatic
+//! activation uses this library capability.
 //! A provider status never establishes CVM/disk absence or billing finality.
 
 use super::{CvmDetail, ProviderClient, ProviderHttpError, ScopedReads};
@@ -66,6 +67,37 @@ pub enum PreparationReadback {
 pub struct ScopedDeletion(ScopedReads);
 
 impl ProviderClient {
+    /// Delete one explicitly selected, already committed CVM. Local generation,
+    /// workspace, target, intent history and clock checks precede authentication
+    /// traffic and run again before the target detail read. This retains the
+    /// client's original invocation deadline and never scans or retries.
+    pub async fn delete_tracked(
+        self,
+        store: &mut LedgerStore,
+        expected_generation: u64,
+        cvm_id: &str,
+    ) -> Result<DeletionReport, DeletionError> {
+        let (_, began_at) = local_target(
+            store,
+            expected_generation,
+            self.workspace_id(),
+            cvm_id,
+            wall_time,
+        )?;
+        self.authenticate_deletion()
+            .await?
+            .prepare_with_clock(store, expected_generation, cvm_id, || {
+                let now = wall_time()?;
+                if now < began_at {
+                    return Err(DeletionError::ClockOrLedgerRejected);
+                }
+                Ok(now)
+            })
+            .await?
+            .dispatch()
+            .await
+    }
+
     /// Explicitly select the deletion path. Ordinary `authenticate` still
     /// produces only `ScopedReads`, with no conversion into this capability.
     pub async fn authenticate_deletion(self) -> Result<ScopedDeletion, ProviderHttpError> {
@@ -159,34 +191,13 @@ impl ScopedDeletion {
         cvm_id: &str,
         mut clock: impl FnMut() -> Result<u64, DeletionError>,
     ) -> Result<PreparedDeletion<'a>, DeletionError> {
-        if store.planning_reference()?.generation() != expected_generation {
-            return Err(StoreError::InvalidState.into());
-        }
-        let ledger = store.ledger()?;
-        if self.0.workspace_id() != ledger.workspace_id() {
-            return Err(ProviderHttpError::WorkspaceMismatch.into());
-        }
-        let target = ledger
-            .tracked_cvms()
-            .find(|cvm| cvm.cvm_id == cvm_id)
-            .cloned()
-            .ok_or(DeletionError::TargetRejected)?;
-        if ledger
-            .deletion_intents()
-            .iter()
-            .any(|intent| intent.target.cvm_id == target.cvm_id)
-        {
-            return Err(DeletionError::PriorIntentNeedsReconciliation);
-        }
-        ReadRequest::Detail {
-            cvm_id: &target.cvm_id,
-        }
-        .path_and_query()
-        .map_err(|_| DeletionError::TargetRejected)?;
-        let began_at = clock()?;
-        ledger
-            .planning_cost_at(began_at)
-            .map_err(|_| DeletionError::ClockOrLedgerRejected)?;
+        let (target, began_at) = local_target(
+            store,
+            expected_generation,
+            self.0.workspace_id(),
+            cvm_id,
+            &mut clock,
+        )?;
         let readback = match self.0.cvm_detail(&target.cvm_id).await? {
             CvmDetail::NotFound => PreparationReadback::DetailNotFound,
             CvmDetail::Present(item) => {
@@ -225,6 +236,44 @@ impl ScopedDeletion {
             readback,
         })
     }
+}
+
+fn local_target(
+    store: &LedgerStore,
+    expected_generation: u64,
+    workspace_id: &str,
+    cvm_id: &str,
+    clock: impl FnOnce() -> Result<u64, DeletionError>,
+) -> Result<(TrackedCvm, u64), DeletionError> {
+    if store.planning_reference()?.generation() != expected_generation {
+        return Err(StoreError::InvalidState.into());
+    }
+    let ledger = store.ledger()?;
+    if workspace_id != ledger.workspace_id() {
+        return Err(ProviderHttpError::WorkspaceMismatch.into());
+    }
+    let target = ledger
+        .tracked_cvms()
+        .find(|cvm| cvm.cvm_id == cvm_id)
+        .cloned()
+        .ok_or(DeletionError::TargetRejected)?;
+    if ledger
+        .deletion_intents()
+        .iter()
+        .any(|intent| intent.target.cvm_id == target.cvm_id)
+    {
+        return Err(DeletionError::PriorIntentNeedsReconciliation);
+    }
+    ReadRequest::Detail {
+        cvm_id: &target.cvm_id,
+    }
+    .path_and_query()
+    .map_err(|_| DeletionError::TargetRejected)?;
+    let began_at = clock()?;
+    ledger
+        .planning_cost_at(began_at)
+        .map_err(|_| DeletionError::ClockOrLedgerRejected)?;
+    Ok((target, began_at))
 }
 
 impl PreparedDeletion<'_> {

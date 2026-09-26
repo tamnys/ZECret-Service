@@ -56,6 +56,25 @@ for args in [("lifecycle",), ("lifecycle", "delete-tracked"), ("lifecycle", "ini
     assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(report)
 print("Provider observation CLI checks passed: explicit help, incomplete input and unsupported mutations rejected.")
 
+# The real deletion entrypoint must be selected explicitly with an exact target
+# and generation. These parser and unavailable-file paths perform no HTTP I/O.
+help_result = subprocess.run([str(BIN), "lifecycle", "delete-tracked", "--help"], capture_output=True, cwd=ROOT)
+assert help_result.returncode == 0 and not help_result.stderr
+assert b"REAL provider deletion" in help_result.stdout and b"--expected-generation" in help_result.stdout
+with tempfile.TemporaryDirectory(dir=ROOT / ".codex-tmp") as temporary:
+    directory = Path(temporary)
+    delete_args = ["lifecycle", "delete-tracked", "--original-binding", str(directory / "absent-original.json"),
+                   "--expected-generation", "0", "--cvm-id", "SYNTHETIC_CVM",
+                   "--api-key-file", str(directory / "absent-key"), "--trust-root", str(directory / "absent-root.der"),
+                   "--invocation-budget-ms", "1", "--max-response-bytes", "1", "--max-input-file-bytes", "1"]
+    for args in [delete_args, *[delete_args + [flag, "SYNTHETIC_CREDENTIAL_MARKER"] for flag in
+                               ("--api-key", "--endpoint", "--now", "--retry", "--initialize", "--simulate")]]:
+        report = run(*args, success=False)
+        assert not report["private_accepted"] and not report["query_sent"] and not report["deployment_enabled"]
+        assert "SYNTHETIC_CREDENTIAL_MARKER" not in json.dumps(report)
+    assert not list(directory.iterdir())
+print("Tracked deletion CLI checks passed: explicit help, no implicit initialization, sanitized refusal, no live provider calls.")
+
 # The authentic upstream fixture has expired collateral at today's clock. A
 # historical-time override is intentionally absent from the production CLI.
 report = run("inspect-quote", "--quote", "tests/fixtures/dcap/tdx_quote.exact.bin", "--collateral", "tests/fixtures/dcap/tdx_quote_collateral.json", success=False)

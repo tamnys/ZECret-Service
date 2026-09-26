@@ -3,8 +3,12 @@
 //! Neither command initializes or recovers a ledger, modifies provider state,
 //! attributes charges, or accepts a caller-selected clock.
 
-use super::{exhausted, print_json, required, take_value};
-use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
+use super::{
+    exhausted, print_json,
+    provider_settings::{ProviderSettings, positive_usize},
+    required,
+};
+use std::num::NonZeroUsize;
 
 const USAGE: &str = r"zrpc lifecycle (observe|reconcile) \
   --original-binding FILE \
@@ -25,42 +29,15 @@ Usage remains unjoined; billing, disk deletion, and cleanup remain unverified. R
 Both commands perform provider reads only and never deploy, delete, or install jobs.";
 
 struct Settings {
-    original_binding: PathBuf,
-    api_key_file: PathBuf,
-    trust_root_der_files: Vec<PathBuf>,
-    invocation_budget: Duration,
-    max_response_bytes: NonZeroUsize,
-    max_input_file_bytes: NonZeroUsize,
+    provider: ProviderSettings,
     inventory_page_size: u64,
     usage_page_size: u64,
     max_inventory_records: NonZeroUsize,
     max_usage_records_per_app: NonZeroUsize,
 }
 
-fn positive_usize(args: &mut Vec<String>, flag: &str) -> Result<NonZeroUsize, String> {
-    required(args, flag)?
-        .parse::<NonZeroUsize>()
-        .map_err(|_| "option requires a positive representable integer".to_owned())
-}
-
 fn parse_settings(mut args: Vec<String>) -> Result<Settings, String> {
-    let original_binding = PathBuf::from(required(&mut args, "--original-binding")?);
-    let api_key_file = PathBuf::from(required(&mut args, "--api-key-file")?);
-    let mut trust_root_der_files = Vec::new();
-    while let Some(path) = take_value(&mut args, "--trust-root")? {
-        trust_root_der_files.push(PathBuf::from(path));
-    }
-    if trust_root_der_files.is_empty() {
-        return Err("required option: --trust-root".to_owned());
-    }
-    let invocation_budget_ms = required(&mut args, "--invocation-budget-ms")?
-        .parse::<u64>()
-        .map_err(|_| "option requires a positive representable integer".to_owned())?;
-    if invocation_budget_ms == 0 {
-        return Err("option requires a positive representable integer".to_owned());
-    }
-    let max_response_bytes = positive_usize(&mut args, "--max-response-bytes")?;
-    let max_input_file_bytes = positive_usize(&mut args, "--max-input-file-bytes")?;
+    let provider = ProviderSettings::parse(&mut args)?;
     let inventory_page_size = required(&mut args, "--inventory-page-size")?
         .parse::<u64>()
         .map_err(|_| "invalid inventory page size".to_owned())?;
@@ -78,19 +55,8 @@ fn parse_settings(mut args: Vec<String>) -> Result<Settings, String> {
     let max_inventory_records = positive_usize(&mut args, "--max-inventory-records")?;
     let max_usage_records_per_app = positive_usize(&mut args, "--max-usage-records-per-app")?;
     exhausted(&args)?;
-    if !original_binding.is_absolute()
-        || !api_key_file.is_absolute()
-        || trust_root_der_files.iter().any(|path| !path.is_absolute())
-    {
-        return Err("provider observation requires absolute input file paths".to_owned());
-    }
     Ok(Settings {
-        original_binding,
-        api_key_file,
-        trust_root_der_files,
-        invocation_budget: Duration::from_millis(invocation_budget_ms),
-        max_response_bytes,
-        max_input_file_bytes,
+        provider,
         inventory_page_size,
         usage_page_size,
         max_inventory_records,
@@ -101,14 +67,18 @@ fn parse_settings(mut args: Vec<String>) -> Result<Settings, String> {
 pub async fn run(mut args: Vec<String>) -> Result<(), String> {
     if args.as_slice() == ["--help"] {
         println!("{USAGE}");
+        println!("{}", super::provider_deletion::USAGE);
         return Ok(());
+    }
+    if args.first().map(String::as_str) == Some("delete-tracked") {
+        return super::provider_deletion::run(args[1..].to_vec()).await;
     }
     let persist = match args.first().map(String::as_str) {
         Some("observe") => false,
         Some("reconcile") => true,
         _ => {
             return Err(
-                "supported lifecycle commands: observe, reconcile; use lifecycle --help".to_owned(),
+                "supported lifecycle commands: observe, reconcile, delete-tracked; use lifecycle --help".to_owned(),
             );
         }
     };
@@ -121,25 +91,14 @@ async fn observe(settings: Settings, persist: bool) -> Result<(), String> {
     use zrpc_lifecycle::{
         observation::{ObservationLimits, ObservationSession},
         persistence::LedgerStore,
-        provider_inputs::ProviderFiles,
     };
 
-    let mut store =
-        LedgerStore::open(&settings.original_binding).map_err(|error| error.to_string())?;
+    let mut store = LedgerStore::open(&settings.provider.original_binding)
+        .map_err(|error| error.to_string())?;
     let session = ObservationSession::new(&store).map_err(|error| error.to_string())?;
-    let client = ProviderFiles {
-        workspace_id: session
-            .workspace_id()
-            .map_err(|error| error.to_string())?
-            .to_owned(),
-        api_key_file: settings.api_key_file,
-        trust_root_der_files: settings.trust_root_der_files,
-        max_input_file_bytes: settings.max_input_file_bytes,
-        invocation_budget: settings.invocation_budget,
-        max_response_bytes: settings.max_response_bytes,
-    }
-    .load()
-    .map_err(|error| error.to_string())?;
+    let client = settings
+        .provider
+        .load(session.workspace_id().map_err(|error| error.to_string())?)?;
     let observation = session
         .observe(
             client,
@@ -299,6 +258,7 @@ fn report(observation: &zrpc_lifecycle::observation::ReadObservation) -> serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn arguments() -> Vec<String> {
         // Values exercise parsing only; they are not deployment defaults.
@@ -352,8 +312,11 @@ mod tests {
         let mut args = base;
         args.extend(["--trust-root".to_owned(), "/operator/second.der".to_owned()]);
         let settings = parse_settings(args).unwrap();
-        assert_eq!(settings.trust_root_der_files.len(), 2);
-        assert_eq!(settings.invocation_budget, Duration::from_millis(1));
+        assert_eq!(settings.provider.trust_root_der_files.len(), 2);
+        assert_eq!(
+            settings.provider.invocation_budget,
+            Duration::from_millis(1)
+        );
         assert_eq!(settings.max_inventory_records.get(), 4);
         assert_eq!(settings.max_usage_records_per_app.get(), 5);
     }

@@ -136,7 +136,7 @@ fn request_methods(server: &Server) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn intent_and_writer_lock_precede_one_exact_delete_with_classified_durable_outcomes() {
+async fn explicit_entrypoint_persists_before_one_exact_delete_and_blocks_another_invocation() {
     for status in [204, 404, 403, 302, 429, 503] {
         let fixture = Fixture::standard();
         let mut store = fixture.open();
@@ -183,17 +183,15 @@ async fn intent_and_writer_lock_precede_one_exact_delete_with_classified_durable
             },
         )
         .await;
-        let prepared = authenticate(&server)
+        let report = server
+            .client(AUTH.len().max(DETAIL.len()))
+            .delete_tracked(&mut store, 0, CVM)
             .await
-            .prepare(&mut store, 0, CVM)
-            .await
-            .ok()
             .unwrap();
         assert_eq!(
-            prepared.preparation_readback(),
+            report.preparation_readback(),
             PreparationReadback::CvmFieldsMatch
         );
-        let report = prepared.dispatch().await.unwrap();
         let expected = match status {
             204 => DeletionOutcome::Initiated204,
             404 => DeletionOutcome::NotFound404,
@@ -219,6 +217,22 @@ async fn intent_and_writer_lock_precede_one_exact_delete_with_classified_durable
         drop(requests);
         assert_eq!(fs::read(fixture.original()).unwrap(), original_bytes);
         assert_eq!(store.planning_reference().unwrap().generation(), 2);
+        assert_eq!(
+            server
+                .client(AUTH.len().max(DETAIL.len()))
+                .delete_tracked(&mut store, 2, CVM)
+                .await
+                .err(),
+            Some(DeletionError::PriorIntentNeedsReconciliation)
+        );
+        assert_eq!(
+            request_methods(&server),
+            [
+                "GET /api/v1/auth/me HTTP/1.1",
+                "GET /api/v1/cvms/synthetic%2Dcvm%2D1 HTTP/1.1",
+                "DELETE /api/v1/cvms/synthetic%2Dcvm%2D1 HTTP/1.1",
+            ]
+        );
         assert!(
             store
                 .ledger()
@@ -241,71 +255,92 @@ async fn intent_and_writer_lock_precede_one_exact_delete_with_classified_durable
 }
 
 #[tokio::test]
-async fn generation_scope_target_path_clock_and_prior_intent_fail_before_detail_or_delete() {
-    for case in [
-        "generation",
-        "workspace",
-        "untracked",
-        "path",
-        "future",
-        "prior_intent",
-        "draft",
-    ] {
-        let fixture = Fixture::new(
-            if case == "workspace" {
-                "different_workspace"
-            } else {
-                WORKSPACE
-            },
-            if case == "path" { "../auth/me" } else { CVM },
-            if case == "future" {
-                wall_time().unwrap() + MAX_LIFETIME_SECONDS
-            } else {
-                START
-            },
-        );
-        let mut store = fixture.open();
-        let mut generation = 0;
-        if case == "prior_intent" {
-            drop(store.prepare_deletion(0, WORKSPACE, CVM, START).unwrap());
-            generation = 1;
-        }
-        if case == "draft" {
-            fs::write(
-                fixture.store().join("pending.json"),
-                b"synthetic interrupted write",
-            )
-            .unwrap();
-        }
-        let server = Server::start(vec![response("200 OK", AUTH)], HOST).await;
-        let result = authenticate(&server)
-            .await
-            .prepare(
-                &mut store,
-                if case == "generation" { 1 } else { generation },
-                match case {
-                    "path" => "../auth/me",
-                    "untracked" => "not_tracked",
-                    _ => CVM,
+async fn local_rejections_precede_authentication_or_detail_at_each_entrypoint() {
+    for before_auth in [true, false] {
+        for case in [
+            "generation",
+            "workspace",
+            "untracked",
+            "path",
+            "future",
+            "prior_intent",
+            "draft",
+            "history",
+        ] {
+            let fixture = Fixture::new(
+                if case == "workspace" {
+                    "different_workspace"
+                } else {
+                    WORKSPACE
                 },
-            )
-            .await;
-        let expected = match case {
-            "generation" => DeletionError::Store(StoreError::InvalidState),
-            "workspace" => DeletionError::Provider(ProviderHttpError::WorkspaceMismatch),
-            "untracked" | "path" => DeletionError::TargetRejected,
-            "future" => DeletionError::ClockOrLedgerRejected,
-            "prior_intent" => DeletionError::PriorIntentNeedsReconciliation,
-            "draft" => DeletionError::Store(StoreError::PendingRecovery),
-            _ => unreachable!(),
-        };
-        assert_eq!(result.err(), Some(expected));
-        server.wait_closed(1).await;
-        assert_eq!(request_methods(&server), ["GET /api/v1/auth/me HTTP/1.1"]);
-        assert_eq!(
-            store.ledger().unwrap().deletion_intents().len(),
-            usize::from(case == "prior_intent")
-        );
+                if case == "path" { "../auth/me" } else { CVM },
+                if case == "future" {
+                    wall_time().unwrap() + MAX_LIFETIME_SECONDS
+                } else {
+                    START
+                },
+            );
+            let mut store = fixture.open();
+            let mut generation = 0;
+            if case == "prior_intent" {
+                drop(store.prepare_deletion(0, WORKSPACE, CVM, START).unwrap());
+                generation = 1;
+            }
+            if case == "draft" {
+                fs::write(
+                    fixture.store().join("pending.json"),
+                    b"synthetic interrupted write",
+                )
+                .unwrap();
+            }
+            if case == "history" {
+                fs::write(
+                    fixture.store().join("ledger-00000000000000000000.json"),
+                    b"synthetic corrupted history",
+                )
+                .unwrap();
+            }
+            let server = Server::start(vec![response("200 OK", AUTH)], HOST).await;
+            let selected_generation = if case == "generation" { 1 } else { generation };
+            let selected_cvm = match case {
+                "path" => "../auth/me",
+                "untracked" => "not_tracked",
+                _ => CVM,
+            };
+            let result = if before_auth {
+                server
+                    .client(AUTH.len().max(DETAIL.len()))
+                    .delete_tracked(&mut store, selected_generation, selected_cvm)
+                    .await
+                    .map(|_| ())
+            } else {
+                authenticate(&server)
+                    .await
+                    .prepare(&mut store, selected_generation, selected_cvm)
+                    .await
+                    .map(|_| ())
+            };
+            let expected = match case {
+                "generation" | "history" => DeletionError::Store(StoreError::InvalidState),
+                "workspace" => DeletionError::Provider(ProviderHttpError::WorkspaceMismatch),
+                "untracked" | "path" => DeletionError::TargetRejected,
+                "future" => DeletionError::ClockOrLedgerRejected,
+                "prior_intent" => DeletionError::PriorIntentNeedsReconciliation,
+                "draft" => DeletionError::Store(StoreError::PendingRecovery),
+                _ => unreachable!(),
+            };
+            assert_eq!(result.err(), Some(expected));
+            if before_auth {
+                assert!(request_methods(&server).is_empty());
+            } else {
+                server.wait_closed(1).await;
+                assert_eq!(request_methods(&server), ["GET /api/v1/auth/me HTTP/1.1"]);
+            }
+            assert_eq!(
+                store.ledger().unwrap().deletion_intents().len(),
+                usize::from(case == "prior_intent")
+            );
+        }
     }
 }
 
