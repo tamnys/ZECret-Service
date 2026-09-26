@@ -8,6 +8,7 @@ upstream image build; it is not installed here.
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -185,6 +186,80 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
+COMPOSE_SERVICE_FIELDS = frozenset({
+    "image", "user", "read_only", "cap_drop", "security_opt", "logging",
+    "restart", "command", "entrypoint", "working_dir", "environment",
+    "depends_on", "network_mode", "ports", "volumes", "tmpfs",
+    "group_add", "healthcheck", "init", "stop_signal", "stop_grace_period",
+})
+
+
+def reject_non_json_constant(value: str) -> None:
+    raise ValueError(f"non-JSON Compose constant: {value}")
+
+
+def reject_interpolation(value: object) -> None:
+    if isinstance(value, str):
+        if "$" in value:
+            raise ValueError("Compose interpolation is forbidden")
+    elif isinstance(value, list):
+        for item in value:
+            reject_interpolation(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            reject_interpolation(key)
+            reject_interpolation(item)
+
+
+def validate_compose_file(content: str) -> None:
+    # Docker Compose accepts JSON as YAML. Requiring JSON excludes aliases,
+    # merge keys and tag processing, while unique_object rejects shadowed keys.
+    # This is a preimage policy, not a substitute for reviewing final mounts,
+    # ports, commands and the exact production Compose implementation.
+    try:
+        compose = json.loads(content, object_pairs_hook=unique_object,
+                             parse_constant=reject_non_json_constant)
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ValueError("Compose content must be unambiguous JSON") from error
+    if (not isinstance(compose, dict)
+            or set(compose) - {"name", "services"}
+            or ("name" in compose and
+                (not isinstance(compose["name"], str) or not compose["name"]))):
+        raise ValueError("unsupported Compose top-level fields")
+    services = compose.get("services")
+    if not isinstance(services, dict) or not services:
+        raise ValueError("Compose services are required")
+    reject_interpolation(compose)
+    for name, service in services.items():
+        if (not name or not isinstance(service, dict)
+                or set(service) - COMPOSE_SERVICE_FIELDS):
+            raise ValueError("unsupported Compose service fields")
+        image = service.get("image")
+        if (not isinstance(image, str)
+                or not re.fullmatch(r"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", image)):
+            raise ValueError("Compose images require an exact SHA-256 digest")
+        user = service.get("user")
+        if (not isinstance(user, str)
+                or not re.fullmatch(r"[1-9][0-9]*(?::[1-9][0-9]*)?", user)):
+            raise ValueError("Compose services require a numeric non-root user")
+        if (service.get("read_only") is not True
+                or service.get("cap_drop") != ["ALL"]
+                or service.get("security_opt") != ["no-new-privileges:true"]
+                or service.get("logging") != {"driver": "none"}
+                or service.get("restart", "no") != "no"):
+            raise ValueError("Compose service violates private runtime policy")
+        mode = service.get("network_mode")
+        if mode is not None and (not isinstance(mode, str)
+                                 or not mode.startswith("service:")
+                                 or mode[8:] not in services
+                                 or mode[8:] == name):
+            raise ValueError("Compose network mode must name another service")
+        environment = service.get("environment", {})
+        if (not isinstance(environment, dict)
+                or any(not isinstance(value, str) for value in environment.values())):
+            raise ValueError("Compose environment must be explicit strings")
+
+
 def launch_config_digest(path: Path | None) -> bytes | None:
     if path is None:
         return None
@@ -229,6 +304,7 @@ def launch_config_digest(path: Path | None) -> bytes | None:
         )),
     )):
         raise ValueError("launch configuration violates private RPC profile")
+    validate_compose_file(profile["docker_compose_file"])
     return hashlib.sha256(payload).digest()
 
 
@@ -486,9 +562,9 @@ fi
     fi
     # Keep Compose attached: a stopped container ends this process and fails
     # app-compose.service. Never treat a zero Compose exit as healthy recovery.
-    # Select the checked base file explicitly. Compose otherwise discovers
-    # neighboring files without changing this file's hash.
-    docker compose -f docker-compose.yaml up --remove-orphans --abort-on-container-exit --no-build --pull never >/dev/null 2>&1
+    # Select the local daemon, checked base file and empty environment file.
+    # Ambient Docker context, neighboring files or .env cannot redirect launch.
+    docker --host unix:///run/docker.sock compose --env-file /dev/null -f docker-compose.yaml up --remove-orphans --abort-on-container-exit --no-build --pull never >/dev/null 2>&1
     dstack-util notify-host -e "boot.error" -d "container supervision ended" || true
     exit 1
 """,
