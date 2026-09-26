@@ -1,0 +1,11 @@
+# Diagnostic host inputs from Debian trixie main arm64 at
+# https://snapshot.debian.org/archive/debian/20260918T000000Z
+# locales is architecture all; no package was installed or run.
+ffc5578d5c2c30ca70d46113908f200a09ab6e5e9eda199463af3285dbbaae8c  locales_2.41-12+deb13u4_all.deb
+bd843ebf679adc79c6e4969361f828d1eae24604c7ac0861e409520ecc272b4b  chrpath_0.18-1_arm64.deb
+cbb9ecfc347a854e78d56b7ebeb1b58cdc4316de816132588c457a76ee823d96  cpio_2.15+dfsg-2_arm64.deb
+2c82754fe9a75d5f332d0cb581cb48ed723d83430e4c6b2fd0524e923cbcd2e7  diffstat_1.67-1_arm64.deb
+0c040f686b0dd34387c0aa69848dd9f29741043821a843b480c38a1cf5956142  gawk_1%3a5.2.1-2+b2_arm64.deb
+4fd72af654e2a72c84093cc2a38c856fba9492ecd828721117867e99c2c9cd92  libsigsegv2_2.14-1+b2_arm64.deb
+4991de3c32fe0f9ccba51c94f46237b53451cc288f207a2221a7dd134a4f7b98  lz4_1.10.0-4_arm64.deb
+715696637b45bf1c30230f1c97f9ffdc9af18ead053564d9349f92accccbe988  zstd_1.5.7+dfsg-1_arm64.deb

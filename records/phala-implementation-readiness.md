@@ -153,11 +153,21 @@ sent, and no account credits were spent. Private mode remains blocked.
   including the checked overlays, and produced identical packaging-manifest SHA-256
   `41222583e744b7dae3db54b246da0173aa7b439084d39589d7811ed6e87d93b4`.
   Both runs used the same synthetic ELF-header file for the guard and proxy;
-  neither establishes binary provenance. A fetcher-offline BitBake parse setup
-  was attempted against this staged tree, but the pinned BitBake server requires
-  `en_US.UTF-8`, which the managed container lacks. The layer setup stopped
-  before adding project layers, so parser validation and dependency closure
-  remain unverified. No rootfs, immutable image or Phala admission exists.
+  neither establishes binary provenance. A source-only BitBake parse preflight
+  used package data from the fixed, signed Debian snapshot
+  `20260918T000000Z`. The SHA-256-checked `locales` u4 package was extracted
+  into the workspace without installing it or running package scripts. The
+  host's `localedef` u2 compiled `en_US.UTF-8`, and Python `setlocale` accepted
+  it; this mixed package revision does not establish build-host compatibility.
+  Seven additional checksum-verified Debian packages supplied six host tools
+  and `libsigsegv2` from workspace-only extracts. Their exact package hashes
+  are recorded in [the parse host-tools lock](bitbake-parse-hosttools.sha256).
+  All 13 pinned layers were registered with `BB_NO_NETWORK=1`,
+  `BB_FETCH_PREMIRRORONLY=1` and an empty `CONNECTIVITY_CHECK_URIS`.
+  The pinned BitBake `-p` invocation then failed in `sanity.bbclass` because
+  the managed container mounts `/tmp` with `noexec`. It did not parse recipes;
+  parser validation and dependency closure remain unverified. No rootfs,
+  immutable image or Phala admission exists.
 - The native verifier has an opaque `ApprovedRelease` separate from diagnostic
   `WorkloadPolicy`. An external policy can select only a client-embedded release.
   The manifest's launch-config digest must equal the app-compose hash used in
