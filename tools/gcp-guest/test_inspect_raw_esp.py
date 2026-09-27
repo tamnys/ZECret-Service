@@ -17,6 +17,7 @@ import zlib
 import debian_snapshot
 import inspect_raw_esp as esp
 import inspect_raw_gpt as gpt
+import prepare
 import verify_builder_closure as closure
 
 
@@ -83,25 +84,34 @@ def rename_pe_section(path, old, new):
     path.write_bytes(data)
 
 
-def synthetic_pe_section_table(names):
+def synthetic_pe_section_table(names, *, cmdline=None):
     """Small x86_64 PE32+ envelope for parser rejection tests, not bootable."""
     pe_offset = 0x80
     optional_size = 0xf0
     section_start = pe_offset + 24 + optional_size
     payload_start = section_start + len(names) * 40
-    data = bytearray(payload_start + len(names))
+    payloads = [(cmdline if cmdline is not None else REVIEWED_CMDLINE.encode())
+                if name == ".cmdline" else bytes([index + 1])
+                for index, name in enumerate(names)]
+    data = bytearray(payload_start + sum(map(len, payloads)))
     data[:2] = b"MZ"
     struct.pack_into("<I", data, 0x3c, pe_offset)
     data[pe_offset:pe_offset + 4] = b"PE\0\0"
     struct.pack_into("<HHIIIHH", data, pe_offset + 4,
                      0x8664, len(names), 0, 0, 0, optional_size, 0)
     struct.pack_into("<H", data, pe_offset + 24, 0x20b)
-    for index, name in enumerate(names):
+    offset = payload_start
+    for index, (name, payload) in enumerate(zip(names, payloads)):
         start = section_start + index * 40
         data[start:start + 8] = name.encode("ascii").ljust(8, b"\0")
-        struct.pack_into("<II", data, start + 16, 1, payload_start + index)
-        data[payload_start + index] = index + 1
+        struct.pack_into("<I", data, start + 8, len(payload))
+        struct.pack_into("<II", data, start + 16, len(payload), offset)
+        data[offset:offset + len(payload)] = payload
+        offset += len(payload)
     return data
+
+
+REVIEWED_CMDLINE = f"roothash={'a' * 64} {prepare.FIXED_KERNEL_CMDLINE}"
 
 
 class EspInspectorTests(unittest.TestCase):
@@ -151,6 +161,52 @@ class EspInspectorTests(unittest.TestCase):
         image.write_bytes(synthetic_pe_section_table(sections))
         self.assertEqual(esp.pe_section_names(image), sections)
 
+    def test_pe_command_line_bytes_and_ukify_report_must_agree(self):
+        image = self.root / "synthetic.efi"
+        raw = REVIEWED_CMDLINE.encode()
+        image.write_bytes(synthetic_pe_section_table(
+            [".linux", ".initrd", ".cmdline"], cmdline=raw))
+        names, extracted = esp.pe_section_table(image)
+        self.assertEqual(names, [".linux", ".initrd", ".cmdline"])
+        self.assertEqual(extracted, raw)
+        report = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                  "text": REVIEWED_CMDLINE}
+        self.assertEqual(esp.reviewed_cmdline(extracted, report), REVIEWED_CMDLINE)
+        for changed in ({**report, "size": len(raw) - 1},
+                        {**report, "sha256": "0" * 64},
+                        {**report, "text": "roothash=hidden"}):
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(ValueError, "differs from PE bytes"):
+                    esp.reviewed_cmdline(extracted, changed)
+
+    def test_boot_profile_rejects_extra_options_duplicate_hashes_and_nuls(self):
+        raw = REVIEWED_CMDLINE.encode()
+        for bad in (raw.replace(b"lockdown=confidentiality", b"lockdown=none"),
+                    raw + b" init=/bin/sh", raw + b"\n", raw + b"\0\0",
+                    raw.replace(b"roothash=", b"roothash=" + b"b" * 64 + b" roothash="),
+                    raw.replace(b"a" * 64, b"A" * 64),
+                    raw.replace(b"systemd.unit=zrpc.target", b"systemd.unit=rescue.target")):
+            with self.subTest(bad=bad):
+                report = {"size": len(bad), "sha256": hashlib.sha256(bad).hexdigest(),
+                          "text": bad.rstrip(b"\0").decode("ascii", errors="replace")}
+                with self.assertRaisesRegex(ValueError, "differs from reviewed boot profile"):
+                    esp.reviewed_cmdline(bad, report)
+        with_nul = raw + b"\0"
+        report = {"size": len(with_nul),
+                  "sha256": hashlib.sha256(with_nul).hexdigest(),
+                  "text": REVIEWED_CMDLINE}
+        self.assertEqual(esp.reviewed_cmdline(with_nul, report), REVIEWED_CMDLINE)
+
+    def test_pe_command_line_virtual_size_must_fit_file_payload(self):
+        image = self.root / "synthetic.efi"
+        data = synthetic_pe_section_table(
+            [".linux", ".initrd", ".cmdline"], cmdline=REVIEWED_CMDLINE.encode())
+        cmdline_header = 0x80 + 24 + 0xf0 + 2 * 40
+        struct.pack_into("<I", data, cmdline_header + 8, len(REVIEWED_CMDLINE) + 1)
+        image.write_bytes(data)
+        with self.assertRaisesRegex(ValueError, "section size differs"):
+            esp.pe_section_table(image)
+
     def test_pe_table_rejects_truncated_section_data(self):
         image = self.root / "synthetic.efi"
         data = synthetic_pe_section_table([".linux", ".initrd", ".cmdline"])
@@ -166,7 +222,8 @@ class EspInspectorTests(unittest.TestCase):
         base = Path(fixture)
         return base / "InRelease", base / "Packages.xz", base / "debs"
 
-    def build_fixture(self, *, extra_entry=False, renamed_section=None):
+    def build_fixture(self, *, extra_entry=False, renamed_section=None,
+                      cmdline=REVIEWED_CMDLINE):
         inrelease, index, archives = self.signed_inputs()
         tools, _ = esp.authenticated_tools(inrelease, index, archives)
         lock = json.loads(esp.LOCK.read_bytes())
@@ -207,7 +264,7 @@ class EspInspectorTests(unittest.TestCase):
         run([sys.executable, "-S", str(ukify), "--config=/dev/null", "build",
              "--stub", str(stub_path), "--linux", str(self.root / "linux"),
              "--initrd", str(self.root / "initrd"),
-             "--cmdline", "ro root=synthetic", "--os-release", "ID=synthetic",
+             "--cmdline", cmdline, "--os-release", "ID=synthetic",
              "--uname", "synthetic", "--output", str(uki)],
             env={"PYTHONPATH": str(tool_dir), "HOME": str(self.root),
                  "PATH": "/usr/bin:/bin", "LC_ALL": "C"})
@@ -236,7 +293,7 @@ class EspInspectorTests(unittest.TestCase):
         report = esp.inspect(*args[:3], SECTOR, *args[3:], self.root)
         self.assertEqual(report["status"], "diagnostic-esp-uki-sections-unapproved")
         self.assertEqual(report["esp_inventory"], list(esp.EXPECTED_ESP_ENTRIES))
-        self.assertEqual(report["uki_cmdline_for_review"], "ro root=synthetic")
+        self.assertEqual(report["uki_cmdline_for_review"], REVIEWED_CMDLINE)
         self.assertTrue(esp.REQUIRED_SECTIONS <= report["uki_sections"].keys())
         for field in ("complete_builder_toolchain", "signed_uki_checked",
                       "cmdline_approved", "dm_verity_checked", "image_built",

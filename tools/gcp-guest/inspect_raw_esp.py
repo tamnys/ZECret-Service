@@ -25,6 +25,7 @@ import tempfile
 
 import debian_snapshot
 import inspect_raw_gpt as gpt
+import prepare
 import verify_builder_closure as closure
 import verify_builder_packages as direct
 
@@ -192,8 +193,8 @@ def run_mtools(binary, command, image, root, *, destination=None):
     return result.stdout
 
 
-def pe_section_names(image):
-    """Read the actual PE section table; a JSON object cannot show duplicates."""
+def pe_section_table(image):
+    """Read the PE table and exact command-line bytes before consulting ukify."""
     descriptor = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(descriptor)
@@ -226,6 +227,7 @@ def pe_section_names(image):
         if section_start + count * 40 > info.st_size:
             raise ValueError("UKI PE section table is truncated")
         names = []
+        cmdline = None
         seen = set()
         for index in range(count):
             section = read(section_start + index * 40, 40)
@@ -242,18 +244,57 @@ def pe_section_names(image):
                 raise ValueError(f"duplicate UKI PE section: {name}")
             if name in UNREVIEWED_STUB_SECTIONS:
                 raise ValueError(f"unreviewed UKI boot section: {name}")
+            virtual_size = struct.unpack_from("<I", section, 8)[0]
             raw_size, raw_offset = struct.unpack_from("<II", section, 16)
             if raw_size and (raw_offset == 0 or raw_offset + raw_size > info.st_size):
                 raise ValueError("UKI PE section data is outside the image")
+            if name == ".cmdline":
+                # Pinned ukify and systemd-stub use the PE virtual size for
+                # section content. Never accept a display string that omits
+                # bytes the stub may read, or a virtual size beyond disk data.
+                expected = len(b"roothash=") + 64 + 1 + len(
+                    prepare.FIXED_KERNEL_CMDLINE.encode("ascii"))
+                if virtual_size not in (expected, expected + 1) or virtual_size > raw_size:
+                    raise ValueError("UKI command-line section size differs")
+                cmdline = read(raw_offset, virtual_size)
             seen.add(name)
             names.append(name)
-        return names
+        return names, cmdline
     finally:
         os.close(descriptor)
 
 
+def pe_section_names(image):
+    """Read the actual PE section names; a JSON object hides duplicates."""
+    return pe_section_table(image)[0]
+
+
+def reviewed_cmdline(raw, details):
+    """Match the extracted boot bytes, then cross-check ukify's digest/text."""
+    if raw is None:
+        raise ValueError("UKI required command-line section absent")
+    fixed = prepare.FIXED_KERNEL_CMDLINE.encode("ascii")
+    suffix = b" " + fixed
+    prefix = b"roothash="
+    # ukify may emit a single terminal NUL; embedded or multiple NUL bytes,
+    # newlines, duplicate hashes and additional kernel options are rejected.
+    logical = raw[:-1] if raw.endswith(b"\0") else raw
+    if (len(raw) not in (len(prefix) + 64 + len(suffix),
+                         len(prefix) + 64 + len(suffix) + 1)
+            or not logical.startswith(prefix)
+            or not logical.endswith(suffix)
+            or not re.fullmatch(rb"[0-9a-f]{64}", logical[len(prefix):len(prefix) + 64])):
+        raise ValueError("UKI command line differs from reviewed boot profile")
+    text = logical.decode("ascii")
+    if (details["size"] != len(raw)
+            or details["sha256"] != hashlib.sha256(raw).hexdigest()
+            or details.get("text") != text):
+        raise ValueError("ukify command-line report differs from PE bytes")
+    return text
+
+
 def section_report(ukify, pefile, ordlookup, image, root):
-    section_names = pe_section_names(image)
+    section_names, raw_cmdline = pe_section_table(image)
     script = root / "ukify"
     module = root / "pefile.py"
     script.write_bytes(ukify)
@@ -287,18 +328,18 @@ def section_report(ukify, pefile, ordlookup, image, root):
                 or not isinstance(details.get("sha256"), str)
                 or not debian_snapshot.HEX_SHA256.fullmatch(details["sha256"])):
             raise ValueError("invalid UKI section report")
-    if (any(sections[name]["size"] == 0 for name in REQUIRED_SECTIONS)
-            or not isinstance(sections[".cmdline"].get("text"), str)
-            or not sections[".cmdline"]["text"]):
+    if any(sections[name]["size"] == 0 for name in REQUIRED_SECTIONS):
         raise ValueError("UKI required section empty")
+    cmdline = reviewed_cmdline(raw_cmdline, sections[".cmdline"])
     return {name: {"size": details["size"], "sha256": details["sha256"]}
-            for name, details in sections.items()}, sections[".cmdline"]["text"]
+            for name, details in sections.items()}, cmdline
 
 
 def inspect(raw_disk, expected_sha256, expected_bytes, sector_size,
             inrelease, packages_index, archives, scratch):
     if platform.machine() != "x86_64":
         raise ValueError("reviewed Debian parser tools require x86_64 Linux")
+    prepare.validate_boot_profile()
     scratch = workspace_scratch(scratch)
     tools, identities = authenticated_tools(inrelease, packages_index, archives)
     layout = gpt.inspect(raw_disk, expected_sha256, expected_bytes, sector_size)
