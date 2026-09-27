@@ -3,7 +3,10 @@
 #[cfg(target_os = "linux")]
 mod signature;
 #[cfg(target_os = "linux")]
-pub use signature::{SBVERIFY_SHA256, SBVERIFY_SIZE, SignatureDiagnostic, inspect_signed_uki};
+pub use signature::{
+    ExpectedSignatureInput, SBVERIFY_RUNTIME, SBVERIFY_SHA256, SBVERIFY_SIZE, SignatureDiagnostic,
+    inspect_signed_uki,
+};
 
 use authenticode::authenticode_digest;
 use object::read::pe::PeFile64;
