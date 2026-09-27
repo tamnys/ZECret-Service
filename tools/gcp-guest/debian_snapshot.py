@@ -5,13 +5,18 @@ authenticated metadata and compares its hashes to local files. It does not
 resolve dependencies or make a staged candidate deployable.
 """
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import fcntl
 import hashlib
+import io
 import lzma
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 
 TRUST = Path(__file__).with_name("trust")
@@ -24,6 +29,11 @@ TRIXIE_ARCHIVE_FINGERPRINT = "04B54C3CDCA79751B16BC6B5225629DF75B188BD"
 INDEX_PATH = "main/binary-amd64/Packages.xz"
 SOURCE_INDEX_PATH = "main/source/Sources.xz"
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# Measured from the reviewed 20260918 InRelease and the larger of its two
+# index sizes pinned in deploy/gcp/guest/input-identities.json. A new snapshot
+# requires explicit review of these limits before it can be consumed.
+MAX_INRELEASE_BYTES = 140421
+MAX_SIGNED_INDEX_BYTES = 10540436
 # Match the managed APT snapshot hold in SUPPLY_CHAIN_HARDENING.md. An
 # authenticated archive snapshot is not yet eligible for package consumption.
 MIN_SNAPSHOT_AGE = timedelta(days=7)
@@ -39,7 +49,25 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_signature(inrelease):
+def bounded_regular_bytes(path, maximum, label):
+    """Read at most maximum+1 bytes from one no-follow file descriptor."""
+    if path.is_symlink():
+        raise ValueError(f"{label} redirected")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+            raise ValueError(f"{label} exceeds reviewed size")
+        data = stream.read(maximum + 1)
+        after = os.fstat(stream.fileno())
+        if (len(data) > maximum or len(data) != before.st_size
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ValueError(f"{label} changed or exceeds reviewed size")
+    return data
+
+
+def verify_signature(inrelease, *, pass_fds=()):
     if sha256(KEYRING) != KEYRING_SHA256:
         raise ValueError("Debian trust keyring differs from reviewed identity")
     executable = shutil.which("gpgv")
@@ -49,7 +77,7 @@ def verify_signature(inrelease):
         raise ValueError("gpgv executable differs from reviewed input identity")
     result = subprocess.run(
         [executable, "--status-fd", "1", "--keyring", str(KEYRING), str(inrelease)],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, pass_fds=pass_fds,
     )
     signatures = []
     for line in result.stdout.splitlines():
@@ -59,6 +87,41 @@ def verify_signature(inrelease):
             signatures.append(fields[-1] if len(fields) > 3 else fields[2])
     if result.returncode != 0 or TRIXIE_ARCHIVE_FINGERPRINT not in signatures:
         raise ValueError("Debian InRelease signature or reviewed signer rejected")
+
+
+@contextmanager
+def sealed_inrelease(data):
+    """Give gpgv and the Release parser the same immutable Linux file bytes."""
+    descriptor = os.memfd_create("zrpc-debian-inrelease", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        offset = 0
+        while offset < len(data):
+            offset += os.write(descriptor, data[offset:])
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        yield Path(f"/proc/self/fd/{descriptor}"), descriptor
+    finally:
+        os.close(descriptor)
+
+
+def authenticated_index_bytes(inrelease, index, expected_inrelease_sha256, index_path=INDEX_PATH):
+    """Authenticate one immutable input snapshot; never reread source paths."""
+    if inrelease.is_symlink() or not inrelease.is_file() or index.is_symlink() or not index.is_file():
+        raise ValueError("Debian signed metadata missing or redirected")
+    inrelease_bytes = bounded_regular_bytes(inrelease, MAX_INRELEASE_BYTES, "Debian InRelease")
+    if hashlib.sha256(inrelease_bytes).hexdigest() != expected_inrelease_sha256:
+        raise ValueError("Debian InRelease differs from reviewed snapshot")
+    with sealed_inrelease(inrelease_bytes) as (sealed_path, descriptor):
+        verify_signature(sealed_path, pass_fds=(descriptor,))
+        epoch, (index_hash, index_size) = release_fields(sealed_path, index_path)
+    label = "Debian Sources index" if index_path == SOURCE_INDEX_PATH else "Debian package index"
+    if index_size <= 0 or index_size > MAX_SIGNED_INDEX_BYTES:
+        raise ValueError(f"{label} exceeds reviewed size")
+    index_bytes = bounded_regular_bytes(index, index_size, label)
+    if len(index_bytes) != index_size or hashlib.sha256(index_bytes).hexdigest() != index_hash:
+        raise ValueError(f"{label} differs from signed Release")
+    return epoch, (index_hash, index_size), index_bytes
 
 
 def release_fields(inrelease, index_path=INDEX_PATH):
@@ -143,18 +206,17 @@ def package_records(index):
 
 def verify_snapshot(lock, paths, inputs, manifest):
     """Return signed metadata identity after verifying every listed local .deb."""
-    verify_signature(paths["snapshot_inrelease"])
-    epoch, (index_hash, index_size) = release_fields(paths["snapshot_inrelease"])
+    epoch, (index_hash, index_size), index_bytes = authenticated_index_bytes(
+        paths["snapshot_inrelease"], paths["packages_index"],
+        lock["artifacts"]["snapshot_inrelease"]["sha256"],
+    )
     if epoch != lock["source_date_epoch"]:
         raise ValueError("source epoch differs from signed Debian Release date")
     snapshot_time = datetime.strptime(lock["snapshot"].rstrip("/").rsplit("/", 1)[-1], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     if epoch > int(snapshot_time.timestamp()):
         raise ValueError("signed Debian Release postdates selected snapshot")
     require_snapshot_age(snapshot_time, datetime.now(timezone.utc))
-    index = paths["packages_index"]
-    if index.stat().st_size != index_size or sha256(index) != index_hash:
-        raise ValueError("Debian package index differs from signed Release")
-    records = package_records(index)
+    records = package_records(io.BytesIO(index_bytes))
     seen = set()
     archives = {}
     for package in manifest:
@@ -182,4 +244,4 @@ def verify_snapshot(lock, paths, inputs, manifest):
             if stream.read(8) != b"!<arch>\n":
                 raise ValueError("local Debian package is not a deb archive")
         archives[identity] = archive
-    return {"inrelease_sha256": sha256(paths["snapshot_inrelease"]), "index_sha256": index_hash, "source_date_epoch": epoch, "package_count": len(archives)}, archives
+    return {"inrelease_sha256": lock["artifacts"]["snapshot_inrelease"]["sha256"], "index_sha256": index_hash, "source_date_epoch": epoch, "package_count": len(archives)}, archives

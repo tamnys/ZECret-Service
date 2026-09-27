@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "status": "candidate-unbuilt-unapproved",
+  "snapshot": "https://snapshot.debian.org/archive/debian/20260918T000000Z/",
+  "packages": [
+    {"name": "apt", "version": "3.0.3", "architecture": "amd64", "filename": "pool/main/a/apt/apt_3.0.3_amd64.deb", "size": 1452192, "sha256": "55e341fbe92d7502c98faf1b3c235393ea0744db119cf2173603e965b658aef4"},
+    {"name": "cryptsetup-bin", "version": "2:2.7.5-2", "architecture": "amd64", "filename": "pool/main/c/cryptsetup/cryptsetup-bin_2.7.5-2_amd64.deb", "size": 503628, "sha256": "b77b192cf1c35f96da02134300bb227ab92c49eec2444268049fa1ce84fb9bc7"},
+    {"name": "dpkg", "version": "1.22.22", "architecture": "amd64", "filename": "pool/main/d/dpkg/dpkg_1.22.22_amd64.deb", "size": 1537216, "sha256": "3e800c6d75e8e709007ed1c356e5fa8509a75c1694fb0a1183709abc9cfdc1f3"},
+    {"name": "gpgv", "version": "2.4.7-21+deb13u1+b5", "architecture": "amd64", "filename": "pool/main/g/gnupg2/gpgv_2.4.7-21+deb13u1+b5_amd64.deb", "size": 241100, "sha256": "104e4c57b98f0b883aa94c68fbe7ec7b48bcdec7c0f9dedf2a51a5054aaeb5ae"},
+    {"name": "gzip", "version": "1.13-1+deb13u1", "architecture": "amd64", "filename": "pool/main/g/gzip/gzip_1.13-1+deb13u1_amd64.deb", "size": 138608, "sha256": "74cf12212beee4ab8d473bdc0107abf9e8cef737492198e2f4944a19f142b0ac"},
+    {"name": "mkosi", "version": "25.3-7", "architecture": "all", "filename": "pool/main/m/mkosi/mkosi_25.3-7_all.deb", "size": 309040, "sha256": "ef56c81324fd47d65490e944ec4697bb3f6fb21326d0d071bfc2fb5ba5383252"},
+    {"name": "mount", "version": "2.41.5-0+deb13u1", "architecture": "amd64", "filename": "pool/main/u/util-linux/mount_2.41.5-0+deb13u1_amd64.deb", "size": 163208, "sha256": "eb70a615114ac40123768beb20e302554d5cb7edb33290be7e418ebe1075c878"},
+    {"name": "sbsigntool", "version": "0.9.4-3.2+deb13u1", "architecture": "amd64", "filename": "pool/main/s/sbsigntool/sbsigntool_0.9.4-3.2+deb13u1_amd64.deb", "size": 67676, "sha256": "b5390c50b1970a98bd5dab6a4a8bba124e41708792da9ea62bb75c0522dd714f"},
+    {"name": "systemd-boot-efi", "version": "257.13-1~deb13u1", "architecture": "amd64", "filename": "pool/main/s/systemd/systemd-boot-efi_257.13-1~deb13u1_amd64.deb", "size": 135912, "sha256": "390ecdcef9bbb753f51bb6d8f696bdae2f1dbedde7239c49ccb2512f137a8933"},
+    {"name": "systemd-boot-tools", "version": "257.13-1~deb13u1", "architecture": "amd64", "filename": "pool/main/s/systemd/systemd-boot-tools_257.13-1~deb13u1_amd64.deb", "size": 111368, "sha256": "8ea810011e878796fb2fef4e8cd1d51d33e98fe74e44b8657d129e0a4d2ecab1"},
+    {"name": "systemd-repart", "version": "257.13-1~deb13u1", "architecture": "amd64", "filename": "pool/main/s/systemd/systemd-repart_257.13-1~deb13u1_amd64.deb", "size": 178072, "sha256": "06c6f2c285eb81c8ab1dbcc8f5f8721dd96a2228bc9e6a85beaa22460e0599e1"},
+    {"name": "systemd-ukify", "version": "257.13-1~deb13u1", "architecture": "all", "filename": "pool/main/s/systemd/systemd-ukify_257.13-1~deb13u1_all.deb", "size": 88516, "sha256": "78e1f7921f39d07512d848244b8b3e320e93e77d0b5778c211809e9f3b8b8284"},
+    {"name": "tar", "version": "1.35+dfsg-3.1", "architecture": "amd64", "filename": "pool/main/t/tar/tar_1.35+dfsg-3.1_amd64.deb", "size": 814968, "sha256": "214c02e1aa291076a3147b8a4c4cae02fadf4c67df629186e3e313726faef1de"},
+    {"name": "util-linux", "version": "2.41.5-0+deb13u1", "architecture": "amd64", "filename": "pool/main/u/util-linux/util-linux_2.41.5-0+deb13u1_amd64.deb", "size": 1242392, "sha256": "7d5b1176cc3d8cc6b290b3ec17af458f362d9200845f30da22057a8198744430"},
+    {"name": "zstd", "version": "1.5.7+dfsg-1", "architecture": "amd64", "filename": "pool/main/libz/libzstd/zstd_1.5.7+dfsg-1_amd64.deb", "size": 756244, "sha256": "6da09b6aad171ef9b50d6a2bb4c62f756b3561aac5e05b452b80516223e5e0f5"}
+  ]
+}

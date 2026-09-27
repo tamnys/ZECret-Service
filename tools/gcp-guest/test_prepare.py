@@ -459,6 +459,7 @@ class CandidateTests(unittest.TestCase):
         self.lock["source_date_epoch"] = 1577836800
         release = self.inputs / "snapshot_inrelease"
         release.write_text("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Debian\nCodename: trixie\nArchitectures: amd64\nComponents: main\nDate: Wed, 01 Jan 2020 00:00:00 UTC\nSHA256:\n " + prepare.digest(index) + f" {index.stat().st_size} main/binary-amd64/Packages.xz\n-----BEGIN PGP SIGNATURE-----\nSYNTHETIC\n")
+        self.lock["artifacts"]["snapshot_inrelease"]["sha256"] = prepare.digest(release)
         paths = {"snapshot_inrelease": release, "packages_index": index}
         with mock.patch.object(prepare.debian_snapshot, "verify_signature"):
             snapshot, archives = prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
@@ -470,7 +471,7 @@ class CandidateTests(unittest.TestCase):
                 prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
             self.lock["snapshot"] = "https://snapshot.debian.org/archive/debian/20200101T000000Z/"
             index.write_bytes(index.read_bytes() + b"TAMPER")
-            with self.assertRaisesRegex(ValueError, "index differs"):
+            with self.assertRaisesRegex(ValueError, "index exceeds reviewed size"):
                 prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
 
     def test_reviewed_debian_keyring_hash(self):
