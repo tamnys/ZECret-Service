@@ -69,6 +69,44 @@ jobs:
             echo 'Rootful mount/network/PID namespace smoke check: unavailable'
           fi
 
+          if sudo -n unshare --user --map-root-user --mount --net --pid --fork \
+            --mount-proc --propagation private bash -c '
+            set -euo pipefail
+            test "$(readlink /proc/self/ns/user)" != "$2"
+            test "$(readlink /proc/self/ns/mnt)" != "$3"
+            test "$(readlink /proc/self/ns/net)" != "$4"
+            test "$(readlink /proc/self/ns/pid)" != "$5"
+            test "$(id -u):$(id -g)" = 0:0
+            read -r inner outer count < /proc/self/uid_map
+            test "$inner:$outer:$count" = 0:0:1
+            read -r inner outer count < /proc/self/gid_map
+            test "$inner:$outer:$count" = 0:0:1
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            echo "Root-owned UID0-mapped user namespace: passed"
+
+            outer_mount_ns="$(readlink /proc/self/ns/mnt)"
+            outer_net_ns="$(readlink /proc/self/ns/net)"
+            unshare --mount --net --propagation private bash -c '\''
+              set -euo pipefail
+              test "$(readlink /proc/self/ns/mnt)" != "$2"
+              test "$(readlink /proc/self/ns/net)" != "$3"
+              test "$(ip -o link show | wc -l)" -eq 1
+              test -z "$(ip -4 route show)"
+              test -z "$(ip -6 route show)"
+              mount -t tmpfs tmpfs "$1"
+              test "$(stat -f -c %T "$1")" = tmpfs
+              umount "$1"
+            '\'' _ "$1" "$outer_mount_ns" "$outer_net_ns"
+            echo "Nested mount/network namespace smoke check: passed"
+          ' _ "$scratch/mount" "$parent_user_ns" "$parent_mount_ns" \
+            "$parent_net_ns" "$parent_pid_ns"; then
+            echo 'Root-owned user namespace and nested sandbox capabilities: available'
+          else
+            echo 'Root-owned user namespace or nested sandbox capabilities: unavailable'
+          fi
+
           if sudo -n unshare --user \
             --map-users="0:${runner_uid}:1" --map-groups="0:${runner_gid}:1" \
             --setuid=0 --setgid=0 --mount --net --pid --fork --mount-proc \
