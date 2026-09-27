@@ -37,7 +37,7 @@ class CandidateTests(unittest.TestCase):
                 self.synthetic_deb_sha = hashlib.sha256(self.synthetic_deb).hexdigest()
                 (self.inputs / "debs").mkdir()
                 (self.inputs / "debs" / (self.synthetic_deb_sha + ".deb")).write_bytes(self.synthetic_deb)
-                data = json.dumps([{"name": name, "version": "1.0~synthetic", "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_1.0~synthetic_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"} for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs")]).encode()
+                data = json.dumps([{"name": name, "version": "1.0~synthetic", "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_1.0~synthetic_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"} for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "kmod")]).encode()
             else:
                 data = b"SYNTHETIC_NOT_A_SIGNED_ARTIFACT"
             (self.inputs / role).write_bytes(data)
@@ -77,7 +77,7 @@ class CandidateTests(unittest.TestCase):
         self.assertTrue((output / "package-cache").is_dir())
         self.assertNotIn("BaseTrees=", config)
         self.assertFalse((output / "artifacts/base_tree.tar").exists())
-        self.assertIn("Packages=e2fsprogs=1.0~synthetic,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
+        self.assertIn("Packages=e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
         self.assertNotIn("CopyFiles=/boot:/", esp)
@@ -170,8 +170,8 @@ class CandidateTests(unittest.TestCase):
         paths = {"snapshot_inrelease": release, "packages_index": index}
         with mock.patch.object(prepare.debian_snapshot, "verify_signature"):
             snapshot, archives = prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
-            self.assertEqual(snapshot["package_count"], 6)
-            self.assertEqual(len(archives), 6)
+            self.assertEqual(snapshot["package_count"], 7)
+            self.assertEqual(len(archives), 7)
             held_snapshot = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             self.lock["snapshot"] = f"https://snapshot.debian.org/archive/debian/{held_snapshot}/"
             with self.assertRaisesRegex(ValueError, "seven-day hold"):
@@ -201,7 +201,7 @@ class CandidateTests(unittest.TestCase):
     def test_missing_required_guest_package_is_rejected(self):
         path = self.inputs / "package_manifest"
         packages = json.loads(path.read_text())
-        for required in ("systemd-resolved", "udev", "e2fsprogs"):
+        for required in ("systemd-resolved", "udev", "e2fsprogs", "kmod"):
             path.write_text(json.dumps([p for p in packages if p["name"] != required]))
             self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
             with self.assertRaisesRegex(ValueError, "guest package surface"):

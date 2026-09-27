@@ -191,6 +191,17 @@ exact archive/toolchain verification, and an installed-package comparison.
 Pinned mkosi invokes `depmod` during image assembly; the 94-package candidate
 does not include the `kmod` package that supplies it, so that candidate cannot
 yet be treated as a build-ready package lock.
+The local staging policy now requires `kmod` in the exact guest package
+manifest, alongside the six earlier seeds. Synthetic staging and omission
+tests cover this rule. An offline, no-download APT simulation against the
+September 18 signed index selected 95 unique package identities: the previous
+94 plus `kmod=34.2-2`. All 95 local archives matched the signed index's size
+and SHA-256, including the newly fetched, content-addressed `kmod` archive.
+The candidate package-manifest SHA-256 is
+`f21157b84b725f3c61f316733ef81df26802090bb8a02cfe5559cb28147c5dbb`.
+Staging those archives with synthetic non-package artifacts returned
+`staged-unbuilt-unapproved` and `package_count: 95`. This does not verify the
+installed package closure, builder toolchain, kernel/initrd, or image build.
 
 The guest modules-load profile now requests `gve`, matching the Google NIC
 module in Debian's exact-version
