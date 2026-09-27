@@ -31,6 +31,10 @@ KERNEL_PACKAGE_VERSION = "6.12.107-1"
 BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
 EARLY_INIT_ROLE = "early_init"
 ROLES = set(BINARIES) | {EARLY_INIT_ROLE, "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
+# Builder-only handoff. A later operator build must supply this private key
+# from a memory-backed mount. Staging never checks that mount, copies the key,
+# or treats this reference as evidence of a signed image.
+EXTERNAL_SECURE_BOOT_KEY = "/run/zrpc-build-signing/secure-boot.key"
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
@@ -509,7 +513,7 @@ def stage(lock_path, source, destination):
     (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
     with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
         versions = {package["name"]: package["version"] for package in package_manifest}
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))
@@ -520,7 +524,7 @@ def stage(lock_path, source, destination):
         entries = staged_inventory(root_fd)
     finally:
         os.close(root_fd)
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": lock_sha256, "repart_seed": str(seed), "repart_seed_derivation": {"algorithm": "UUIDv5", "namespace": str(uuid.NAMESPACE_URL), "name": REPART_SEED_NAME_PREFIX + lock_sha256}, "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual appended initrd /init and x86_64 early-init runtime closure", "test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "prove exact signed UKI boot policy excludes unreviewed addons and profiles", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": lock_sha256, "repart_seed": str(seed), "repart_seed_derivation": {"algorithm": "UUIDv5", "namespace": str(uuid.NAMESPACE_URL), "name": REPART_SEED_NAME_PREFIX + lock_sha256}, "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "operator-owned signing key supplied at the builder-only memory-backed reference and checked against the staged certificate", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual appended initrd /init and x86_64 early-init runtime closure", "test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "prove exact signed UKI boot policy excludes unreviewed addons and profiles", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     manifest_path = destination / "candidate-manifest.json"
     manifest_path.write_text(json.dumps(report, indent=2) + "\n")
     # Return these for recording outside the mutable stage. They cannot be
