@@ -343,14 +343,23 @@ pub async fn teardown_once<P: Provider>(
                     "creation outcome uncertain; absence alone cannot finish cleanup",
                 ));
             }
-            if state
-                .delete
-                .as_ref()
-                .is_some_and(|i| i.operation.is_some() && !i.done)
-            {
-                return Ok(Progress::Pending);
+            match state.delete.as_ref() {
+                Some(delete) if delete.failed => {
+                    return Err(Error("deletion operation failed; original intent retained"));
+                }
+                Some(delete) if delete.done => continue,
+                Some(delete) if delete.operation.is_some() => return Ok(Progress::Pending),
+                Some(_) => {
+                    return Err(Error(
+                        "deletion outcome uncertain; absence alone cannot finish cleanup",
+                    ));
+                }
+                None => {
+                    return Err(Error(
+                        "resource absent without recorded deletion; cleanup uncertain",
+                    ));
+                }
             }
-            continue;
         }
         if resource.kind != ResourceKind::StagingObject
             && !state.create.as_ref().is_some_and(|i| i.done)

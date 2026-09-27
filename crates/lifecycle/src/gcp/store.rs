@@ -346,10 +346,11 @@ fn validate_transition(previous: &Journal, next: &Journal) -> Result<()> {
         if !valid_digest(hash)
             || !next.teardown_started
             || next.resources.iter().any(|r| {
-                r.create
-                    .as_ref()
-                    .is_some_and(|i| !i.done || !r.observed_absent)
-                    || r.delete.as_ref().is_some_and(|i| !i.done)
+                r.create.as_ref().is_some_and(|i| {
+                    !i.done
+                        || !r.observed_absent
+                        || !r.delete.as_ref().is_some_and(|d| d.done && !d.failed)
+                }) || r.delete.as_ref().is_some_and(|i| !i.done || i.failed)
             })
         {
             return Err(Error(
