@@ -55,8 +55,8 @@ class AccountInputTests(unittest.TestCase):
 
     def test_exact_signed_package_input_set_is_recorded(self):
         selected, receipt = self.read()
-        self.assertEqual(len(selected), 11)
-        self.assertEqual(len(receipt), 11)
+        self.assertEqual(len(selected), 12)
+        self.assertEqual(len(receipt), 12)
         self.assertEqual(selected[("project", "usr/lib/sysusers.d/zrpc.conf")],
                          b"u zrpc-wrapper -\n")
         self.assertTrue(all("sha256" in item and "size" in item for item in receipt))

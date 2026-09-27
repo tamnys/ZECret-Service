@@ -49,6 +49,7 @@ REQUIRED = {
     "libsystemd-shared": {
         "usr/lib/x86_64-linux-gnu/systemd/libsystemd-shared-257.so",
     },
+    "libssl3t64": {"usr/lib/x86_64-linux-gnu/libcrypto.so.3"},
 }
 SYSUSERS_DIRS = ("etc/sysusers.d/", "run/sysusers.d/",
                  "usr/local/lib/sysusers.d/", "usr/lib/sysusers.d/")
@@ -158,7 +159,7 @@ def check_master_ids(root, selected):
             raise ValueError("generated group differs from signed base-passwd master")
 
 
-def run_once(directory, selected, binary, library):
+def run_once(directory, selected, binary, library, crypto):
     root = directory / "root"
     sysusers_dir = root / "usr/lib/sysusers.d"
     sysusers_dir.mkdir(parents=True)
@@ -169,7 +170,7 @@ def run_once(directory, selected, binary, library):
     environment = {
         "LANG": "C", "PATH": "/usr/bin:/bin", "SYSTEMD_LOG_LEVEL": "warning",
         "SOURCE_DATE_EPOCH": str(guest.SIGNED_RELEASE_EPOCH),
-        "LD_LIBRARY_PATH": str(library.parent),
+        "LD_LIBRARY_PATH": os.pathsep.join((str(library.parent), str(crypto.parent))),
     }
     result = subprocess.run([str(binary), f"--root={root}"], env=environment,
                             capture_output=True, check=False)
@@ -210,11 +211,14 @@ def build(metadata, archives, workspace, output):
         binary = scratch / "tool/usr/bin/systemd-sysusers"
         library = (scratch / "tool/usr/lib/x86_64-linux-gnu/systemd/"
                    "libsystemd-shared-257.so")
+        crypto = scratch / "tool/usr/lib/x86_64-linux-gnu/libcrypto.so.3"
         write_input(binary, selected[("systemd", "usr/bin/systemd-sysusers")], 0o500)
         write_input(library, selected[("libsystemd-shared", "usr/lib/x86_64-linux-gnu/"
                                        "systemd/libsystemd-shared-257.so")], 0o400)
-        first = run_once(scratch / "first", selected, binary, library)
-        second = run_once(scratch / "second", selected, binary, library)
+        write_input(crypto, selected[("libssl3t64", "usr/lib/x86_64-linux-gnu/"
+                                      "libcrypto.so.3")], 0o400)
+        first = run_once(scratch / "first", selected, binary, library, crypto)
+        second = run_once(scratch / "second", selected, binary, library, crypto)
         if first != second:
             raise ValueError("systemd-sysusers account bytes are nondeterministic")
         artifact = scratch / "artifact"
