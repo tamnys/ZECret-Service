@@ -35,12 +35,18 @@ jobs:
       - name: Check both live source policies before any dependency fetch
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
-          python3 -I "$source/scripts/check-cargo-registry-age.py"
-          registry_status=$?
-          python3 -I "$source/scripts/check-cargo-git-source.py"
-          git_status=$?
+          if python3 -I "$source/scripts/check-cargo-registry-age.py"; then
+            registry_status=0
+          else
+            registry_status=$?
+          fi
+          if python3 -I "$source/scripts/check-cargo-git-source.py"; then
+            git_status=0
+          else
+            git_status=$?
+          fi
           if (( registry_status != 0 || git_status != 0 )); then
             echo 'Native Cargo fetch and build refused by live source preflight.' >&2
             exit 1
