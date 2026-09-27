@@ -219,11 +219,13 @@ jobs:
                 "$chroot_command" --userspec="$run_uid:$run_gid" "$staged" "$@"
             }
             run_staged /usr/bin/python3 -I - <<"PY"
+          import io
           import json
           from pathlib import Path
           import sys
 
           sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import debian_snapshot
           import verify_builder_closure
 
           report = verify_builder_closure.verify(
@@ -240,6 +242,56 @@ jobs:
                   or report["private_mode_approved"] is not False):
               raise ValueError("signed snapshot check changed diagnostic acceptance status")
           print(json.dumps(report, sort_keys=True))
+
+          # Diagnose the missing mkosi PackageDirectories helper using the
+          # already-authenticated 195-package builder and sealed APT resolver.
+          # This only prints a candidate dependency delta; no new archive is
+          # trusted, installed, or executed by this diagnostic.
+          lock = verify_builder_closure.direct.read_json(
+              verify_builder_closure.LOCK
+          )
+          direct_lock = verify_builder_closure.direct.read_json(
+              verify_builder_closure.DIRECT_LOCK
+          )
+          _, _, index_bytes = debian_snapshot.authenticated_index_bytes(
+              Path("/zrpc-metadata/InRelease"),
+              Path("/zrpc-metadata/Packages.xz"),
+              lock["inrelease_sha256"],
+          )
+          records = debian_snapshot.package_records(io.BytesIO(index_bytes))
+          record = records[("reprepro", "5.4.6+really5.3.2-1+deb13u1", "amd64")]
+          helper = {
+              "name": record["Package"], "version": record["Version"],
+              "architecture": record["Architecture"],
+              "filename": record["Filename"], "size": int(record["Size"]),
+              "sha256": record["SHA256"],
+          }
+          runtime = {}
+          for entry in lock["packages"]:
+              if entry["name"] in verify_builder_closure.APT_ELF_PACKAGES:
+                  indexed = records[(entry["name"], entry["version"], entry["architecture"])]
+                  runtime[entry["name"]] = verify_builder_closure.indexed_archive(
+                      entry, indexed, Path("/zrpc-archives"), keep_bytes=True
+                  )
+          resolved, _ = verify_builder_closure.apt_plan(
+              index_bytes, Path("/zrpc-apt-scratch"), Path("/usr/bin/apt-get"),
+              lock["resolver"], [*direct_lock["packages"], helper],
+              lock["snapshot"], runtime,
+          )
+          original = {entry["name"]: (entry["version"], entry["architecture"])
+                      for entry in lock["packages"]}
+          if any(resolved.get(name) != identity for name, identity in original.items()):
+              raise ValueError("candidate helper changed reviewed APT selections")
+          delta = {name: resolved[name] for name in sorted(resolved) if name not in original}
+          if "reprepro" not in delta:
+              raise ValueError("candidate helper absent from signed APT plan")
+          print(json.dumps({
+              "status": "diagnostic-signed-reprepro-apt-delta-unbuilt",
+              "package_count": len(resolved), "new_packages": delta,
+              "new_archive_bytes_checked": False,
+              "package_scripts_executed": False, "image_built": False,
+              "private_mode_approved": False,
+          }, sort_keys=True))
           PY
             run_staged /usr/bin/python3 -I - <<"PY"
           import json
