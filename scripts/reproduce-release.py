@@ -7,6 +7,7 @@ This script grants no release approval, attestation acceptance or cloud authorit
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -32,12 +33,57 @@ ARTIFACTS = (
     ("zrpc-server", "zrpc-wrapper"),
     ("zrpc-server", "zrpc-node-wrapper"),
     ("zrpc-server", "zrpc-quote-proxy"),
+    ("zrpc-server", "zrpc-gcp-quote-broker"),
+    ("zrpc-server", "zrpc-gcp-guard"),
+    ("zrpc-server", "zrpc-gcp-cookie"),
 )
+
+
+def check_guest_artifacts(source):
+    """The exported image profile must not require an unbuilt project binary."""
+    profile = source / "tools/gcp-guest/prepare.py"
+    tree = ast.parse(profile.read_text())
+    assignments = [statement.value for statement in tree.body
+                   if isinstance(statement, ast.Assign)
+                   and len(statement.targets) == 1
+                   and isinstance(statement.targets[0], ast.Name)
+                   and statement.targets[0].id == "BINARIES"]
+    if len(assignments) != 1:
+        raise Refusal("GCP guest executable inventory is unavailable")
+    try:
+        binaries = ast.literal_eval(assignments[0])
+    except (ValueError, TypeError, SyntaxError, MemoryError) as error:
+        raise Refusal("GCP guest executable inventory requires review") from error
+    if (not isinstance(binaries, dict) or not binaries
+            or any(not isinstance(role, str) or not isinstance(name, str) or not name
+                   for role, name in binaries.items())
+            or len(set(binaries.values())) != len(binaries.values())
+            or binaries.get("zebra") != "zebrad"):
+        raise Refusal("GCP guest executable inventory requires review")
+    # Zebra is a separately authenticated upstream release. Every project
+    # executable that the image stages must be compared in both native builds.
+    missing = sorted(name for name in binaries.values()
+                     if name != "zebrad" and ("zrpc-server", name) not in ARTIFACTS)
+    if missing:
+        raise Refusal("GCP guest executable missing from double build: " + ", ".join(missing))
 
 
 def digest(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def require_source_script(source, invoking_sha256, manifest):
+    """Reproduction rules must be the rules committed in the selected tree."""
+    source_script = source / "scripts/reproduce-release.py"
+    if not source_script.is_file() or source_script.is_symlink():
+        raise Refusal("selected commit lacks its exact reproduction script")
+    manifest["script_in_source_sha256"] = digest(source_script)
+    manifest["script_matches_source"] = (
+        manifest["script_in_source_sha256"] == invoking_sha256
+    )
+    if not manifest["script_matches_source"]:
+        raise Refusal("invoking reproduction script differs from selected commit")
 
 
 def command(args, *, cwd, env, stdout=subprocess.PIPE):
@@ -244,10 +290,8 @@ def reproduce(args):
             root.mkdir()
             source, target, temporary = root / "source", root / "target", root / "tmp"
             extract_source(archive, source)
-            source_script = source / "scripts" / "reproduce-release.py"
-            if source_script.is_file():
-                manifest["script_in_source_sha256"] = digest(source_script)
-                manifest["script_matches_source"] = manifest["script_in_source_sha256"] == manifest["script_sha256"]
+            require_source_script(source, manifest["script_sha256"], manifest)
+            check_guest_artifacts(source)
             target.mkdir()
             temporary.mkdir()
             inputs = [source / "Cargo.lock", source / "rust-toolchain.toml"]
