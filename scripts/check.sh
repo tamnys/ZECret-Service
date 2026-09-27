@@ -19,6 +19,7 @@ python3 tools/gcp-guest/test_gcp_import_archive.py
 python3 tools/gcp-guest/test_verify_mkosi_source.py
 python3 tools/gcp-guest/test_verify_mkosi_tree.py
 python3 tools/gcp-guest/test_verify_package_closure.py
+python3 tools/gcp-guest/test_verify_builder_packages.py
 python3 experiments/ephemeral-runtime/test-launch-profile.py
 python3 experiments/ephemeral-runtime/test-rootfs-source.py
 python3 experiments/ephemeral-runtime/test-packaging-source.py
