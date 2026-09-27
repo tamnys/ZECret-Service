@@ -7,7 +7,7 @@ use std::{
 };
 use zrpc_lifecycle::gcp::{
     self, Error, Result, controller,
-    package::{DeploymentSpec, Package},
+    package::{Artifact, DeploymentSpec, Package},
     provider::{GoogleClient, Runtime},
     store::Store,
     watchdog::{self, Controls},
@@ -45,7 +45,7 @@ async fn run() -> Result<()> {
     let command = args.next().unwrap_or_else(|| "--help".into());
     if command == "--help" || command == "help" {
         println!(
-            "zrpc-gcp-lifecycle: explicit Google C3 TDX operator control plane\n\nLocal commands (no authentication/network):\n  prepare --spec SPEC.json --package PACKAGE.json --state ABSOLUTE_NEW_DIRECTORY\n  status --state DIRECTORY\n  recover --state DIRECTORY\n  export-watchdog --state DIRECTORY --controls CONTROLS.json --output NEW_DIRECTORY\n\nOperator cloud commands (OAuth/network; deploy can incur costs):\n  deploy --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json --approve-package SHA256\n  observe --state DIRECTORY --runtime RUNTIME.json\n  teardown --state DIRECTORY --runtime RUNTIME.json\n  watchdog-once --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json\n\nEach pass is bounded by explicit runtime inputs. Pending results require another\npass. Never replace the original journal. No package grants private acceptance.\nNo cloud commands are run by prepare or export-watchdog."
+            "zrpc-gcp-lifecycle: explicit Google C3 TDX operator control plane\n\nLocal commands (no authentication/network):\n  prepare --spec SPEC.json --package PACKAGE.json --state ABSOLUTE_NEW_DIRECTORY\n  status --state DIRECTORY\n  recover --state DIRECTORY\n  export-watchdog --state DIRECTORY --controls CONTROLS.json --output NEW_DIRECTORY\n  record-billing-evidence --state DIRECTORY --evidence ARTIFACT.json\n\nOperator cloud commands (OAuth/network; deploy can incur costs):\n  deploy --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json --approve-package SHA256\n  observe --state DIRECTORY --runtime RUNTIME.json\n  teardown --state DIRECTORY --runtime RUNTIME.json\n  watchdog-once --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json\n\nEach pass is bounded by explicit runtime inputs. Pending results require another\npass. Never replace the original journal. No package grants private acceptance.\nLocal commands make no cloud calls; billing evidence does not establish finality."
         );
         return Ok(());
     }
@@ -53,6 +53,7 @@ async fn run() -> Result<()> {
         "prepare" => &["--spec", "--package", "--state"],
         "status" | "recover" => &["--state"],
         "export-watchdog" => &["--state", "--controls", "--output"],
+        "record-billing-evidence" => &["--state", "--evidence"],
         "deploy" => &["--state", "--runtime", "--controls", "--approve-package"],
         "observe" | "teardown" => &["--state", "--runtime"],
         "watchdog-once" => &["--state", "--runtime", "--controls"],
@@ -85,6 +86,13 @@ async fn run() -> Result<()> {
     let package = store.package()?;
     if command == "status" {
         return print(store.journal());
+    }
+    if command == "record-billing-evidence" {
+        let evidence: Artifact = read(&path(&options, "--evidence")?)?;
+        store.record_billing_evidence(&evidence)?;
+        return print(
+            &json!({"billing_evidence_sha256":evidence.sha256,"billing_reconciled":false,"network_used":false}),
+        );
     }
     if command == "export-watchdog" {
         let controls_path = path(&options, "--controls")?;

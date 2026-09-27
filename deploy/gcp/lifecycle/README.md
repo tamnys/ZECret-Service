@@ -96,3 +96,18 @@ Cleanup does not depend on an unexpired price quote or continued availability
 of the image files. Resource absence remains separate from final billing
 reconciliation. The tool never reports private-mode approval or a guaranteed
 zero balance.
+
+After teardown, preserve a reviewed billing export and invoice comparison as a
+local file. Create an `Artifact` JSON object containing its absolute `path` and
+lowercase `sha256`, then append its digest to the original journal with:
+
+```sh
+zrpc-gcp-lifecycle record-billing-evidence \
+  --state /operator/evaluation/journal \
+  --evidence /operator/evaluation/billing-artifact.json
+```
+
+The command verifies the file and makes no cloud call. It stores only the
+digest, never the billing data. Preserve the referenced file separately. The
+command reports `billing_reconciled: false`; the journal records only the
+evidence digest. Later charges or corrections can arrive.
