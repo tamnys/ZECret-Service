@@ -110,21 +110,21 @@ class BuilderClosureTests(unittest.TestCase):
         library = Path("/proc/self/fd/4")
         good = ("\t/proc/self/fd/4 (0x000000400284c000)\n"
                 "\t/lib64/ld-linux-x86-64.so.2 => /proc/self/fd/3 (0x0000004000000000)\n")
+        vdso = "\tlinux-vdso.so.1 (0x0000004003000000)\n"
         result = lambda body: subprocess.CompletedProcess([], 0, body, "")
-        closure.check_loader_report(result(good), loader, [library])
+        self.assertFalse(closure.check_loader_report(result(good), loader, [library]))
+        self.assertTrue(closure.check_loader_report(result(vdso + good), loader, [library]))
         for body, message in (
             (good.replace("/proc/self/fd/4", "/lib/x86_64-linux-gnu/libc.so.6"), "unrecognized"),
             (good.splitlines(keepends=True)[1], "missing or ambient"),
             (good + "\t/proc/self/fd/4 (0x000000400284c000)\n", "missing or ambient"),
+            (vdso + vdso + good, "duplicate or relocated"),
+            (good + vdso, "duplicate or relocated"),
+            (vdso.replace(".so.1", ".so.2") + good, "unrecognized"),
+            (vdso.replace(" (0x", " => /proc/self/fd/4 (0x") + good, "unrecognized"),
         ):
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, message):
                 closure.check_loader_report(result(body), loader, [library])
-        with self.assertRaisesRegex(ValueError, "linux-vdso.so.1") as rejected:
-            closure.check_loader_report(
-                result("\tlinux-vdso.so.1 (0x0000004003000000)\n" + good),
-                loader, [library],
-            )
-        self.assertNotIn("\n", str(rejected.exception))
 
     def test_archive_elf_is_sealed_across_loader_inspection_and_use(self):
         with closure.sealed_elf_bytes(b"\x7fELFsynthetic") as (path, fd):
