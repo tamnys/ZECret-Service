@@ -44,6 +44,22 @@ GENERATED_MAN_PAGES = {
     "mkosi-addon.1", "mkosi-initrd.1", "mkosi-sandbox.1", "mkosi.1", "mkosi.news.7",
 }
 MAN_PREFIX = "mkosi/resources/man/"
+# Exact additional regular files in the reviewed mkosi_25.3-7_all.deb. They
+# are not part of the mkosi Python/resource tree or generated entry points.
+ANCILLARY_FILES = frozenset({
+    "usr/share/bash-completion/completions/mkosi",
+    "usr/share/doc/mkosi/README.md.gz",
+    "usr/share/doc/mkosi/changelog.Debian.gz",
+    "usr/share/doc/mkosi/copyright",
+    "usr/share/fish/completions/mkosi.fish",
+    "usr/share/lintian/overrides/mkosi",
+    "usr/share/man/man1/mkosi-addon.1.gz",
+    "usr/share/man/man1/mkosi-initrd.1.gz",
+    "usr/share/man/man1/mkosi-sandbox.1.gz",
+    "usr/share/man/man1/mkosi.1.gz",
+    "usr/share/man/man7/mkosi.news.7.gz",
+    "usr/share/zsh/site-functions/_mkosi",
+})
 
 
 def sha256(data):
@@ -65,6 +81,7 @@ def compare_payload(source_entries, binary_bytes, *, console_scripts=CONSOLE_SCR
     matched = set()
     executable = set()
     generated_man = set()
+    ancillary = set()
     seen = set()
     entry_points = False
     try:
@@ -117,10 +134,18 @@ def compare_payload(source_entries, binary_bytes, *, console_scripts=CONSOLE_SCR
                         entry_points = True
                 elif name.startswith("usr/lib/python3/dist-packages/"):
                     raise ValueError("unexpected Python path in mkosi package")
+                elif name in ANCILLARY_FILES:
+                    if member.mode & 0o111:
+                        raise ValueError("mkosi ancillary package file is executable")
+                    ancillary.add(name)
+                else:
+                    raise ValueError("unexpected mkosi ancillary package file: " + name)
     except (tarfile.TarError, lzma.LZMAError, EOFError) as error:
         raise ValueError("invalid mkosi package data archive") from error
     if matched != set(expected) or generated_man != GENERATED_MAN_PAGES:
         raise ValueError("packaged mkosi source or generated man pages missing")
+    if ancillary != ANCILLARY_FILES:
+        raise ValueError("reviewed mkosi ancillary package file missing")
     if not set(KERNEL_INSTALL) <= seen or executable != set(console_scripts) | set(KERNEL_INSTALL):
         raise ValueError("mkosi package executable set differs from review")
     if not entry_points or not set(console_scripts) <= seen:
@@ -128,6 +153,7 @@ def compare_payload(source_entries, binary_bytes, *, console_scripts=CONSOLE_SCR
     return {"source_files_matched": len(matched),
             "python_modules_matched": sum(name.endswith(".py") for name in matched),
             "generated_man_pages": sorted(generated_man),
+            "reviewed_ancillary_files": sorted(ancillary),
             "reviewed_console_scripts": sorted(console_scripts)}
 
 
@@ -178,7 +204,7 @@ def verify(inrelease, sources_index, packages_index, source_dir, binary_package,
     if source.digest(source_archive) != membership["source_file_sha256"][source_archive.name]:
         raise ValueError("mkosi source changed during package comparison")
     payload = compare_payload(source_entries, binary_bytes)
-    return {"status": "diagnostic-signed-mkosi-binary-matches-debian-source-unbuilt",
+    return {"status": "diagnostic-signed-mkosi-code-matches-debian-source-unbuilt",
             "mkosi_package_sha256": entry["sha256"],
             "debian_source_sha256": membership["source_file_sha256"][source_archive.name],
             **payload, "installer_hooks_executed": False,

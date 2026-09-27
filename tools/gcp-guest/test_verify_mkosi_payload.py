@@ -61,6 +61,8 @@ class PayloadTests(unittest.TestCase):
             self.files[payload.PACKAGE_MODULES + "resources/man/" + name] = (b"man", 0o644)
         for name in self.scripts:
             self.files[name] = (name.encode(), 0o755)
+        for name in payload.ANCILLARY_FILES:
+            self.files[name] = (b"ancillary", 0o644)
 
     def compare(self, files=None, source=None):
         return payload.compare_payload(
@@ -75,6 +77,7 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(report["source_files_matched"], 2)
         self.assertEqual(report["python_modules_matched"], 1)
         self.assertEqual(set(report["generated_man_pages"]), payload.GENERATED_MAN_PAGES)
+        self.assertEqual(set(report["reviewed_ancillary_files"]), payload.ANCILLARY_FILES)
 
     def test_changed_or_missing_source_resource_rejected(self):
         cases = [
@@ -105,9 +108,11 @@ class PayloadTests(unittest.TestCase):
             ({**self.files, payload.DIST_INFO + "entry_points.txt": (b"changed", 0o644)},
              "entry points differ"),
             ({**self.files, "usr/share/doc/mkosi/unreviewed": (b"shell", 0o755)},
-             "executable set differs"),
+             "unexpected mkosi ancillary package file"),
             ({**self.files, "usr/lib/python3/dist-packages/other.py": (b"import", 0o644)},
              "unexpected Python path"),
+            ({**self.files, "etc/mkosi.conf": (b"unreviewed configuration", 0o644)},
+             "unexpected mkosi ancillary package file"),
         ]
         for files, message in cases:
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
