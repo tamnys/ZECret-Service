@@ -21,8 +21,11 @@ cargo run --locked -p zrpc-cli -- inspect-workload --platform gcp-tdx \
 The GCP policy contains expected MRTD, all four RTMRs, the ordered boot-event
 reference, the UKI PE/COFF measurement, and artifact commitments. Obtain these
 from reviewed firmware and build outputs. Do not turn a received quote into a
-policy. Event-log replay authenticates measurement ordering; artifact appraisal
-also checks the independently reviewed event references.
+policy. Inspection checks signed measurements and CCEL entries against the
+supplied references, including the UKI PE/COFF measurement. It does not derive
+the other artifact hashes or firmware-endorsement hash from that evidence;
+their provenance reports `not_checked`. Establish the relationship between
+those commitments and the measured boot bytes before packaging a release.
 
 To inspect a compatible wrapper through a local Tor installation:
 
