@@ -119,6 +119,12 @@ class BuilderClosureTests(unittest.TestCase):
         ):
             with self.subTest(body=body), self.assertRaisesRegex(ValueError, message):
                 closure.check_loader_report(result(body), loader, [library])
+        with self.assertRaisesRegex(ValueError, "linux-vdso.so.1") as rejected:
+            closure.check_loader_report(
+                result("\tlinux-vdso.so.1 (0x0000004003000000)\n" + good),
+                loader, [library],
+            )
+        self.assertNotIn("\n", str(rejected.exception))
 
     def test_archive_elf_is_sealed_across_loader_inspection_and_use(self):
         with closure.sealed_elf_bytes(b"\x7fELFsynthetic") as (path, fd):

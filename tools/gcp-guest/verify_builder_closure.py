@@ -243,7 +243,11 @@ def check_loader_report(result, loader, preloads):
     for line in result.stdout.splitlines():
         match = LOADER_INTERPRETER.fullmatch(line) or LOADER_OBJECT.fullmatch(line)
         if match is None:
-            raise ValueError("unrecognized signed APT ELF loader report")
+            # Diagnostic-only: the signed loader runs with a cleared
+            # environment. Escape the report so control characters cannot
+            # forge CI log lines; keep refusing every unrecognized object.
+            raise ValueError("unrecognized signed APT ELF loader report: "
+                             + ascii(result.stdout))
         found.append(match.group(1))
     if len(found) != len(expected) or set(found) != expected:
         raise ValueError("signed APT ELF loader used missing or ambient objects")
