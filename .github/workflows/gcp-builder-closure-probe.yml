@@ -215,6 +215,12 @@ jobs:
             echo "Isolated mount namespace: $(readlink /proc/self/ns/mnt)"
             echo "Isolated network namespace: $(readlink /proc/self/ns/net)"
 
+            # mkosi-sandbox changes propagation on its chroot /, which must
+            # itself be a mount point (as in the separate sandbox probe below).
+            test ! -L "$staged"
+            mount --bind "$staged" "$staged"
+            mountpoint -q "$staged"
+
             for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch zrpc-guest-payload-parent proc dev; do
               test ! -L "$staged/$directory"
               mkdir -p "$staged/$directory"
@@ -230,9 +236,16 @@ jobs:
             mount --bind "$guest_archives" "$staged/zrpc-guest-archives"
             mount -o remount,bind,ro "$staged/zrpc-guest-archives"
             mount -t proc proc "$staged/proc"
-            test ! -e "$staged/dev/null"
-            touch "$staged/dev/null"
-            mount --bind /dev/null "$staged/dev/null"
+            # Pinned mkosi-sandbox DevOperation requires these API devices in
+            # its old root. Do not expose the optional /dev/fuse device.
+            for device in null zero full random urandom tty; do
+              test -c "/dev/$device"
+              test ! -e "$staged/dev/$device"
+              test ! -L "$staged/dev/$device"
+              touch "$staged/dev/$device"
+              mount --bind "/dev/$device" "$staged/dev/$device"
+              test -c "$staged/dev/$device"
+            done
 
             run_staged() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
@@ -462,6 +475,81 @@ jobs:
                   or report["private_mode_approved"] is not False):
               raise ValueError("root BaseTrees extraction changed diagnostic status")
           print(json.dumps(report, sort_keys=True))
+          PY
+            # This separate diagnostic profile snapshots the signed-source
+            # BaseTrees tar and configures custom mkosi with no packages. It
+            # cannot emit a UKI, disk, initrd, or private-mode approval.
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import prepare_guest_basetree_profile as diagnostic
+
+          metadata = Path("/zrpc-metadata")
+          archives = Path("/zrpc-guest-archives")
+          artifact = Path("/zrpc-guest-payload-parent/root-basetree")
+          profile = Path("/zrpc-guest-payload-parent/mkosi-root-profile")
+          workspace = Path("/zrpc-guest-payload-parent")
+          prepared = diagnostic.prepare_profile(
+              metadata, archives, artifact, profile, workspace,
+          )
+          checked = diagnostic.verify_profile(
+              metadata, archives, artifact, profile, workspace,
+          )
+          if (prepared != checked or prepared["status"] != diagnostic.STATUS
+                  or prepared["package_install_configured"] is not False
+                  or prepared["package_scripts_executed"] is not False
+                  or prepared["root_directory_built"] is not False
+                  or prepared["disk_image_built"] is not False
+                  or prepared["boot_verified"] is not False
+                  or prepared["private_mode_approved"] is not False):
+              raise ValueError("mkosi BaseTrees profile changed diagnostic status")
+          print(json.dumps(prepared, sort_keys=True))
+          PY
+            profile_root="$staged/zrpc-guest-payload-parent/mkosi-root-profile"
+            echo "Diagnostic profile bind mount starting"
+            mount --bind "$profile_root" "$profile_root"
+            echo "Diagnostic profile bind mount succeeded"
+            mount -o remount,bind,ro "$profile_root"
+            echo "Diagnostic profile read-only remount succeeded"
+            profile_options="$(findmnt -n -o OPTIONS --target "$profile_root")"
+            printf "Diagnostic profile observed mount options: %s\n" "$profile_options"
+            case ",$profile_options," in *,ro,*) ;; *) exit 1 ;; esac
+            echo "Diagnostic profile read-only assertion succeeded"
+            run_staged_root() {
+              /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+                LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                "$chroot_command" "$staged" "$@"
+            }
+            # Pinned mkosi still runs its sysusers/tmpfiles/preset/depmod/
+            # firstboot/hwdb and output stages. This exercises those stages
+            # only for a root directory, which remains unaudited and unbootable.
+            run_staged_root /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import prepare_guest_basetree_profile as diagnostic
+
+          result = diagnostic.build_root_directory(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+              Path("/zrpc-guest-payload-parent/root-basetree"),
+              Path("/zrpc-guest-payload-parent/mkosi-root-profile"),
+              Path("/zrpc-guest-payload-parent"),
+          )
+          if (result["status"] != "diagnostic-root-directory-built-unapproved"
+                  or result["package_install_configured"] is not False
+                  or result["package_scripts_executed"] is not False
+                  or result["root_directory_built"] is not True
+                  or result["post_mkosi_tree_audited"] is not False
+                  or result["disk_image_built"] is not False
+                  or result["boot_verified"] is not False
+                  or result["private_mode_approved"] is not False):
+              raise ValueError("mkosi root directory changed diagnostic status")
+          print(json.dumps(result, sort_keys=True))
           PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"
