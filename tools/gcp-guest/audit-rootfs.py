@@ -113,6 +113,12 @@ def audit_accounts(root):
 def audit(root):
     if root.is_symlink() or not root.is_dir() or root.resolve() == Path("/"):
         raise ValueError("explicit build root required")
+    # mkosi prepends these image-tree files to KernelCommandLine=. The UKI must
+    # contain only the reviewed flags and mkosi's repart-derived roothash.
+    for name in ("etc/kernel/cmdline", "usr/lib/kernel/cmdline"):
+        path = root / name
+        if path.exists() or path.is_symlink():
+            raise ValueError("unreviewed kernel command line source")
     for name in FORBIDDEN_BINARIES:
         if (root / name).exists() or (root / name).is_symlink():
             raise ValueError("administrative binary present")
