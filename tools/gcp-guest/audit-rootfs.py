@@ -113,6 +113,12 @@ def audit_accounts(root):
 def audit(root):
     if root.is_symlink() or not root.is_dir() or root.resolve() == Path("/"):
         raise ValueError("explicit build root required")
+    # This direct-UKI recipe generates /efi only after the finalize audit.
+    # Repart copies its entire contents to the ESP, where systemd-stub can
+    # consume global addons and credentials outside the UKI itself.
+    efi = root / "efi"
+    if efi.is_symlink() or (efi.exists() and (not efi.is_dir() or any(efi.iterdir()))):
+        raise ValueError("unapproved EFI boot input")
     # mkosi prepends these image-tree files to KernelCommandLine=. The UKI must
     # contain only the reviewed flags and mkosi's repart-derived roothash.
     for name in ("etc/kernel/cmdline", "usr/lib/kernel/cmdline"):

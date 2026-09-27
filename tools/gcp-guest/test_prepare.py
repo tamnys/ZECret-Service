@@ -664,5 +664,31 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit_rootfs.audit(root)
 
+    def test_rootfs_audit_rejects_global_efi_boot_inputs(self):
+        root = self.synthetic_guest_root()
+        audit_rootfs.audit(root)
+        efi = root / "efi"
+        efi.mkdir()
+        audit_rootfs.audit(root)
+        for relative in (
+            "loader/addons/unreviewed.addon.efi",
+            "loader/credentials/unreviewed.cred",
+            "loader/loader.conf",
+        ):
+            path = efi / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"SYNTHETIC")
+            with self.assertRaisesRegex(ValueError, "unapproved EFI boot input"):
+                audit_rootfs.audit(root)
+            path.unlink()
+        (efi / "loader/credentials").rmdir()
+        (efi / "loader/addons").rmdir()
+        (efi / "loader").rmdir()
+        audit_rootfs.audit(root)
+        efi.rmdir()
+        efi.symlink_to("/unreviewed-esp")
+        with self.assertRaisesRegex(ValueError, "unapproved EFI boot input"):
+            audit_rootfs.audit(root)
+
 if __name__ == "__main__":
     unittest.main()
