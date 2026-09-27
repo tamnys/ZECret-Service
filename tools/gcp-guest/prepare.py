@@ -8,10 +8,12 @@ import argparse
 import configparser
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -50,11 +52,14 @@ REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-se
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
 
-def validate_boot_profile(profile=PROFILE):
+def validate_boot_profile(profile=PROFILE, staged_copy=False):
     """Reject source drift that would omit the direct UKI or unbind the root."""
     # mkosi discovers settings and executable hooks by filename. The staged
     # directory is created fresh from these reviewed source entries only.
-    if {path.name for path in profile.iterdir()} != {"input-identities.json", "package-closure.lock.json", "mkosi.conf", "mkosi.images", "repart", "rootfs"} or any(path.is_symlink() for path in profile.iterdir()):
+    expected_entries = {"mkosi.conf", "mkosi.images", "repart", "rootfs"}
+    if not staged_copy:
+        expected_entries |= {"input-identities.json", "package-closure.lock.json"}
+    if {path.name for path in profile.iterdir()} != expected_entries or any(path.is_symlink() for path in profile.iterdir()):
         raise ValueError("unexpected mkosi source override or redirected input")
     parser = configparser.ConfigParser(interpolation=None, strict=True)
     parser.optionxform = str
@@ -118,8 +123,144 @@ def unique_object(pairs):
         result[key] = value
     return result
 
+def reject_nonfinite_constant(value):
+    raise ValueError(f"nonstandard JSON constant: {value}")
+
 def read_json(path):
     return json.loads(path.read_text(), object_pairs_hook=unique_object)
+
+def staged_inventory(directory_fd, expected=None):
+    """Inventory the directory by file descriptor without following symlinks.
+
+    The candidate manifest itself is excluded because its digest must be
+    recorded outside this tree. An expected inventory rejects added build
+    inputs before opening or descending into them.
+    """
+    entries = {}
+
+    def visit(parent_fd, prefix):
+        with os.scandir(parent_fd) as children:
+            for child in children:
+                relative = f"{prefix}/{child.name}" if prefix else child.name
+                if relative == "candidate-manifest.json":
+                    continue
+                if expected is not None and relative not in expected:
+                    raise ValueError("unexpected staged input or build output")
+                before = os.stat(child.name, dir_fd=parent_fd, follow_symlinks=False)
+                if stat.S_ISLNK(before.st_mode):
+                    entry = {"type": "symlink", "target": os.readlink(child.name, dir_fd=parent_fd)}
+                    after = os.stat(child.name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (before.st_dev, before.st_ino, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_ctime_ns):
+                        raise ValueError("staged symlink changed during inspection")
+                elif stat.S_ISDIR(before.st_mode):
+                    fd = os.open(child.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+                    try:
+                        opened = os.fstat(fd)
+                        if (before.st_dev, before.st_ino, before.st_mode) != (opened.st_dev, opened.st_ino, opened.st_mode):
+                            raise ValueError("staged directory changed during inspection")
+                        entry = {"type": "directory", "mode": stat.S_IMODE(opened.st_mode)}
+                        if expected is not None and expected[relative] != entry:
+                            raise ValueError("staged input differs from pinned manifest")
+                        entries[relative] = entry
+                        visit(fd, relative)
+                        after = os.fstat(fd)
+                        if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_mtime_ns, opened.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns, after.st_ctime_ns):
+                            raise ValueError("staged directory changed during inspection")
+                    finally:
+                        os.close(fd)
+                    continue
+                elif stat.S_ISREG(before.st_mode):
+                    fd = os.open(child.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent_fd)
+                    with os.fdopen(fd, "rb") as stream:
+                        opened = os.fstat(stream.fileno())
+                        if not stat.S_ISREG(opened.st_mode) or (before.st_dev, before.st_ino, before.st_mode, before.st_size) != (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_size):
+                            raise ValueError("staged file changed during inspection")
+                        entry = {"type": "file", "sha256": hashlib.file_digest(stream, "sha256").hexdigest(), "mode": stat.S_IMODE(opened.st_mode)}
+                        after = os.fstat(stream.fileno())
+                        if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                            raise ValueError("staged file changed during inspection")
+                else:
+                    raise ValueError("unsupported staged input file type")
+                if expected is not None and expected[relative] != entry:
+                    raise ValueError("staged input differs from pinned manifest")
+                entries[relative] = entry
+
+    visit(directory_fd, "")
+    if expected is not None and entries.keys() != expected.keys():
+        raise ValueError("staged input missing from pinned manifest")
+    return dict(sorted(entries.items()))
+
+def open_stage_directory(directory):
+    if not directory.is_absolute() or directory.is_symlink() or not directory.resolve(strict=True).is_relative_to(ROOT.resolve()):
+        raise ValueError("stage must be a non-symlink directory on the workspace volume")
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    if not stat.S_ISDIR(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError("stage root is not a directory")
+    return fd
+
+def verify_stage(directory, expected_manifest_sha256, expected_manifest_bytes):
+    """Check pinned staged inputs; this does not establish a built image."""
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_manifest_sha256) or type(expected_manifest_bytes) is not int or expected_manifest_bytes <= 0:
+        raise ValueError("recorded candidate manifest identity required")
+    root_fd = open_stage_directory(directory)
+    try:
+        manifest_fd = os.open("candidate-manifest.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root_fd)
+        with os.fdopen(manifest_fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size != expected_manifest_bytes:
+                raise ValueError("candidate manifest is not the recorded regular file")
+            manifest_bytes = stream.read(expected_manifest_bytes)
+            after = os.fstat(stream.fileno())
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                raise ValueError("candidate manifest changed during inspection")
+        if hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest_sha256:
+            raise ValueError("candidate manifest differs from recorded digest")
+        manifest = json.loads(
+            manifest_bytes,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_nonfinite_constant,
+        )
+        manifest_fields = {
+            "schema_version", "status", "input_lock_sha256", "repart_seed",
+            "repart_seed_derivation", "debian_snapshot", "entries",
+            "remaining_gates", "image_built", "private_mode_approved",
+        }
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != manifest_fields
+            or type(manifest["schema_version"]) is not int
+            or manifest["schema_version"] != 1
+            or manifest["status"] != "staged-unbuilt-unapproved"
+            or manifest["image_built"] is not False
+            or manifest["private_mode_approved"] is not False
+        ):
+            raise ValueError("candidate manifest cannot authorize a built image or private mode")
+        expected = manifest["entries"]
+        if not isinstance(expected, dict) or not expected or not re.fullmatch(r"[0-9a-f]{64}", manifest["input_lock_sha256"]):
+            raise ValueError("candidate manifest inventory or lock identity invalid")
+        for relative in expected:
+            if not isinstance(relative, str):
+                raise ValueError("candidate manifest contains an invalid input path")
+            path = Path(relative)
+            if path.is_absolute() or relative != path.as_posix() or not path.parts or any(part in (".", "..") for part in path.parts) or relative == "candidate-manifest.json":
+                raise ValueError("candidate manifest contains an invalid input path")
+        staged_inventory(root_fd, expected)
+        lock_fd = os.open("inputs.lock.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=root_fd)
+        with os.fdopen(lock_fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("staged input lock differs from candidate manifest")
+            lock_bytes = stream.read()
+            after = os.fstat(stream.fileno())
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_mode, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or hashlib.sha256(lock_bytes).hexdigest() != manifest["input_lock_sha256"]:
+                raise ValueError("staged input lock differs from candidate manifest")
+        seed = repart_seed(lock_bytes)
+        if manifest["repart_seed"] != str(seed) or manifest["repart_seed_derivation"] != {"algorithm": "UUIDv5", "namespace": str(uuid.NAMESPACE_URL), "name": REPART_SEED_NAME_PREFIX + manifest["input_lock_sha256"]}:
+            raise ValueError("staged repart seed differs from candidate manifest")
+    finally:
+        os.close(root_fd)
+    return {"status": "staged-inputs-match-pinned-manifest", "manifest_sha256": expected_manifest_sha256, "manifest_bytes": expected_manifest_bytes, "image_built": False, "private_mode_approved": False}
 
 def repart_seed(lock_bytes):
     """Use the standard UUIDv5 name construction for reproducible GPT IDs."""
@@ -221,7 +362,16 @@ def stage(lock_path, source, destination):
     lock_bytes = lock_path.read_bytes()
     lock = json.loads(lock_bytes, object_pairs_hook=unique_object)
     paths, package_manifest, snapshot, packages = validate_lock(lock, source)
+    source_fd = open_stage_directory(PROFILE)
+    try:
+        source_entries = staged_inventory(source_fd)
+    finally:
+        os.close(source_fd)
     validate_boot_profile()
+    copied_entries = {
+        path: entry for path, entry in source_entries.items()
+        if path not in {"input-identities.json", "package-closure.lock.json"}
+    }
     lock_sha256 = hashlib.sha256(lock_bytes).hexdigest()
     seed = repart_seed(lock_bytes)
     destination = destination.resolve()
@@ -232,6 +382,14 @@ def stage(lock_path, source, destination):
     shutil.copytree(PROFILE / "repart", destination / "repart")
     shutil.copytree(PROFILE / "mkosi.images", destination / "mkosi.images")
     shutil.copy2(PROFILE / "mkosi.conf", destination / "mkosi.conf")
+    copied_fd = open_stage_directory(destination)
+    try:
+        staged_inventory(copied_fd, copied_entries)
+    finally:
+        os.close(copied_fd)
+    # Also parse the copied mkosi and repart recipe before generated settings
+    # or binaries are added; the inventory comparison covers copied rootfs.
+    validate_boot_profile(destination, staged_copy=True)
     shutil.copyfile(Path(__file__).with_name("audit-rootfs.py"), destination / "audit-rootfs.py")
     (destination / "audit-rootfs.py").chmod(0o555)
     initrd_audit = destination / "mkosi.images/initrd/audit-initrd.py"
@@ -287,17 +445,18 @@ def stage(lock_path, source, destination):
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))
         stream.write(f"\nPackages={initrd_packages}\nFinalizeScripts=audit-initrd.py\n")
     (destination / "inputs.lock.json").write_bytes(lock_bytes)
-    entries = {}
-    for path in sorted(destination.rglob("*")):
-        if path.is_symlink():
-            entry = {"type": "symlink", "target": str(path.readlink())}
-        elif path.is_file():
-            entry = {"type": "file", "sha256": digest(path), "mode": path.stat().st_mode & 0o777}
-        else:
-            entry = {"type": "directory", "mode": path.stat().st_mode & 0o777}
-        entries[str(path.relative_to(destination))] = entry
+    root_fd = open_stage_directory(destination)
+    try:
+        entries = staged_inventory(root_fd)
+    finally:
+        os.close(root_fd)
     report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": lock_sha256, "repart_seed": str(seed), "repart_seed_derivation": {"algorithm": "UUIDv5", "namespace": str(uuid.NAMESPACE_URL), "name": REPART_SEED_NAME_PREFIX + lock_sha256}, "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual initrd contents and test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
-    (destination / "candidate-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
+    manifest_path = destination / "candidate-manifest.json"
+    manifest_path.write_text(json.dumps(report, indent=2) + "\n")
+    # Return these for recording outside the mutable stage. They cannot be
+    # included in the manifest itself without a self-reference.
+    report["manifest_sha256"] = digest(manifest_path)
+    report["manifest_bytes"] = manifest_path.stat().st_size
     return report
 
 def main():
@@ -306,10 +465,14 @@ def main():
     sub.add_parser("preflight")
     inputs = sub.add_parser("inspect-inputs")
     staging = sub.add_parser("stage")
+    verification = sub.add_parser("verify-stage")
     for command in (inputs, staging):
         command.add_argument("--lock", type=Path, required=True)
         command.add_argument("--inputs", type=Path, required=True)
     staging.add_argument("--output", type=Path, required=True)
+    verification.add_argument("--output", type=Path, required=True)
+    verification.add_argument("--expected-manifest-sha256", required=True)
+    verification.add_argument("--expected-manifest-bytes", type=int, required=True)
     args = parser.parse_args()
     try:
         if args.command == "preflight":
@@ -317,11 +480,13 @@ def main():
         elif args.command == "inspect-inputs":
             _, _, snapshot, _ = validate_lock(read_json(args.lock), args.inputs)
             report = {"status": "offline-debian-signature-and-hashes-matched-toolchain-review-pending", "debian_snapshot": snapshot, "image_built": False, "private_mode_approved": False}
+        elif args.command == "verify-stage":
+            report = verify_stage(args.output, args.expected_manifest_sha256, args.expected_manifest_bytes)
         else:
             report = stage(args.lock, args.inputs, args.output)
         print(json.dumps(report, indent=2))
         return 1 if report["status"] == "blocked" else 0
-    except (OSError, ValueError, KeyError, TypeError, configparser.Error) as error:
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError, RecursionError, configparser.Error) as error:
         print(json.dumps({"status": "blocked", "reason": str(error), "image_built": False, "private_mode_approved": False}))
         return 1
 

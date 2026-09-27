@@ -7,6 +7,8 @@ import json
 import lzma
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -64,6 +66,166 @@ class CandidateTests(unittest.TestCase):
         self.closure_hash_patch.stop()
         self.closure_patch.stop()
         self.temporary.cleanup()
+
+    def stage_synthetic_candidate(self):
+        lock_path = self.root / "synthetic.lock.json"
+        lock_path.write_text(json.dumps(self.lock))
+        output = self.root / "candidate"
+        package_manifest = json.loads((self.inputs / "package_manifest").read_text())
+        archives = {(item["name"], item["version"], item["architecture"]): self.inputs / item["path"] for item in package_manifest}
+        # Only the snapshot service is mocked; these are deliberately not
+        # authenticated Debian archives or executable guest binaries.
+        with mock.patch.object(prepare.debian_snapshot, "verify_snapshot", return_value=({"synthetic": True}, archives)):
+            report = prepare.stage(lock_path, self.inputs, output)
+        return output, report
+
+    def test_verify_stage_matches_only_pinned_source_inputs(self):
+        output, report = self.stage_synthetic_candidate()
+        recorded_sha = report["manifest_sha256"]
+        recorded_bytes = report["manifest_bytes"]
+        manifest = output / "candidate-manifest.json"
+        self.assertEqual(recorded_sha, prepare.digest(manifest))
+        self.assertEqual(recorded_bytes, manifest.stat().st_size)
+        self.assertNotIn("manifest_sha256", json.loads(manifest.read_text()))
+        result = prepare.verify_stage(output, recorded_sha, recorded_bytes)
+        self.assertEqual(result["status"], "staged-inputs-match-pinned-manifest")
+        self.assertFalse(result["image_built"])
+        self.assertFalse(result["private_mode_approved"])
+        cli = subprocess.run(
+            [sys.executable, str(Path(prepare.__file__)), "verify-stage", "--output", str(output),
+             "--expected-manifest-sha256", recorded_sha, "--expected-manifest-bytes", str(recorded_bytes)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
+        self.assertEqual(json.loads(cli.stdout), result)
+        with self.assertRaisesRegex(ValueError, "recorded regular file"):
+            prepare.verify_stage(output, recorded_sha, recorded_bytes + 1)
+        with self.assertRaisesRegex(ValueError, "recorded digest"):
+            prepare.verify_stage(output, "0" * 64, recorded_bytes)
+
+    def test_verify_stage_rejects_changed_added_and_missing_inputs(self):
+        output, report = self.stage_synthetic_candidate()
+        recorded_sha = report["manifest_sha256"]
+        recorded_bytes = report["manifest_bytes"]
+
+        def replace_mask(candidate):
+            mask = candidate / "rootfs/etc/systemd/system/ssh.service"
+            mask.unlink()
+            mask.symlink_to("/usr/lib/systemd/system/ssh.service")
+
+        def add_hook(candidate):
+            override = candidate / "mkosi.conf.d"
+            override.mkdir()
+            (override / "99-unreviewed.conf").write_text("[Validation]\nSecureBoot=no\n")
+
+        def change_mode(candidate):
+            (candidate / "mkosi.conf").chmod(0o755)
+
+        def add_build_output(candidate, name):
+            directory = candidate / name
+            directory.mkdir(exist_ok=True)
+            (directory / "poison").write_bytes(b"unreviewed build input")
+
+        cases = [
+            ("config", lambda candidate: (candidate / "mkosi.conf").write_text("SecureBoot=no\n")),
+            ("hook", add_hook),
+            ("binary", lambda candidate: (candidate / "artifacts/wrapper").write_bytes(b"different guest binary")),
+            ("mask", replace_mask),
+            ("mode", change_mode),
+            ("missing", lambda candidate: (candidate / "audit-rootfs.py").unlink()),
+            ("lock", lambda candidate: (candidate / "inputs.lock.json").write_bytes(b"{}")),
+            ("output", lambda candidate: add_build_output(candidate, "output")),
+            ("work", lambda candidate: add_build_output(candidate, "work")),
+            ("cache", lambda candidate: add_build_output(candidate, "package-cache")),
+        ]
+        for name, change in cases:
+            with self.subTest(change=name):
+                candidate = self.root / f"changed-{name}"
+                shutil.copytree(output, candidate, symlinks=True)
+                change(candidate)
+                with self.assertRaises(ValueError):
+                    prepare.verify_stage(candidate, recorded_sha, recorded_bytes)
+
+    def test_verify_stage_rejects_forbidden_manifest_claims_even_with_matching_hash(self):
+        output, report = self.stage_synthetic_candidate()
+        manifest = output / "candidate-manifest.json"
+        original = manifest.read_bytes()
+        recorded_sha = report["manifest_sha256"]
+        recorded_bytes = report["manifest_bytes"]
+
+        def reject_rewritten(data):
+            manifest.write_bytes(data)
+            with self.assertRaises(ValueError):
+                prepare.verify_stage(output, hashlib.sha256(data).hexdigest(), len(data))
+
+        changed_gate = original.replace(b"real TDX acceptance", b"fake TDX acceptance")
+        self.assertNotEqual(changed_gate, original)
+        manifest.write_bytes(changed_gate)
+        with self.assertRaisesRegex(ValueError, "recorded digest"):
+            prepare.verify_stage(output, recorded_sha, recorded_bytes)
+
+        changed = json.loads(original)
+        changed["image_built"] = True
+        reject_rewritten(json.dumps(changed).encode())
+        changed["image_built"] = False
+        changed["private_mode_approved"] = True
+        reject_rewritten(json.dumps(changed).encode())
+        changed["private_mode_approved"] = False
+        changed["status"] = "approved"
+        reject_rewritten(json.dumps(changed).encode())
+        reject_rewritten(original.replace(b'"schema_version": 1,', b'"schema_version": 1, "schema_version": 1,', 1))
+        changed = json.loads(original)
+        changed["entries"]["../unreviewed"] = {"type": "directory", "mode": 493}
+        reject_rewritten(json.dumps(changed).encode())
+
+        manifest.write_bytes(original)
+        manifest.unlink()
+        manifest.symlink_to("inputs.lock.json")
+        with self.assertRaises(OSError):
+            prepare.verify_stage(output, recorded_sha, recorded_bytes)
+        root_link = self.root / "candidate-symlink"
+        root_link.symlink_to(output, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            prepare.verify_stage(root_link, recorded_sha, recorded_bytes)
+
+    def test_staging_rejects_changed_copied_boot_profile(self):
+        lock_path = self.root / "synthetic.lock.json"
+        lock_path.write_text(json.dumps(self.lock))
+        output = self.root / "candidate"
+        package_manifest = json.loads((self.inputs / "package_manifest").read_text())
+        archives = {(item["name"], item["version"], item["architecture"]): self.inputs / item["path"] for item in package_manifest}
+        original_copy2 = shutil.copy2
+
+        def changed_copy(source, destination, *args, **kwargs):
+            result = original_copy2(source, destination, *args, **kwargs)
+            if Path(source) == prepare.PROFILE / "mkosi.conf":
+                copied = Path(destination)
+                copied.write_text(copied.read_text().replace("SecureBoot=yes", "SecureBoot=no"))
+            return result
+
+        with mock.patch.object(prepare.debian_snapshot, "verify_snapshot", return_value=({"synthetic": True}, archives)), mock.patch.object(prepare.shutil, "copy2", side_effect=changed_copy):
+            with self.assertRaisesRegex(ValueError, "staged input differs from pinned manifest"):
+                prepare.stage(lock_path, self.inputs, output)
+        self.assertFalse((output / "candidate-manifest.json").exists())
+
+    def test_staging_rejects_changed_copied_rootfs(self):
+        lock_path = self.root / "synthetic.lock.json"
+        lock_path.write_text(json.dumps(self.lock))
+        output = self.root / "candidate"
+        package_manifest = json.loads((self.inputs / "package_manifest").read_text())
+        archives = {(item["name"], item["version"], item["architecture"]): self.inputs / item["path"] for item in package_manifest}
+        original_copytree = shutil.copytree
+
+        def changed_copy(source, destination, *args, **kwargs):
+            result = original_copytree(source, destination, *args, **kwargs)
+            if Path(source) == prepare.PROFILE / "rootfs":
+                (Path(destination) / "usr/lib/systemd/system/zrpc.target").write_text("[Unit]\nDescription=changed during copy\n")
+            return result
+
+        with mock.patch.object(prepare.debian_snapshot, "verify_snapshot", return_value=({"synthetic": True}, archives)), mock.patch.object(prepare.shutil, "copytree", side_effect=changed_copy):
+            with self.assertRaisesRegex(ValueError, "staged input differs from pinned manifest"):
+                prepare.stage(lock_path, self.inputs, output)
+        self.assertFalse((output / "candidate-manifest.json").exists())
 
     def test_missing_identity_changed_artifact_and_escape_fail(self):
         for change in (lambda lock: lock.update(schema_version=4), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].update(initrd={"path": "initrd", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(kernel={"path": "kernel", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["wrapper"].update(path="../wrapper"), lambda lock: lock.update(kernel_version="other-abi"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
