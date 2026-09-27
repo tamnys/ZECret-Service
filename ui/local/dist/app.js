@@ -6,6 +6,7 @@ const byId = (id) => {
 };
 const run = byId('run');
 const session = byId('session');
+const methodSelect = byId('method');
 let capability = '';
 let mode = 'simulation';
 let bootstrap = location.hash.slice(1);
@@ -52,14 +53,58 @@ function show(report, elapsed) {
             ? 'VERIFIED RESPONSE' : report.private_accepted === true ? 'QUERY FAILED' : 'PRIVATE MODE BLOCKED');
     renderEvidence(report.verification);
 }
+function updateMethodFields() {
+    const method = methodSelect.value;
+    const live = mode === 'live_unverified';
+    byId('live-params').hidden = !live;
+    byId('height-param').hidden = !live || method !== 'getblockhash';
+    byId('hash-param').hidden = !live || !['getblockheader', 'getrawtransaction'].includes(method);
+    byId('verbosity-param').hidden = !live || !['getblockheader', 'getrawtransaction'].includes(method);
+    byId('hash-label').textContent = method === 'getrawtransaction' ? 'Transaction ID' : 'Block hash';
+}
+function requestForMethod() {
+    const method = methodSelect.value;
+    let params = [];
+    if (mode === 'simulation') {
+        params = method === 'getblockhash' ? [42]
+            : ['getblockheader', 'getrawtransaction'].includes(method)
+                ? [method === 'getrawtransaction' ? 'b'.repeat(64) : 'a'.repeat(64), true] : [];
+    }
+    else if (method === 'getblockhash') {
+        const raw = byId('height').value;
+        const height = Number(raw);
+        // The typed protocol permits u32, but the pinned Zebra node adapter accepts i32.
+        if (!/^(0|[1-9][0-9]*)$/.test(raw) || !Number.isInteger(height) || height > 0x7fffffff) {
+            throw new Error('Enter a whole block height from 0 through 2147483647.');
+        }
+        params = [height];
+    }
+    else if (method === 'getblockheader' || method === 'getrawtransaction') {
+        const hash = byId('hash').value.trim();
+        if (!/^[a-fA-F0-9]{64}$/.test(hash)) {
+            throw new Error('Enter a 64-digit hexadecimal block hash or transaction ID.');
+        }
+        const verbosity = byId('verbosity').value;
+        if (verbosity !== 'true' && verbosity !== 'false') {
+            throw new Error('Choose a supported response detail.');
+        }
+        params = [hash, verbosity === 'true'];
+    }
+    return JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
+}
+methodSelect.addEventListener('change', () => {
+    if (mode === 'live_unverified') {
+        byId('height').value = '';
+        byId('hash').value = '';
+    }
+    updateMethodFields();
+});
 run.addEventListener('click', async () => {
     run.disabled = true;
-    const method = byId('method').value;
-    const params = method === 'getblockhash' ? [42] : ['getblockheader', 'getrawtransaction'].includes(method) ? [method === 'getrawtransaction' ? 'b'.repeat(64) : 'a'.repeat(64), true] : [];
-    const request = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
     const started = performance.now();
     try {
-        show(await api('/api/query', request, mode === 'simulation' ? byId('scenario').value : undefined), performance.now() - started);
+        show(await api('/api/query', requestForMethod(), mode === 'simulation' ? byId('scenario').value : undefined), performance.now() - started);
+        session.textContent = mode === 'simulation' ? 'Local session ready. Simulation fixtures stay on this device.' : 'Local session ready. Private mode requires independent verification.';
     }
     catch (error) {
         session.textContent = error instanceof Error ? error.message : 'Local request failed';
@@ -83,10 +128,15 @@ async function start() {
             byId('method-label').textContent = 'Typed testnet request';
             byId('scenario-label').style.display = 'none';
             byId('scenario').style.display = 'none';
-            for (const option of Array.from(byId('method').options)) {
-                if (!['getblockcount', 'getblockchaininfo'].includes(option.value))
-                    option.disabled = true;
+            for (const option of Array.from(methodSelect.options)) {
+                if (option.value === 'getblockhash')
+                    option.textContent = 'Block identity by height';
+                if (option.value === 'getblockheader')
+                    option.textContent = 'Block header by hash';
+                if (option.value === 'getrawtransaction')
+                    option.textContent = 'Transaction by ID';
             }
+            updateMethodFields();
             run.firstChild.textContent = 'Try verified query ';
             byId('release-note').textContent = `${result.platform === 'gcp-tdx' ? 'Google Cloud TDX' : 'Phala dstack'}: no approved production release is packaged yet. Private mode stays blocked.`;
             byId('gate-note').textContent = result.platform === 'gcp-tdx'
@@ -102,6 +152,7 @@ async function start() {
             session.textContent = 'Local session ready. Private mode requires independent verification.';
         }
         else {
+            updateMethodFields();
             byId('mode-label').textContent = 'SIMULATION ONLY';
             byId('mode-description').textContent = 'No hardware attestation, Tor connection, cloud service or live blockchain. Fixtures never authorize private mode.';
             session.textContent = 'Local session ready. Simulation fixtures stay on this device.';
