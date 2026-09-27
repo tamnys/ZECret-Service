@@ -383,7 +383,9 @@ jobs:
 
           outer = dict(zip(("user", "mnt", "net", "pid"), sys.argv[1:5]))
           inner = {name: os.readlink("/proc/self/ns/" + name) for name in outer}
-          if (inner["user"] == outer["user"] or inner["mnt"] == outer["mnt"]
+          # The outer namespace already runs as UID 0. mkosi 25.3 therefore
+          # retains that user namespace while unsharing the mount namespace.
+          if (inner["user"] != outer["user"] or inner["mnt"] == outer["mnt"]
                   or inner["net"] != outer["net"] or inner["pid"] != outer["pid"]):
               raise ValueError(
                   "mkosi APT-equivalent namespace boundary changed: "
