@@ -86,6 +86,23 @@ def preflight():
         result = subprocess.run([tools["unshare"], "--user", "--map-root-user", "true"], capture_output=True, check=False)
         if result.returncode:
             blockers.append("user namespace creation denied by builder isolation")
+        # mkosi's APT sandbox deliberately allows network access. A future
+        # build runner must isolate the *whole* build, not just build scripts.
+        # A successful command alone is insufficient if the tool does not
+        # actually move the process into a different network namespace.
+        try:
+            parent_net = Path("/proc/self/ns/net").readlink().as_posix()
+        except OSError:
+            blockers.append("builder network namespace identity unavailable")
+        else:
+            result = subprocess.run(
+                [tools["unshare"], "--user", "--map-root-user", "--net", sys.executable,
+                 "-c", 'import os; print(os.readlink("/proc/self/ns/net"))'],
+                capture_output=True, text=True, check=False,
+            )
+            child_net = result.stdout.strip()
+            if result.returncode or not re.fullmatch(r"net:\[[0-9]+\]", child_net) or child_net == parent_net:
+                blockers.append("outer build network namespace isolation unavailable")
     return {"schema_version": 1, "status": "blocked" if blockers else "capabilities-present-input-review-required", "architecture": platform.machine(), "tools": tools, "blockers": blockers, "image_built": False, "private_mode_approved": False}
 
 def validate_lock(lock, source):
@@ -124,7 +141,9 @@ def validate_lock(lock, source):
         if set(package) != {"name", "version", "architecture", "filename", "size", "sha256", "path"} or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package["name"]) or not re.fullmatch(r"[0-9][A-Za-z0-9.+:~-]*", package["version"]) or not re.fullmatch("[0-9a-f]{64}", package["sha256"]) or package["name"] in names:
             raise ValueError("invalid package identity")
         names.add(package["name"])
-    if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved"} <= names:
+    # networkd/resolved, stable /dev/disk links, the direct UKI/verity path,
+    # and x-systemd.makefs for the public ext4 data disk need these binaries.
+    if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs"} <= names:
         raise ValueError("guest package surface does not match appliance policy")
     runtime = lock["runtime"]
     if set(runtime) != {"listen_port", "max_connections", "max_quotes", "quote_spacing_ms", "node_startup_timeout_secs", "node_poll_interval_ms"} or any(type(value) is not int or value <= 0 for value in runtime.values()) or runtime["listen_port"] > 65535:
@@ -154,6 +173,10 @@ def stage(lock_path, source, destination):
             raise ValueError("artifact changed during staging")
     package_directory = destination / "packages"
     package_directory.mkdir()
+    # mkosi otherwise reuses the invoking user's shared APT cache and lists.
+    # This candidate-specific directory is still not an offline-build proof:
+    # the eventual runner must verify an outer network namespace before build.
+    (destination / "package-cache").mkdir()
     for package in package_manifest:
         source_archive = packages[(package["name"], package["version"], package["architecture"])]
         target = package_directory / (package["sha256"] + ".deb")
@@ -188,7 +211,7 @@ def stage(lock_path, source, destination):
     (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nBaseTrees=artifacts/base_tree.tar\nInitrds=artifacts/initrd\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\n[Build]\nWorkspaceDirectory=work\n')
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nBaseTrees=artifacts/base_tree.tar\nInitrds=artifacts/initrd\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
     shutil.copyfile(lock_path, destination / "inputs.lock.json")
     entries = {}
     for path in sorted(destination.rglob("*")):
@@ -199,7 +222,7 @@ def stage(lock_path, source, destination):
         else:
             entry = {"type": "directory", "mode": path.stat().st_mode & 0o777}
         entries[str(path.relative_to(destination))] = entry
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["complete installed package closure comparison after build", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     (destination / "candidate-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
