@@ -117,6 +117,18 @@ async fn observe_resource<P: Provider>(
 ) -> Result<Option<Value>> {
     let resource = &package.resources[index];
     let value = provider.get(resource).await?;
+    if resource.kind == ResourceKind::StagingObject && value.is_none() {
+        if let Some(identity) = store.journal().resources[index].identity.as_deref() {
+            if provider
+                .staging_generation_residual(resource, identity)
+                .await?
+            {
+                return Err(Error(
+                    "recorded staging generation remains live, noncurrent, or soft-deleted",
+                ));
+            }
+        }
+    }
     let mut next = store.journal().clone();
     let state = &mut next.resources[index];
     if let Some(value) = &value {
