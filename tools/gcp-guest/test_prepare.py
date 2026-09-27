@@ -647,9 +647,25 @@ class CandidateTests(unittest.TestCase):
             (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
         for unit in audit_rootfs.MASKED_UNITS:
             (root / "etc/systemd/system" / unit).symlink_to("/dev/null")
-        (root / "etc/passwd").write_text("root:x:0:0::/:/usr/sbin/nologin\nzrpc-node:x:101:101::/nonexistent:/usr/sbin/nologin\nzrpc-wrapper:x:102:102::/nonexistent:/usr/sbin/nologin\n")
-        (root / "etc/shadow").write_text("root:!:0:0:0:0:0:0:\nzrpc-node:!:0:0:0:0:0:0:\nzrpc-wrapper:!:0:0:0:0:0:0:\n")
-        (root / "etc/group").write_text("root:x:0:\nzrpc-node:x:101:\nzrpc-wrapper:x:102:\nzrpc-cookie:x:103:zrpc-node,zrpc-wrapper\n")
+        (root / "etc/passwd").write_text(
+            "root:x:0:0::/:/usr/sbin/nologin\n"
+            "systemd-network:x:998:998::/:/usr/sbin/nologin\n"
+            "systemd-resolve:x:997:997::/:/usr/sbin/nologin\n"
+            "zrpc-node:x:101:101::/nonexistent:/usr/sbin/nologin\n"
+            "zrpc-wrapper:x:102:102::/nonexistent:/usr/sbin/nologin\n")
+        (root / "etc/shadow").write_text(
+            "root:!:0:0:0:0:0:0:\n"
+            "systemd-network:!:0:0:0:0:0:0:\n"
+            "systemd-resolve:!:0:0:0:0:0:0:\n"
+            "zrpc-node:!:0:0:0:0:0:0:\n"
+            "zrpc-wrapper:!:0:0:0:0:0:0:\n")
+        (root / "etc/group").write_text(
+            "root:x:0:\n"
+            "systemd-network:x:998:\n"
+            "systemd-resolve:x:997:\n"
+            "zrpc-node:x:101:\n"
+            "zrpc-wrapper:x:102:\n"
+            "zrpc-cookie:x:103:zrpc-node,zrpc-wrapper\n")
         for name in prepare.BINARIES.values():
             (root / "usr/lib/zrpc" / name).write_text("SYNTHETIC")
             (root / "usr/lib/zrpc" / name).chmod(0o555)
@@ -766,6 +782,64 @@ class CandidateTests(unittest.TestCase):
             audit_rootfs.audit(root)
         companion.unlink()
         (root / "etc/systemd/system/ssh.service").unlink()
+        with self.assertRaises(ValueError):
+            audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_missing_or_privileged_network_accounts(self):
+        cases = (
+            ("etc/passwd", "systemd-network:x:998:998::/:/usr/sbin/nologin\n", ""),
+            ("etc/shadow", "systemd-resolve:!:0:0:0:0:0:0:\n", ""),
+            ("etc/shadow", "systemd-network:!:", "systemd-network:$6$unlocked:"),
+            ("etc/passwd", "systemd-resolve:x:997:997:", "systemd-resolve:x:0:997:"),
+            ("etc/passwd", "systemd-network:x:998:998:", "systemd-network:x:998:0:"),
+            ("etc/group", "systemd-resolve:x:997:\n", ""),
+            ("etc/group", "systemd-network:x:998:\n", "systemd-network:x:101:\n"),
+        )
+        for index, (relative, old, new) in enumerate(cases):
+            with self.subTest(relative=relative, old=old, new=new):
+                root = self.synthetic_guest_root(f"-network-account-{index}")
+                audit_rootfs.audit(root)
+                path = root / relative
+                path.write_text(path.read_text().replace(old, new))
+                with self.assertRaises(ValueError):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_unlocked_or_unmatched_extra_accounts(self):
+        cases = (
+            ("extra:x:500:500::/nonexistent:/usr/sbin/nologin\n", ""),
+            ("root-alias:x:0:500::/nonexistent:/usr/sbin/nologin\n",
+             "root-alias:!:0:0:0:0:0:0:\n"),
+            ("root-group-alias:x:500:0::/nonexistent:/usr/sbin/nologin\n",
+             "root-group-alias:!:0:0:0:0:0:0:\n"),
+            ("extra:x:500:500::/nonexistent:/usr/sbin/nologin\n",
+             "extra:$6$unlocked:0:0:0:0:0:0:\n"),
+            ("extra:x:500:500::/nonexistent:/usr/sbin/nologin\n",
+             "extra:!:0:0:0:0:0:0:\norphan:!:0:0:0:0:0:0:\n"),
+        )
+        for index, (passwd_line, shadow_lines) in enumerate(cases):
+            with self.subTest(index=index):
+                root = self.synthetic_guest_root(f"-extra-account-{index}")
+                audit_rootfs.audit(root)
+                with (root / "etc/passwd").open("a") as passwd:
+                    passwd.write(passwd_line)
+                with (root / "etc/shadow").open("a") as shadow:
+                    shadow.write(shadow_lines)
+                with self.assertRaises(ValueError):
+                    audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-extra-group-zero")
+        with (root / "etc/group").open("a") as groups:
+            groups.write("root-group-alias:x:0:\n")
+        with self.assertRaises(ValueError):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-root-group-member")
+        groups = root / "etc/group"
+        groups.write_text(groups.read_text().replace("root:x:0:\n",
+                                                    "root:x:0:zrpc-wrapper\n"))
+        with self.assertRaises(ValueError):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-unreviewed-service-group")
+        with (root / "etc/group").open("a") as groups:
+            groups.write("disk:x:6:zrpc-wrapper\n")
         with self.assertRaises(ValueError):
             audit_rootfs.audit(root)
 

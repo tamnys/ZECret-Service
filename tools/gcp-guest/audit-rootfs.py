@@ -146,7 +146,35 @@ def audit_accounts(root):
     passwd = account_file(root, "passwd", 7)
     shadow = account_file(root, "shadow", 9)
     groups = account_file(root, "group", 4)
-    expected = {"root": (0, 0), "zrpc-node": None, "zrpc-wrapper": None}
+    if passwd.keys() != shadow.keys():
+        raise ValueError("guest passwd and shadow accounts differ")
+    for name, entry in passwd.items():
+        if entry[1] != "x" or not shadow[name][1].startswith(("!", "*")):
+            raise ValueError("guest account missing or unlocked")
+        try:
+            uid, gid = int(entry[2]), int(entry[3])
+        except ValueError as error:
+            raise ValueError("guest account identity malformed") from error
+        if uid < 0 or gid < 0 or (name != "root" and (uid == 0 or gid == 0)):
+            raise ValueError("guest account identity differs")
+    if groups.get("root") is None or groups["root"][1:] != ["x", "0", ""]:
+        raise ValueError("guest root group missing")
+    for name, entry in groups.items():
+        try:
+            gid = int(entry[2])
+        except ValueError as error:
+            raise ValueError("guest group GID malformed") from error
+        if gid < 0 or (gid == 0) != (name == "root"):
+            raise ValueError("guest group identity differs")
+        members = entry[3].split(",") if entry[3] else []
+        for member in members:
+            if member in {"systemd-network", "systemd-resolve", "zrpc-node", "zrpc-wrapper"}:
+                if not ((name == "zrpc-cookie" and member in {"zrpc-node", "zrpc-wrapper"})
+                        or (name == member and member in {"zrpc-node", "zrpc-wrapper"})):
+                    raise ValueError("guest service has unreviewed supplementary group")
+    expected = {"root": (0, 0), "systemd-network": None,
+                "systemd-resolve": None, "zrpc-node": None,
+                "zrpc-wrapper": None}
     protected_uids = set()
     for name, fixed in expected.items():
         entry = passwd.get(name)
@@ -171,7 +199,9 @@ def audit_accounts(root):
                 and (
                     uid == 0
                     or gid == 0
-                    or entry[5:] != ["/nonexistent", "/usr/sbin/nologin"]
+                    or entry[5:] != [
+                        "/" if name in {"systemd-network", "systemd-resolve"}
+                        else "/nonexistent", "/usr/sbin/nologin"]
                 )
             )
         ):
@@ -188,7 +218,8 @@ def audit_accounts(root):
             if uid in protected_uids:
                 raise ValueError("guest service UID has an alias")
     protected_gids = set()
-    for name in ("zrpc-node", "zrpc-wrapper", "zrpc-cookie"):
+    for name in ("systemd-network", "systemd-resolve", "zrpc-node",
+                 "zrpc-wrapper", "zrpc-cookie"):
         entry = groups.get(name)
         if entry is None or entry[1] != "x":
             raise ValueError("guest service group missing")
@@ -203,7 +234,9 @@ def audit_accounts(root):
         ):
             raise ValueError("guest service GID differs")
         members = entry[3].split(",") if entry[3] else []
-        expected_members = {"zrpc-node", "zrpc-wrapper"} if name == "zrpc-cookie" else {name}
+        expected_members = ({"zrpc-node", "zrpc-wrapper"} if name == "zrpc-cookie"
+                            else set() if name in {"systemd-network", "systemd-resolve"}
+                            else {name})
         if (
             len(members) != len(set(members))
             or not set(members) <= expected_members
@@ -212,7 +245,8 @@ def audit_accounts(root):
             raise ValueError("guest service group membership differs")
         protected_gids.add(gid)
     for name, entry in groups.items():
-        if name not in ("zrpc-node", "zrpc-wrapper", "zrpc-cookie"):
+        if name not in ("systemd-network", "systemd-resolve", "zrpc-node",
+                        "zrpc-wrapper", "zrpc-cookie"):
             try:
                 gid = int(entry[2])
             except ValueError as error:

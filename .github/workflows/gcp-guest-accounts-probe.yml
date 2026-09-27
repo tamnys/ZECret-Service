@@ -1,0 +1,155 @@
+name: GCP signed guest account diagnostic on x86
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/gcp-guest-accounts-probe.yml
+      - tools/gcp-guest/build_guest_accounts.py
+      - tools/gcp-guest/test_build_guest_accounts.py
+      - tools/gcp-guest/audit-rootfs.py
+      - tools/gcp-guest/test_prepare.py
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  accounts:
+    name: Exact-head signed inputs and account artifact verification
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Fetch exact repository head and reviewed Debian inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          [[ "$ZRPC_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/guest-accounts"
+          mkdir "$source" "$scratch" "$scratch/bin" "$scratch/builder-metadata" \
+            "$scratch/builder-archives" "$scratch/guest-metadata" "$scratch/guest-archives"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_HEAD_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_HEAD_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_HEAD_SHA"
+          echo "Exact source head: $ZRPC_HEAD_SHA"
+          echo "Runner userspace architecture: $(uname -m)"
+
+          ZRPC_SOURCE="$source" ZRPC_SCRATCH="$scratch" python3 -I - <<'PY'
+          import hashlib
+          import io
+          import os
+          from pathlib import Path
+          import sys
+          import tarfile
+
+          source = Path(os.environ["ZRPC_SOURCE"])
+          scratch = Path(os.environ["ZRPC_SCRATCH"])
+          sys.path.insert(0, str(source / "tools/gcp-guest"))
+          import debian_snapshot
+          import fetch_builder_closure as builder
+          import fetch_guest_closure as guest
+          import verify_builder_closure as closure
+
+          lock, _, _ = builder.reviewed_lock(closure.LOCK)
+          package = next(item for item in lock["packages"] if item["name"] == "gpgv")
+          archives = scratch / "builder-archives"
+          directory = os.open(archives, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+          try:
+              builder.download_one(directory, package, lock["snapshot"])
+              if not builder.verify_cached(directory, package):
+                  raise ValueError("reviewed gpgv archive missing")
+          finally:
+              os.close(directory)
+          data = (archives / (package["sha256"] + ".deb")).read_bytes()
+          if hashlib.sha256(data).hexdigest() != package["sha256"]:
+              raise ValueError("reviewed gpgv archive differs")
+          with tarfile.open(fileobj=io.BytesIO(closure.deb_data_tar(data)), mode="r:xz") as payload:
+              member = payload.getmember("./usr/bin/gpgv")
+              if not member.isfile() or member.uid != 0 or member.gid != 0:
+                  raise ValueError("reviewed gpgv payload differs")
+              binary = payload.extractfile(member).read()
+          if (len(binary) != debian_snapshot.GPGV_SIZE or
+                  hashlib.sha256(binary).hexdigest() != debian_snapshot.GPGV_SHA256):
+              raise ValueError("reviewed gpgv executable differs")
+          executable = scratch / "bin/gpgv"
+          executable.write_bytes(binary)
+          executable.chmod(0o555)
+
+          # The committed gpgv hash bootstraps the signed Debian metadata
+          # check. No package control archive or install hook is executed.
+          os.environ["PATH"] = str(scratch / "bin") + os.pathsep + os.environ["PATH"]
+          builder.fetch_reviewed_metadata(scratch / "builder-metadata")
+          builder.authenticated_packages(
+              scratch / "builder-metadata/InRelease",
+              scratch / "builder-metadata/Packages.xz",
+          )
+          guest.fetch_metadata(scratch / "guest-metadata")
+          guest.prefetch_archives(scratch / "guest-archives")
+          report = guest.verify_cached_archives(
+              scratch / "guest-metadata", scratch / "guest-archives")
+          if (report["package_count"] != 104 or
+                  report["signed_snapshot_rechecked"] is not True or
+                  report["archive_bytes_checked"] is not True or
+                  report["package_scripts_executed"] is not False or
+                  report["image_built"] is not False or
+                  report["private_mode_approved"] is not False):
+              raise ValueError("guest archive diagnostic changed acceptance status")
+          print("Signed guest archive count:", report["package_count"])
+          PY
+
+      - name: Generate, mutate, and verify accounts without a network route
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/guest-accounts"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_HEAD_SHA"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          sudo -n unshare --net -- bash -c '
+            set -euo pipefail
+            test "$(readlink /proc/self/ns/net)" != "$3"
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            setpriv --reuid "$1" --regid "$2" --clear-groups -- \
+              env -i PATH="$4/bin:/usr/bin:/bin" LANG=C \
+              PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+              CODEX_TMP_DIR="$4" ZRPC_GUEST_METADATA="$4/guest-metadata" \
+              ZRPC_GUEST_ARCHIVES="$4/guest-archives" \
+              python3 -m unittest discover -s "$5/tools/gcp-guest" \
+                -p test_build_guest_accounts.py -v
+            setpriv --reuid "$1" --regid "$2" --clear-groups -- \
+              env -i PATH="$4/bin:/usr/bin:/bin" LANG=C \
+              PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+              python3 "$5/tools/gcp-guest/build_guest_accounts.py" \
+                --metadata "$4/guest-metadata" --archives "$4/guest-archives" \
+                --workspace "$4" --output "$4/account-artifact"
+            setpriv --reuid "$1" --regid "$2" --clear-groups -- \
+              env -i PATH="$4/bin:/usr/bin:/bin" LANG=C \
+              PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+              python3 "$5/tools/gcp-guest/build_guest_accounts.py" --verify \
+                --metadata "$4/guest-metadata" --archives "$4/guest-archives" \
+                --workspace "$4" --output "$4/account-artifact"
+          ' _ "$runner_uid" "$runner_gid" "$parent_net_ns" "$scratch" "$source"
+          python3 - "$scratch/account-artifact/receipt.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          receipt = json.loads(Path(sys.argv[1]).read_bytes())
+          if (receipt["status"] != "diagnostic-reproducible-guest-accounts-unbuilt"
+                  or receipt["independent_generation_runs_matched"] is not True
+                  or receipt["package_scripts_executed"] is not False
+                  or receipt["host_dynamic_runtime_authenticated"] is not False
+                  or receipt["installed_rootfs_accounts_compared"] is not False
+                  or receipt["image_built"] is not False
+                  or receipt["private_mode_approved"] is not False):
+              raise ValueError("account diagnostic changed acceptance status")
+          print("Account expectation remains unbuilt and unapproved")
+          PY
