@@ -80,6 +80,9 @@ impl Fixture {
         Mock {
             state: self.state.clone(),
             objects: BTreeMap::new(),
+            staging_noncurrent: false,
+            staging_soft_deleted: false,
+            staging_residual_failure: false,
             operations: BTreeMap::new(),
             calls: Vec::new(),
             deletes: Vec::new(),
@@ -139,6 +142,9 @@ fn image_package_pins_the_complete_secure_boot_policy() {
 struct Mock {
     state: PathBuf,
     objects: BTreeMap<String, Value>,
+    staging_noncurrent: bool,
+    staging_soft_deleted: bool,
+    staging_residual_failure: bool,
     operations: BTreeMap<String, Operation>,
     calls: Vec<String>,
     deletes: Vec<String>,
@@ -186,6 +192,19 @@ impl Provider for Mock {
             return Err(Error("synthetic outage"));
         }
         Ok(self.objects.get(&r.path).cloned())
+    }
+    async fn staging_generation_residual(
+        &mut self,
+        r: &ResourcePlan,
+        identity: &str,
+    ) -> Result<bool> {
+        if r.kind != ResourceKind::StagingObject || !identity.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error("invalid synthetic staging generation"));
+        }
+        if self.outage || self.staging_residual_failure {
+            return Err(Error("synthetic staging generation read failed"));
+        }
+        Ok(self.staging_noncurrent || self.staging_soft_deleted)
     }
     async fn create(&mut self, _: &Package, r: &ResourcePlan, request: &str) -> Result<Mutation> {
         self.assert_committed(request);
@@ -466,6 +485,78 @@ async fn replacement_and_untracked_resources_are_never_deleted() {
     p.objects.get_mut(&instance.path).unwrap()["id"] = json!("999");
     assert!(teardown_once(&mut store, &mut p, 1001).await.is_err());
     assert!(p.deletes.is_empty());
+}
+
+#[tokio::test]
+async fn absent_live_staging_object_with_retained_generation_blocks_cleanup() {
+    let f = Fixture::new();
+    let mut p = f.mock();
+    let mut store = Store::open(&f.state).unwrap();
+    deploy_all(&mut store, &mut p, &f.package).await;
+    let staging = &f.package.resources[0];
+    let identity = store.journal().resources[0].identity.as_deref().unwrap();
+    let paths = crate::gcp::provider::staging_generation_paths(staging, identity).unwrap();
+    assert_eq!(
+        paths,
+        [
+            format!("/storage/v1/{}?generation={identity}", staging.path),
+            format!(
+                "/storage/v1/{}?generation={identity}&softDeleted=true",
+                staging.path
+            ),
+        ]
+    );
+    assert!(crate::gcp::provider::staging_generation_paths(staging, "not-a-generation").is_err());
+    assert!(
+        crate::gcp::provider::staging_generation_paths(
+            f.package.resources.last().unwrap(),
+            identity
+        )
+        .is_err()
+    );
+
+    // Simulate a bucket policy change after deploy: ordinary GET now misses
+    // the object, but its recorded generation remains billable.
+    p.objects.remove(&staging.path);
+    p.staging_noncurrent = true;
+    let generation = store.journal().generation;
+    assert!(
+        observe_resource(&mut store, &mut p, &f.package, 0, 1001)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.journal().generation, generation);
+    assert!(!store.journal().resources[0].observed_absent);
+    assert!(p.deletes.is_empty());
+
+    p.staging_noncurrent = false;
+    p.staging_soft_deleted = true;
+    assert!(
+        observe_resource(&mut store, &mut p, &f.package, 0, 1002)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.journal().generation, generation);
+    assert!(!store.journal().resources[0].observed_absent);
+
+    p.staging_soft_deleted = false;
+    p.staging_residual_failure = true;
+    assert!(
+        observe_resource(&mut store, &mut p, &f.package, 0, 1003)
+            .await
+            .is_err()
+    );
+    assert_eq!(store.journal().generation, generation);
+    assert!(!store.journal().resources[0].observed_absent);
+
+    p.staging_residual_failure = false;
+    assert!(
+        observe_resource(&mut store, &mut p, &f.package, 0, 1004)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.journal().resources[0].observed_absent);
 }
 #[test]
 fn locked_store_and_original_binding_cannot_reset() {

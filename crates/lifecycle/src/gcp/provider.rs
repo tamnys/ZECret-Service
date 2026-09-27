@@ -131,6 +131,13 @@ pub enum Mutation {
 pub trait Provider {
     async fn preflight(&mut self, package: &Package) -> Result<()>;
     async fn get(&mut self, resource: &ResourcePlan) -> Result<Option<Value>>;
+    /// A missing live staging object can still have a billable noncurrent or
+    /// soft-deleted generation. Check the exact generation recorded at create.
+    async fn staging_generation_residual(
+        &mut self,
+        resource: &ResourcePlan,
+        identity: &str,
+    ) -> Result<bool>;
     async fn create(
         &mut self,
         package: &Package,
@@ -365,6 +372,25 @@ fn path(resource: &ResourcePlan) -> (&'static str, String) {
         )
     }
 }
+pub(crate) fn staging_generation_paths(
+    resource: &ResourcePlan,
+    identity: &str,
+) -> Result<[String; 2]> {
+    if resource.kind != ResourceKind::StagingObject
+        || identity.is_empty()
+        || !identity.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(Error("invalid staging generation query"));
+    }
+    let (host, path) = path(resource);
+    if host != "storage.googleapis.com" {
+        return Err(Error("invalid staging resource path"));
+    }
+    Ok([
+        format!("{path}?generation={identity}"),
+        format!("{path}?generation={identity}&softDeleted=true"),
+    ])
+}
 pub fn operation_path(resource: &ResourcePlan, name: &str) -> Result<String> {
     if !super::package::name(name) {
         return Err(Error("invalid Google operation name"));
@@ -426,6 +452,46 @@ impl Provider for GoogleClient {
     async fn get(&mut self, resource: &ResourcePlan) -> Result<Option<Value>> {
         let (h, p) = path(resource);
         self.json(h, p, Method::GET, None).await
+    }
+    async fn staging_generation_residual(
+        &mut self,
+        resource: &ResourcePlan,
+        identity: &str,
+    ) -> Result<bool> {
+        let [noncurrent, soft_deleted] = staging_generation_paths(resource, identity)?;
+        let bucket_name = resource
+            .path
+            .strip_prefix("b/")
+            .and_then(|tail| tail.split_once("/o/"))
+            .map(|(bucket, _)| bucket)
+            .ok_or(Error("invalid staging resource path"))?;
+        let bucket = self
+            .json(
+                "storage.googleapis.com",
+                format!("/storage/v1/b/{bucket_name}"),
+                Method::GET,
+                None,
+            )
+            .await?
+            .ok_or(Error(
+                "staging bucket unavailable; cleanup remains uncertain",
+            ))?;
+        if bucket.get("name").and_then(Value::as_str) != Some(bucket_name) {
+            return Err(Error("staging bucket identity mismatch"));
+        }
+        // Ordinary GET omits both noncurrent and soft-deleted objects. A 404
+        // here is not cleanup evidence until both exact-generation reads miss.
+        if self
+            .json("storage.googleapis.com", noncurrent, Method::GET, None)
+            .await?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .json("storage.googleapis.com", soft_deleted, Method::GET, None)
+            .await?
+            .is_some())
     }
     async fn create(
         &mut self,

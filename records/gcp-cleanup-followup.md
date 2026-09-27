@@ -60,6 +60,22 @@ No offline package or journal field can prove these live authority facts. The
 implementation therefore retains both the creation block and Compute DELETE
 refusal until this contract is independently reviewed and exercised.
 
+## Staging-object residuals
+
+An ordinary object GET can miss a recorded generation that remains noncurrent
+or soft-deleted. Google's [objects.get](https://docs.cloud.google.com/storage/docs/json_api/v1/objects/get)
+supports selecting the exact `generation` and fetching soft-deleted metadata
+with `softDeleted=true`; [soft-deleted objects keep accruing storage charges](https://docs.cloud.google.com/storage/docs/soft-delete).
+The adapter now checks that the shared staging bucket still exists, then
+queries both forms for the recorded generation before committing observed
+absence. A retained generation or provider error leaves cleanup unresolved.
+The synthetic test covers both residual classes and a failed residual read.
+
+This check does not prove that the shared bucket cannot be replaced, that its
+policy cannot change later, or that billing has settled. Those properties
+require live external authority and reconciliation. Compute creation and
+deletion remain blocked.
+
 ## Billing
 
 The [detailed billing export](https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-tables/detailed-usage)
