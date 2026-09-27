@@ -8,6 +8,16 @@ use crate::gcp::{
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
+#[test]
+fn older_journal_without_upload_proof_defaults_to_unverified() {
+    let mut old = serde_json::to_value(crate::gcp::store::ResourceState::default()).unwrap();
+    old.as_object_mut()
+        .unwrap()
+        .remove("upload_media_stream_verified");
+    let decoded: crate::gcp::store::ResourceState = serde_json::from_value(old).unwrap();
+    assert!(!decoded.upload_media_stream_verified);
+}
+
 struct Fixture {
     root: PathBuf,
     state: PathBuf,
@@ -276,6 +286,10 @@ async fn create_intents_are_durable_and_cleanup_tracks_every_owned_resource() {
     let mut store = Store::open(&f.state).unwrap();
     let mut provider = f.mock();
     deploy_all(&mut store, &mut provider, &f.package).await;
+    assert!(store.journal().resources[0].upload_media_stream_verified);
+    let mut reset = store.journal().clone();
+    reset.resources[0].upload_media_stream_verified = false;
+    assert!(store.commit(reset).is_err());
     assert_eq!(provider.calls.len(), f.package.resources.len());
     for _ in &f.package.resources {
         assert_eq!(
@@ -381,7 +395,7 @@ async fn billing_reference_is_post_cleanup_append_only_and_never_changes_status(
     );
 }
 #[tokio::test]
-async fn interrupted_creation_resumes_from_original_intent_after_restart() {
+async fn interrupted_staging_upload_cannot_advance_from_metadata_only() {
     let f = Fixture::new();
     let mut provider = f.mock();
     provider.fail_after_create = true;
@@ -405,10 +419,10 @@ async fn interrupted_creation_resumes_from_original_intent_after_restart() {
             .request_id,
         id
     );
-    assert_eq!(
-        deploy_once(&mut store, &mut provider, 1001).await.unwrap(),
-        Progress::Pending
-    );
+    assert!(deploy_once(&mut store, &mut provider, 1001).await.is_err());
+    assert!(!store.journal().resources[0].upload_media_stream_verified);
+    assert!(store.journal().resources[0].create.as_ref().unwrap().done);
+    assert_eq!(store.journal().resources[0].identity.as_deref(), Some("1"));
     assert_eq!(
         provider
             .calls
@@ -417,6 +431,32 @@ async fn interrupted_creation_resumes_from_original_intent_after_restart() {
             .count(),
         1
     );
+    assert_eq!(provider.objects.len(), 1);
+    let image = f
+        .package
+        .resources
+        .iter()
+        .find(|r| r.kind == ResourceKind::Image)
+        .unwrap();
+    assert!(!provider.objects.contains_key(&image.path));
+    // The exact observed generation remains deletable even though its bytes
+    // cannot be authenticated from metadata after the interrupted response.
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1002)
+            .await
+            .unwrap(),
+        Progress::Pending
+    );
+    assert_eq!(provider.deletes, vec![f.package.resources[0].path.clone()]);
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1003)
+            .await
+            .unwrap(),
+        Progress::ResourcesAbsentBillingUnreconciled
+    );
+    assert!(store.journal().resources[0].observed_absent);
+    assert!(store.journal().resources[0].delete.as_ref().unwrap().done);
+    assert!(!store.journal().resources[0].upload_media_stream_verified);
     assert_eq!(store.journal().original_start, 1000);
 }
 #[tokio::test]

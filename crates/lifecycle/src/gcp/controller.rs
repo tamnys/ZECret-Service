@@ -219,17 +219,12 @@ pub async fn deploy_once<P: Provider>(
             .is_some();
         let state = store.journal().resources[index].clone();
         if present {
-            if resource.kind == ResourceKind::StagingObject
-                && state.create.as_ref().is_some_and(|i| !i.done)
-            {
-                let mut next = store.journal().clone();
-                next.resources[index]
-                    .create
-                    .as_mut()
-                    .ok_or(Error("missing staging intent"))?
-                    .done = true;
-                store.commit(next)?;
-            } else if !state.create.as_ref().is_some_and(|i| i.done) {
+            if resource.kind == ResourceKind::StagingObject && !state.upload_media_stream_verified {
+                return Err(Error(
+                    "staging image exists without verified upload bytes; teardown required",
+                ));
+            }
+            if !state.create.as_ref().is_some_and(|i| i.done) {
                 return Ok(Progress::Pending);
             }
             continue;
@@ -261,11 +256,18 @@ pub async fn deploy_once<P: Provider>(
                 accept_operation(store, index, resource, operation, false)?
             }
             Mutation::Object(value) => {
+                if resource.kind != ResourceKind::StagingObject {
+                    return Err(Error("unexpected object creation response"));
+                }
                 owned(resource, &value)?;
                 let id = identity(resource, &value)?;
                 let mut next = store.journal().clone();
                 let s = &mut next.resources[index];
                 s.identity = Some(id);
+                // The live provider returns this only after the exact media
+                // stream has matched the package digest. GET metadata cannot
+                // make the same assertion after an interrupted upload.
+                s.upload_media_stream_verified = true;
                 s.create
                     .as_mut()
                     .ok_or(Error("missing creation intent"))?
