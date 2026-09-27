@@ -29,6 +29,10 @@ pub struct ResourceState {
     pub delete: Option<Intent>,
     /// Compute incarnation id, or the exact storage-object generation.
     pub identity: Option<String>,
+    /// Only a successful upload whose emitted media matched the package digest
+    /// may set this. Object metadata observed after a lost response cannot.
+    #[serde(default)]
+    pub upload_media_stream_verified: bool,
     pub last_observed_at: Option<u64>,
     pub observed_absent: bool,
 }
@@ -318,6 +322,14 @@ fn validate_transition(previous: &Journal, next: &Journal) -> Result<()> {
     for (a, b) in previous.resources.iter().zip(&next.resources) {
         if a.identity.is_some() && a.identity != b.identity {
             return Err(Error("resource incarnation cannot be replaced"));
+        }
+        if a.upload_media_stream_verified && !b.upload_media_stream_verified
+            || b.upload_media_stream_verified
+                && (b.identity.is_none() || !b.create.as_ref().is_some_and(|i| i.done))
+        {
+            return Err(Error(
+                "verified upload media status is invalid or was reset",
+            ));
         }
         for (old, new) in [(&a.create, &b.create), (&a.delete, &b.delete)] {
             if let Some(new) = new {

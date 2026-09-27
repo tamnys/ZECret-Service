@@ -28,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
@@ -546,11 +546,14 @@ impl Provider for GoogleClient {
                 .metadata()
                 .map_err(|_| Error("raw image stat failed"))?
                 .len();
+            let completed_media_sha256 = Arc::new(Mutex::new(None));
             let body = FileBody {
                 file: tokio::fs::File::from_std(stdfile),
                 prefix: Some(prefix),
                 suffix: Some(suffix),
                 remaining: length,
+                media_hasher: Sha256::new(),
+                completed_media_sha256: completed_media_sha256.clone(),
             };
             let (status, bytes) = self
                 .exchange(
@@ -569,6 +572,10 @@ impl Provider for GoogleClient {
                     "image upload rejected or uncertain; reconcile staging object before retry",
                 ));
             }
+            verify_uploaded_media(
+                &completed_media_sha256,
+                &package.spec.raw_image_tar_gz.sha256,
+            )?;
             return Ok(Mutation::Object(
                 serde_json::from_slice(&bytes).map_err(|_| Error("invalid upload response"))?,
             ));
@@ -682,7 +689,22 @@ struct FileBody {
     prefix: Option<Vec<u8>>,
     suffix: Option<Vec<u8>>,
     remaining: u64,
+    media_hasher: Sha256,
+    completed_media_sha256: Arc<Mutex<Option<String>>>,
 }
+
+fn verify_uploaded_media(completed: &Arc<Mutex<Option<String>>>, expected: &str) -> Result<()> {
+    let digest = completed
+        .lock()
+        .map_err(|_| Error("image upload media state unavailable; reconcile staging object"))?;
+    if digest.as_deref() != Some(expected) {
+        return Err(Error(
+            "image upload media incomplete or changed; reconcile staging object before retry",
+        ));
+    }
+    Ok(())
+}
+
 impl Body for FileBody {
     type Data = Bytes;
     type Error = std::io::Error;
@@ -717,17 +739,113 @@ impl Body for FileBody {
                         ))));
                     }
                     self.remaining -= bytes.len() as u64;
+                    self.media_hasher.update(bytes);
                     return Poll::Ready(Some(Ok(Frame::data(Bytes::copy_from_slice(bytes)))));
                 }
             }
         }
-        Poll::Ready(self.suffix.take().map(|b| Ok(Frame::data(Bytes::from(b)))))
+        if let Some(suffix) = self.suffix.take() {
+            let digest = hex::encode(self.media_hasher.clone().finalize());
+            match self.completed_media_sha256.lock() {
+                Ok(mut completed) => *completed = Some(digest),
+                Err(_) => {
+                    return Poll::Ready(Some(Err(std::io::Error::other(
+                        "image upload media state unavailable",
+                    ))));
+                }
+            }
+            return Poll::Ready(Some(Ok(Frame::data(Bytes::from(suffix)))));
+        }
+        Poll::Ready(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn synthetic_body(file: std::fs::File) -> (FileBody, Arc<Mutex<Option<String>>>) {
+        let length = file.metadata().unwrap().len();
+        let completed_media_sha256 = Arc::new(Mutex::new(None));
+        (
+            FileBody {
+                file: tokio::fs::File::from_std(file),
+                prefix: Some(b"synthetic multipart prefix".to_vec()),
+                suffix: Some(b"synthetic multipart suffix".to_vec()),
+                remaining: length,
+                media_hasher: Sha256::new(),
+                completed_media_sha256: completed_media_sha256.clone(),
+            },
+            completed_media_sha256,
+        )
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_media_changed_after_file_precheck() {
+        let path =
+            std::env::temp_dir().join(format!("zrpc-upload-{}", super::super::uuid().unwrap()));
+        let original = b"synthetic original image bytes";
+        let changed = b"synthetic changed! image bytes";
+        assert_eq!(original.len(), changed.len());
+        fs::write(&path, original).unwrap();
+        let expected = file_sha256(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let (body, completed) = synthetic_body(file);
+        // The second file handle is already open, but media has not been read.
+        // An initial path hash cannot authenticate bytes later sent from it.
+        fs::write(&path, changed).unwrap();
+        let transmitted = body.collect().await.unwrap().to_bytes();
+        assert!(transmitted.windows(changed.len()).any(|w| w == changed));
+        assert!(!transmitted.windows(original.len()).any(|w| w == original));
+        assert!(verify_uploaded_media(&completed, &expected).is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_requires_complete_matching_media_before_acceptance() {
+        let path =
+            std::env::temp_dir().join(format!("zrpc-upload-{}", super::super::uuid().unwrap()));
+        fs::write(&path, b"synthetic exact image bytes").unwrap();
+        let expected = file_sha256(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let (mut body, completed) = synthetic_body(file);
+        assert!(verify_uploaded_media(&completed, &expected).is_err());
+        assert_eq!(
+            body.frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap()
+                .as_ref(),
+            b"synthetic multipart prefix".as_slice()
+        );
+        assert_eq!(
+            body.frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap()
+                .as_ref(),
+            b"synthetic exact image bytes".as_slice()
+        );
+        assert!(verify_uploaded_media(&completed, &expected).is_err());
+        assert_eq!(
+            body.frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap()
+                .as_ref(),
+            b"synthetic multipart suffix".as_slice()
+        );
+        assert!(verify_uploaded_media(&completed, &expected).is_ok());
+        assert!(body.frame().await.is_none());
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn staging_bucket_requires_explicitly_disabled_soft_delete() {
