@@ -2,9 +2,12 @@
 use serde_json::Value;
 use std::{
     net::SocketAddrV4,
+    path::PathBuf,
     time::{Duration, Instant},
 };
 use zrpc_protocol::{Backend, ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
+#[cfg(unix)]
+use zrpc_transport::ManagedTor;
 use zrpc_transport::{
     EndpointInspection, IsolationLabel, RemoteEndpoint, TorConfig, UnverifiedGcpEvidence,
     UnverifiedPublicEvidence, VerifiedRpcSession,
@@ -41,6 +44,45 @@ impl PublicInspectionConfig {
             platform,
             tor: TorConfig::new(address)?,
             endpoint: RemoteEndpoint::new(hostname, port)?,
+        })
+    }
+
+    pub fn platform(&self) -> Backend {
+        self.platform
+    }
+}
+
+/// Genuine private sessions use a child process launched from the selected
+/// local Tor installation. An arbitrary TCP SOCKS listener cannot construct
+/// this configuration or be promoted by the transport authorization API.
+pub struct PrivateEndpointConfig {
+    platform: Backend,
+    endpoint: RemoteEndpoint,
+    tor_executable: PathBuf,
+    #[cfg(unix)]
+    tor: tokio::sync::OnceCell<ManagedTor>,
+}
+
+impl PrivateEndpointConfig {
+    pub fn for_platform(
+        platform: Backend,
+        hostname: &str,
+        port: u16,
+        tor_executable: impl Into<PathBuf>,
+    ) -> Result<Self, SafeError> {
+        let tor_executable = tor_executable.into();
+        if !tor_executable.is_absolute() {
+            return Err(SafeError::new(
+                ErrorCode::TorUnavailable,
+                "An absolute path to the local Tor executable is required.",
+            ));
+        }
+        Ok(Self {
+            platform,
+            endpoint: RemoteEndpoint::new(hostname, port)?,
+            tor_executable,
+            #[cfg(unix)]
+            tor: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -106,7 +148,7 @@ enum NativeEvidence {
 /// This is the only native promotion to a private-capable connection. It
 /// retains the original Tor/TLS socket and cannot accept a diagnostic policy.
 pub async fn connect_verified(
-    config: &PublicInspectionConfig,
+    config: &PrivateEndpointConfig,
     collateral_json: &[u8],
     raw_app_compose: &[u8],
     selection: &ReleasePolicy,
@@ -124,18 +166,38 @@ pub async fn connect_verified(
             "This client has no selected reviewed release.",
         ));
     }
-    match request_evidence(config).await? {
-        NativeEvidence::Phala(evidence) => {
-            evidence.authorize(collateral_json, raw_app_compose, selection)
+    // Selection must succeed before a local Tor process is started. A cached
+    // child is reused by dashboard requests; a dead child is never restarted.
+    #[cfg(not(unix))]
+    return Err(SafeError::new(
+        ErrorCode::TorUnavailable,
+        "Managed local Tor requires a Unix-domain socket on this client platform.",
+    ));
+    #[cfg(unix)]
+    {
+        let tor = config
+            .tor
+            .get_or_try_init(|| async { ManagedTor::launch(&config.tor_executable) })
+            .await?;
+        match request_evidence_with(
+            config.platform,
+            &config.endpoint,
+            EvidenceTransport::Managed(tor),
+        )
+        .await?
+        {
+            NativeEvidence::Phala(evidence) => {
+                evidence.authorize(collateral_json, raw_app_compose, selection)
+            }
+            NativeEvidence::Gcp(evidence) => evidence.authorize(collateral_json, selection),
         }
-        NativeEvidence::Gcp(evidence) => evidence.authorize(collateral_json, selection),
     }
 }
 
 /// Build/read query bytes only after approval, then parse the typed allowlist
 /// and transmit through the retained original TLS sender.
 pub async fn query_endpoint(
-    config: &PublicInspectionConfig,
+    config: &PrivateEndpointConfig,
     collateral_json: &[u8],
     raw_app_compose: &[u8],
     selection: &ReleasePolicy,
@@ -146,6 +208,25 @@ pub async fn query_endpoint(
 }
 
 async fn request_evidence(config: &PublicInspectionConfig) -> Result<NativeEvidence, SafeError> {
+    request_evidence_with(
+        config.platform,
+        &config.endpoint,
+        EvidenceTransport::Diagnostic(&config.tor),
+    )
+    .await
+}
+
+enum EvidenceTransport<'a> {
+    Diagnostic(&'a TorConfig),
+    #[cfg(unix)]
+    Managed(&'a ManagedTor),
+}
+
+async fn request_evidence_with(
+    platform: Backend,
+    endpoint: &RemoteEndpoint,
+    transport: EvidenceTransport<'_>,
+) -> Result<NativeEvidence, SafeError> {
     // Fresh OS randomness per native session; its encoded isolation label is
     // never returned or logged. RFC1929's one-byte length accommodates 64 hex bytes.
     let mut isolation = [0u8; 32];
@@ -161,12 +242,15 @@ async fn request_evidence(config: &PublicInspectionConfig) -> Result<NativeEvide
     let lifetime = Duration::from_secs(MAX_CONNECTION_LIFETIME_SECONDS);
     let started = Instant::now();
     let operation = async {
-        let channel = config
-            .tor
-            .connect_bootstrap(&config.endpoint, isolation)
-            .await?;
+        let channel = match transport {
+            EvidenceTransport::Diagnostic(tor) => {
+                tor.connect_bootstrap(endpoint, isolation).await?
+            }
+            #[cfg(unix)]
+            EvidenceTransport::Managed(tor) => tor.connect_bootstrap(endpoint, isolation).await?,
+        };
         let pending = channel.start_tls().await?.prepare_challenge()?;
-        match config.platform {
+        match platform {
             Backend::PhalaDstack => pending
                 .request_attestation()
                 .await
@@ -216,15 +300,25 @@ mod tests {
 
     #[tokio::test]
     async fn empty_reviewed_catalog_never_reads_query_or_opens_tor() {
-        let config = PublicInspectionConfig::new("fixture.invalid", 443, "127.0.0.1:9").unwrap();
+        let config = PrivateEndpointConfig::for_platform(
+            Backend::PhalaDstack,
+            "fixture.invalid",
+            443,
+            "/missing/local/tor",
+        )
+        .unwrap();
         let result = query_endpoint(&config, b"{}", b"{}", &ReleasePolicy::default(), || {
             panic!("private body read before approval")
         })
         .await;
         assert_eq!(result.unwrap_err().code, ErrorCode::UnknownRelease);
-        let config =
-            PublicInspectionConfig::for_platform(Backend::GcpTdx, "192.0.2.1", 443, "127.0.0.1:9")
-                .unwrap();
+        let config = PrivateEndpointConfig::for_platform(
+            Backend::GcpTdx,
+            "192.0.2.1",
+            443,
+            "/missing/local/tor",
+        )
+        .unwrap();
         let result = query_endpoint(&config, b"{}", b"", &ReleasePolicy::default(), || {
             panic!("GCP private body read before approval")
         })

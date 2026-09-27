@@ -9,7 +9,7 @@ use rustls::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
 use tokio_rustls::{TlsAcceptor, server::TlsStream as ServerStream};
 

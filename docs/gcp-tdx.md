@@ -36,11 +36,11 @@ cargo run --locked -p zrpc-cli -- inspect-endpoint --platform gcp-tdx \
   --policy gcp-workload-policy.json
 ```
 
-Set the SOCKS address to your actual local Tor listener. IPs remain numeric
-SOCKS destinations; hostnames use remote DNS. No endpoint is contacted directly.
-The client trusts your Tor installation; SOCKS negotiation does not prove that
-the proxy is Tor. Collateral is supplied locally, with current-clock expiration
-checks and no automatic downloads.
+Set the SOCKS address to your actual local Tor listener. This inspection command
+accepts any responding loopback SOCKS proxy and cannot authorize a private
+session. IPs remain numeric SOCKS destinations; hostnames use remote DNS. No
+endpoint is contacted directly. Collateral is supplied locally, with
+current-clock expiration checks and no automatic downloads.
 
 Inspection sends only a fresh nonce, compares authenticated evidence with the
 original TLS session's exporter, then closes the connection. Its output never
@@ -54,12 +54,17 @@ by this workload comparison.
 ```sh
 cargo run --locked -p zrpc-cli -- verify --platform gcp-tdx \
   --endpoint-host "$ZRPC_ENDPOINT_IP" --endpoint-port "$ZRPC_ENDPOINT_PORT" \
-  --socks 127.0.0.1:9050 --collateral collateral.json \
+  --tor-executable /absolute/path/to/tor --collateral collateral.json \
   --release-policy config/release-policy.example.json
 ```
 
-Replace `verify` with `query --stdin` or `dashboard` as appropriate. With the
-empty release catalog, queries refuse before reading stdin or opening Tor.
+Replace `verify` with `query --stdin` or `dashboard` as appropriate. The private
+client is designed to start the selected local Tor executable as a child with a
+fresh private Unix SOCKS socket. It trusts that local executable and host;
+process launch is not independent proof of Tor's identity or network behavior.
+Its local Tor cache is host state, separate from the confidential guest's disk
+policy. With the empty release catalog, queries refuse before reading stdin or
+opening Tor.
 The dashboard receives queries locally and delegates verification and transport
 to Rust. `demo` remains a separate simulation with no cloud connection.
 

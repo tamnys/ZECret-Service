@@ -4,7 +4,7 @@ ZECret service is an experimental privacy-focused way to read Zcash blockchain d
 
 The goal is simple: look up a block or transaction without giving a remote server an easy way to connect that lookup to you.
 
-**Current status:** this repository provides a local demo, attestation tools, and the foundations of a Zcash testnet service. Private queries are disabled because the client does not yet include an approved server release. The current transport uses Tor; Nym is an intended alternative, not an available client option in this version. No hosted endpoint or live Zcash node is included.
+**Current status:** this repository provides a local demo, attestation tools, and the foundations of a Zcash testnet service. Private queries are disabled because the client does not yet include an approved server release. Endpoint inspection accepts a configured local SOCKS proxy; private commands are designed to start a selected local Tor executable. Nym is an intended alternative, not an available client option in this version. No hosted endpoint or live Zcash node is included.
 
 ## How it works
 
@@ -36,12 +36,12 @@ Network privacy complements the TEE by making it harder to link a request to the
 
 | Option | What it provides | Availability here |
 | --- | --- | --- |
-| **Tor** | Routes connections through relays to hide the client's IP address from the destination. | Implemented through an explicitly configured local SOCKS proxy. Available for endpoint inspection; private queries remain disabled. |
+| **Tor** | Routes connections through relays to hide the client's IP address from the destination. | Endpoint inspection uses an explicitly configured local SOCKS proxy. Private commands are designed to start a local Tor child with a private Unix socket once an approved release exists; private queries remain disabled. |
 | **Nym mixnet** | Mixes traffic with other users' traffic and adds cover traffic and timing delays to make connections harder to correlate. This adds latency. | Intended alternative; not yet selectable in this version. |
 
 Learn more about [Tor's protections](https://support.torproject.org/about-tor/introduction/protections/) and [how Nym's mixnet works](https://nym.com/nym_litepaper.pdf).
 
-The Tor transport sends destination hostnames through the proxy for remote DNS resolution, uses a fresh stream-isolation credential for each session, and has no direct fallback. You must run and configure Tor yourself: a successful SOCKS connection alone does not prove that the local proxy is Tor. See the [endpoint inspection guide](docs/public-inspection.md) for configuration.
+The transport sends destination hostnames through the proxy for remote DNS resolution, uses a fresh stream-isolation credential for each session, and has no direct fallback. For endpoint inspection, run and configure Tor yourself. For private commands, supply the absolute path to the local Tor executable. The client trusts that installation and your device; a successful SOCKS connection alone does not prove Tor's identity or network behavior. See the [endpoint inspection guide](docs/public-inspection.md) for diagnostic configuration.
 
 Neither network routing nor a TEE guarantees complete anonymity. They address different parts of the privacy problem, and both depend on the client and service being configured correctly.
 

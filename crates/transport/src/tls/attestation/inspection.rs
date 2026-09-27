@@ -128,6 +128,7 @@ impl UnverifiedPublicEvidence {
         raw_app_compose: &[u8],
         selection: &ReleasePolicy,
     ) -> Result<VerifiedRpcSession, zrpc_protocol::SafeError> {
+        self._session.origin.require_managed()?;
         let releases = ApprovedRelease::selected(selection)?;
         if releases.is_empty() {
             return Err(zrpc_protocol::SafeError::new(
