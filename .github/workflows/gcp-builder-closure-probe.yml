@@ -236,9 +236,16 @@ jobs:
             mount --bind "$guest_archives" "$staged/zrpc-guest-archives"
             mount -o remount,bind,ro "$staged/zrpc-guest-archives"
             mount -t proc proc "$staged/proc"
-            test ! -e "$staged/dev/null"
-            touch "$staged/dev/null"
-            mount --bind /dev/null "$staged/dev/null"
+            # Pinned mkosi-sandbox DevOperation requires these API devices in
+            # its old root. Do not expose the optional /dev/fuse device.
+            for device in null zero full random urandom tty; do
+              test -c "/dev/$device"
+              test ! -e "$staged/dev/$device"
+              test ! -L "$staged/dev/$device"
+              touch "$staged/dev/$device"
+              mount --bind "/dev/$device" "$staged/dev/$device"
+              test -c "$staged/dev/$device"
+            done
 
             run_staged() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
