@@ -322,7 +322,7 @@ fn private_file(path: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod real_tor_smoke {
     use super::*;
-    use std::net::{ErrorKind, TcpListener};
+    use std::{io::ErrorKind, net::TcpListener};
 
     /// Opt-in integration check using an independently authenticated Tor
     /// executable. A loopback destination would be reachable by a direct
