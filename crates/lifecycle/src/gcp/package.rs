@@ -32,6 +32,35 @@ const CUSTOM_IMAGE_C3_TDX_MACHINE_TYPES: [&str; 6] = [
     "c3-standard-88",
     "c3-standard-176",
 ];
+// Google's C3 TDX zone list is distinct from the C3 Local SSD and C4 lists.
+// Review the current provider list before admitting an additional zone:
+// https://docs.cloud.google.com/confidential-computing/confidential-vm/docs/supported-configurations
+const CUSTOM_IMAGE_C3_TDX_ZONES: [&str; 24] = [
+    "asia-northeast1-b",
+    "asia-south1-b",
+    "asia-southeast1-a",
+    "asia-southeast1-b",
+    "asia-southeast1-c",
+    "europe-west3-a",
+    "europe-west3-b",
+    "europe-west4-a",
+    "europe-west4-b",
+    "europe-west4-c",
+    "europe-west9-a",
+    "europe-west9-b",
+    "us-central1-a",
+    "us-central1-b",
+    "us-central1-c",
+    "us-east1-b",
+    "us-east1-c",
+    "us-east4-a",
+    "us-east4-b",
+    "us-east4-c",
+    "us-east5-b",
+    "us-east5-c",
+    "us-west1-a",
+    "us-west1-b",
+];
 // Embed the checked source so a path next to the operator binary cannot
 // replace the import validator. Python's maintained gzip/tarfile decoders are
 // required on the operator's reviewed Linux host; absence fails closed.
@@ -260,6 +289,7 @@ impl DeploymentSpec {
             || !name(&self.region)
             || !name(&self.zone)
             || !self.zone.starts_with(&format!("{}-", self.region))
+            || !CUSTOM_IMAGE_C3_TDX_ZONES.contains(&self.zone.as_str())
             || !name(&self.machine_type)
             || !CUSTOM_IMAGE_C3_TDX_MACHINE_TYPES.contains(&self.machine_type.as_str())
             || self.boot_disk_gib == 0

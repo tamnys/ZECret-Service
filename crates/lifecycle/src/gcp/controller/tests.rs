@@ -335,6 +335,24 @@ fn custom_image_package_rejects_incompatible_c3_tdx_machine_types() {
 }
 
 #[test]
+fn custom_image_package_rejects_zones_without_c3_tdx_support() {
+    let f = Fixture::new();
+    let mut supported = f.package.spec.clone();
+    supported.region = "us-east5".into();
+    supported.zone = "us-east5-c".into();
+    assert!(Package::prepare(supported, 1000).is_ok());
+
+    for zone in ["us-central1-d", "us-central1-f"] {
+        let mut unsupported = f.package.spec.clone();
+        unsupported.zone = zone.into();
+        assert!(
+            Package::prepare(unsupported, 1000).is_err(),
+            "{zone} is not in Google's C3 TDX zone list"
+        );
+    }
+}
+
+#[test]
 fn import_receipt_binds_candidate_media_and_local_executables_without_approval() {
     let f = Fixture::new();
     let original: Value =
