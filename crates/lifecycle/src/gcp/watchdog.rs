@@ -66,6 +66,33 @@ fn safe_path(path: &Path) -> Result<&str> {
     }
     Ok(s)
 }
+
+/// The unit pins a controls *path*, not its contents. Reject a path that
+/// another local UID could replace after deployment admission. The controller
+/// UID itself remains part of the trusted external-host boundary.
+pub fn verify_controls_path(path: &Path, controller_uid: u32) -> Result<()> {
+    safe_path(path)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| Error("external controls file unavailable"))?;
+    if !metadata.is_file()
+        || metadata.uid() != 0 && metadata.uid() != controller_uid
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(Error("external controls file permits replacement"));
+    }
+    for parent in path.ancestors().skip(1) {
+        let metadata = fs::symlink_metadata(parent)
+            .map_err(|_| Error("external controls path unavailable"))?;
+        let root_owned_sticky = metadata.uid() == 0 && metadata.mode() & 0o1000 != 0;
+        if !metadata.is_dir()
+            || metadata.uid() != 0 && metadata.uid() != controller_uid
+            || metadata.mode() & 0o022 != 0 && !root_owned_sticky
+        {
+            return Err(Error("external controls path permits replacement"));
+        }
+    }
+    Ok(())
+}
 impl Controls {
     pub fn deletion_start(&self, package: &Package) -> Result<u64> {
         let runtime: Runtime = serde_json::from_slice(&read_regular(&self.runtime_file.path)?)
@@ -205,6 +232,7 @@ impl Controls {
             ));
         }
         self.validate(package, at)?;
+        verify_controls_path(controls_path, self.controller_uid)?;
         if at >= self.deletion_start(package)? {
             return Err(Error("deletion window reached; deploy is disabled"));
         }
@@ -324,4 +352,42 @@ pub fn export(
             .map_err(|_| Error("watchdog export failed"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn controls_path_rejects_other_writer_and_symlink_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "zrpc-gcp-controls-synthetic-{}",
+            crate::gcp::uuid().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let controls = root.join("controls.json");
+        fs::write(&controls, b"synthetic controls").unwrap();
+        fs::set_permissions(&controls, fs::Permissions::from_mode(0o600)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        verify_controls_path(&controls, uid).unwrap();
+
+        fs::set_permissions(&controls, fs::Permissions::from_mode(0o620)).unwrap();
+        assert!(verify_controls_path(&controls, uid).is_err());
+        fs::set_permissions(&controls, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
+        assert!(verify_controls_path(&controls, uid).is_err());
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let linked_file = root.join("linked.json");
+        symlink(&controls, &linked_file).unwrap();
+        assert!(verify_controls_path(&linked_file, uid).is_err());
+        let linked_dir = root.with_extension("link");
+        symlink(&root, &linked_dir).unwrap();
+        assert!(verify_controls_path(&linked_dir.join("controls.json"), uid).is_err());
+
+        fs::remove_file(linked_dir).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 }

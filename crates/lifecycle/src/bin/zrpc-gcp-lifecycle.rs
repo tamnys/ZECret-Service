@@ -115,6 +115,7 @@ async fn run() -> Result<()> {
                 "external controls do not bind this journal and runtime",
             ));
         }
+        watchdog::verify_controls_path(&controls_path, controls.controller_uid)?;
         if command == "deploy" {
             if value(&options, "--approve-package")? != package.sha256()? {
                 return Err(Error("explicit approval must match frozen package SHA-256"));
