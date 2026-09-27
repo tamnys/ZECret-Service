@@ -410,7 +410,7 @@ fn parse_operation(v: Value) -> Result<Operation> {
     serde_json::from_value(v).map_err(|_| Error("invalid Google operation response"))
 }
 
-fn validate_staging_bucket(bucket: &Value) -> Result<()> {
+fn validate_staging_bucket(bucket: &Value) -> Result<&str> {
     // A missing policy is not evidence that soft delete is disabled. Require
     // the explicit zero returned by the Storage JSON API for a disabled policy.
     if bucket.get("retentionPolicy").is_some()
@@ -437,6 +437,19 @@ fn validate_staging_bucket(bucket: &Value) -> Result<()> {
             "staging bucket must enforce public access prevention",
         ));
     }
+    bucket
+        .get("metageneration")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or(Error("staging bucket metadata generation missing"))
+}
+
+fn validate_staging_bucket_pair(before: &Value, after: &Value) -> Result<()> {
+    if validate_staging_bucket(before)? != validate_staging_bucket(after)? {
+        return Err(Error(
+            "staging bucket metadata changed during propagation wait",
+        ));
+    }
     Ok(())
 }
 
@@ -444,16 +457,28 @@ impl Provider for GoogleClient {
     async fn preflight(&mut self, package: &Package) -> Result<()> {
         super::ensure_live_creation_ready()?;
         // Detect storage retention/soft-delete billing before image upload.
-        let bucket = self
+        let bucket_path = format!("/storage/v1/b/{}", package.spec.staging_bucket);
+        let before = self
             .json(
                 "storage.googleapis.com",
-                format!("/storage/v1/b/{}", package.spec.staging_bucket),
+                bucket_path.clone(),
                 Method::GET,
                 None,
             )
             .await?
             .ok_or(Error("staging bucket missing"))?;
-        validate_staging_bucket(&bucket)
+        validate_staging_bucket(&before)?;
+        // Google documents up to 30 seconds of soft-delete policy propagation.
+        // A zero-valued GET immediately after disabling it is not enough.
+        // https://docs.cloud.google.com/storage/docs/disable-soft-delete
+        tokio::time::timeout_at(self.deadline, tokio::time::sleep(Duration::from_secs(30)))
+            .await
+            .map_err(|_| Error("invocation deadline before bucket policy propagation"))?;
+        let after = self
+            .json("storage.googleapis.com", bucket_path, Method::GET, None)
+            .await?
+            .ok_or(Error("staging bucket missing after propagation wait"))?;
+        validate_staging_bucket_pair(&before, &after)
     }
     async fn get(&mut self, resource: &ResourcePlan) -> Result<Option<Value>> {
         let (h, p) = path(resource);
@@ -707,7 +732,8 @@ mod tests {
     #[test]
     fn staging_bucket_requires_explicitly_disabled_soft_delete() {
         let mut bucket = json!({
-            "iamConfiguration": {"publicAccessPrevention": "enforced"}
+            "iamConfiguration": {"publicAccessPrevention": "enforced"},
+            "metageneration": "1"
         });
         assert!(validate_staging_bucket(&bucket).is_err());
 
@@ -716,5 +742,12 @@ mod tests {
 
         bucket["softDeletePolicy"] = json!({"retentionDurationSeconds": "0"});
         assert!(validate_staging_bucket(&bucket).is_ok());
+        assert!(validate_staging_bucket_pair(&bucket, &bucket).is_ok());
+
+        let mut changed = bucket.clone();
+        changed["metageneration"] = json!("2");
+        assert!(validate_staging_bucket_pair(&bucket, &changed).is_err());
+        changed["metageneration"] = Value::Null;
+        assert!(validate_staging_bucket_pair(&bucket, &changed).is_err());
     }
 }
