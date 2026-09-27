@@ -17,6 +17,52 @@ use ez_hash::{Hasher, Sha256, Sha384};
 use serde::{Deserialize, Serialize};
 use zrpc_protocol::MAX_ATTESTATION_RESPONSE_BYTES;
 
+/// Provider facts reviewed before a release is embedded in the native client.
+/// Neither endpoint evidence nor an operator-supplied diagnostic policy can
+/// construct an `ApprovedRelease` carrying these expectations.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GcpProviderIdentity {
+    /// PPID of the reviewed object at Google's confidential-host-registry
+    /// bucket. The object is named by the lowercase hex encoding of this PPID.
+    #[serde(deserialize_with = "decode_hash")]
+    pub ppid: [u8; 16],
+    /// SHA-256 of the exact registry object acquired from Google for review.
+    #[serde(deserialize_with = "decode_hash")]
+    pub host_registry_sha256: [u8; 32],
+    pub project_number: u64,
+    pub zone: String,
+    pub instance_id: u64,
+    /// SHA-256 of the independently reviewed instance inventory record.
+    #[serde(deserialize_with = "decode_hash")]
+    pub instance_inventory_sha256: [u8; 32],
+}
+
+impl GcpProviderIdentity {
+    pub(crate) fn validate(&self) -> bool {
+        !self.zone.is_empty()
+            && self
+                .zone
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && self.host_registry_sha256 != [0; 32]
+            && self.instance_inventory_sha256 != [0; 32]
+    }
+
+    fn pzid_payload(&self) -> String {
+        // Google's PZIDPayload uses precisely this ASCII JSON serialization.
+        // Zone validation above makes JSON string escaping unnecessary.
+        format!(
+            "{{\"instanceId\":{},\"numericalProjectId\":{},\"zone\":\"{}\"}}",
+            self.instance_id, self.project_number, self.zone
+        )
+    }
+
+    fn pzid_digest(&self) -> [u8; 48] {
+        Sha384::hash(self.pzid_payload().as_bytes())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GcpArtifactPolicy {
@@ -185,6 +231,11 @@ pub struct GcpWorkloadInspection {
     pub firmware_endorsement_provenance: InspectionStatus,
     /// Component hashes require independent reconstruction from build artifacts.
     pub artifact_provenance: InspectionStatus,
+    /// Verified PCK PPID compared with a client-packaged registry reference.
+    /// This does not fetch or authenticate a registry response at runtime.
+    pub google_host_ppid_match: InspectionStatus,
+    /// Signed MR_OWNER compared with client-packaged project, zone and instance.
+    pub google_instance_binding: InspectionStatus,
     pub workload_issue: Option<GcpWorkloadIssue>,
 }
 
@@ -225,6 +276,8 @@ impl BoundGcpWorkloadInspection {
         self.diagnostic_passed()
             && self.workload.firmware_endorsement_provenance == InspectionStatus::Verified
             && self.workload.artifact_provenance == InspectionStatus::Verified
+            && self.workload.google_host_ppid_match == InspectionStatus::Verified
+            && self.workload.google_instance_binding == InspectionStatus::Verified
     }
 }
 
@@ -234,7 +287,7 @@ pub fn inspect_gcp_workload(
     ccel: &[u8],
     policy: &GcpWorkloadPolicy,
 ) -> GcpWorkloadInspection {
-    inspect_using(ccel, policy, None, |inspect| {
+    inspect_using(ccel, policy, None, None, |inspect| {
         offline::inspect_quote_with_claims(quote, collateral_json, inspect)
     })
     .workload
@@ -247,7 +300,20 @@ pub fn inspect_gcp_workload_and_report_data(
     policy: &GcpWorkloadPolicy,
     expected: &[u8; 64],
 ) -> BoundGcpWorkloadInspection {
-    inspect_using(ccel, policy, Some(expected), |inspect| {
+    inspect_using(ccel, policy, Some(expected), None, |inspect| {
+        offline::inspect_quote_with_claims(quote, collateral_json, inspect)
+    })
+}
+
+pub(crate) fn inspect_approved_gcp_workload_and_report_data(
+    quote: &[u8],
+    collateral_json: &[u8],
+    ccel: &[u8],
+    policy: &GcpWorkloadPolicy,
+    provider: &GcpProviderIdentity,
+    expected: &[u8; 64],
+) -> BoundGcpWorkloadInspection {
+    inspect_using(ccel, policy, Some(expected), Some(provider), |inspect| {
         offline::inspect_quote_with_claims(quote, collateral_json, inspect)
     })
 }
@@ -256,14 +322,21 @@ fn inspect_using(
     ccel: &[u8],
     policy: &GcpWorkloadPolicy,
     expected: Option<&[u8; 64]>,
+    provider: Option<&GcpProviderIdentity>,
     inspect_quote: impl FnOnce(&mut dyn FnMut(&dcap_qvl::QuoteClaims)) -> OfflineInspection,
 ) -> BoundGcpWorkloadInspection {
     let mut checks = Checks::default();
     let mut report_data = InspectionStatus::NotChecked;
+    let mut host_ppid_match = InspectionStatus::NotChecked;
+    let mut instance_binding = InspectionStatus::NotChecked;
     let mut issue = None;
     let mut quote = inspect_quote(&mut |claims| {
         // No unauthenticated quote field reaches replay or policy comparison.
         if let Some(td) = claims.report.as_td10() {
+            if let Some(provider) = provider {
+                (host_ppid_match, instance_binding) =
+                    compare_provider(td, &claims.platform.pck.ppid, provider);
+            }
             if let Some(expected) = expected {
                 report_data = if td.report_data == *expected {
                     InspectionStatus::Verified
@@ -285,18 +358,45 @@ fn inspect_using(
     BoundGcpWorkloadInspection {
         workload: GcpWorkloadInspection {
             quote,
-            policy_source: "explicit_local_input_not_release_approval",
+            policy_source: if provider.is_some() {
+                "client_packaged_reviewed_release"
+            } else {
+                "explicit_local_input_not_release_approval"
+            },
             ccel_integrity: checks.replay,
             firmware_measurement_reference_match: checks.firmware_measurement,
             boot_measurement_reference_match: checks.boot_measurements,
             firmware_endorsement_provenance: InspectionStatus::NotChecked,
             artifact_provenance: InspectionStatus::NotChecked,
+            google_host_ppid_match: host_ppid_match,
+            google_instance_binding: instance_binding,
             workload_issue: issue,
         },
         authenticated_report_data_match: report_data,
         binding_issue: (report_data == InspectionStatus::Rejected)
             .then_some(ReportDataIssue::AuthenticatedReportDataMismatch),
     }
+}
+
+fn compare_provider(
+    td: &TDReport10,
+    verified_pck_ppid: &[u8],
+    expected: &GcpProviderIdentity,
+) -> (InspectionStatus, InspectionStatus) {
+    if !expected.validate() {
+        return (InspectionStatus::Rejected, InspectionStatus::Rejected);
+    }
+    let host = if verified_pck_ppid == expected.ppid {
+        InspectionStatus::Verified
+    } else {
+        InspectionStatus::Rejected
+    };
+    let instance = if td.mr_owner == expected.pzid_digest() {
+        InspectionStatus::Verified
+    } else {
+        InspectionStatus::Rejected
+    };
+    (host, instance)
 }
 
 struct Checks {

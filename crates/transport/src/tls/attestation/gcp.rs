@@ -43,7 +43,7 @@ impl UnverifiedGcpEvidence {
         }
         let collateral_deadline = releases.iter().find_map(|release| {
             release.gcp_workload().and_then(|policy| {
-                let report = self.inspect_against(collateral, policy);
+                let report = self.inspect_against_with_release(collateral, policy, Some(release));
                 (report.diagnostic_passed()
                     && report
                         .gcp_evidence
@@ -68,6 +68,15 @@ impl UnverifiedGcpEvidence {
     }
 
     fn inspect_against(&self, collateral: &[u8], policy: &GcpWorkloadPolicy) -> EndpointInspection {
+        self.inspect_against_with_release(collateral, policy, None)
+    }
+
+    fn inspect_against_with_release(
+        &self,
+        collateral: &[u8],
+        policy: &GcpWorkloadPolicy,
+        release: Option<&ApprovedRelease>,
+    ) -> EndpointInspection {
         let mut report = EndpointInspection::new();
         report.platform = Backend::GcpTdx;
         self.check_session(&mut report);
@@ -92,13 +101,26 @@ impl UnverifiedGcpEvidence {
             report.issue = Some(EndpointInspectionIssue::MalformedQuoteEncoding);
             return report;
         };
-        report.gcp_evidence = Some(inspect_gcp_workload_and_report_data(
-            &quote,
-            collateral,
-            &ccel,
-            policy,
-            &self.connection.expected_report_data,
-        ));
+        report.gcp_evidence = Some(match release {
+            Some(release) => {
+                let Some(inspection) = release.inspect_gcp_evidence(
+                    &quote,
+                    collateral,
+                    &ccel,
+                    &self.connection.expected_report_data,
+                ) else {
+                    return report;
+                };
+                inspection
+            }
+            None => inspect_gcp_workload_and_report_data(
+                &quote,
+                collateral,
+                &ccel,
+                policy,
+                &self.connection.expected_report_data,
+            ),
+        });
         self.check_session(&mut report);
         let after_instant = Instant::now();
         let after = SystemTime::now();
