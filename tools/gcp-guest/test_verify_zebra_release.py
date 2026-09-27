@@ -5,18 +5,23 @@ from datetime import timedelta
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest import mock
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import verify_zebra_release as zebra
 
 
 class ZebraArtifactTests(unittest.TestCase):
     def setUp(self):
-        self.lock = zebra.load_lock()
+        self.lock, self.lock_sha256 = zebra.load_lock()
         self.advisories = [{
             "ghsa_id": "GHSA-test-synthetic-0001",
             "updated_at": "2026-09-25T20:02:29Z",
@@ -95,9 +100,41 @@ class ZebraArtifactTests(unittest.TestCase):
             with mock.patch.object(zebra, "live_preflight", return_value={
                     "status": "held-metadata-only-unapproved"}):
                 with self.assertRaisesRegex(ValueError, "release hold"):
-                    zebra.stage(self.lock, Path(root) / "missing-archive",
+                    zebra.stage(self.lock, self.lock_sha256,
+                                Path(root) / "missing-archive",
                                 Path(root) / "missing-gh", output)
             self.assertFalse(output.exists())
+
+    def test_metadata_redirect_does_not_fetch_asset_body(self):
+        hits = {"metadata": 0, "asset": 0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/metadata":
+                    hits["metadata"] += 1
+                    self.send_response(302)
+                    self.send_header("Location", "/asset")
+                    self.end_headers()
+                else:
+                    hits["asset"] += 1
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"synthetic asset bytes")
+
+            def log_message(self, _format, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaisesRegex(ValueError, "redirected"):
+                zebra.fetch_json(f"http://127.0.0.1:{server.server_port}/metadata")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        self.assertEqual(hits, {"metadata": 1, "asset": 0})
 
     def test_attestation_must_match_pinned_source_and_subject(self):
         with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:
@@ -114,6 +151,9 @@ class ZebraArtifactTests(unittest.TestCase):
                 self.assertEqual(zebra.verify_gh(self.lock, verifier,
                                                  Path(root) / "archive"), 1)
             args = run.call_args.args[0]
+            self.assertEqual(run.call_args.kwargs["executable"], args[0])
+            self.assertTrue(args[0].startswith("/proc/self/fd/"))
+            self.assertEqual(len(run.call_args.kwargs["pass_fds"]), 1)
             self.assertIn("--deny-self-hosted-runners", args)
             self.assertEqual(args[args.index("--signer-workflow") + 1],
                              self.lock["signer_workflow"])
@@ -127,6 +167,66 @@ class ZebraArtifactTests(unittest.TestCase):
             with mock.patch.object(zebra.subprocess, "run", return_value=response):
                 with self.assertRaisesRegex(ValueError, "subject or predicate"):
                     zebra.verify_gh(self.lock, verifier, Path(root) / "archive")
+
+    def test_replaced_verifier_path_cannot_change_executed_bytes(self):
+        with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:
+            verifier = Path(root) / "verifier"
+            shutil.copyfile("/bin/true", verifier)
+            verifier.chmod(0o755)
+            expected = hashlib.sha256(verifier.read_bytes()).hexdigest()
+            descriptor = zebra.sealed_verifier_fd(verifier, expected)
+            try:
+                replacement = Path(root) / "replacement"
+                replacement.write_bytes(b"not the reviewed executable")
+                replacement.chmod(0o755)
+                os.replace(replacement, verifier)
+                with self.assertRaises(OSError):
+                    os.pwrite(descriptor, b"x", 0)
+                command = f"/proc/self/fd/{descriptor}"
+                result = subprocess.run([command], executable=command,
+                                        pass_fds=(descriptor,), capture_output=True,
+                                        check=False)
+                self.assertEqual(result.returncode, 0)
+                self.assertNotEqual(hashlib.sha256(verifier.read_bytes()).hexdigest(),
+                                    expected)
+            finally:
+                os.close(descriptor)
+
+    def test_receipt_names_original_lock_bytes_after_replacement(self):
+        with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:
+            root = Path(root)
+            elf = bytearray(64)
+            elf[:6] = b"\x7fELF\x02\x01"
+            elf[16:18] = b"\x03\x00"
+            elf[18:20] = b"\x3e\x00"
+            archive = root / "synthetic.tar.gz"
+            with tarfile.open(archive, "w:gz") as package:
+                for name in sorted(zebra.TAR_MEMBERS):
+                    content = bytes(elf) if name == "zebrad" else b"synthetic text"
+                    member = tarfile.TarInfo(name)
+                    member.size = len(content)
+                    package.addfile(member, io.BytesIO(content))
+            self.lock["asset"]["size"] = archive.stat().st_size
+            self.lock["asset"]["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+            self.lock["zebrad_elf_size"] = len(elf)
+            self.lock["zebrad_elf_sha256"] = hashlib.sha256(elf).hexdigest()
+            lock_path = root / "reviewed.lock.json"
+            lock_path.write_text(json.dumps(self.lock))
+            with mock.patch.object(zebra, "LOCK_PATH", lock_path):
+                selected, selected_digest = zebra.load_lock()
+
+                def replace_lock(*_args):
+                    lock_path.write_text('{"different":"lock"}')
+                    return 1
+
+                with (mock.patch.object(zebra, "live_preflight", return_value={
+                        "status": "age-eligible-metadata-only-unapproved"}),
+                      mock.patch.object(zebra, "verify_gh", side_effect=replace_lock)):
+                    receipt = zebra.stage(selected, selected_digest, archive,
+                                          root / "unused-verifier", root / "output")
+            self.assertEqual(receipt["release_lock_sha256"], selected_digest)
+            self.assertNotEqual(hashlib.sha256(lock_path.read_bytes()).hexdigest(),
+                                selected_digest)
 
     def test_archive_rejects_extra_members_links_and_non_x86_elf(self):
         with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:

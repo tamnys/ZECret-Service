@@ -10,6 +10,7 @@ Neither command downloads release assets, builds an image, or approves privacy.
 import argparse
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -30,6 +31,11 @@ API = "https://api.github.com/repos/ZcashFoundation/zebra"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SHA1 = re.compile(r"[0-9a-f]{40}\Z")
 TAR_MEMBERS = {"zebrad", "LICENSE-APACHE", "LICENSE-MIT", "README.md"}
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        raise ValueError("GitHub metadata endpoint redirected")
 
 
 def unique_object(pairs):
@@ -59,9 +65,15 @@ def utc(value):
 
 
 def load_lock():
-    if LOCK_PATH.is_symlink() or not LOCK_PATH.is_file():
-        raise ValueError("reviewed Zebra release lock missing or redirected")
-    lock = read_json(LOCK_PATH.read_bytes())
+    descriptor, before = regular_file(LOCK_PATH)
+    with os.fdopen(descriptor, "rb") as stream:
+        lock_bytes = stream.read()
+        after = os.fstat(stream.fileno())
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+            before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
+                                    after.st_mtime_ns, after.st_ctime_ns):
+        raise ValueError("reviewed Zebra release lock changed while reading")
+    lock = read_json(lock_bytes)
     required = {"schema_version", "status", "repository", "release_id",
                 "tag", "tag_object_sha", "source_commit", "published_at",
                 "minimum_age_days", "asset", "signer_workflow",
@@ -109,7 +121,7 @@ def load_lock():
     if lock["zebrad_elf_size"] is not None and (type(lock["zebrad_elf_size"]) is not int
                                                 or lock["zebrad_elf_size"] <= 0):
         raise ValueError("reviewed ELF size malformed")
-    return lock
+    return lock, hashlib.sha256(lock_bytes).hexdigest()
 
 
 def fetch_json(url):
@@ -117,7 +129,9 @@ def fetch_json(url):
         url, headers={"Accept": "application/vnd.github+json",
                       "User-Agent": "zrpc-zebra-artifact-preflight/1",
                       "Cache-Control": "no-cache"})
-    with urllib.request.urlopen(request) as response:
+    # Reject 30x before urllib can follow it and read an asset body during the
+    # release hold. A final-URL check alone would be too late.
+    with urllib.request.build_opener(NoRedirect()).open(request) as response:
         if response.status != 200 or response.geturl() != url:
             raise ValueError("official GitHub metadata endpoint changed")
         if "rel=\"next\"" in response.headers.get("Link", ""):
@@ -238,19 +252,68 @@ def sha256_file(path):
     return after.st_size, digest
 
 
+def sealed_verifier_fd(verifier, expected_sha256):
+    """Snapshot the reviewed executable into a sealed Linux memfd."""
+    if not (hasattr(os, "memfd_create") and hasattr(os, "MFD_ALLOW_SEALING")
+            and hasattr(os, "MFD_CLOEXEC")
+            and all(hasattr(fcntl, name) for name in (
+                "F_ADD_SEALS", "F_GET_SEALS", "F_SEAL_WRITE", "F_SEAL_GROW",
+                "F_SEAL_SHRINK", "F_SEAL_SEAL"))):
+        raise ValueError("Linux sealed executable support unavailable")
+    source_fd, before = regular_file(verifier)
+    try:
+        sealed_fd = os.memfd_create("zrpc-reviewed-gh",
+                                    os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    except Exception:
+        os.close(source_fd)
+        raise
+    try:
+        digest = hashlib.sha256()
+        with os.fdopen(source_fd, "rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(sealed_fd, view)
+                    if written <= 0:
+                        raise ValueError("attestation verifier could not be snapshotted")
+                    view = view[written:]
+            after = os.fstat(source.fileno())
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+             before.st_ctime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                 after.st_ctime_ns)
+                or digest.hexdigest() != expected_sha256):
+            raise ValueError("attestation verifier differs from reviewed executable")
+        seals = (fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW
+                 | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(sealed_fd, fcntl.F_ADD_SEALS, seals)
+        if fcntl.fcntl(sealed_fd, fcntl.F_GET_SEALS) & seals != seals:
+            raise ValueError("attestation verifier could not be sealed")
+        return sealed_fd
+    except Exception:
+        os.close(sealed_fd)
+        raise
+
+
 def verify_gh(lock, verifier, archive):
     if lock["gh_verifier_executable_sha256"] is None:
         raise ValueError("pinned maintained attestation verifier is not reviewed")
-    if sha256_file(verifier)[1] != lock["gh_verifier_executable_sha256"]:
-        raise ValueError("attestation verifier differs from reviewed executable")
-    command = [str(verifier), "attestation", "verify", str(archive),
-               "--repo", lock["repository"],
-               "--signer-workflow", lock["signer_workflow"],
-               "--signer-digest", lock["source_commit"],
-               "--source-digest", lock["source_commit"],
-               "--source-ref", "refs/tags/" + lock["tag"],
-               "--deny-self-hosted-runners", "--format", "json"]
-    result = subprocess.run(command, capture_output=True, check=False)
+    sealed_fd = sealed_verifier_fd(verifier, lock["gh_verifier_executable_sha256"])
+    try:
+        executable = f"/proc/self/fd/{sealed_fd}"
+        command = [executable, "attestation", "verify", str(archive),
+                   "--repo", lock["repository"],
+                   "--signer-workflow", lock["signer_workflow"],
+                   "--signer-digest", lock["source_commit"],
+                   "--source-digest", lock["source_commit"],
+                   "--source-ref", "refs/tags/" + lock["tag"],
+                   "--deny-self-hosted-runners", "--format", "json"]
+        result = subprocess.run(command, executable=executable,
+                                pass_fds=(sealed_fd,), capture_output=True,
+                                check=False)
+    finally:
+        os.close(sealed_fd)
     if result.returncode:
         raise ValueError("GitHub attestation verification failed")
     verified = read_json(result.stdout)
@@ -291,7 +354,7 @@ def extract_zebrad(archive, destination):
     return size, digest
 
 
-def stage(lock, archive, verifier, output):
+def stage(lock, lock_sha256, archive, verifier, output):
     preflight = live_preflight(lock)
     if preflight["status"] != "age-eligible-metadata-only-unapproved":
         raise ValueError("Zebra x86_64 asset remains inside seven-day release hold")
@@ -325,7 +388,7 @@ def stage(lock, archive, verifier, output):
                    "zebrad_elf_size": size,
                    "verified_attestation_count": attestations,
                    "gh_verifier_executable_sha256": lock["gh_verifier_executable_sha256"],
-                   "release_lock_sha256": sha256_file(LOCK_PATH)[1]}
+                   "release_lock_sha256": lock_sha256}
         (temporary / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         temporary.rename(output)
         return receipt
@@ -344,11 +407,11 @@ def main():
     staging.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
-        lock = load_lock()
+        lock, lock_sha256 = load_lock()
         if args.command == "preflight":
             report = live_preflight(lock)
         else:
-            report = stage(lock, args.archive, args.verifier, args.output)
+            report = stage(lock, lock_sha256, args.archive, args.verifier, args.output)
         print(json.dumps(report, indent=2))
         return 0 if report["status"] != "held-metadata-only-unapproved" else 2
     except (OSError, ValueError, TypeError, KeyError, tarfile.TarError) as error:

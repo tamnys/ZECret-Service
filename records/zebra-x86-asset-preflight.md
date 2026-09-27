@@ -28,14 +28,18 @@ a complete dependency or runtime vulnerability audit. No automatic trust update
 is allowed when the snapshot changes.
 
 The tool's explicit `preflight` command fetches only release, tag and advisory
-JSON from GitHub. It uses the response server time and the asset's creation
-time for the project's seven-day release hold. At 2026-09-27T20:53:28Z it
+JSON from GitHub. It rejects HTTP redirects before urllib can follow them;
+a redirected metadata endpoint cannot cause an asset-body download during the
+hold. It uses the response server time and the asset's creation time for the
+project's seven-day release hold. At 2026-09-27T21:05:13Z it
 returned `held-metadata-only-unapproved` with earliest eligibility
 2026-10-02T19:59:10Z; no Zebra archive bytes were fetched. Future `stage`
 requires the archived asset already present locally, exact size/SHA-256,
 an independently pinned Linux x86_64 `gh` executable, the upstream signer
 workflow/source/ref checks, a safe archive shape and a reviewed ELF size/hash.
-It emits a diagnostic receipt only.
+It executes the hash-checked verifier from a sealed Linux memory file, binding
+execution to the bytes checked even if the source path changes. The diagnostic
+receipt carries the digest of the exact lock bytes read at startup.
 
 The maintained verifier candidate is GitHub CLI `v2.101.0`, released
 2026-09-15. Its official Linux amd64 tarball is 15,282,175 bytes with
@@ -49,9 +53,11 @@ copy is ignored local data, not committed. A final native-builder check must
 exercise this exact verifier and its trust root. The release metadata lock
 pins its provenance inputs and executable digest.
 
-Five synthetic negative tests passed in the managed container. They exercise
+Eight synthetic negative tests passed in the managed container. They exercise
 the age boundary before local archive access, changed release/tag/advisory
-identities, required `gh` verification flags and subject matching, and archive
+identities, rejection before following a metadata redirect, executable binding
+after verifier-path replacement, lock-receipt binding after lock replacement,
+required `gh` verification flags and subject matching, and archive
 member/architecture rejection. No test used the real Zebra archive or a real
 attestation verification. The guest input lock, image build, testnet sync and
 private approval remain blocked.
