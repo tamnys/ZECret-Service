@@ -13,6 +13,7 @@ pub mod watchdog;
 /// A name-based GET followed by DELETE is not an incarnation precondition.
 pub const LIVE_DEPLOYMENT_BLOCKERS: &[&str] = &[
     "Compute deletion has no reviewed incarnation-safe precondition; same-name replacement race unresolved",
+    "operator Python/GNU tar import toolchain identity and its receipt have not been independently reviewed/pinned",
 ];
 
 pub fn ensure_live_creation_ready() -> Result<()> {
