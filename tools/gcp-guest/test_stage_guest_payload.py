@@ -88,8 +88,11 @@ class GuestPayloadTests(unittest.TestCase):
         ]
         for label, bad in cases:
             with self.subTest(label=label):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(ValueError) as failure:
                     self.run_stage([("alpha", package(directory + [bad]))])
+                if label == "hardlink":
+                    self.assertIn("alpha payload member './usr/hard' tar type b'1'",
+                                  str(failure.exception))
                 self.assertFalse(self.output.exists())
 
     def test_rejects_cross_package_collision_and_symlink_parent(self):

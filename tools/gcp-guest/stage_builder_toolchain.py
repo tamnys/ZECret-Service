@@ -103,7 +103,13 @@ def payload_entries(packages):
         payloads[package] = payload
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as contents:
             for member in contents:
-                path = member_path(member)
+                try:
+                    path = member_path(member)
+                except ValueError as error:
+                    raise ValueError(
+                        f"{package} payload member {member.name!r} "
+                        f"tar type {member.type!r}: {error}"
+                    ) from error
                 if path is None:
                     continue
                 kind = ("directory" if member.type == tarfile.DIRTYPE else
@@ -130,7 +136,7 @@ def payload_entries(packages):
                 if prior is not None:
                     if (kind != "directory" or prior["kind"] != "directory"
                             or prior["source_mode"] != member.mode):
-                        raise ValueError("builder payload path collision")
+                        raise ValueError(f"builder payload path collision: {path}")
                     prior["packages"].append(package)
                 else:
                     entries[path] = record
@@ -139,7 +145,7 @@ def payload_entries(packages):
         for index in range(1, len(parts)):
             parent = entries.get("/".join(parts[:index]))
             if parent is None or parent["kind"] != "directory":
-                raise ValueError("builder payload member has missing or symlink parent")
+                raise ValueError(f"builder payload member has missing or symlink parent: {path}")
     return payloads, entries
 
 

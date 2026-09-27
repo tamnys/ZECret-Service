@@ -170,6 +170,21 @@ jobs:
           echo "Runner scratch use before guest payload staging (bytes):"
           du -B1 -s "$scratch"
 
+          report_disk_evidence() {
+            echo "Runner free space after guest payload attempt (bytes):"
+            df -B1 "$GITHUB_WORKSPACE"
+            echo "Runner scratch and component use after guest payload attempt (bytes):"
+            for path in "$scratch" "$scratch/archives" "$scratch/guest-archives" \
+              "$scratch/staged/zrpc-guest-payload-parent/tree"; do
+              if test -d "$path"; then
+                du -B1 -s "$path"
+              else
+                echo "absent: $path"
+              fi
+            done
+          }
+          trap report_disk_evidence EXIT
+
           # Only the commands below execute staged code. The outer namespace
           # has no network route. Signature and APT-plan checks execute using
           # the hash-checked staged gpgv, Python, apt-get, and shared libraries
@@ -309,7 +324,6 @@ jobs:
             "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command" \
             "$source" "$scratch/archives" "$scratch/metadata" \
             "$scratch/guest-archives"
-
       - name: Diagnostic packaged mkosi sandbox in root-owned namespaces
         shell: bash
         run: |
