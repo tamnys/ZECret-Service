@@ -7,7 +7,99 @@ import stat
 import sys
 
 FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec")
-MASKED_UNITS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-firstboot.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service")
+MASKED_UNITS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-firstboot.service", "systemd-sysusers.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service")
+
+def account_file(root, name, fields):
+    path = root / "etc" / name
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("guest account file missing or redirected")
+    entries = {}
+    for line in path.read_text().splitlines():
+        parts = line.split(":")
+        if len(parts) != fields or not parts[0] or parts[0] in entries:
+            raise ValueError("guest account database malformed or duplicated")
+        entries[parts[0]] = parts
+    return entries
+
+def audit_accounts(root):
+    if (root / "etc").is_symlink():
+        raise ValueError("guest account directory redirected")
+    passwd = account_file(root, "passwd", 7)
+    shadow = account_file(root, "shadow", 9)
+    groups = account_file(root, "group", 4)
+    expected = {"root": (0, 0), "zrpc-node": None, "zrpc-wrapper": None}
+    protected_uids = set()
+    for name, fixed in expected.items():
+        entry = passwd.get(name)
+        password = shadow.get(name)
+        if (
+            entry is None
+            or password is None
+            or entry[1] != "x"
+            or not password[1].startswith(("!", "*"))
+        ):
+            raise ValueError("guest account missing or unlocked")
+        try:
+            uid, gid = int(entry[2]), int(entry[3])
+        except ValueError as error:
+            raise ValueError("guest account identity malformed") from error
+        if (
+            uid < 0
+            or gid < 0
+            or (fixed is not None and (uid, gid) != fixed)
+            or (
+                name != "root"
+                and (
+                    uid == 0
+                    or gid == 0
+                    or entry[5:] != ["/nonexistent", "/usr/sbin/nologin"]
+                )
+            )
+        ):
+            raise ValueError("guest account identity differs")
+        if uid in protected_uids:
+            raise ValueError("guest service UID is shared")
+        protected_uids.add(uid)
+    for name, entry in passwd.items():
+        if name not in expected:
+            try:
+                uid = int(entry[2])
+            except ValueError as error:
+                raise ValueError("guest account UID malformed") from error
+            if uid in protected_uids:
+                raise ValueError("guest service UID has an alias")
+    protected_gids = set()
+    for name in ("zrpc-node", "zrpc-wrapper", "zrpc-cookie"):
+        entry = groups.get(name)
+        if entry is None or entry[1] != "x":
+            raise ValueError("guest service group missing")
+        try:
+            gid = int(entry[2])
+        except ValueError as error:
+            raise ValueError("guest service GID malformed") from error
+        if (
+            gid <= 0
+            or gid in protected_gids
+            or (name != "zrpc-cookie" and gid != int(passwd[name][3]))
+        ):
+            raise ValueError("guest service GID differs")
+        members = entry[3].split(",") if entry[3] else []
+        expected_members = {"zrpc-node", "zrpc-wrapper"} if name == "zrpc-cookie" else {name}
+        if (
+            len(members) != len(set(members))
+            or not set(members) <= expected_members
+            or (name == "zrpc-cookie" and set(members) != expected_members)
+        ):
+            raise ValueError("guest service group membership differs")
+        protected_gids.add(gid)
+    for name, entry in groups.items():
+        if name not in ("zrpc-node", "zrpc-wrapper", "zrpc-cookie"):
+            try:
+                gid = int(entry[2])
+            except ValueError as error:
+                raise ValueError("guest group GID malformed") from error
+            if gid in protected_gids:
+                raise ValueError("guest service GID has an alias")
 
 def audit(root):
     if root.is_symlink() or not root.is_dir() or root.resolve() == Path("/"):
@@ -19,13 +111,7 @@ def audit(root):
         path = root / "etc/systemd/system" / unit
         if not path.is_symlink() or path.readlink() != Path("/dev/null"):
             raise ValueError("administrative unit unmasked")
-    for account in ("root", "zrpc-node", "zrpc-wrapper"):
-        entries = [line.split(":") for line in (root / "etc/passwd").read_text().splitlines() if line.split(":")[0] == account]
-        if len(entries) != 1 or (account != "root" and entries[0][-1] != "/usr/sbin/nologin"):
-            raise ValueError("guest account surface differs")
-        shadow = [line.split(":") for line in (root / "etc/shadow").read_text().splitlines() if line.split(":")[0] == account]
-        if len(shadow) != 1 or not shadow[0][1].startswith(("!", "*")):
-            raise ValueError("guest account is not locked")
+    audit_accounts(root)
     for path in root.rglob("*"):
         relative = path.relative_to(root)
         mode = path.lstat().st_mode

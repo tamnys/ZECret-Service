@@ -73,6 +73,8 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("Packages=systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd=1.0~synthetic", config)
         self.assertEqual((output / "rootfs/etc/systemd/system/ssh.service").readlink(), Path("/dev/null"))
+        self.assertEqual((output / "rootfs/etc/systemd/system/systemd-sysusers.service").readlink(), Path("/dev/null"))
+        self.assertIn("zrpc-wrapper.service", (units / "zrpc.target").read_text())
         with self.assertRaises(ValueError):
             prepare.stage(lock_path, self.inputs, output)
 
@@ -140,12 +142,30 @@ class CandidateTests(unittest.TestCase):
         (root / "usr/lib/zrpc").mkdir(parents=True)
         for unit in audit_rootfs.MASKED_UNITS:
             (root / "etc/systemd/system" / unit).symlink_to("/dev/null")
-        (root / "etc/passwd").write_text("root:x:0:0::/:/usr/sbin/nologin\nzrpc-node:x:101:101::/:/usr/sbin/nologin\nzrpc-wrapper:x:102:102::/:/usr/sbin/nologin\n")
+        (root / "etc/passwd").write_text("root:x:0:0::/:/usr/sbin/nologin\nzrpc-node:x:101:101::/nonexistent:/usr/sbin/nologin\nzrpc-wrapper:x:102:102::/nonexistent:/usr/sbin/nologin\n")
         (root / "etc/shadow").write_text("root:!:0:0:0:0:0:0:\nzrpc-node:!:0:0:0:0:0:0:\nzrpc-wrapper:!:0:0:0:0:0:0:\n")
+        (root / "etc/group").write_text("root:x:0:\nzrpc-node:x:101:\nzrpc-wrapper:x:102:\nzrpc-cookie:x:103:zrpc-node,zrpc-wrapper\n")
         for name in prepare.BINARIES.values():
             (root / "usr/lib/zrpc" / name).write_text("SYNTHETIC")
             (root / "usr/lib/zrpc" / name).chmod(0o555)
         audit_rootfs.audit(root)
+        group = root / "etc/group"
+        good_group = group.read_text()
+        group.write_text(good_group.replace("zrpc-node,zrpc-wrapper", "zrpc-node,zrpc-wrapper,attacker"))
+        with self.assertRaises(ValueError):
+            audit_rootfs.audit(root)
+        group.write_text(good_group)
+        passwd = root / "etc/passwd"
+        good_passwd = passwd.read_text()
+        passwd.write_text(good_passwd + "alias:x:102:103::/nonexistent:/usr/sbin/nologin\n")
+        with self.assertRaises(ValueError):
+            audit_rootfs.audit(root)
+        passwd.write_text(good_passwd)
+        sysusers_mask = root / "etc/systemd/system/systemd-sysusers.service"
+        sysusers_mask.unlink()
+        with self.assertRaises(ValueError):
+            audit_rootfs.audit(root)
+        sysusers_mask.symlink_to("/dev/null")
         (root / "boot").mkdir()
         companion = root / "boot/unapproved.addon.efi"
         companion.write_bytes(b"SYNTHETIC")
