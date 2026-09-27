@@ -490,7 +490,8 @@ def stage(lock_path, source, destination):
         shutil.copyfile(artifacts / role, binaries / name)
         (binaries / name).chmod(0o555)
     (rootfs / "etc/zrpc").mkdir(parents=True)
-    (rootfs / "etc/zrpc/zebra.toml").write_text('[network]\nnetwork = "Testnet"\nlisten_addr = "127.0.0.1:18233"\n[state]\ncache_dir = "/var/lib/zebra"\n[rpc]\nlisten_addr = "127.0.0.1:18232"\ncookie_dir = "/run/zrpc-node"\nenable_cookie_auth = true\n[tracing]\nfilter = "off"\n')
+    # Zebra otherwise enables a HOME/XDG peer cache outside the public node tree.
+    (rootfs / "etc/zrpc/zebra.toml").write_text('[network]\nnetwork = "Testnet"\nlisten_addr = "127.0.0.1:18233"\ncache_dir = false\n[state]\ncache_dir = "/var/lib/zebra"\n[rpc]\nlisten_addr = "127.0.0.1:18232"\ncookie_dir = "/run/zrpc-node"\nenable_cookie_auth = true\n[tracing]\nfilter = "off"\n')
     unit_dir = rootfs / "usr/lib/systemd/system"
     runtime = lock["runtime"]
     with (unit_dir / "zrpc-wrapper.service").open("a") as stream:
