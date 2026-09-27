@@ -210,3 +210,38 @@ isolation. The runner did not recheck the Debian signature
 image, or verify later-loaded components and every mkosi helper. It did not
 establish a complete runnable builder closure or change private-mode approval.
 The release catalog remains empty.
+
+## 2026-09-27 native signed-builder APT-plan diagnostic
+
+The first [manual public-runner attempt](https://github.com/tamnys/ZECret-service/actions/runs/36338263152)
+on `9c744e8` fetched the 195 hash-pinned archives and the exact Debian
+InRelease and Packages index, then reached the signed APT loader inspection in
+the networkless staged chroot. It exited 1 because the existing parser rejected
+an unrecognized loader-report line. It did not report a matched APT plan or
+change any release status.
+
+The [refusal-only diagnostic rerun](https://github.com/tamnys/ZECret-service/actions/runs/36338601743)
+on `96cb117` escaped the actual APT loader report into its error. It showed
+one leading `linux-vdso.so.1 (0x...)` line, followed by the 16 sealed
+`/proc/self/fd` library objects and the sealed `/proc/self/fd` interpreter.
+There was no ambient disk-backed loader object. The vDSO is supplied by the
+kernel, not by a signed Debian archive. That rerun also exited 1; the
+temporary full-report error was removed after the format was identified.
+
+The [corrected manual run](https://github.com/tamnys/ZECret-service/actions/runs/36338861781)
+on `af7cb75` succeeded on the standard free `ubuntu-24.04` x86-64 runner.
+It rechecked the signed September 18 Debian snapshot and the source-reviewed
+APT plan for all 195 packages inside the no-route chroot. Its report lists
+17 loader file objects from signed archives and
+`apt_kernel_vdso: {observed: true, disk_authenticated: false}`; a single
+leading vDSO is excluded from the disk-object count. The run also observed
+staged-command UID 1001 and started mkosi 25.3, systemd-repart 257, and
+ukify 257. The GitHub artifact inventory has zero uploads.
+
+This remains a builder diagnostic. The report explicitly keeps
+`apt_post_start_elf_loads_verified: false`,
+`complete_builder_toolchain: false`, `image_built: false`, and
+`private_mode_approved: false`. No package maintainer script, image build,
+signing operation, cloud API, or private query ran. The verifier has not
+authenticated every later-loaded helper or produced a reproducible guest
+image; the approved-release catalog remains empty.
