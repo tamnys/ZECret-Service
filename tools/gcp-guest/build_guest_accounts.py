@@ -174,7 +174,17 @@ def run_once(directory, selected, binary, library):
     result = subprocess.run([str(binary), f"--root={root}"], env=environment,
                             capture_output=True, check=False)
     if result.returncode:
-        raise ValueError(f"signed systemd-sysusers failed: exit {result.returncode}")
+        # The diagnostic may contain only public account inputs. Bound what
+        # enters logs by the exact signed configuration byte count and strip
+        # control/non-ASCII characters from loader and sysusers messages.
+        limit = sum(len(data) for (_, path), data in selected.items()
+                    if path.startswith("usr/lib/sysusers.d/"))
+        detail = "".join(character if 32 <= ord(character) <= 126 else " " for
+                         character in result.stderr[:limit].decode("utf-8", "replace"))
+        if len(result.stderr) > limit:
+            detail += " [diagnostic truncated]"
+        raise ValueError(f"signed systemd-sysusers failed: exit {result.returncode}: " +
+                         (detail.strip() or "no stderr"))
     shadow = root / "etc/shadow"
     if shadow.is_symlink() or not shadow.is_file():
         raise ValueError("signed systemd-sysusers omitted shadow")
