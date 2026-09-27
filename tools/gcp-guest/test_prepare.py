@@ -5,6 +5,7 @@ import importlib.util
 import json
 import lzma
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -72,11 +73,46 @@ class CandidateTests(unittest.TestCase):
         config = (output / "mkosi.conf").read_text()
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("Packages=systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd=1.0~synthetic", config)
+        esp = (output / "repart/30-esp.conf").read_text()
+        self.assertIn("CopyFiles=/efi:/", esp)
+        self.assertNotIn("CopyFiles=/boot:/", esp)
         self.assertEqual((output / "rootfs/etc/systemd/system/ssh.service").readlink(), Path("/dev/null"))
         self.assertEqual((output / "rootfs/etc/systemd/system/systemd-sysusers.service").readlink(), Path("/dev/null"))
         self.assertIn("zrpc-wrapper.service", (units / "zrpc.target").read_text())
         with self.assertRaises(ValueError):
             prepare.stage(lock_path, self.inputs, output)
+
+    def test_boot_recipe_rejects_missing_uki_or_verity_commitment(self):
+        profile = self.root / "profile"
+        profile.mkdir()
+        shutil.copy2(prepare.PROFILE / "mkosi.conf", profile / "mkosi.conf")
+        shutil.copytree(prepare.PROFILE / "repart", profile / "repart")
+        (profile / "rootfs").mkdir()
+        (profile / "input-identities.json").write_text("{}")
+        prepare.validate_boot_profile(profile)
+        changes = (
+            ("repart/30-esp.conf", "CopyFiles=/efi:/", "CopyFiles=/boot:/"),
+            ("repart/10-root.conf", "Verity=data", "Verity=off"),
+            ("repart/20-root-verity.conf", "Verity=hash", "Verity=off"),
+            ("mkosi.conf", "SecureBoot=yes", "SecureBoot=no"),
+            ("mkosi.conf", "Bootloader=uki", "Bootloader=systemd-boot"),
+            ("mkosi.conf", "ExtraTrees=rootfs", "ExtraTrees=rootfs\nPostOutputScripts=unreviewed.sh"),
+        )
+        for name, original, altered in changes:
+            path = profile / name
+            good = path.read_text()
+            self.assertIn(original, good)
+            path.write_text(good.replace(original, altered))
+            with self.assertRaises(ValueError):
+                prepare.validate_boot_profile(profile)
+            path.write_text(good)
+        (profile / "repart/40-unreviewed.conf").write_text("[Partition]\nType=swap\n")
+        with self.assertRaises(ValueError):
+            prepare.validate_boot_profile(profile)
+        (profile / "repart/40-unreviewed.conf").unlink()
+        (profile / "mkosi.conf.d").mkdir()
+        with self.assertRaises(ValueError):
+            prepare.validate_boot_profile(profile)
 
     def test_unverified_snapshot_cannot_stage(self):
         lock_path = self.root / "synthetic.lock.json"

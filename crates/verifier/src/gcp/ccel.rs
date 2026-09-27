@@ -128,6 +128,12 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Ccel<'_>, Issue> {
                 return Err(Issue::MalformedCcel);
             }
             let value = input.take(size)?;
+            // EV_NO_ACTION is advisory: firmware does not extend any of its
+            // digests into an RTMR. TCG requires every bank's digest to be
+            // zero, including banks we do not use for SHA-384 replay.
+            if event_type == EV_NO_ACTION && value.iter().any(|byte| *byte != 0) {
+                return Err(Issue::UnsupportedCcel);
+            }
             if id == TPM_ALG_SHA384 {
                 digest = Some(value.try_into().map_err(|_| Issue::MalformedCcel)?);
             }

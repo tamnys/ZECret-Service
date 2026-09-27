@@ -52,8 +52,12 @@ The selected mkosi parser source is upstream 25.3, commit
 `54c625c380ef5500f17460981a3c67b109b6a847`; Debian stable carries package 25.3-7.
 The downloaded upstream source archive matches SHA-256
 `7b039fb3b34e1680173a7f4af1bc24b475465afe335c8b21c213167734061e35`, listed in
-the retrieved Debian `.dsc`. The `.dsc` and InRelease signatures have not yet
-been authenticated. Hash matching alone is not Debian archive authentication.
+the retrieved Debian `.dsc`. The `.dsc` signature remains unauthenticated.
+The selected Debian snapshot InRelease and its package index have since been
+authenticated against reviewed archive keys, as recorded in
+`gcp-builder-followup.md`; that does not authenticate the mkosi `.dsc`, the
+complete package closure, or an image. Hash matching alone is not Debian
+archive authentication.
 These metadata identities are recorded in `input-identities.json`; the file is
 explicitly incomplete and non-deployable.
 

@@ -5,6 +5,7 @@ Run inside the managed Linux container. No package installer, cloud client,
 credential discovery, image builder, signing operation or scheduler is invoked.
 """
 import argparse
+import configparser
 import hashlib
 import json
 from pathlib import Path
@@ -23,6 +24,42 @@ BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "
 ROLES = set(BINARIES) | {"base_tree", "kernel", "initrd", "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
+
+def validate_boot_profile(profile=PROFILE):
+    """Reject source drift that would omit the direct UKI or unbind the root."""
+    # mkosi discovers settings and executable hooks by filename. The staged
+    # directory is created fresh from these four reviewed source entries only.
+    if {path.name for path in profile.iterdir()} != {"input-identities.json", "mkosi.conf", "repart", "rootfs"} or any(path.is_symlink() for path in profile.iterdir()):
+        raise ValueError("unexpected mkosi source override or redirected input")
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    with (profile / "mkosi.conf").open() as stream:
+        parser.read_file(stream)
+    expected_settings = {
+        "Distribution": {"Distribution": "debian", "Release": "trixie", "Architecture": "x86-64", "RepositoryKeyCheck": "yes", "RepositoryKeyFetch": "no"},
+        "Output": {"Format": "disk", "Output": "zrpc-gcp", "ManifestFormat": "json", "RepartDirectories": "repart"},
+        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "Autologin": "no", "Ssh": "no", "KernelCommandLine": "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 systemd.unit=zrpc.target rd.emergency=reboot rd.shell=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality", "ExtraTrees": "rootfs"},
+        "Validation": {"SecureBoot": "yes", "SecureBootAutoEnroll": "no", "SignExpectedPcr": "no", "Checksum": "yes"},
+        "Build": {"WithNetwork": "no", "CacheOnly": "always", "Incremental": "no"},
+    }
+    if {section: dict(parser.items(section)) for section in parser.sections()} != expected_settings:
+        raise ValueError("direct signed-UKI image recipe differs")
+    repart = profile / "repart"
+    expected = {"10-root.conf", "20-root-verity.conf", "30-esp.conf"}
+    if {path.name for path in repart.iterdir()} != expected:
+        raise ValueError("unexpected repart definition")
+    definitions = {
+        "10-root.conf": ("[Partition]", "Type=root-x86-64", "Format=ext4", "CopyFiles=/", "Minimize=best", "ReadOnly=yes", "Verity=data", "VerityMatchKey=root"),
+        "20-root-verity.conf": ("[Partition]", "Type=root-x86-64-verity", "Verity=hash", "VerityMatchKey=root"),
+        "30-esp.conf": ("[Partition]", "Type=esp", "Format=vfat", "CopyFiles=/efi:/"),
+    }
+    for name, expected_lines in definitions.items():
+        path = repart / name
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("repart definition missing or redirected")
+        lines = tuple(line.strip() for line in path.read_text().splitlines() if line.strip() and not line.lstrip().startswith(("#", ";")))
+        if lines != expected_lines:
+            raise ValueError("direct UKI or root verity repart definition differs")
 
 def digest(path):
     with path.open("rb") as stream:
@@ -98,6 +135,7 @@ def validate_lock(lock, source):
 def stage(lock_path, source, destination):
     lock = read_json(lock_path)
     paths, package_manifest, snapshot, packages = validate_lock(lock, source)
+    validate_boot_profile()
     destination = destination.resolve()
     if not destination.is_relative_to(ROOT.resolve()) or destination.exists():
         raise ValueError("fresh output directory on the managed workspace volume required")
@@ -186,7 +224,7 @@ def main():
             report = stage(args.lock, args.inputs, args.output)
         print(json.dumps(report, indent=2))
         return 1 if report["status"] == "blocked" else 0
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, configparser.Error) as error:
         print(json.dumps({"status": "blocked", "reason": str(error), "image_built": False, "private_mode_approved": False}))
         return 1
 
