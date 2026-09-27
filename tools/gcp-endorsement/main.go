@@ -42,9 +42,43 @@ type report struct {
 	GoogleRootCertificateSHA256 string `json:"google_root_certificate_sha256"`
 	GoogleVerifierCommit        string `json:"google_verifier_commit"`
 	MeasurementProfile          string `json:"measurement_profile"`
+	MachineType                 string `json:"machine_type,omitempty"`
+	RamGiB                      uint32 `json:"ram_gib,omitempty"`
+	EarlyAccept                 *bool  `json:"early_accept,omitempty"`
 	TDXFirmwareSVN              uint32 `json:"tdx_firmware_svn"`
 	MRTD                        string `json:"mrtd"`
 	PrivateModeApproved         bool   `json:"private_mode_approved"`
+}
+
+// These are the exact C3 shapes in the pinned Google TDX measurement code.
+// Legacy launch variants are distinct from the current generic profile; do
+// not infer a shape from an endorsement filename or a received quote.
+var legacyC3RamGiB = map[string]uint32{
+	"c3-standard-4":   16,
+	"c3-standard-8":   32,
+	"c3-standard-22":  88,
+	"c3-standard-44":  176,
+	"c3-standard-88":  352,
+	"c3-standard-176": 704,
+}
+
+type launchSelection struct {
+	legacyMachineType string
+	earlyAccept       bool
+	legacy            bool
+}
+
+func parseLaunchSelection(machineType, earlyAccept string) (launchSelection, error) {
+	if machineType == "" && earlyAccept == "" {
+		return launchSelection{}, nil
+	}
+	if machineType == "" || (earlyAccept != "true" && earlyAccept != "false") {
+		return launchSelection{}, errors.New("legacy launch requires --legacy-machine-type and --legacy-early-accept=true|false")
+	}
+	if _, ok := legacyC3RamGiB[machineType]; !ok {
+		return launchSelection{}, fmt.Errorf("unsupported legacy C3 machine type: %s", machineType)
+	}
+	return launchSelection{legacyMachineType: machineType, earlyAccept: earlyAccept == "true", legacy: true}, nil
 }
 
 func trustedRoot() (*x509.CertPool, error) {
@@ -62,9 +96,20 @@ func trustedRoot() (*x509.CertPool, error) {
 }
 
 func inspect(endorsementBytes, firmware []byte, roots *x509.CertPool, now time.Time) (report, error) {
+	return inspectSelected(endorsementBytes, firmware, roots, now, launchSelection{})
+}
+
+func inspectSelected(endorsementBytes, firmware []byte, roots *x509.CertPool, now time.Time, selection launchSelection) (report, error) {
 	var result report
 	if len(endorsementBytes) == 0 || len(firmware) == 0 {
 		return result, errors.New("endorsement and firmware must be nonempty")
+	}
+	if selection.legacy {
+		if _, ok := legacyC3RamGiB[selection.legacyMachineType]; !ok {
+			return result, errors.New("unsupported legacy C3 machine type")
+		}
+	} else if selection.legacyMachineType != "" || selection.earlyAccept {
+		return result, errors.New("inconsistent launch selection")
 	}
 	endorsement := new(epb.VMLaunchEndorsement)
 	if err := proto.Unmarshal(endorsementBytes, endorsement); err != nil {
@@ -86,32 +131,44 @@ func inspect(endorsementBytes, firmware []byte, roots *x509.CertPool, now time.T
 	if golden.GetTdx() == nil {
 		return result, errors.New("signed endorsement has no TDX measurements")
 	}
-	// Google's current generic launch profile is independent of the older
-	// machine-shape/early-accept compatibility variants. It cannot authorize
-	// those variants; a real quote must later match a separately reviewed policy.
-	computed, err := tdx.MRTD(tdx.LaunchOptionsDefault(""), firmware)
+	options := tdx.LaunchOptionsDefault("")
+	profile := "google_current_generic"
+	var ramGiB uint32
+	if selection.legacy {
+		// The pinned Google endorsement generator uses this exact historical
+		// TDHOB measurement recipe for named C3 shapes.
+		options = tdx.LaunchOptionsDefaultTDHOBBug(selection.legacyMachineType)
+		options.DisableUnacceptedMemory = selection.earlyAccept
+		ramGiB = legacyC3RamGiB[selection.legacyMachineType]
+		profile = "google_legacy_c3_tdhob_bug"
+	}
+	computed, err := tdx.MRTD(options, firmware)
 	if err != nil {
 		return result, fmt.Errorf("reconstruct TDX MRTD from firmware: %w", err)
 	}
-	var generic *epb.VMTdx_Measurement
+	var selected *epb.VMTdx_Measurement
 	for _, m := range golden.GetTdx().GetMeasurements() {
 		if m == nil || len(m.GetMrtd()) != len(computed) {
 			return result, errors.New("signed TDX measurement has invalid length")
 		}
-		if m.GetRamGib() == 0 && !m.GetEarlyAccept() {
-			if generic != nil {
-				return result, errors.New("signed endorsement has ambiguous generic TDX measurements")
+		if m.GetRamGib() == ramGiB && m.GetEarlyAccept() == selection.earlyAccept {
+			if selected != nil {
+				return result, errors.New("signed endorsement has ambiguous selected TDX measurements")
 			}
-			generic = m
+			selected = m
 		}
 	}
-	if generic == nil {
-		return result, errors.New("signed endorsement has no generic TDX measurement")
+	if selected == nil {
+		return result, errors.New("signed endorsement has no selected TDX measurement")
 	}
-	if !bytes.Equal(generic.GetMrtd(), computed[:]) {
-		return result, errors.New("reconstructed MRTD differs from signed generic TDX measurement")
+	if !bytes.Equal(selected.GetMrtd(), computed[:]) {
+		return result, errors.New("reconstructed MRTD differs from signed selected TDX measurement")
 	}
 	endorsementDigest := sha256.Sum256(endorsementBytes)
+	var earlyAccept *bool
+	if selection.legacy {
+		earlyAccept = &selection.earlyAccept
+	}
 	result = report{
 		SchemaVersion:               1,
 		Status:                      "signed_firmware_reference_reconstructed_unapproved",
@@ -119,7 +176,10 @@ func inspect(endorsementBytes, firmware []byte, roots *x509.CertPool, now time.T
 		FirmwareSHA384:              hex.EncodeToString(firmwareDigest[:]),
 		GoogleRootCertificateSHA256: googleRootSHA256,
 		GoogleVerifierCommit:        googleSourceCommit,
-		MeasurementProfile:          "google_current_generic",
+		MeasurementProfile:          profile,
+		MachineType:                 selection.legacyMachineType,
+		RamGiB:                      ramGiB,
+		EarlyAccept:                 earlyAccept,
 		TDXFirmwareSVN:              golden.GetTdx().GetSvn(),
 		MRTD:                        hex.EncodeToString(computed[:]),
 		PrivateModeApproved:         false,
@@ -131,11 +191,17 @@ func run(args []string) error {
 	flags := flag.NewFlagSet("gcp-endorsement", flag.ContinueOnError)
 	endorsementPath := flags.String("endorsement", "", "local signed VMLaunchEndorsement binarypb")
 	firmwarePath := flags.String("firmware", "", "local Google OVMF firmware binary")
+	legacyMachineType := flags.String("legacy-machine-type", "", "explicit historical C3 shape (requires --legacy-early-accept)")
+	legacyEarlyAccept := flags.String("legacy-early-accept", "", "explicit true|false for historical C3 measurement")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *endorsementPath == "" || *firmwarePath == "" {
 		return errors.New("require --endorsement FILE and --firmware FILE; no positional arguments")
+	}
+	selection, err := parseLaunchSelection(*legacyMachineType, *legacyEarlyAccept)
+	if err != nil {
+		return err
 	}
 	roots, err := trustedRoot()
 	if err != nil {
@@ -149,7 +215,7 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read local firmware: %w", err)
 	}
-	result, err := inspect(endorsementBytes, firmware, roots, time.Now().UTC())
+	result, err := inspectSelected(endorsementBytes, firmware, roots, time.Now().UTC(), selection)
 	if err != nil {
 		return err
 	}
