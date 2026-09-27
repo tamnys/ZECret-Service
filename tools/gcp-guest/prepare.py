@@ -481,9 +481,9 @@ def stage(lock_path, source, destination):
     unit_dir = rootfs / "usr/lib/systemd/system"
     runtime = lock["runtime"]
     with (unit_dir / "zrpc-wrapper.service").open("a") as stream:
-        stream.write(f'ExecStart=/usr/lib/zrpc/zrpc-node-wrapper --platform gcp-tdx --listen 0.0.0.0:{runtime["listen_port"]} --node 127.0.0.1:18232 --max-connections {runtime["max_connections"]} --max-quotes {runtime["max_quotes"]} --quote-spacing-ms {runtime["quote_spacing_ms"]}\n')
+        stream.write(f'ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec wrapper --platform gcp-tdx --listen 0.0.0.0:{runtime["listen_port"]} --node 127.0.0.1:18232 --max-connections {runtime["max_connections"]} --max-quotes {runtime["max_quotes"]} --quote-spacing-ms {runtime["quote_spacing_ms"]}\n')
     with (unit_dir / "zrpc-cookie.service").open("a") as stream:
-        stream.write(f'ExecStart=/usr/lib/zrpc/zrpc-gcp-cookie --startup-timeout-secs {runtime["node_startup_timeout_secs"]} --poll-interval-ms {runtime["node_poll_interval_ms"]}\nTimeoutStartSec={runtime["node_startup_timeout_secs"]}s\n')
+        stream.write(f'ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec cookie --startup-timeout-secs {runtime["node_startup_timeout_secs"]} --poll-interval-ms {runtime["node_poll_interval_ms"]}\nTimeoutStartSec={runtime["node_startup_timeout_secs"]}s\n')
     masks = rootfs / "etc/systemd/system"
     masks.mkdir(parents=True, exist_ok=True)
     for name in MASKS:
