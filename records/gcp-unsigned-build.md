@@ -38,3 +38,40 @@ before a build can be attempted. The project still lacks the full authenticated
 package/base-tree/kernel/initramfs closure and an eligible Zebra binary; those
 would remain gates even in a capable builder. No first-seen measurement or
 synthetic image can enter the approved-release catalog.
+
+## 2026-09-27 opt-in guest-builder follow-up
+
+The reviewed `guest-builder` container profile was prepared by the canonical
+container-system full verifier (`2937.143s`), activated, and loaded with its
+hash-checked, boot-scoped AppArmor policy. The policy check passed. This is a
+local container capability change, not an image build or cloud deployment.
+
+`colima list` reports one VM: the `default` Colima profile is `aarch64`.
+`uname -a` inside that VM reports an `aarch64` Linux kernel. The new
+`guest-builder-amd64` and existing `amd64` names identify Docker container
+profiles on that ARM VM; they do not identify native x86_64 VMs. The x86_64
+container runs through QEMU user-mode emulation.
+
+Inside `guest-builder-amd64`, `python3 tools/gcp-guest/prepare.py preflight`
+reported x86_64 architecture but exited blocked. The expected build tools
+(`mkosi`, `systemd-repart`, `ukify`, `gpgv`, `sbsign`, `veritysetup`) are still
+absent. More importantly, `unshare -U` variants returned `EINVAL`, so the
+user, network, and mount namespace probes failed. Native ARM `unshare --user`
+in Colima succeeded; the guest-builder had dropped capabilities, enabled
+no-new-privileges and seccomp, and was under the named enforcing AppArmor
+profile. No AppArmor denial was observed. This matches [QEMU's linux-user
+namespace limitation](https://gitlab.com/qemu-project/qemu/-/issues/871),
+so widening the reviewed policy is not a justified fix.
+
+The signed September 18 builder archive cache contains all 194 source-pinned
+packages, and the offline APT-plan verifier passed. The script-free stager
+still reports an unbuilt diagnostic. Real extraction stops before output
+creation because signed `libpam-runtime` contains both `PAM.7.gz` and
+`pam.7.gz`, which collide on the current case-insensitive `/workspace`
+backing volume. A project-local case-sensitive APFS probe image was created,
+but macOS refused to attach it at the project mountpoint (`Permission
+denied`); the disposable probe was removed. No package scripts ran. A native
+x86_64 Linux builder with case-sensitive workspace-backed storage, or a
+separately reviewed equivalent environment, is still needed before an
+unsigned image build can be attempted. The approved-release catalog remains
+empty. No cloud resource was created, and no private query was sent.
