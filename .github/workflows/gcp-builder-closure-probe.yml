@@ -215,6 +215,12 @@ jobs:
             echo "Isolated mount namespace: $(readlink /proc/self/ns/mnt)"
             echo "Isolated network namespace: $(readlink /proc/self/ns/net)"
 
+            # mkosi-sandbox changes propagation on its chroot /, which must
+            # itself be a mount point (as in the separate sandbox probe below).
+            test ! -L "$staged"
+            mount --bind "$staged" "$staged"
+            mountpoint -q "$staged"
+
             for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch zrpc-guest-payload-parent proc dev; do
               test ! -L "$staged/$directory"
               mkdir -p "$staged/$directory"
