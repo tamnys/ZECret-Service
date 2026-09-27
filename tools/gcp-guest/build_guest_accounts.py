@@ -227,6 +227,7 @@ def build(metadata, archives, workspace, output):
             "independent_generation_runs_matched": True,
             "package_scripts_executed": False,
             "host_dynamic_runtime_authenticated": False,
+            "installed_rootfs_accounts_compared": False,
             "image_built": False,
             "private_mode_approved": False,
         }
@@ -317,6 +318,8 @@ def main():
                       "input_count": len(receipt["inputs"]),
                       "outputs": receipt["outputs"],
                       "independent_generation_runs_matched": True,
+                      "host_dynamic_runtime_authenticated": False,
+                      "installed_rootfs_accounts_compared": False,
                       "image_built": False, "private_mode_approved": False}, sort_keys=True))
     return 0
 

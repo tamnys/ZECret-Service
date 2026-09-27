@@ -110,6 +110,7 @@ class SignedCacheAccountTests(unittest.TestCase):
             output = workspace / "accounts"
             receipt = accounts.build(Path(metadata), Path(archives), workspace, output)
             self.assertTrue(receipt["independent_generation_runs_matched"])
+            self.assertFalse(receipt["installed_rootfs_accounts_compared"])
             self.assertFalse(receipt["private_mode_approved"])
             accounts.audit_rootfs.audit_accounts(output)
             verified = accounts.verify(Path(metadata), Path(archives), workspace, output)
