@@ -16,6 +16,7 @@ python3 scripts/wrapper-check.py
 python3 tools/gcp-guest/test_prepare.py
 python3 tools/gcp-guest/test_audit_initrd.py
 python3 tools/gcp-guest/test_gcp_import_archive.py
+python3 tools/gcp-guest/test_inspect_import_toolchain.py
 python3 tools/gcp-guest/test_verify_mkosi_source.py
 python3 tools/gcp-guest/test_verify_mkosi_tree.py
 python3 tools/gcp-guest/test_verify_mkosi_payload.py
