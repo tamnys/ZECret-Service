@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Check the candidate builder APT plan against one signed Debian snapshot.
 
-This is an offline package-resolution diagnostic. It does not prove the full
-set of programs mkosi may invoke, installed file bytes, dynamic libraries,
-Python imports, a runnable builder image, or an approved guest image.
+This is an offline package-resolution diagnostic. It authenticates the
+file objects reported by the signed ELF loader's --list mode for APT. It
+does not prove kernel-provided objects such as vDSO, later plugin loads,
+the full set of programs mkosi may invoke, installed file bytes, Python
+imports, a runnable builder image, or an approved guest image.
 """
 
 import argparse
+from contextlib import ExitStack, contextmanager
+import fcntl
 import hashlib
 import io
 import json
@@ -38,6 +42,31 @@ DIRECT_LOCK_BYTES = 3792
 INDEX_BYTES = 56620099
 APT_LIST_NAME = "snapshot.debian.org_archive_debian_20260918T000000Z_dists_trixie_main_binary-amd64_Packages"
 APT_INSTALL = re.compile(r"Inst ([a-z0-9][a-z0-9+.-]*) \((\S+) snapshot\.debian\.org \[(amd64|all)\]\)(?: .*)?\Z")
+LOADER_OBJECT = re.compile(r"\s*(/proc/self/fd/[0-9]+) \(0x[0-9a-f]+\)\Z")
+LOADER_INTERPRETER = re.compile(
+    r"\s*/lib64/ld-linux-x86-64\.so\.2 => (/proc/self/fd/[0-9]+) \(0x[0-9a-f]+\)\Z"
+)
+# Exact SONAME providers observed for apt-get 3.0.3 in the reviewed signed
+# snapshot. A new resolver or dependency graph requires source review.
+APT_ELF_PROVIDERS = (
+    ("libapt-private.so.0.0", "apt"),
+    ("libapt-pkg.so.7.0", "libapt-pkg7.0"),
+    ("libstdc++.so.6", "libstdc++6"),
+    ("libgcc_s.so.1", "libgcc-s1"),
+    ("libc.so.6", "libc6"),
+    ("libz.so.1", "zlib1g"),
+    ("libbz2.so.1.0", "libbz2-1.0"),
+    ("liblzma.so.5", "liblzma5"),
+    ("liblz4.so.1", "liblz4-1"),
+    ("libzstd.so.1", "libzstd1"),
+    ("libudev.so.1", "libudev1"),
+    ("libsystemd.so.0", "libsystemd0"),
+    ("libcrypto.so.3", "libssl3t64"),
+    ("libxxhash.so.0", "libxxhash0"),
+    ("libm.so.6", "libc6"),
+    ("libcap.so.2", "libcap2"),
+)
+APT_ELF_PACKAGES = frozenset(package for _, package in APT_ELF_PROVIDERS)
 
 
 def indexed_archive(entry, record, archive_dir, *, keep_bytes=False):
@@ -87,8 +116,8 @@ def indexed_archive(entry, record, archive_dir, *, keep_bytes=False):
     return data
 
 
-def apt_get_from_deb(data):
-    """Read one regular apt-get file from the hash-checked .deb, without dpkg."""
+def deb_data_tar(data):
+    """Return the sole xz data member of a hash-checked Debian archive."""
     if not data.startswith(b"!<arch>\n"):
         raise ValueError("apt package is not a deb")
     offset = 8
@@ -113,9 +142,14 @@ def apt_get_from_deb(data):
         offset = end + (size % 2)
     if offset != len(data) or payload is None:
         raise ValueError("apt archive has no unique data member")
+    return payload
+
+
+def apt_get_from_deb(data):
+    """Read one regular apt-get file from the hash-checked .deb, without dpkg."""
     found = None
     try:
-        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as archive:
+        with tarfile.open(fileobj=io.BytesIO(deb_data_tar(data)), mode="r:xz") as archive:
             for member in archive:
                 if member.name in {"./usr/bin/apt-get", "usr/bin/apt-get"}:
                     if found is not None or not member.isfile():
@@ -126,6 +160,37 @@ def apt_get_from_deb(data):
     if found is None:
         raise ValueError("apt archive has no unique regular apt-get")
     return found
+
+
+def package_elf(data, soname):
+    """Resolve one same-directory SONAME link inside an authenticated .deb."""
+    prefix = "./usr/lib/x86_64-linux-gnu/"
+    if not re.fullmatch(r"(?:lib[a-zA-Z0-9+_.-]+|ld-linux-x86-64)\.so(?:\.[0-9]+)*", soname):
+        raise ValueError("invalid reviewed ELF SONAME")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(deb_data_tar(data)), mode="r:xz") as archive:
+            members = {}
+            for member in archive:
+                if member.name.startswith(prefix) and "/" not in member.name[len(prefix):]:
+                    if member.name in members:
+                        raise ValueError("duplicate signed ELF archive path")
+                    members[member.name] = member
+            current = members.get(prefix + soname)
+            if current is None:
+                raise ValueError("signed ELF SONAME absent from provider archive")
+            if current.issym():
+                if (not re.fullmatch(r"[a-zA-Z0-9+_.-]+", current.linkname)
+                        or not current.linkname.startswith(soname)):
+                    raise ValueError("signed ELF SONAME link escapes provider archive")
+                current = members.get(prefix + current.linkname)
+            if current is None or not current.isfile():
+                raise ValueError("signed ELF SONAME has no regular target")
+            elf = archive.extractfile(current).read()
+    except (lzma.LZMAError, tarfile.TarError) as error:
+        raise ValueError("invalid signed ELF archive data member") from error
+    if not elf.startswith(b"\x7fELF"):
+        raise ValueError("signed ELF SONAME target is not ELF")
+    return elf
 
 
 def parse_apt_plan(result):
@@ -148,7 +213,43 @@ def parse_apt_plan(result):
     return resolved
 
 
-def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot):
+@contextmanager
+def sealed_elf_bytes(data):
+    """Keep a signed archive member unchanged across loader inspection and use."""
+    if not data.startswith(b"\x7fELF"):
+        raise ValueError("signed runtime object is not ELF")
+    descriptor = os.memfd_create("zrpc-signed-apt-elf", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written == 0:
+                raise OSError("signed runtime object could not be sealed")
+            view = view[written:]
+        os.fchmod(descriptor, 0o500)
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        yield Path(f"/proc/self/fd/{descriptor}"), descriptor
+    finally:
+        os.close(descriptor)
+
+
+def check_loader_report(result, loader, preloads):
+    """Reject any loader-reported file object outside the sealed fds."""
+    if result.returncode != 0 or result.stderr.strip():
+        raise ValueError("signed APT ELF loader inspection failed")
+    expected = {str(loader), *(str(path) for path in preloads)}
+    found = []
+    for line in result.stdout.splitlines():
+        match = LOADER_INTERPRETER.fullmatch(line) or LOADER_OBJECT.fullmatch(line)
+        if match is None:
+            raise ValueError("unrecognized signed APT ELF loader report")
+        found.append(match.group(1))
+    if len(found) != len(expected) or set(found) != expected:
+        raise ValueError("signed APT ELF loader used missing or ambient objects")
+
+
+def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot, runtime_archives):
     if scratch.is_symlink() or not scratch.is_dir():
         raise ValueError("workspace scratch directory missing or redirected")
     with tempfile.TemporaryDirectory(prefix="zrpc-builder-apt-", dir=scratch) as temporary:
@@ -170,12 +271,14 @@ def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot):
             (etc / name).write_bytes(b"")
         for name in ("apt.conf.d", "sources.list.d", "preferences.d"):
             (etc / name).mkdir()
+        empty_lib = root / "empty-lib"
+        empty_lib.mkdir()
         (etc / "sources.list.d/snapshot.sources").write_text(
             "Types: deb\nURIs: " + snapshot.rstrip("/") + "\nSuites: trixie\n"
             "Components: main\nSigned-By: " + str(debian_snapshot.KEYRING.resolve()) + "\n"
         )
-        command = [
-            str(apt_get), "--simulate", "--no-install-recommends",
+        arguments = [
+            "--simulate", "--no-install-recommends",
             "-o", f"Dir::State::lists={lists}",
             "-o", f"Dir::State::status={root / 'status'}",
             "-o", f"Dir::State::extended_states={root / 'extended_states'}",
@@ -183,14 +286,32 @@ def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot):
             "-o", f"Dir::Etc={etc}/", "-o", "Debug::NoLocking=1",
             "install", *(f'{entry["name"]}={entry["version"]}' for entry in anchors),
         ]
-        with debian_snapshot.sealed_reviewed_file(
+        with ExitStack() as stack:
+            program, program_fd = stack.enter_context(debian_snapshot.sealed_reviewed_file(
                 apt_get, resolver["executable_sha256"], resolver["executable_size"],
-                "APT resolver", executable=True) as (program, fd):
-            command[0] = str(program)
+                "APT resolver", executable=True))
+            loader, loader_fd = stack.enter_context(sealed_elf_bytes(
+                package_elf(runtime_archives["libc6"], "ld-linux-x86-64.so.2")))
+            preloads = []
+            file_descriptors = [program_fd, loader_fd]
+            for soname, package in APT_ELF_PROVIDERS:
+                library, descriptor = stack.enter_context(sealed_elf_bytes(
+                    package_elf(runtime_archives[package], soname)))
+                preloads.append(library)
+                file_descriptors.append(descriptor)
+            prefix = [str(loader), "--inhibit-cache", "--preload",
+                      ":".join(str(path) for path in preloads),
+                      "--library-path", str(empty_lib)]
+            env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(root),
+                   "APT_CONFIG": str(etc / "apt.conf")}
+            inspection = subprocess.run(
+                [*prefix, "--list", str(program)], capture_output=True, text=True,
+                check=False, pass_fds=file_descriptors, env=env,
+            )
+            check_loader_report(inspection, loader, preloads)
             result = subprocess.run(
-                command, capture_output=True, text=True, check=False, pass_fds=(fd,),
-                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "HOME": str(root),
-                     "APT_CONFIG": str(etc / "apt.conf")},
+                [*prefix, str(program), *arguments], capture_output=True, text=True,
+                check=False, pass_fds=file_descriptors, env=env,
             )
     return parse_apt_plan(result)
 
@@ -251,7 +372,7 @@ def verify(inrelease, packages_index, archive_dir, apt_get, scratch, *,
     if not isinstance(entries, list) or not entries:
         raise ValueError("builder closure package list missing")
     selected = {}
-    apt_archive = None
+    runtime_archives = {}
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             raise ValueError("invalid builder closure package identity")
@@ -259,20 +380,24 @@ def verify(inrelease, packages_index, archive_dir, apt_get, scratch, *,
         if name in selected:
             raise ValueError("duplicate builder closure package")
         record = records.get((name, entry.get("version"), entry.get("architecture")))
-        data = indexed_archive(entry, record, archive_dir, keep_bytes=name == "apt")
+        data = indexed_archive(entry, record, archive_dir,
+                               keep_bytes=name in APT_ELF_PACKAGES)
         selected[name] = (entry["version"], entry["architecture"])
-        if name == "apt":
-            apt_archive = data
+        if data is not None:
+            runtime_archives[name] = data
     if [entry["name"] for entry in entries] != sorted(selected):
         raise ValueError("builder closure package order differs from reviewed lock")
     if any(selected.get(entry["name"]) != (entry["version"], entry["architecture"])
            for entry in anchors):
         raise ValueError("builder closure excludes a direct tool package")
-    extracted = apt_get_from_deb(apt_archive)
+    if set(runtime_archives) != APT_ELF_PACKAGES:
+        raise ValueError("builder closure excludes signed APT ELF provider")
+    extracted = apt_get_from_deb(runtime_archives["apt"])
     if (len(extracted) != resolver["executable_size"]
             or hashlib.sha256(extracted).hexdigest() != resolver["executable_sha256"]):
         raise ValueError("APT resolver executable differs from signed apt archive")
-    resolved = apt_plan(index_bytes, scratch, apt_get, resolver, anchors, lock["snapshot"])
+    resolved = apt_plan(index_bytes, scratch, apt_get, resolver, anchors,
+                        lock["snapshot"], runtime_archives)
     if selected != resolved:
         raise ValueError("builder closure differs from offline APT package plan")
     return {
@@ -283,6 +408,9 @@ def verify(inrelease, packages_index, archive_dir, apt_get, scratch, *,
         "signed_packages_index_sha256": index_hash,
         "package_count": len(selected),
         "apt_resolver_binary_matches_signed_package": True,
+        "apt_loader_reported_file_objects_from_signed_archives": True,
+        "apt_loader_reported_file_object_count": len(APT_ELF_PROVIDERS) + 1,
+        "apt_post_start_elf_loads_verified": False,
         "complete_builder_toolchain": False,
         "image_built": False,
         "private_mode_approved": False,
