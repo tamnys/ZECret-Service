@@ -12,6 +12,7 @@ pub mod watchdog;
 /// Provider API contract still required before this adapter may incur costs.
 /// A name-based GET followed by DELETE is not an incarnation precondition.
 pub const LIVE_DEPLOYMENT_BLOCKERS: &[&str] = &[
+    "exact raw image has not passed pinned offline post-build image inspection of GPT, ESP, signed UKI, command line, dm-verity root, installed components and Secure Boot policy",
     "Compute deletion has no reviewed incarnation-safe precondition; same-name replacement race unresolved",
     "operator Python/GNU tar import toolchain identity and its receipt have not been independently reviewed/pinned",
 ];
