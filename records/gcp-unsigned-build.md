@@ -99,6 +99,22 @@ No mkosi sandbox, authenticated package installation, or complete image build
 ran. This is a possible root-owned builder capability, not proof that the
 offline build boundary or resulting artifact is safe.
 
+The [pinned mkosi sandbox probe](https://github.com/tamnys/ZECret-service/actions/runs/36334452473)
+then passed on the standard public x86_64 runner. It checked Git commit
+`54c625c380ef5500f17460981a3c67b109b6a847`, tree
+`f5d828707aa0b1bd0235c55e13f7d4b41dba409e`, and exact archive SHA-256
+`16a58d4aab33a8f28dc996dc4c816711686d1e58fa6af23131b8e84ff11917d0`
+before execution. The runner copied only the byte-compared standalone
+`sandbox.py` into a root-owned temporary directory: the preceding failed run
+showed that `/home/runner` is not traversable by the UID 0-to-0 mapped child.
+Inside a distinct user, mount, network, and PID namespace with no routes,
+`python3 -I sandbox.py --ro-bind / / --unshare-net -- /usr/bin/true` exited 0.
+This proves the pinned sandbox's narrow launch path on that runner, not a
+complete mkosi image build, authenticated runnable toolchain, package-script
+confinement, or a production offline boundary. No guest image, signing key,
+cloud resource, cache, or uploaded artifact was involved; private mode remains
+blocked.
+
 A separate locked, offline build in the emulated `linux/amd64` managed
 container produced five **unsigned candidate binaries** from repository commit
 `5afdbe2`. They are ELF x86-64 inputs for later review, not a reproducible
