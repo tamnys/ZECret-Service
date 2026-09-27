@@ -43,13 +43,13 @@ class CandidateTests(unittest.TestCase):
             (self.inputs / role).write_bytes(data)
             artifacts[role] = {"path": role, "sha256": hashlib.sha256(data).hexdigest()}
         # Values exercise branches only and are never production defaults.
-        self.lock = {"schema_version": 2, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": "synthetic", "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
+        self.lock = {"schema_version": 3, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": "synthetic", "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def test_missing_identity_changed_artifact_and_escape_fail(self):
-        for change in (lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].pop("kernel"), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["kernel"].update(path="../kernel"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
+        for change in (lambda lock: lock.update(schema_version=2), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].pop("kernel"), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["kernel"].update(path="../kernel"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
             lock = copy.deepcopy(self.lock)
             change(lock)
             with self.assertRaises(ValueError):
@@ -75,6 +75,8 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)
         self.assertTrue((output / "package-cache").is_dir())
+        self.assertNotIn("BaseTrees=", config)
+        self.assertFalse((output / "artifacts/base_tree.tar").exists())
         self.assertIn("Packages=e2fsprogs=1.0~synthetic,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
@@ -98,6 +100,7 @@ class CandidateTests(unittest.TestCase):
             ("repart/10-root.conf", "Verity=data", "Verity=off"),
             ("repart/20-root-verity.conf", "Verity=hash", "Verity=off"),
             ("mkosi.conf", "SecureBoot=yes", "SecureBoot=no"),
+            ("mkosi.conf", "KernelModulesInitrd=no", "KernelModulesInitrd=yes"),
             ("mkosi.conf", "Bootloader=uki", "Bootloader=systemd-boot"),
             ("mkosi.conf", "ExtraTrees=rootfs", "ExtraTrees=rootfs\nPostOutputScripts=unreviewed.sh"),
         )

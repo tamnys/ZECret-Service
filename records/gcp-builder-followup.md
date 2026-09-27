@@ -177,3 +177,39 @@ container package was selected. The solver executable and its libraries are
 not yet authenticated, package archives were not fetched, and installed-image
 closure cannot be compared until an image exists. The supplied kernel,
 initramfs, and modules remain separate unverified boot inputs.
+
+## Empty-root package input, 2026-09-27 UTC
+
+The staged recipe no longer accepts an opaque `BaseTrees` archive. Lock schema
+3 rejects schema-2 locks and any `base_tree` role. With no base tree, pinned
+mkosi 25.3 enters its Debian bootstrap path, resolving `?essential` and
+`base-files` before the explicitly locked packages. This makes the complete
+installed package set observable rather than inheriting unreviewed binaries
+from a prebuilt root. The authenticated 94-package APT result is only a
+candidate for that bootstrap; the builder still needs an actual isolated run,
+exact archive/toolchain verification, and an installed-package comparison.
+
+The guest modules-load profile now requests `gve`, matching the Google NIC
+module in Debian's exact-version
+[cloud kernel file list](https://packages.debian.org/trixie/amd64/linux-image-6.12.107%2Bdeb13-cloud-amd64/filelist).
+The old `gvnic` name did not match that package. This is a source-profile
+correction, not validation of the selected kernel's configuration, signed
+modules, boot initramfs, or actual Google TDX boot.
+
+Pinned mkosi defaults to appending a generated kernel-modules initrd to every
+direct UKI; with no filter it copies the installed module tree. The source
+profile now sets `KernelModulesInitrd=no` and keeps the explicit `Initrds=`
+input. The supplied initrd must be inspected for the matching kernel's early
+NVMe, dm-verity, and root-filesystem support (or prove those are built in)
+before a UKI is accepted. Disabling mkosi's implicit module bundle is not
+proof that the explicit initrd boots or that post-root module loading is
+restricted.
+
+With the 94 locally fetched, signed-index-matched Debian archives and
+synthetic remaining artifacts, schema-3 staging returned
+`staged-unbuilt-unapproved` with `image_built: false` and
+`private_mode_approved: false`. Pinned mkosi 25.3 parsed that staged
+configuration: no base tree was configured, the candidate-specific package
+cache resolved inside the staging directory, and the implicit modules initrd
+was disabled. This was a parser/staging check only; it did not install the
+packages, execute scripts, build a UKI, or inspect a real kernel or initrd.
