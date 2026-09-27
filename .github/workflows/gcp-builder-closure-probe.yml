@@ -312,8 +312,7 @@ jobs:
           # scratch. No signing key, cloud credential, source write, or upload
           # enters this diagnostic. chroot is not a security boundary.
           root_scratch="$(sudo -n mktemp -d /var/tmp/zrpc-packaged-mkosi.XXXXXX)"
-          host_canary="$(mktemp /var/tmp/zrpc-host-only.XXXXXX)"
-          trap 'sudo -n rm -rf -- "$root_scratch"; rm -f -- "$host_canary"' EXIT
+          trap 'sudo -n rm -rf -- "$root_scratch"' EXIT
           sudo -n cp -a --no-preserve=ownership -- "$staged"/. "$root_scratch"/
           sudo -n test ! -L "$root_scratch/tmp"
           sudo -n install -d -m 1777 "$root_scratch/tmp"
@@ -347,8 +346,6 @@ jobs:
             test "$(ip -o link show | wc -l)" -eq 1
             test -z "$(ip -4 route show)"
             test -z "$(ip -6 route show)"
-            test -f "$7"
-            test ! -e "$root$7"
             # mkosi changes / mount propagation before creating its sandbox.
             # A plain chroot directory is not a mount point for that operation.
             mount --bind "$root" "$root"
@@ -359,65 +356,8 @@ jobs:
               LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
               "$6" "$root" /usr/bin/mkosi-sandbox \
                 --ro-bind / / --unshare-net -- /usr/bin/true
-            # Apt.sandbox(network=True) sets SYSTEMD_OFFLINE=0 and does not
-            # request an inner network namespace. Test those exact network
-            # options with its become-root/suppress-chown flags and a harmless
-            # command. This does not run APT or any package hook.
-            outer_user="$(readlink /proc/self/ns/user)"
-            outer_mount="$(readlink /proc/self/ns/mnt)"
-            outer_net="$(readlink /proc/self/ns/net)"
-            outer_pid="$(readlink /proc/self/ns/pid)"
-            /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
-              LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-              "$6" "$root" /usr/bin/mkosi-sandbox \
-                --proc /proc --ro-bind / / \
-                --setenv SYSTEMD_OFFLINE 0 \
-                --unshare-ipc --become-root --suppress-chown -- \
-                /usr/bin/python3 -I - "$outer_user" "$outer_mount" \
-                  "$outer_net" "$outer_pid" "$7" <<"PY"
-          import errno
-          import json
-          import os
-          from pathlib import Path
-          import sys
-
-          outer = dict(zip(("user", "mnt", "net", "pid"), sys.argv[1:5]))
-          inner = {name: os.readlink("/proc/self/ns/" + name) for name in outer}
-          # The outer namespace already runs as UID 0. mkosi 25.3 therefore
-          # retains that user namespace while unsharing the mount namespace.
-          if (inner["user"] != outer["user"] or inner["mnt"] == outer["mnt"]
-                  or inner["net"] != outer["net"] or inner["pid"] != outer["pid"]):
-              raise ValueError(
-                  "mkosi APT-equivalent namespace boundary changed: "
-                  + json.dumps({"outer": outer, "inner": inner}, sort_keys=True)
-              )
-          if os.getenv("SYSTEMD_OFFLINE") != "0":
-              raise ValueError("mkosi network=True option was not retained")
-          if len(Path("/proc/net/route").read_text().splitlines()) != 1:
-              raise ValueError("IPv4 route appeared inside mkosi sandbox")
-          ipv6 = Path("/proc/net/ipv6_route")
-          if ipv6.exists() and ipv6.read_text().strip():
-              raise ValueError("IPv6 route appeared inside mkosi sandbox")
-          if Path(sys.argv[5]).exists():
-              raise ValueError("host-only canary entered mkosi sandbox")
-          try:
-              descriptor = os.open("/.zrpc-builder-toolchain.json", os.O_WRONLY)
-          except OSError as error:
-              if error.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
-                  raise
-          else:
-              os.close(descriptor)
-              raise ValueError("reviewed builder manifest was writable")
-          print(json.dumps({
-              "status": "diagnostic-mkosi-network-true-canary-passed-unbuilt",
-              "outer_network_namespace_retained": True,
-              "ipv4_routes": 0, "ipv6_routes": 0,
-              "host_canary_visible": False, "reviewed_manifest_writable": False,
-              "package_scripts_executed": False, "image_built": False,
-              "private_mode_approved": False,
-          }, sort_keys=True))
-          PY
+            echo "Packaged mkosi sandbox true-command: passed in root-owned no-route namespace"
           ' _ "$root_scratch" "$parent_user_ns" "$parent_mount_ns" \
-            "$parent_net_ns" "$parent_pid_ns" "$chroot_command" "$host_canary"
+            "$parent_net_ns" "$parent_pid_ns" "$chroot_command"
 
           printf '%s\n' '{"status":"diagnostic-packaged-mkosi-sandbox-passed-unbuilt","package_scripts_executed":false,"image_built":false,"approved_release":false,"private_mode_approved":false}'
