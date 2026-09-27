@@ -94,6 +94,12 @@ fn accept_operation(
             "operation identity/scope does not match durable intent",
         ));
     }
+    // A terminal Compute operation's targetId names the exact resource
+    // incarnation. Even a failed operation cannot authorize later cleanup of
+    // a same-name resource without that provenance.
+    if operation.status == "DONE" && operation.target_id.is_none() {
+        return Err(Error("completed operation lacks target incarnation"));
+    }
     intent.operation = Some(operation.name);
     intent.done = operation.status == "DONE";
     intent.failed = operation.error.is_some();
@@ -345,6 +351,13 @@ pub async fn teardown_once<P: Provider>(
                 return Ok(Progress::Pending);
             }
             continue;
+        }
+        if resource.kind != ResourceKind::StagingObject
+            && !state.create.as_ref().is_some_and(|i| i.done)
+        {
+            return Err(Error(
+                "Compute creation outcome uncertain; a name match cannot authorize deletion",
+            ));
         }
         if state.delete.as_ref().is_some_and(|i| i.failed) {
             return Err(Error("deletion operation failed; original intent retained"));
