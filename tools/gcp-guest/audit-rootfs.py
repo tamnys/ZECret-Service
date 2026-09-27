@@ -17,6 +17,116 @@ MASKED_UNITS = (
     "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service",
     "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer",
 )
+APPLIANCE_UNITS = (
+    "zrpc-node.service", "zrpc-gcp-quote.service", "zrpc-cookie.service",
+    "zrpc-wrapper.service", "zrpc.target",
+)
+PROTECTED_UNITS = (*APPLIANCE_UNITS, "multi-user.target")
+# Debian trixie's systemd.unit(5) load path. Runtime generators and transient
+# units must also be checked on the exact booted image; they do not exist in a
+# finalized rootfs and this audit does not claim to check their later output.
+UNIT_DIRS = (
+    "etc/systemd/system.control", "run/systemd/system.control",
+    "run/systemd/transient", "run/systemd/generator.early",
+    "etc/systemd/system", "etc/systemd/system.attached",
+    "run/systemd/system", "run/systemd/system.attached",
+    "run/systemd/generator", "usr/local/lib/systemd/system",
+    "usr/lib/systemd/system", "run/systemd/generator.late",
+)
+
+
+def present(path):
+    return path.exists() or path.is_symlink()
+
+
+def protected_unit_additions(units):
+    """Names whose systemd load semantics can alter an appliance unit."""
+    names = {"service.d", "target.d"}
+    for unit in units:
+        names.update(f"{unit}.{suffix}" for suffix in ("d", "wants", "requires", "upholds"))
+        stem, kind = unit.rsplit(".", 1)
+        for index, character in enumerate(stem):
+            if character == "-":
+                names.add(f"{stem[:index + 1]}.{kind}.d")
+    return names
+
+
+def protected_aliases(root):
+    """Follow effective static unit-name aliases, including Debian runlevels."""
+    effective = {}
+    for relative in UNIT_DIRS:
+        directory = root / relative
+        if not present(directory):
+            continue
+        if not directory.is_dir():
+            raise ValueError("system unit load path redirected")
+        for entry in directory.iterdir():
+            if entry.name.endswith((".service", ".target")) and entry.name not in effective:
+                effective[entry.name] = entry.readlink().name if entry.is_symlink() else None
+    protected = set(PROTECTED_UNITS)
+    while True:
+        aliases = {name for name, target in effective.items() if target in protected}
+        if aliases <= protected:
+            return protected
+        protected.update(aliases)
+
+
+def audit_appliance_units(root):
+    for relative in UNIT_DIRS:
+        path = root
+        for component in Path(relative).parts:
+            path = path / component
+            if path.is_symlink():
+                raise ValueError("system unit load path redirected")
+    vendor = root / "usr/lib/systemd/system"
+    if vendor.is_symlink() or not vendor.is_dir():
+        raise ValueError("appliance unit directory missing or redirected")
+    for unit in APPLIANCE_UNITS:
+        path = vendor / unit
+        if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o022:
+            raise ValueError("appliance unit missing or mutable")
+
+    configured = root / "etc/systemd/system"
+    if configured.is_symlink() or not configured.is_dir():
+        raise ValueError("system unit configuration directory missing or redirected")
+    default = configured / "default.target"
+    if not default.is_symlink() or default.readlink() != Path("/usr/lib/systemd/system/zrpc.target"):
+        raise ValueError("appliance default target differs")
+    wants = configured / "multi-user.target.wants"
+    network_units = {"systemd-networkd.service", "systemd-resolved.service"}
+    if wants.is_symlink() or not wants.is_dir() or {entry.name for entry in wants.iterdir()} != network_units:
+        raise ValueError("appliance boot dependencies differ")
+    for unit in network_units:
+        path = wants / unit
+        if not path.is_symlink() or path.readlink() != Path("/usr/lib/systemd/system") / unit:
+            raise ValueError("appliance network dependency differs")
+
+    additions = protected_unit_additions(protected_aliases(root))
+    for relative in UNIT_DIRS:
+        directory = root / relative
+        if not present(directory):
+            continue
+        if not directory.is_dir():
+            raise ValueError("system unit load path redirected")
+        for name in additions:
+            # The exact /etc network wants are checked above. Debian may
+            # install vendor wants; their final set remains an image-review
+            # gate, not a license for extra wants in other load paths.
+            if name == "multi-user.target.wants" and directory in (configured, vendor):
+                continue
+            if present(directory / name):
+                raise ValueError("appliance unit override or dependency present")
+        if directory != vendor:
+            for unit in PROTECTED_UNITS:
+                if present(directory / unit):
+                    raise ValueError("appliance unit replaced")
+        # An alias carries its own drop-ins into the target unit. The image
+        # recipe declares only default.target -> zrpc.target as such an alias.
+        for path in directory.iterdir():
+            if not path.is_symlink() or path == default:
+                continue
+            if path.readlink().name in APPLIANCE_UNITS:
+                raise ValueError("unreviewed appliance unit alias")
 
 def account_file(root, name, fields):
     path = root / "etc" / name
@@ -132,6 +242,7 @@ def audit(root):
         path = root / "etc/systemd/system" / unit
         if not path.is_symlink() or path.readlink() != Path("/dev/null"):
             raise ValueError("administrative unit unmasked")
+    audit_appliance_units(root)
     audit_accounts(root)
     for path in root.rglob("*"):
         relative = path.relative_to(root)

@@ -609,10 +609,26 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare.read_json(path)
 
-    def synthetic_guest_root(self):
-        root = self.root / "synthetic-root"
+    def synthetic_guest_root(self, suffix=""):
+        root = self.root / f"synthetic-root{suffix}"
         (root / "etc/systemd/system").mkdir(parents=True)
         (root / "usr/lib/zrpc").mkdir(parents=True)
+        units = root / "usr/lib/systemd/system"
+        units.mkdir(parents=True)
+        source_units = prepare.PROFILE / "rootfs/usr/lib/systemd/system"
+        for unit in audit_rootfs.APPLIANCE_UNITS:
+            shutil.copyfile(source_units / unit, units / unit)
+        # Debian's installed multi-user target has runlevel aliases. Their
+        # drop-ins and dependency directories affect this appliance's boot.
+        (units / "multi-user.target").write_text("[Unit]\nDescription=Synthetic multi-user target\n")
+        for alias in ("runlevel2.target", "runlevel3.target", "runlevel4.target"):
+            (units / alias).symlink_to("multi-user.target")
+        (root / "etc/systemd/system/default.target").symlink_to(
+            "/usr/lib/systemd/system/zrpc.target")
+        wants = root / "etc/systemd/system/multi-user.target.wants"
+        wants.mkdir()
+        for unit in ("systemd-networkd.service", "systemd-resolved.service"):
+            (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
         for unit in audit_rootfs.MASKED_UNITS:
             (root / "etc/systemd/system" / unit).symlink_to("/dev/null")
         (root / "etc/passwd").write_text("root:x:0:0::/:/usr/sbin/nologin\nzrpc-node:x:101:101::/nonexistent:/usr/sbin/nologin\nzrpc-wrapper:x:102:102::/nonexistent:/usr/sbin/nologin\n")
@@ -622,6 +638,66 @@ class CandidateTests(unittest.TestCase):
             (root / "usr/lib/zrpc" / name).write_text("SYNTHETIC")
             (root / "usr/lib/zrpc" / name).chmod(0o555)
         return root
+
+    def test_rootfs_audit_rejects_appliance_unit_overrides(self):
+        changed = (
+            ("etc/systemd/system/zrpc-wrapper.service.d/override.conf", b"[Service]\nExecStart=\n"),
+            ("usr/local/lib/systemd/system/zrpc-wrapper.service", b"[Service]\nExecStart=/bin/false\n"),
+            ("usr/lib/systemd/system/service.d/override.conf", b"[Service]\nProtectSystem=no\n"),
+            ("etc/systemd/system/zrpc-.service.d/override.conf", b"[Service]\nNoNewPrivileges=no\n"),
+            ("etc/systemd/system/zrpc-gcp-.service.d/override.conf", b"[Service]\nUser=root\n"),
+            ("run/systemd/system/zrpc-node.service.d/override.conf", b"[Service]\nExecStart=\n"),
+            ("etc/systemd/system/zrpc.target.wants/rogue.service", b"SYNTHETIC"),
+            ("etc/systemd/system/zrpc.target.upholds/rogue.service", b"SYNTHETIC"),
+            ("etc/systemd/system/default.target.d/override.conf", b"[Unit]\nRequires=rogue.service\n"),
+            ("etc/systemd/system/default.target.upholds/rogue.service", b"SYNTHETIC"),
+            ("etc/systemd/system/runlevel2.target.d/override.conf", b"[Unit]\nWants=rogue.service\n"),
+            ("usr/lib/systemd/system/runlevel3.target.requires/rogue.service", b"SYNTHETIC"),
+            ("etc/systemd/system/runlevel4.target.upholds/rogue.service", b"SYNTHETIC"),
+            ("usr/lib/systemd/system/target.d/override.conf", b"[Unit]\nWants=rogue.service\n"),
+            ("etc/systemd/system/multi-user.target.wants/rogue.service", b"SYNTHETIC"),
+            ("usr/local/lib/systemd/system/multi-user.target.wants/rogue.service", b"SYNTHETIC"),
+        )
+        for index, (relative, contents) in enumerate(changed):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-{index}")
+                audit_rootfs.audit(root)
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(contents)
+                with self.assertRaisesRegex(ValueError, "appliance unit override or dependency|appliance boot dependencies|appliance unit replaced"):
+                    audit_rootfs.audit(root)
+
+        root = self.synthetic_guest_root("-replacement")
+        (root / "etc/systemd/system/zrpc-wrapper.service").symlink_to(
+            "/usr/lib/systemd/system/zrpc-wrapper.service")
+        with self.assertRaisesRegex(ValueError, "appliance unit replaced"):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-multi-user")
+        (root / "etc/systemd/system/multi-user.target").write_text(
+            "[Unit]\nWants=rogue.service\n")
+        with self.assertRaisesRegex(ValueError, "appliance unit replaced"):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-alias")
+        (root / "etc/systemd/system/alias.service").symlink_to(
+            "/usr/lib/systemd/system/zrpc-wrapper.service")
+        with self.assertRaisesRegex(ValueError, "unreviewed appliance unit alias"):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-default")
+        default = root / "etc/systemd/system/default.target"
+        default.unlink()
+        default.symlink_to("/usr/lib/systemd/system/multi-user.target")
+        with self.assertRaisesRegex(ValueError, "appliance default target differs"):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-missing")
+        (root / "usr/lib/systemd/system/zrpc-wrapper.service").unlink()
+        with self.assertRaisesRegex(ValueError, "appliance unit missing or mutable"):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-redirected-parent")
+        (root / "usr/local/lib").mkdir(parents=True)
+        (root / "usr/local/lib/systemd").symlink_to("/var/lib/zebra")
+        with self.assertRaisesRegex(ValueError, "system unit load path redirected"):
+            audit_rootfs.audit(root)
 
     def test_rootfs_audit_rejects_base_tree_kernel_cmdline(self):
         root = self.synthetic_guest_root()
