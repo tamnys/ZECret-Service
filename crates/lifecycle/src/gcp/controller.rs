@@ -86,6 +86,7 @@ fn accept_operation(
     );
     if !super::package::name(&operation.name)
         || !["PENDING", "RUNNING", "DONE"].contains(&operation.status.as_str())
+        || operation.operation_type != if deleting { "delete" } else { "insert" }
         || operation.target_link != target1 && operation.target_link != target2
         || operation.client_operation_id.as_deref() != Some(&intent.request_id)
         || intent
@@ -401,9 +402,14 @@ pub async fn teardown_once<P: Provider>(
             .clone();
         match provider.delete(resource, &id, &request_id).await? {
             Mutation::Operation(operation) => {
+                if resource.kind == ResourceKind::StagingObject {
+                    return Err(Error("unexpected staging deletion operation"));
+                }
                 accept_operation(store, index, resource, operation, true)?
             }
-            Mutation::Object(_) | Mutation::Absent => {
+            Mutation::Object(_) | Mutation::Absent
+                if resource.kind == ResourceKind::StagingObject =>
+            {
                 let mut next = store.journal().clone();
                 next.resources[index]
                     .delete
@@ -411,6 +417,11 @@ pub async fn teardown_once<P: Provider>(
                     .ok_or(Error("missing deletion intent"))?
                     .done = true;
                 store.commit(next)?;
+            }
+            Mutation::Object(_) | Mutation::Absent => {
+                return Err(Error(
+                    "Compute deletion lacks a matching operation; outcome remains uncertain",
+                ));
             }
         }
         return Ok(Progress::Pending);
