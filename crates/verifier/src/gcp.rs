@@ -215,6 +215,17 @@ impl BoundGcpWorkloadInspection {
             && self.workload.workload_issue.is_none()
             && self.binding_issue.is_none()
     }
+
+    /// A matching quote, event log and local policy are insufficient for a
+    /// private session. The endorsement and the exact boot/application
+    /// artifacts must also be independently authenticated against the
+    /// client-packaged release. Current inspection cannot establish either
+    /// provenance fact, so this remains false until those checks are added.
+    pub fn private_acceptance_ready(&self) -> bool {
+        self.diagnostic_passed()
+            && self.workload.firmware_endorsement_provenance == InspectionStatus::Verified
+            && self.workload.artifact_provenance == InspectionStatus::Verified
+    }
 }
 
 pub fn inspect_gcp_workload(

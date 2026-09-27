@@ -44,16 +44,19 @@ impl UnverifiedGcpEvidence {
         let collateral_deadline = releases.iter().find_map(|release| {
             release.gcp_workload().and_then(|policy| {
                 let report = self.inspect_against(collateral, policy);
-                report
-                    .diagnostic_passed()
-                    .then_some(report.private_collateral_deadline)
-                    .flatten()
+                (report.diagnostic_passed()
+                    && report
+                        .gcp_evidence
+                        .as_ref()
+                        .is_some_and(|evidence| evidence.private_acceptance_ready()))
+                .then_some(report.private_collateral_deadline)
+                .flatten()
             })
         });
         let Some(collateral_deadline) = collateral_deadline else {
             return Err(SafeError::new(
                 ErrorCode::PrivateModeUnavailable,
-                "Hardware, workload, freshness or live TLS key did not match a reviewed release.",
+                "Hardware, workload, provenance, freshness or live TLS key did not match a reviewed release.",
             ));
         };
         VerifiedRpcSession::from_authenticated_inspection(
