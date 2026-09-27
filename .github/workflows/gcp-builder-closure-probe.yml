@@ -139,6 +139,32 @@ jobs:
           print(json.dumps(report, sort_keys=True))
           PY
 
+          mkdir "$scratch/guest-archives"
+          ZRPC_GUEST_ARCHIVES="$scratch/guest-archives" python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import fetch_guest_closure
+
+          report = fetch_guest_closure.prefetch_archives(
+              Path(os.environ["ZRPC_GUEST_ARCHIVES"]),
+          )
+          if (report["status"] !=
+                  "diagnostic-guest-archive-hashes-matched-signature-unchecked"
+                  or report["package_count"] != 104
+                  or report["signed_snapshot_rechecked"] is not False
+                  or report["archive_hashes_matched_source_lock"] is not True
+                  or report["installed_closure_checked"] is not False
+                  or report["package_scripts_executed"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("guest archive prefetch changed diagnostic acceptance status")
+          print(json.dumps(report, sort_keys=True))
+          PY
+
           # Only the commands below execute staged code. The outer namespace
           # has no network route. Signature and APT-plan checks execute using
           # the hash-checked staged gpgv, Python, apt-get, and shared libraries
@@ -159,6 +185,7 @@ jobs:
             source=$8
             archives=$9
             metadata=${10}
+            guest_archives=${11}
             test "$(readlink /proc/self/ns/user)" = "$4"
             test "$(readlink /proc/self/ns/mnt)" != "$5"
             test "$(readlink /proc/self/ns/net)" != "$6"
@@ -168,7 +195,7 @@ jobs:
             echo "Isolated mount namespace: $(readlink /proc/self/ns/mnt)"
             echo "Isolated network namespace: $(readlink /proc/self/ns/net)"
 
-            for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-apt-scratch proc dev; do
+            for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch proc dev; do
               test ! -L "$staged/$directory"
               mkdir -p "$staged/$directory"
             done
@@ -179,6 +206,8 @@ jobs:
             mount -o remount,bind,ro "$staged/zrpc-archives"
             mount --bind "$metadata" "$staged/zrpc-metadata"
             mount -o remount,bind,ro "$staged/zrpc-metadata"
+            mount --bind "$guest_archives" "$staged/zrpc-guest-archives"
+            mount -o remount,bind,ro "$staged/zrpc-guest-archives"
             mount -t proc proc "$staged/proc"
             test ! -e "$staged/dev/null"
             touch "$staged/dev/null"
@@ -212,6 +241,29 @@ jobs:
               raise ValueError("signed snapshot check changed diagnostic acceptance status")
           print(json.dumps(report, sort_keys=True))
           PY
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import fetch_guest_closure
+
+          report = fetch_guest_closure.verify_cached_archives(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+          )
+          if (report["status"] !=
+                  "diagnostic-guest-archives-matched-signed-snapshot-unbuilt"
+                  or report["package_count"] != 104
+                  or report["signed_snapshot_rechecked"] is not True
+                  or report["archive_bytes_checked"] is not True
+                  or report["installed_closure_checked"] is not False
+                  or report["package_scripts_executed"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("guest archive diagnostic changed acceptance status")
+          print(json.dumps(report, sort_keys=True))
+          PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"
             run_staged /lib64/ld-linux-x86-64.so.2 --list /usr/bin/systemd-repart
@@ -221,4 +273,5 @@ jobs:
             echo "Diagnostic staged tool startup passed; no image built or approved."
           ' _ "$scratch/staged" "$runner_uid" "$runner_gid" \
             "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command" \
-            "$source" "$scratch/archives" "$scratch/metadata"
+            "$source" "$scratch/archives" "$scratch/metadata" \
+            "$scratch/guest-archives"

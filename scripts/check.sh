@@ -21,6 +21,7 @@ python3 tools/gcp-guest/test_verify_mkosi_source.py
 python3 tools/gcp-guest/test_verify_mkosi_tree.py
 python3 tools/gcp-guest/test_verify_mkosi_payload.py
 python3 tools/gcp-guest/test_verify_package_closure.py
+python3 tools/gcp-guest/test_fetch_guest_closure.py
 python3 tools/gcp-guest/test_verify_builder_packages.py
 python3 tools/gcp-guest/test_verify_builder_closure.py
 python3 tools/gcp-guest/test_stage_builder_toolchain.py
