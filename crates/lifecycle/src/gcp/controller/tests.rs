@@ -290,6 +290,7 @@ impl Fixture {
             operations: BTreeMap::new(),
             calls: Vec::new(),
             deletes: Vec::new(),
+            compute_delete_response: None,
             fail_after_create: false,
             outage: false,
         }
@@ -667,6 +668,7 @@ struct Mock {
     operations: BTreeMap<String, Operation>,
     calls: Vec<String>,
     deletes: Vec<String>,
+    compute_delete_response: Option<Mutation>,
     fail_after_create: bool,
     outage: bool,
 }
@@ -691,10 +693,11 @@ impl Mock {
         );
         assert!(!self.state.join("pending.json").exists());
     }
-    fn op(&self, r: &ResourcePlan, request: &str, id: &str) -> Operation {
+    fn op(&self, r: &ResourcePlan, request: &str, id: &str, deleting: bool) -> Operation {
         Operation {
             name: format!("operation-{request}"),
             status: "DONE".into(),
+            operation_type: if deleting { "delete" } else { "insert" }.into(),
             target_link: format!("https://www.googleapis.com/compute/v1/{}", r.path),
             target_id: Some(id.into()),
             client_operation_id: Some(request.into()),
@@ -742,7 +745,7 @@ impl Provider for Mock {
         let response = if r.kind == ResourceKind::StagingObject {
             Mutation::Object(object)
         } else {
-            let op = self.op(r, request, &id);
+            let op = self.op(r, request, &id, false);
             self.operations.insert(request.into(), op.clone());
             Mutation::Operation(op)
         };
@@ -757,11 +760,17 @@ impl Provider for Mock {
     async fn delete(&mut self, r: &ResourcePlan, id: &str, request: &str) -> Result<Mutation> {
         self.assert_committed(request);
         self.deletes.push(r.path.clone());
+        if r.kind != ResourceKind::StagingObject {
+            if let Some(response) = self.compute_delete_response.take() {
+                self.objects.remove(&r.path);
+                return Ok(response);
+            }
+        }
         self.objects.remove(&r.path);
         if r.kind == ResourceKind::StagingObject {
             return Ok(Mutation::Object(Value::Null));
         }
-        let op = self.op(r, request, id);
+        let op = self.op(r, request, id, true);
         self.operations.insert(request.into(), op.clone());
         Ok(Mutation::Operation(op))
     }
@@ -927,6 +936,7 @@ async fn failed_done_deletion_does_not_complete_cleanup_or_admit_billing_evidenc
         resource,
         &state.delete.as_ref().unwrap().request_id,
         state.identity.as_ref().unwrap(),
+        true,
     );
     operation.error = Some(json!({"errors": [{"code": "synthetic"}]}));
     accept_operation(&mut store, index, resource, operation, true).unwrap();
@@ -937,7 +947,6 @@ async fn failed_done_deletion_does_not_complete_cleanup_or_admit_billing_evidenc
             .unwrap()
             .failed
     );
-
     assert_eq!(
         teardown_once(&mut store, &mut provider, 1003)
             .await
@@ -1210,7 +1219,7 @@ async fn completed_compute_deletion_requires_the_journaled_target_id() {
         (None, Some(json!({"errors": [{"code": "synthetic"}]}))),
         (Some("999".into()), None),
     ] {
-        let mut operation = provider.op(resource, &request, &id);
+        let mut operation = provider.op(resource, &request, &id, true);
         operation.target_id = target_id;
         operation.error = error;
         assert!(accept_operation(&mut store, index, resource, operation, true).is_err());
@@ -1227,11 +1236,26 @@ async fn completed_compute_deletion_requires_the_journaled_target_id() {
                 .done
         );
     }
+    let mut wrong_action = provider.op(resource, &request, &id, true);
+    wrong_action.operation_type = "insert".into();
+    assert!(accept_operation(&mut store, index, resource, wrong_action, true).is_err());
+    assert_eq!(store.journal().generation, generation);
+
+    let mut running = provider.op(resource, &request, &id, true);
+    running.status = "RUNNING".into();
+    accept_operation(&mut store, index, resource, running, true).unwrap();
+    assert!(
+        !store.journal().resources[index]
+            .delete
+            .as_ref()
+            .unwrap()
+            .done
+    );
     accept_operation(
         &mut store,
         index,
         resource,
-        provider.op(resource, &request, &id),
+        provider.op(resource, &request, &id, true),
         true,
     )
     .unwrap();
@@ -1242,6 +1266,54 @@ async fn completed_compute_deletion_requires_the_journaled_target_id() {
             .unwrap()
             .done
     );
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1002)
+            .await
+            .unwrap_err()
+            .0,
+        "resource remains after completed deletion; cleanup uncertain"
+    );
+}
+
+#[tokio::test]
+async fn compute_delete_404_or_object_cannot_complete_cleanup() {
+    for response in [Mutation::Absent, Mutation::Object(json!({"id": "8"}))] {
+        let f = Fixture::new();
+        let mut store = Store::open(&f.state).unwrap();
+        let mut provider = f.mock();
+        deploy_all(&mut store, &mut provider, &f.package).await;
+        provider.compute_delete_response = Some(response);
+
+        assert_eq!(
+            teardown_once(&mut store, &mut provider, 1001)
+                .await
+                .unwrap_err()
+                .0,
+            "Compute deletion lacks a matching operation; outcome remains uncertain"
+        );
+        let instance = store.journal().resources.last().unwrap();
+        let delete = instance.delete.as_ref().unwrap();
+        assert!(store.journal().teardown_started);
+        assert!(delete.operation.is_none());
+        assert!(!delete.done);
+        assert!(!delete.failed);
+        assert_eq!(provider.deletes.len(), 1);
+
+        // The mock removes the VM before returning its ambiguous response.
+        // A later missing GET still cannot replace a completed delete operation.
+        assert_eq!(
+            teardown_once(&mut store, &mut provider, 1002)
+                .await
+                .unwrap_err()
+                .0,
+            "deletion outcome uncertain; absence alone cannot finish cleanup"
+        );
+        assert!(
+            store
+                .record_billing_evidence(&f.package.spec.release_manifest)
+                .is_err()
+        );
+    }
 }
 #[tokio::test]
 async fn rejects_early_late_and_tampered_deploy_without_provider_mutations() {

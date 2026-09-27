@@ -115,6 +115,7 @@ impl Runtime {
 pub struct Operation {
     pub name: String,
     pub status: String,
+    pub operation_type: String,
     pub target_link: String,
     pub target_id: Option<String>,
     pub client_operation_id: Option<String>,
