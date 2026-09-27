@@ -495,10 +495,10 @@ jobs:
               raise ValueError("mkosi BaseTrees profile changed diagnostic status")
           print(json.dumps(prepared, sort_keys=True))
           PY
-            profile_input="$staged/zrpc-guest-payload-parent/mkosi-root-profile/input"
-            mount --bind "$profile_input" "$profile_input"
-            mount -o remount,bind,ro "$profile_input"
-            test "$(findmnt -n -o OPTIONS --target "$profile_input" | tr , '\n' | grep -x ro)" = ro
+            profile_root="$staged/zrpc-guest-payload-parent/mkosi-root-profile"
+            mount --bind "$profile_root" "$profile_root"
+            mount -o remount,bind,ro "$profile_root"
+            test "$(findmnt -n -o OPTIONS --target "$profile_root" | tr , '\n' | grep -x ro)" = ro
             run_staged_root() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
