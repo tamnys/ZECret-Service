@@ -17,8 +17,10 @@ Supply a `DeploymentSpec` JSON object matching
 `crates/lifecycle/src/gcp/package.rs`. Its artifact fields are objects containing
 an absolute `path` and lowercase `sha256`. Required inputs include the raw disk
 archive, release manifest, boot policy, memory measurements, reproducibility
-report, and DER Secure Boot public certificates. Keep signing private keys
-outside this package.
+report, DER Secure Boot PK/KEK/db certificates, and a reviewed binary `dbx`
+revocation database. The package supplies all four Secure Boot variables to
+the image API; omitting `dbx` would select Google's default. Keep signing
+private keys outside this package.
 
 Specify the project, C3 machine type, region/zone, boot/data disk capacities,
 private subnet CIDR, wrapper port, and an existing private staging bucket.
