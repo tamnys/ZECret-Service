@@ -77,6 +77,9 @@ class CandidateTests(unittest.TestCase):
         wrapper = (units / "zrpc-wrapper.service").read_text()
         self.assertIn("--platform gcp-tdx", wrapper)
         self.assertIn("--check wrapper", wrapper)
+        for name in ("zrpc-wrapper", "zrpc-node", "zrpc-cookie", "zrpc-gcp-quote"):
+            unit = (units / f"{name}.service").read_text()
+            self.assertIn("NoExecPaths=/run /tmp /var /dev\n", unit)
         config = (output / "mkosi.conf").read_text()
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)

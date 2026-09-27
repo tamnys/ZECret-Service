@@ -100,6 +100,20 @@ fn validate_namespace(
         }
     }
     for m in &mounts {
+        // A read-only view of another tmpfs may still contain bytes written
+        // by a different unit. Check the effective namespace rather than
+        // trusting unit directives.
+        if service.is_some()
+            && ((m.kind == "tmpfs" && !m.options.contains("noexec"))
+                || (m.options.contains("rw")
+                    && !m.options.contains("noexec")
+                    && !matches!(
+                        m.kind,
+                        "proc" | "sysfs" | "cgroup2" | "configfs" | "securityfs"
+                    )))
+        {
+            return Err(());
+        }
         if m.options.contains("rw") && m.path != "/var/lib/zebra" {
             let memory = m.kind == "tmpfs"
                 && (m.path == "/run"
@@ -375,17 +389,38 @@ mod tests {
     #[test]
     fn service_namespace_checks_allow_only_narrowed_runtime_access() {
         let narrowed = MOUNTS
+            .replace("/ /run rw,nosuid,nodev", "/ /run rw,nosuid,nodev,noexec")
+            .replace("/ /tmp rw,nosuid,nodev", "/ /tmp rw,nosuid,nodev,noexec")
+            .replace("/ /var rw,nosuid,nodev", "/ /var rw,nosuid,nodev,noexec")
             .replace("/ /var rw,", "/ /var ro,")
             .replace("/ /tmp rw,", "/ /tmp ro,")
             .replace("/ /run rw,", "/ /run ro,");
         let node = format!(
-            "{narrowed}6 2 0:2 /zrpc-node /run/zrpc-node rw,nosuid,nodev - tmpfs tmpfs rw\n"
+            "{narrowed}6 2 0:2 /zrpc-node /run/zrpc-node rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n"
         );
         assert!(validate_namespace(&node, SWAPS, "/dev/null", "0", Some("zebra")).is_ok());
+        let node_with_devices =
+            format!("{node}7 1 0:7 / /dev rw,nosuid,nodev,noexec - devtmpfs udev rw\n");
+        assert!(
+            validate_namespace(&node_with_devices, SWAPS, "/dev/null", "0", Some("zebra")).is_ok()
+        );
+        for executable in [
+            node.replace("/ /run ro,nosuid,nodev,noexec", "/ /run ro,nosuid,nodev"),
+            node.replace(
+                "/run/zrpc-node rw,nosuid,nodev,noexec",
+                "/run/zrpc-node rw,nosuid,nodev",
+            ),
+            node_with_devices.replace("/ /dev rw,nosuid,nodev,noexec", "/ /dev rw,nosuid,nodev"),
+        ] {
+            assert!(
+                validate_namespace(&executable, SWAPS, "/dev/null", "0", Some("zebra")).is_err()
+            );
+        }
         assert!(validate_namespace(&narrowed, SWAPS, "/dev/null", "0", Some("zebra")).is_err());
         let wrong = node.replace("/ /run ro,", "/ /run rw,");
         assert!(validate_namespace(&wrong, SWAPS, "/dev/null", "0", Some("zebra")).is_err());
-        let rogue = format!("{node}7 2 0:7 /rogue /run/rogue rw,nosuid,nodev - tmpfs tmpfs rw\n");
+        let rogue =
+            format!("{node}7 2 0:7 /rogue /run/rogue rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n");
         assert!(validate_namespace(&rogue, SWAPS, "/dev/null", "0", Some("zebra")).is_err());
         let hidden = narrowed.replace(
             "5 4 259:1 / /var/lib/zebra rw,nosuid,nodev,noexec - ext4 /dev/nvme0n2 rw",
@@ -394,12 +429,12 @@ mod tests {
         assert!(validate_namespace(&hidden, SWAPS, "/dev/null", "0", Some("wrapper")).is_ok());
         assert!(validate_namespace(&hidden, SWAPS, "/dev/null", "0", Some("zebra")).is_err());
         let broker = format!(
-            "{hidden}6 2 0:2 /zrpc-gcp-quote /run/zrpc-gcp-quote rw,nosuid,nodev - tmpfs tmpfs rw\n"
+            "{hidden}6 2 0:2 /zrpc-gcp-quote /run/zrpc-gcp-quote rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n"
         );
         assert!(validate_namespace(&broker, SWAPS, "/dev/null", "0", Some("broker")).is_ok());
         assert!(validate_namespace(&hidden, SWAPS, "/dev/null", "0", Some("broker")).is_err());
         let cookie = format!(
-            "{hidden}6 2 0:2 /zrpc-wrapper /run/zrpc-wrapper rw,nosuid,nodev - tmpfs tmpfs rw\n"
+            "{hidden}6 2 0:2 /zrpc-wrapper /run/zrpc-wrapper rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n"
         );
         assert!(validate_namespace(&cookie, SWAPS, "/dev/null", "0", Some("cookie")).is_ok());
         assert!(validate_namespace(&hidden, SWAPS, "/dev/null", "0", Some("cookie")).is_err());
