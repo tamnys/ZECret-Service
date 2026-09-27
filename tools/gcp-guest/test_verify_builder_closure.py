@@ -30,8 +30,13 @@ def apt_archive(paths):
     with tarfile.open(fileobj=buffer, mode="w:xz") as archive:
         for path, data in paths:
             member = tarfile.TarInfo(path)
-            member.size = len(data)
-            archive.addfile(member, io.BytesIO(data))
+            if isinstance(data, str):
+                member.type = tarfile.SYMTYPE
+                member.linkname = data
+                archive.addfile(member)
+            else:
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
     return b"!<arch>\n" + ar_member("debian-binary/", b"2.0\n") + ar_member("data.tar.xz/", buffer.getvalue())
 
 
@@ -82,6 +87,45 @@ class BuilderClosureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "apt ar header"):
             closure.apt_get_from_deb(b"!<arch>\n" + b"malformed")
 
+    def test_signed_elf_provider_requires_same_directory_regular_target(self):
+        prefix = "./usr/lib/x86_64-linux-gnu/"
+        signed = apt_archive([
+            (prefix + "libexample.so.1", "libexample.so.1.2"),
+            (prefix + "libexample.so.1.2", b"\x7fELFsynthetic"),
+        ])
+        self.assertEqual(closure.package_elf(signed, "libexample.so.1"), b"\x7fELFsynthetic")
+        for archive, message in (
+            (apt_archive([(prefix + "libexample.so.1", "/usr/lib/libexample.so.1")]), "escapes"),
+            (apt_archive([(prefix + "libexample.so.1", "../libexample.so.1")]), "escapes"),
+            (apt_archive([(prefix + "libexample.so.1", "libexample.so.1.2")]), "regular target"),
+            (apt_archive([(prefix + "libexample.so.1", b"not-elf")]), "not ELF"),
+            (apt_archive([(prefix + "libexample.so.1", b"\x7fELFone"),
+                          (prefix + "libexample.so.1", b"\x7fELFtwo")]), "duplicate"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                closure.package_elf(archive, "libexample.so.1")
+
+    def test_loader_rejects_ambient_missing_and_duplicate_objects(self):
+        loader = Path("/proc/self/fd/3")
+        library = Path("/proc/self/fd/4")
+        good = ("\t/proc/self/fd/4 (0x000000400284c000)\n"
+                "\t/lib64/ld-linux-x86-64.so.2 => /proc/self/fd/3 (0x0000004000000000)\n")
+        result = lambda body: subprocess.CompletedProcess([], 0, body, "")
+        closure.check_loader_report(result(good), loader, [library])
+        for body, message in (
+            (good.replace("/proc/self/fd/4", "/lib/x86_64-linux-gnu/libc.so.6"), "unrecognized"),
+            (good.splitlines(keepends=True)[1], "missing or ambient"),
+            (good + "\t/proc/self/fd/4 (0x000000400284c000)\n", "missing or ambient"),
+        ):
+            with self.subTest(body=body), self.assertRaisesRegex(ValueError, message):
+                closure.check_loader_report(result(body), loader, [library])
+
+    def test_archive_elf_is_sealed_across_loader_inspection_and_use(self):
+        with closure.sealed_elf_bytes(b"\x7fELFsynthetic") as (path, fd):
+            self.assertEqual(path.read_bytes(), b"\x7fELFsynthetic")
+            with self.assertRaises(OSError):
+                os.write(fd, b"change")
+
     def test_apt_plan_rejects_removal_duplicate_and_wrong_version(self):
         good = "Inst apt (3.0.3 snapshot.debian.org [amd64])\n"
         result = lambda body, code=0, error="": subprocess.CompletedProcess([], code, body, error)
@@ -111,7 +155,8 @@ class BuilderClosureTests(unittest.TestCase):
         with patch.object(closure, "INDEX_BYTES", 4):
             with self.assertRaisesRegex(ValueError, "APT resolver differs"):
                 closure.apt_plan(lzma.compress(b"data"), self.root, apt_get,
-                                 resolver, [], "https://snapshot.debian.org/archive/debian/20260918T000000Z/")
+                                 resolver, [], "https://snapshot.debian.org/archive/debian/20260918T000000Z/",
+                                 {})
 
 
 if __name__ == "__main__":
