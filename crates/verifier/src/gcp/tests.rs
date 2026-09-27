@@ -193,6 +193,79 @@ fn replay_alone_does_not_authorize_changed_event_descriptions_or_types() {
 }
 
 #[test]
+fn unextended_no_action_digests_must_be_zero_in_every_bank() {
+    let mut bytes = synthetic_log();
+    let original = ccel::replay(&ccel::parse(&bytes).unwrap().events);
+    u32le(&mut bytes, 1);
+    u32le(&mut bytes, ccel::EV_NO_ACTION);
+    u32le(&mut bytes, 1);
+    bytes.extend(0x000cu16.to_le_bytes());
+    bytes.extend([0; 48]);
+    u32le(&mut bytes, 8);
+    bytes.extend(b"ADVISORY");
+    assert_eq!(ccel::replay(&ccel::parse(&bytes).unwrap().events), original);
+
+    // A nonzero digest in this event would otherwise be silently skipped by
+    // replay, so it must not be treated as hardware-authenticated evidence.
+    let digest_offset = bytes.len() - 8 - 4 - 48;
+    bytes[digest_offset] = 1;
+    assert!(matches!(
+        ccel::parse(&bytes),
+        Err(GcpWorkloadIssue::UnsupportedCcel)
+    ));
+
+    // The SHA-384 replay bank alone is insufficient: a second declared bank
+    // must also obey the zero-digest rule for an unextended event.
+    let source = synthetic_log();
+    let parsed = ccel::parse(&source).unwrap();
+    let mut spec = b"Spec ID Event03\0".to_vec();
+    u32le(&mut spec, 0);
+    spec.extend([0, 2, 0, 2]);
+    u32le(&mut spec, 2);
+    spec.extend(0x000bu16.to_le_bytes());
+    spec.extend(32u16.to_le_bytes());
+    spec.extend(0x000cu16.to_le_bytes());
+    spec.extend(48u16.to_le_bytes());
+    spec.push(0);
+    let mut multibank = Vec::new();
+    u32le(&mut multibank, 1);
+    u32le(&mut multibank, ccel::EV_NO_ACTION);
+    multibank.extend([0; 20]);
+    u32le(&mut multibank, spec.len() as u32);
+    multibank.extend(spec);
+    for event in &parsed.events {
+        u32le(&mut multibank, event.mr_index);
+        u32le(&mut multibank, event.event_type);
+        u32le(&mut multibank, 2);
+        multibank.extend(0x000bu16.to_le_bytes());
+        multibank.extend(Sha256::hash(event.data));
+        multibank.extend(0x000cu16.to_le_bytes());
+        multibank.extend(event.digest);
+        u32le(&mut multibank, event.data.len() as u32);
+        multibank.extend(event.data);
+    }
+    u32le(&mut multibank, 1);
+    u32le(&mut multibank, ccel::EV_NO_ACTION);
+    u32le(&mut multibank, 2);
+    multibank.extend(0x000bu16.to_le_bytes());
+    let sha256_offset = multibank.len();
+    multibank.extend([0; 32]);
+    multibank.extend(0x000cu16.to_le_bytes());
+    multibank.extend([0; 48]);
+    u32le(&mut multibank, 8);
+    multibank.extend(b"ADVISORY");
+    assert_eq!(
+        ccel::replay(&ccel::parse(&multibank).unwrap().events),
+        original
+    );
+    multibank[sha256_offset] = 1;
+    assert!(matches!(
+        ccel::parse(&multibank),
+        Err(GcpWorkloadIssue::UnsupportedCcel)
+    ));
+}
+
+#[test]
 fn hash_of_measured_variable_content_cannot_be_replaced_by_a_descriptor_reference() {
     let mut p = synthetic_policy();
     let td = synthetic_report(&p);
