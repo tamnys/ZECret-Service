@@ -177,7 +177,7 @@ jobs:
             for path in "$scratch" "$scratch/archives" "$scratch/guest-archives" \
               "$scratch/staged/zrpc-guest-payload-parent/tree"; do
               if test -d "$path"; then
-                du -B1 -s "$path"
+                sudo -n du -B1 -s "$path"
               else
                 echo "absent: $path"
               fi
