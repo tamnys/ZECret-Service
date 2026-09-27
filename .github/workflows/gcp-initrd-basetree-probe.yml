@@ -1,0 +1,199 @@
+name: GCP initrd BaseTrees input probe
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/gcp-initrd-basetree-probe.yml
+      - deploy/gcp/guest/package-closure.lock.json
+      - tools/gcp-guest/assemble_guest_base_tree.py
+      - tools/gcp-guest/assemble_initrd_base_tree.py
+      - tools/gcp-guest/debian_snapshot.py
+      - tools/gcp-guest/fetch_guest_closure.py
+      - tools/gcp-guest/preflight_guest_base_tree.py
+      - tools/gcp-guest/prepare.py
+      - tools/gcp-guest/stage_builder_toolchain.py
+      - tools/gcp-guest/test_assemble_initrd_base_tree.py
+      - tools/gcp-guest/trust/**
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  initrd-input:
+    name: Signed Debian data-only initrd input on native x86
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Fetch the exact public source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          command -v readelf
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+
+      - name: Authenticate inputs and assemble only inert package data
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/initrd-input"
+          mkdir "$scratch" "$scratch/bin" "$scratch/builder-archives" \
+            "$scratch/metadata" "$scratch/archives"
+          python3 -B -m unittest discover -s tools/gcp-guest \
+            -p 'test_*base_tree.py'
+          python3 -B tools/gcp-guest/fetch_guest_closure.py metadata \
+            --directory "$scratch/metadata"
+          python3 -B tools/gcp-guest/fetch_guest_closure.py prefetch \
+            --archives "$scratch/archives"
+
+          # Bootstrap the exact source-reviewed gpgv bytes before trusting the
+          # downloaded Debian metadata. Do not execute package control scripts.
+          ZRPC_SCRATCH="$scratch" python3 -I - <<'PY'
+          import hashlib
+          import io
+          import os
+          from pathlib import Path
+          import sys
+          import tarfile
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import debian_snapshot
+          import fetch_builder_closure as builder
+          import verify_builder_closure as closure
+
+          scratch = Path(os.environ["ZRPC_SCRATCH"])
+          lock, _, _ = builder.reviewed_lock(closure.LOCK)
+          package = next(item for item in lock["packages"] if item["name"] == "gpgv")
+          archives = scratch / "builder-archives"
+          directory = os.open(archives, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+          try:
+              builder.download_one(directory, package, lock["snapshot"])
+              if not builder.verify_cached(directory, package):
+                  raise ValueError("reviewed gpgv archive missing")
+          finally:
+              os.close(directory)
+          data = (archives / (package["sha256"] + ".deb")).read_bytes()
+          if hashlib.sha256(data).hexdigest() != package["sha256"]:
+              raise ValueError("reviewed gpgv archive differs")
+          with tarfile.open(fileobj=io.BytesIO(closure.deb_data_tar(data)), mode="r:xz") as payload:
+              member = payload.getmember("./usr/bin/gpgv")
+              if not member.isfile() or member.uid != 0 or member.gid != 0:
+                  raise ValueError("reviewed gpgv payload differs")
+              binary = payload.extractfile(member).read()
+          if (len(binary) != debian_snapshot.GPGV_SIZE or
+                  hashlib.sha256(binary).hexdigest() != debian_snapshot.GPGV_SHA256):
+              raise ValueError("reviewed gpgv executable differs")
+          executable = scratch / "bin/gpgv"
+          executable.write_bytes(binary)
+          executable.chmod(0o555)
+          PY
+          export PATH="$scratch/bin:$PATH"
+
+          python3 -B tools/gcp-guest/fetch_guest_closure.py verify-archives \
+            --metadata-directory "$scratch/metadata" --archives "$scratch/archives"
+          python3 -B tools/gcp-guest/assemble_initrd_base_tree.py assemble \
+            --metadata "$scratch/metadata" --archives "$scratch/archives" \
+            --artifact "$scratch/candidate" --workspace "$GITHUB_WORKSPACE"
+          python3 -B tools/gcp-guest/assemble_initrd_base_tree.py verify \
+            --metadata "$scratch/metadata" --archives "$scratch/archives" \
+            --artifact "$scratch/candidate"
+
+          python3 -I - "$scratch/candidate" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          artifact = Path(sys.argv[1])
+          manifest_bytes = (artifact / "guest-initrd-inputs-manifest.json").read_bytes()
+          manifest = json.loads(manifest_bytes)
+          archive = artifact / "guest-initrd-inputs.tar"
+          if (manifest["status"] != "diagnostic-signed-initrd-basetree-input-unbuilt"
+                  or len(manifest["entries"]) != 102
+                  or len(manifest["selected_packages"]) != 28
+                  or manifest["archive_sha256"] !=
+                      "b76b22d39e106849e30d8e3d229cd6d8dd8a834d373bfd6ab71b1c5f4c8b15f4"
+                  or hashlib.sha256(archive.read_bytes()).hexdigest() !=
+                      manifest["archive_sha256"]
+                  or any(manifest[field] is not False for field in (
+                      "package_control_scripts_executed", "early_init_included",
+                      "runtime_closure_verified", "initrd_built",
+                      "boot_verified", "private_mode_approved"))):
+              raise ValueError("native initrd input changed source-bound diagnostic state")
+          print(json.dumps({
+              "status": manifest["status"],
+              "archive_sha256": manifest["archive_sha256"],
+              "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+              "entry_count": len(manifest["entries"]),
+              "selected_package_count": len(manifest["selected_packages"]),
+              "runtime_closure_verified": False,
+              "initrd_built": False,
+              "private_mode_approved": False,
+          }, sort_keys=True))
+          PY
+
+          # Inspect verified archive bytes with maintained native readelf.
+          # No package executable is run or even extracted to disk here.
+          # DT_NEEDED coverage does not establish dlopen, units, /init, or boot.
+          python3 -I - "$scratch/candidate" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import tarfile
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import assemble_initrd_base_tree as candidate
+
+          artifact = Path(sys.argv[1])
+          manifest = json.loads((artifact / candidate.MANIFEST).read_bytes())
+          by_path = {row["path"]: row for row in manifest["entries"]}
+          checked = 0
+          with tarfile.open(artifact / candidate.ARCHIVE, mode="r:") as archive:
+              for relative in candidate.ELF_ENTRYPOINTS + candidate.ELF_RUNTIME:
+                  row = by_path[relative]
+                  if row["kind"] == "symlink":
+                      continue
+                  if row["kind"] != "file":
+                      raise ValueError(f"initrd ELF member type differs: {relative}")
+                  member = archive.getmember("./" + relative)
+                  data = archive.extractfile(member).read()
+                  descriptor = os.memfd_create("signed-initrd-elf", os.MFD_CLOEXEC)
+                  try:
+                      os.write(descriptor, data)
+                      output = subprocess.run(
+                          ["readelf", "--wide", "--file-header", "--program-headers",
+                           "--dynamic", f"/proc/self/fd/{descriptor}"],
+                          pass_fds=(descriptor,), check=True,
+                          capture_output=True, text=True,
+                      ).stdout
+                  finally:
+                      os.close(descriptor)
+                  if not re.search(r"Machine:\s+Advanced Micro Devices X86-64", output):
+                      raise ValueError(f"initrd ELF architecture differs: {relative}")
+                  for name in re.findall(r"\(NEEDED\).*?\[(.*?)\]", output):
+                      if not any(directory + "/" + name in by_path for directory in (
+                          "usr/lib/x86_64-linux-gnu/systemd",
+                          "usr/lib/x86_64-linux-gnu",
+                      )):
+                          raise ValueError(f"initrd direct ELF dependency absent: {relative}:{name}")
+                  for interpreter in re.findall(
+                      r"Requesting program interpreter: (.*?)\]", output
+                  ):
+                      if (interpreter != "/lib64/ld-linux-x86-64.so.2"
+                              or "lib64" not in by_path
+                              or "usr/lib64/ld-linux-x86-64.so.2" not in by_path):
+                          raise ValueError(f"initrd ELF interpreter differs: {relative}")
+                  checked += 1
+          print(f"Native x86 readelf inspected {checked} regular ELF files; runtime and boot remain unverified.")
+          PY
