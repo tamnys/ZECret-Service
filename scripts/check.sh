@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --all -- --check
 python3 scripts/check-verifier-features.py
+python3 scripts/test_reproduce_release.py
 cargo test --locked --workspace
 cargo build --locked -p zrpc-cli --bins --examples
 cargo build --locked -p zrpc-server --bins
@@ -13,7 +14,11 @@ python3 scripts/public-inspection-check.py
 python3 scripts/public-inspection-check.py --platform gcp-tdx
 python3 scripts/wrapper-check.py
 python3 tools/gcp-guest/test_prepare.py
+python3 tools/gcp-guest/test_audit_initrd.py
+python3 tools/gcp-guest/test_gcp_import_archive.py
 python3 tools/gcp-guest/test_verify_mkosi_source.py
+python3 tools/gcp-guest/test_verify_mkosi_tree.py
+python3 tools/gcp-guest/test_verify_package_closure.py
 python3 experiments/ephemeral-runtime/test-launch-profile.py
 python3 experiments/ephemeral-runtime/test-rootfs-source.py
 python3 experiments/ephemeral-runtime/test-packaging-source.py
