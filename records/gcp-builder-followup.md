@@ -27,7 +27,8 @@ The managed container's maintained GnuPG verified the InRelease against the
 pinned three-key keyring with exit 0. The status contained `VALIDSIG` for the
 Debian 13 archive primary fingerprint above, plus the Debian 12 archive and
 Debian 13 release signatures. This authenticates that Release file, not the
-mkosi `.dsc`, a package closure, or an image.
+mkosi `.dsc` by itself, a package closure, or an image. Source membership is
+checked separately below.
 
 The Release file signs `main/binary-amd64/Packages.xz` at SHA-256
 `7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498`
@@ -84,3 +85,31 @@ and hash-checked; staging them with **synthetic remaining guest artifacts**
 returned `staged-unbuilt-unapproved` and parsed with mkosi 25.3 `summary` exit 0.
 This proves the local metadata/package path can run. It does not prove package
 closure, reviewed toolchain libraries, an image, or approved guest execution.
+
+## Signed mkosi source membership, 2026-09-27 UTC
+
+The same authenticated InRelease signs `main/source/Sources.xz` at SHA-256
+`6002f81f463a2d976d84b34170367cc16da2d60bd0ba9ab9d868d6e1c1a935d9`
+and 10,540,436 bytes. The index was downloaded from that hash's immutable
+snapshot path and matched both the signed Release entry and the pinned local
+identity. Its single `mkosi` version `25.3-7` record binds the `.dsc`, upstream
+tarball, and Debian patch tarball to the SHA-256 values already recorded in
+`input-identities.json`; the local copies of all three match those hashes and
+sizes. `tools/gcp-guest/verify_mkosi_source.py` repeats this check using the
+pinned Debian keyring and executable hash. The real-input invocation returned
+`source-membership-verified-toolchain-unreviewed`; four synthetic parser tests
+passed in the managed amd64 container.
+
+This resolves source-archive membership in Debian's signed snapshot. It does
+not authenticate the extracted `gpgv` dynamic-library closure, establish that
+the upstream release tar corresponds to the separately recorded Git commit,
+authenticate the installed mkosi/systemd/apt toolchain, complete the package
+closure, or build the guest. The managed amd64 container remains UID 502 with
+zero effective capabilities, `NoNewPrivs: 1`, active seccomp, and denied
+`CLONE_NEWUSER`; it also lacks mkosi, systemd-repart, ukify, gpgv, sbsign, and
+veritysetup. The pinned [mkosi 25.3 requirements](https://github.com/systemd/mkosi/blob/54c625c380ef5500f17460981a3c67b109b6a847/mkosi/resources/man/mkosi.1.md#requirements)
+require namespace creation. Its offline repart mode avoids loop devices but
+does not avoid the namespace requirement. The next image-building step needs a
+reviewed managed builder with that capability and a fully authenticated
+toolchain; changing this guest preparer cannot make the current container
+build-capable.

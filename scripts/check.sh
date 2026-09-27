@@ -13,6 +13,7 @@ python3 scripts/public-inspection-check.py
 python3 scripts/public-inspection-check.py --platform gcp-tdx
 python3 scripts/wrapper-check.py
 python3 tools/gcp-guest/test_prepare.py
+python3 tools/gcp-guest/test_verify_mkosi_source.py
 python3 experiments/ephemeral-runtime/test-launch-profile.py
 python3 experiments/ephemeral-runtime/test-rootfs-source.py
 python3 experiments/ephemeral-runtime/test-packaging-source.py

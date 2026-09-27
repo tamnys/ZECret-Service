@@ -173,6 +173,7 @@ class CandidateTests(unittest.TestCase):
             prepare.read_json(path)
 
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
+        self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
         root = self.root / "synthetic-root"
         (root / "etc/systemd/system").mkdir(parents=True)
         (root / "usr/lib/zrpc").mkdir(parents=True)
@@ -202,6 +203,11 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit_rootfs.audit(root)
         sysusers_mask.symlink_to("/dev/null")
+        update_mask = root / "etc/systemd/system/systemd-sysupdate.timer"
+        update_mask.unlink()
+        with self.assertRaises(ValueError):
+            audit_rootfs.audit(root)
+        update_mask.symlink_to("/dev/null")
         (root / "boot").mkdir()
         companion = root / "boot/unapproved.addon.efi"
         companion.write_bytes(b"SYNTHETIC")

@@ -7,7 +7,16 @@ import stat
 import sys
 
 FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec")
-MASKED_UNITS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-firstboot.service", "systemd-sysusers.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service")
+MASKED_UNITS = (
+    "ssh.service", "sshd.service", "ssh.socket",
+    "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service",
+    "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target",
+    "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service",
+    "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service",
+    "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service",
+    "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service",
+    "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer",
+)
 
 def account_file(root, name, fields):
     path = root / "etc" / name

@@ -11,7 +11,7 @@
     "distribution_package_version": "25.3-7"
   },
   "downloaded_metadata": {
-    "mkosi_dsc_authentication": "unverified-signature-not-a-trust-input",
+    "mkosi_dsc_authentication": "archive-membership-verifiable-through-signed-sources-index; builder-toolchain-unreviewed",
     "mkosi_25.3-7.dsc_sha256": "05241915b6d7d0e633eafdde1248acb4cc734c06e19c41436e82e457a034a07f",
     "mkosi_25.3.orig.tar.gz_sha256_from_dsc": "7b039fb3b34e1680173a7f4af1bc24b475465afe335c8b21c213167734061e35",
     "mkosi_25.3-7.debian.tar.xz_sha256_from_dsc": "2d91b18e25cf2906b874cda68240e03f5fac3eafc60ca5fadb609f9969b80ec6",
@@ -20,6 +20,8 @@
       "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
       "main_binary_amd64_packages_xz_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
       "main_binary_amd64_packages_xz_size": 9678380,
+      "main_source_sources_xz_sha256": "6002f81f463a2d976d84b34170367cc16da2d60bd0ba9ab9d868d6e1c1a935d9",
+      "main_source_sources_xz_size": 10540436,
       "signed_release_date_epoch": 1789199741,
       "archive_signer_primary_fingerprint": "04B54C3CDCA79751B16BC6B5225629DF75B188BD",
       "local_verification": "reviewed-key GnuPG and checksum-bound extracted gpgv matched signatures; complete builder toolchain remains unreviewed"
