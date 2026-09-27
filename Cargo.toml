@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli"]
+members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest"]
 
 [workspace.package]
 version = "0.1.0"
@@ -39,6 +39,8 @@ dstack-sdk-types = { git = "https://github.com/Dstack-TEE/dstack", rev = "282eeb
 ez-hash = "=1.1.0"
 hex = "=0.4.3"
 sha2 = "=0.10.9"
+authenticode = { version = "=0.6.0", default-features = false, features = ["object", "std"] }
+object = { version = "=0.39.0", default-features = false, features = ["pe", "read_core", "unaligned"] }
 
 # Offline quote verification only: no PCCS/HTTP fetch or permissive TCB override.
 dcap-qvl = { version = "=0.6.3", default-features = false, features = ["std", "ring", "default-x509"] }
