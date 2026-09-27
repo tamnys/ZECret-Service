@@ -4,6 +4,7 @@ use super::{
     Error, Result, digest,
     package::{Artifact, Package},
     read_regular, valid_digest, valid_uuid,
+    watchdog::WatchdogBinding,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -44,6 +45,10 @@ pub struct Journal {
     pub package_sha256: String,
     pub original_start: u64,
     pub original_deadline: u64,
+    /// Frozen before the first provider call. Later Controls edits may only
+    /// accelerate cleanup, never move its admitted start toward the deadline.
+    #[serde(default)]
+    pub watchdog: Option<WatchdogBinding>,
     pub resources: Vec<ResourceState>,
     /// Immutable audit reference only. A digest cannot establish that delayed
     /// charges, corrections, or invoices have finished arriving.
@@ -110,6 +115,7 @@ impl Store {
             package_sha256: digest(&package_bytes),
             original_start: package.spec.start_unix_seconds,
             original_deadline: package.spec.deadline_unix_seconds,
+            watchdog: None,
             resources: vec![ResourceState::default(); package.resources.len()],
             billing_evidence_sha256: None,
             teardown_started: false,
@@ -205,6 +211,24 @@ impl Store {
     pub fn journal(&self) -> &Journal {
         &self.journal
     }
+    /// Publish the admitted cleanup schedule before any provider operation.
+    /// Retrying the same admission is idempotent; a different one cannot
+    /// replace the original experiment's cleanup controls.
+    pub fn admit_watchdog(&mut self, binding: WatchdogBinding) -> Result<()> {
+        if self.poisoned {
+            return Err(Error("reload journal after uncertain persistence"));
+        }
+        if let Some(original) = &self.journal.watchdog {
+            return if original == &binding {
+                Ok(())
+            } else {
+                Err(Error("admitted watchdog controls cannot be replaced"))
+            };
+        }
+        let mut next = self.journal.clone();
+        next.watchdog = Some(binding);
+        self.commit(next)
+    }
     /// Preserve a reviewed billing artifact's identity after cleanup. This
     /// records evidence only; it cannot establish invoice finality.
     pub fn record_billing_evidence(&mut self, evidence: &Artifact) -> Result<()> {
@@ -292,10 +316,24 @@ fn validate_transition(previous: &Journal, next: &Journal) -> Result<()> {
     if previous.package_sha256 != next.package_sha256
         || previous.original_start != next.original_start
         || previous.original_deadline != next.original_deadline
+        || previous.watchdog.is_some() && previous.watchdog != next.watchdog
         || previous.resources.len() != next.resources.len()
         || previous.teardown_started && !next.teardown_started
     {
         return Err(Error("journal original experiment cannot be reset"));
+    }
+    if let Some(binding) = &next.watchdog {
+        binding.validate(previous.original_start, previous.original_deadline)?;
+    }
+    if previous.watchdog.is_none()
+        && next.watchdog.is_some()
+        && (previous.resources.iter().any(|r| r.create.is_some())
+            || next.resources.iter().any(|r| r.create.is_some()))
+    {
+        return Err(Error("watchdog admission must precede creation intent"));
+    }
+    if next.watchdog.is_none() && next.resources.iter().any(|r| r.create.is_some()) {
+        return Err(Error("creation intent requires admitted watchdog"));
     }
     if previous.billing_evidence_sha256.is_some()
         && previous.billing_evidence_sha256 != next.billing_evidence_sha256

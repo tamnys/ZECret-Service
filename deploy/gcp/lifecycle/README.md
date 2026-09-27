@@ -70,13 +70,21 @@ clock, executable identity, and local permissions. The deadline reserves an
 in-flight invocation, poll interval, measured deletion duration, and manager
 delay. Timers and reminders cannot guarantee a spending cap.
 
+Deployment appends the exact Controls file digest, runtime-file identity, and
+deletion-start time to the original journal before Google authentication. Keep
+that Controls file unchanged for the evaluation. If it changes or disappears,
+the next watchdog invocation starts teardown rather than moving the original
+cleanup trigger later. It still requires the original runtime-file identity.
+A watchdog invocation before deployment makes no cloud call.
+
 ## Cloud commands and cleanup
 
 `deploy`, `observe`, `teardown`, and `watchdog-once` are separate commands.
 `deploy` additionally requires `--approve-package` with the frozen package
 SHA-256 and live external-control validation. Each invocation makes one bounded
 pass; `pending` means another pass is needed. The watchdog never creates
-resources.
+resources. After deployment admission, `observe` and `teardown` also require
+the original runtime-file identity.
 
 Live creation currently fails closed because the Compute adapter cannot safely
 delete a specific resource incarnation when another actor replaces its name

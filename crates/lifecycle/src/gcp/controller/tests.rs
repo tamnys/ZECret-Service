@@ -4,6 +4,7 @@ use crate::gcp::{
     digest,
     package::{Artifact, DeploymentSpec, Pricing},
     store::Journal,
+    watchdog::{Controls, WatchdogBinding},
 };
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, sync::OnceLock};
@@ -123,6 +124,49 @@ impl Fixture {
         let package = Package::prepare(spec, 1000).unwrap();
         let state = root.join("journal");
         Store::initialize(&state, &package).unwrap();
+        let artifact = package.spec.release_manifest.clone();
+        let runtime = crate::gcp::provider::Runtime {
+            gcloud: artifact.clone(),
+            gcloud_distribution_receipt: artifact.clone(),
+            gcloud_config_directory: root.join("credentials"),
+            trust_roots_der: vec![artifact.clone()],
+            invocation_budget_ms: 11_000,
+            response_limit_bytes: 4096,
+        };
+        let controls_path = root.join("controls.json");
+        let runtime_path = root.join("runtime.json");
+        let runtime_bytes = serde_json::to_vec(&runtime).unwrap();
+        fs::write(&runtime_path, &runtime_bytes).unwrap();
+        let controls = Controls {
+            package_sha256: package.sha256().unwrap(),
+            executable: artifact.clone(),
+            runtime_file: Artifact {
+                path: runtime_path,
+                sha256: digest(&runtime_bytes),
+            },
+            state_directory: state.clone(),
+            controller_machine_id: "a".repeat(32),
+            controller_uid: unsafe { libc::geteuid() }.max(1),
+            poll_interval_seconds: 20,
+            deletion_duration_seconds: 100,
+            systemd_delay_seconds: 3,
+            deletion_rehearsal: artifact.clone(),
+            independent_backstop: artifact,
+        };
+        let controls_bytes = serde_json::to_vec(&controls).unwrap();
+        fs::write(&controls_path, &controls_bytes).unwrap();
+        Store::open(&state)
+            .unwrap()
+            .admit_watchdog(
+                WatchdogBinding::from_admitted(
+                    &controls,
+                    &controls_path,
+                    &controls_bytes,
+                    &package,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         Self {
             root,
             state,
@@ -237,6 +281,10 @@ impl Mock {
             .collect::<Vec<_>>();
         files.sort();
         let j: Journal = serde_json::from_slice(&fs::read(files.last().unwrap()).unwrap()).unwrap();
+        assert!(
+            j.watchdog.is_some(),
+            "provider mutation preceded durable watchdog admission"
+        );
         assert!(
             j.resources.iter().any(|r| [&r.create, &r.delete]
                 .iter()
@@ -702,12 +750,11 @@ fn journal_recovers_published_pending_commit_and_rejects_truncation() {
     let mut next = store.journal().clone();
     next.teardown_started = true;
     store.commit(next).unwrap();
+    let current = f
+        .state
+        .join(format!("{:020}.json", store.journal().generation));
     drop(store);
-    fs::hard_link(
-        f.state.join("00000000000000000001.json"),
-        f.state.join("pending.json"),
-    )
-    .unwrap();
+    fs::hard_link(current, f.state.join("pending.json")).unwrap();
     assert!(Store::open(&f.state).is_err());
     Store::recover(&f.state).unwrap();
     assert!(Store::open(&f.state).unwrap().journal().teardown_started);
@@ -734,6 +781,79 @@ fn operation_scope_uses_documented_global_regional_and_zonal_collections() {
 fn live_creation_stays_blocked_until_compute_deletion_contract_is_resolved() {
     let error = crate::gcp::ensure_live_creation_ready().unwrap_err();
     assert!(error.0.contains("incarnation"));
+}
+
+#[tokio::test]
+async fn deployment_never_contacts_provider_without_frozen_watchdog() {
+    let f = Fixture::new();
+    let unbound = f.root.join("unbound-journal");
+    Store::initialize(&unbound, &f.package).unwrap();
+    let mut store = Store::open(&unbound).unwrap();
+    let mut provider = f.mock();
+    provider.outage = true;
+    let error = deploy_once(&mut store, &mut provider, 1000)
+        .await
+        .unwrap_err();
+    assert!(error.0.contains("durably admitted watchdog"));
+    assert_eq!(store.journal().generation, 0);
+    assert!(provider.calls.is_empty());
+}
+
+#[test]
+fn frozen_watchdog_survives_restart_and_controls_mutation_accelerates_cleanup() {
+    let f = Fixture::new();
+    let store = Store::open(&f.state).unwrap();
+    let original = store.journal().watchdog.clone().unwrap();
+    let before = original.deletion_start_unix_seconds - 1;
+    assert!(
+        !original
+            .due(&original.controls_path, before, false)
+            .unwrap()
+    );
+    let mut controls: Controls =
+        serde_json::from_slice(&fs::read(&original.controls_path).unwrap()).unwrap();
+    controls.poll_interval_seconds = 1;
+    controls.deletion_duration_seconds = 1;
+    controls.systemd_delay_seconds = 1;
+    assert!(controls.deletion_start(&f.package).unwrap() > original.deletion_start_unix_seconds);
+    fs::write(
+        &original.controls_path,
+        serde_json::to_vec(&controls).unwrap(),
+    )
+    .unwrap();
+    drop(store);
+
+    let mut restarted = Store::open(&f.state).unwrap();
+    assert_eq!(restarted.journal().watchdog.as_ref(), Some(&original));
+    assert!(
+        original
+            .due(&original.controls_path, before, false)
+            .unwrap()
+    );
+    assert!(
+        original
+            .due(
+                &original.controls_path,
+                original.deletion_start_unix_seconds,
+                false
+            )
+            .unwrap()
+    );
+    fs::remove_file(&original.controls_path).unwrap();
+    assert!(
+        original
+            .due(&original.controls_path, before, false)
+            .unwrap()
+    );
+
+    let generation = restarted.journal().generation;
+    let mut changed = original.clone();
+    changed.deletion_start_unix_seconds += 1;
+    assert!(restarted.admit_watchdog(changed).is_err());
+    let mut removed = restarted.journal().clone();
+    removed.watchdog = None;
+    assert!(restarted.commit(removed).is_err());
+    assert_eq!(restarted.journal().generation, generation);
 }
 
 #[test]
