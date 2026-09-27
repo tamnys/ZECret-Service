@@ -143,6 +143,32 @@ fn strict_quote_failure_never_runs_gcp_policy_or_report_data_checks() {
 }
 
 #[test]
+fn diagnostic_measurement_success_without_provenance_cannot_be_private_ready() {
+    let policy = synthetic_policy();
+    let mut report = inspect_using(&synthetic_log(), &policy, Some(&[0; 64]), |inspect| {
+        offline::inspect_fixture_quote_with_claims(QUOTE, COLLATERAL, 1_752_919_234, inspect)
+    });
+    // Fabricate an otherwise passing diagnostic report in this unit test. No
+    // actual quote is modified or promoted to accepted private evidence.
+    report.workload.quote.hardware_authenticity = InspectionStatus::Verified;
+    report.workload.quote.security_policy = InspectionStatus::Verified;
+    report.workload.quote.workload_policy = InspectionStatus::Verified;
+    report.workload.quote.issue = None;
+    report.workload.ccel_integrity = InspectionStatus::Verified;
+    report.workload.firmware_measurement_reference_match = InspectionStatus::Verified;
+    report.workload.boot_measurement_reference_match = InspectionStatus::Verified;
+    report.authenticated_report_data_match = InspectionStatus::Verified;
+    assert!(report.diagnostic_passed());
+    assert!(!report.private_acceptance_ready());
+
+    report.workload.firmware_endorsement_provenance = InspectionStatus::Verified;
+    assert!(!report.private_acceptance_ready());
+    report.workload.firmware_endorsement_provenance = InspectionStatus::NotChecked;
+    report.workload.artifact_provenance = InspectionStatus::Verified;
+    assert!(!report.private_acceptance_ready());
+}
+
+#[test]
 fn fabricated_matching_measurements_never_authenticate_a_quote() {
     let p = synthetic_policy();
     let td = synthetic_report(&p);
