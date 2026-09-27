@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use serde::Serialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use zrpc_client::inspection::PublicInspectionConfig;
@@ -29,6 +30,52 @@ pub struct LocalSession {
 enum DashboardMode {
     Simulation,
     Live(LiveConfiguration),
+}
+
+/// These are observations of the current local session, not a cached claim
+/// about a future remote connection. A rejected attempt cannot prove which
+/// earlier checks succeeded, so it reports them as unverified.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LiveCheck {
+    NotConnected,
+    NotChecked,
+    NotVerified,
+    NotApproved,
+}
+
+#[derive(Serialize)]
+struct LiveVerification {
+    transport: LiveCheck,
+    hardware: LiveCheck,
+    workload: LiveCheck,
+    channel_binding: LiveCheck,
+    freshness: LiveCheck,
+    release_approval: LiveCheck,
+}
+
+impl LiveVerification {
+    fn initial() -> Self {
+        Self {
+            transport: LiveCheck::NotConnected,
+            hardware: LiveCheck::NotChecked,
+            workload: LiveCheck::NotChecked,
+            channel_binding: LiveCheck::NotChecked,
+            freshness: LiveCheck::NotChecked,
+            release_approval: LiveCheck::NotApproved,
+        }
+    }
+
+    fn rejected() -> Self {
+        Self {
+            transport: LiveCheck::NotVerified,
+            hardware: LiveCheck::NotVerified,
+            workload: LiveCheck::NotVerified,
+            channel_binding: LiveCheck::NotVerified,
+            freshness: LiveCheck::NotVerified,
+            release_approval: LiveCheck::NotApproved,
+        }
+    }
 }
 
 /// Files and endpoint settings are loaded by the native CLI, not the browser.
@@ -199,7 +246,7 @@ async fn query(State(session): State<LocalSession>, request: Request) -> Respons
             Err(error) => return Json(json!({"mode":"private_blocked","simulation":false,
                 "private_accepted":false,"query_sent":false,"error":error,
                 "platform":live.config.platform(),
-                "verification":{"transport":"not_approved","hardware":"not_checked","application":"not_checked","key_binding":"not_checked","freshness":"not_checked","release":"not_approved"},"chain_readiness":"not_checked","result":null})).into_response(),
+                "verification":LiveVerification::rejected(),"chain_readiness":"not_checked","result":null})).into_response(),
         };
         let body = match to_bytes(body, MAX_BODY).await {
             Ok(body) => body,
@@ -252,7 +299,8 @@ async fn status(State(session): State<LocalSession>) -> Response {
         DashboardMode::Simulation => Json(json!(PrivateClient::new().verify())).into_response(),
         DashboardMode::Live(live) => Json(
             json!({"mode":"live_unverified","simulation":false,"platform":live.config.platform(),
-            "private_accepted":false,"query_sent":false,"verification":"not_checked"}),
+            "private_accepted":false,"query_sent":false,"verification":LiveVerification::initial(),
+            "chain_readiness":"not_checked","result":null}),
         )
         .into_response(),
     }
@@ -450,6 +498,59 @@ mod tests {
             assert_eq!(report["simulation"], false);
             assert_eq!(report["error"]["code"], "unknown_release");
             assert_eq!(report["platform"], serde_json::to_value(platform).unwrap());
+            assert_eq!(report["verification"]["hardware"], "not_verified");
+            assert_eq!(report["verification"]["workload"], "not_verified");
+            assert_eq!(report["verification"]["channel_binding"], "not_verified");
+            assert_eq!(report["verification"]["release_approval"], "not_approved");
+        }
+    }
+    #[tokio::test]
+    async fn live_status_reports_separate_unverified_gates_without_network() {
+        for platform in [
+            zrpc_protocol::Backend::GcpTdx,
+            zrpc_protocol::Backend::PhalaDstack,
+        ] {
+            let proxy_trap = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            proxy_trap.set_nonblocking(true).unwrap();
+            let socks = proxy_trap.local_addr().unwrap().to_string();
+            let live = LiveConfiguration::new(
+                PublicInspectionConfig::for_platform(platform, "192.0.2.1", 443, &socks).unwrap(),
+                b"{}".to_vec(),
+                if platform == zrpc_protocol::Backend::PhalaDstack {
+                    b"{}".to_vec()
+                } else {
+                    Vec::new()
+                },
+                ReleasePolicy::default(),
+            );
+            let state = LocalSession::new_live("127.0.0.1:32123".parse().unwrap(), live).unwrap();
+            let app = dashboard(state.clone());
+            let response = app
+                .oneshot(call(
+                    "/api/status",
+                    &state.host,
+                    &state.origin,
+                    &state.capability,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+            let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(report["mode"], "live_unverified");
+            assert_eq!(report["platform"], serde_json::to_value(platform).unwrap());
+            assert_eq!(report["private_accepted"], false);
+            assert_eq!(report["query_sent"], false);
+            assert_eq!(report["verification"]["transport"], "not_connected");
+            for check in ["hardware", "workload", "channel_binding", "freshness"] {
+                assert_eq!(report["verification"][check], "not_checked");
+            }
+            assert_eq!(report["verification"]["release_approval"], "not_approved");
+            assert_eq!(
+                proxy_trap.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
         }
     }
     #[test]

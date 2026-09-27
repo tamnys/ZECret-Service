@@ -1,9 +1,15 @@
 export {};
 
+type Verification = {
+  transport?: string; hardware?: string; workload?: string; application?: string;
+  channel_binding?: string; key_binding?: string; freshness?: string;
+  release_approval?: string; release?: string;
+};
 type Report = {
-  simulation: boolean; private_accepted: boolean; query_sent: boolean | string; fixture_dispatched?: boolean;
-  verification?: Record<string, unknown>; chain_readiness?: unknown;
-  error: unknown; result: unknown;
+  mode?: string; platform?: string; simulation: boolean; private_accepted: boolean;
+  query_sent: boolean | string; fixture_dispatched?: boolean;
+  verification?: Verification; chain_readiness?: unknown;
+  error?: unknown; result?: unknown;
 };
 const byId = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -26,6 +32,25 @@ async function api(path: string, body?: string, scenario?: string): Promise<unkn
   if (!response.ok) throw new Error('Local client rejected this request. Restart the dashboard from the CLI.');
   return response.json();
 }
+function renderEvidence(verification?: Verification): void {
+  const evidence = byId('evidence');
+  evidence.replaceChildren();
+  const checks: [string, string | undefined][] = [
+    ['SOCKS path', verification?.transport],
+    ['Hardware authenticity', verification?.hardware],
+    ['Workload policy', verification?.workload ?? verification?.application],
+    ['Connection key', verification?.channel_binding ?? verification?.key_binding],
+    ['Freshness', verification?.freshness],
+    ['Release approval', verification?.release_approval ?? verification?.release]
+  ];
+  for (const [label, status] of checks) {
+    const row = document.createElement('div');
+    const name = document.createElement('dt'); name.textContent = label;
+    const value = document.createElement('dd');
+    value.textContent = typeof status === 'string' ? status.replaceAll('_',' ') : 'not checked';
+    row.append(name, value); evidence.append(row);
+  }
+}
 function show(report: Report, elapsed: number): void {
   byId('result').textContent = JSON.stringify(report, null, 2);
   byId('sent').textContent = report.query_sent === true ? 'Yes' : report.query_sent === false ? 'No' : 'Unknown';
@@ -35,17 +60,7 @@ function show(report: Report, elapsed: number): void {
     ? (report.error ? 'SIMULATED REJECTION' : 'SYNTHETIC RESULT')
     : (report.private_accepted === true && report.query_sent === true && !report.error
       ? 'VERIFIED RESPONSE' : report.private_accepted === true ? 'QUERY FAILED' : 'PRIVATE MODE BLOCKED');
-  const evidence = byId('evidence');
-  evidence.replaceChildren();
-  const labels: Record<string,string> = {transport:'Transport',hardware:'Hardware authenticity',application:'Application policy',key_binding:'Connection key',freshness:'Freshness',release:'Release approval'};
-  for (const [key, label] of Object.entries(labels)) {
-    const row = document.createElement('div');
-    const name = document.createElement('dt'); name.textContent = label;
-    const value = document.createElement('dd');
-    const status = report.verification?.[key];
-    value.textContent = typeof status === 'string' ? status.replaceAll('_',' ') : 'not checked';
-    row.append(name, value); evidence.append(row);
-  }
+  renderEvidence(report.verification);
 }
 run.addEventListener('click', async () => {
   run.disabled = true;
@@ -76,6 +91,16 @@ async function start(): Promise<void> {
       }
       run.firstChild!.textContent = 'Try verified query ';
       byId('release-note').textContent = `${result.platform === 'gcp-tdx' ? 'Google Cloud TDX' : 'Phala dstack'}: no approved production release is packaged yet. Private mode stays blocked.`;
+      byId('gate-note').textContent = result.platform === 'gcp-tdx'
+        ? 'Google Cloud TDX boot integrity, administrative isolation, durable storage isolation, channel binding, and external cleanup still need independent validation.'
+        : 'Phala Gates A–E still need genuine evidence.';
+      const started = performance.now();
+      const status = await api('/api/status') as Report;
+      if (status.mode !== 'live_unverified' || status.platform !== result.platform ||
+          status.private_accepted !== false || status.query_sent !== false) {
+        throw new Error('Local client status is inconsistent. Restart the dashboard from the CLI.');
+      }
+      show(status, performance.now()-started);
       session.textContent = 'Local session ready. Private mode requires independent verification.';
     } else {
       byId('mode-label').textContent = 'SIMULATION ONLY';
