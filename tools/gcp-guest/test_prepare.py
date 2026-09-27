@@ -37,19 +37,24 @@ class CandidateTests(unittest.TestCase):
                 self.synthetic_deb_sha = hashlib.sha256(self.synthetic_deb).hexdigest()
                 (self.inputs / "debs").mkdir()
                 (self.inputs / "debs" / (self.synthetic_deb_sha + ".deb")).write_bytes(self.synthetic_deb)
-                data = json.dumps([{"name": name, "version": "1.0~synthetic", "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_1.0~synthetic_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"} for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "kmod")]).encode()
+                # The reviewed kernel identity has deliberately synthetic archive bytes.
+                packages = []
+                for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "kmod", prepare.KERNEL_PACKAGE):
+                    version = prepare.KERNEL_PACKAGE_VERSION if name == prepare.KERNEL_PACKAGE else "1.0~synthetic"
+                    packages.append({"name": name, "version": version, "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_{version}_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"})
+                data = json.dumps(packages).encode()
             else:
                 data = b"SYNTHETIC_NOT_A_SIGNED_ARTIFACT"
             (self.inputs / role).write_bytes(data)
             artifacts[role] = {"path": role, "sha256": hashlib.sha256(data).hexdigest()}
         # Values exercise branches only and are never production defaults.
-        self.lock = {"schema_version": 3, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": "synthetic", "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
+        self.lock = {"schema_version": 4, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": prepare.KERNEL_VERSION, "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def test_missing_identity_changed_artifact_and_escape_fail(self):
-        for change in (lambda lock: lock.update(schema_version=2), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].pop("kernel"), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["kernel"].update(path="../kernel"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
+        for change in (lambda lock: lock.update(schema_version=3), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].pop("initrd"), lambda lock: lock["artifacts"].update(kernel={"path": "kernel", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["wrapper"].update(path="../wrapper"), lambda lock: lock.update(kernel_version="other-abi"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
             lock = copy.deepcopy(self.lock)
             change(lock)
             with self.assertRaises(ValueError):
@@ -77,7 +82,9 @@ class CandidateTests(unittest.TestCase):
         self.assertTrue((output / "package-cache").is_dir())
         self.assertNotIn("BaseTrees=", config)
         self.assertFalse((output / "artifacts/base_tree.tar").exists())
-        self.assertIn("Packages=e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
+        self.assertFalse((output / "artifacts/kernel").exists())
+        self.assertFalse((output / "rootfs/usr/lib/modules").exists())
+        self.assertIn("Packages=e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
         self.assertNotIn("CopyFiles=/boot:/", esp)
@@ -119,6 +126,13 @@ class CandidateTests(unittest.TestCase):
         (profile / "mkosi.conf.d").mkdir()
         with self.assertRaises(ValueError):
             prepare.validate_boot_profile(profile)
+        (profile / "mkosi.conf.d").rmdir()
+        for source in ("boot", "lib/modules", "usr/lib/modules"):
+            path = profile / "rootfs" / source
+            path.mkdir(parents=True)
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "ExtraTrees must not supply"):
+                prepare.validate_boot_profile(profile)
+            path.rmdir()
 
     def test_unverified_snapshot_cannot_stage(self):
         lock_path = self.root / "synthetic.lock.json"
@@ -170,8 +184,8 @@ class CandidateTests(unittest.TestCase):
         paths = {"snapshot_inrelease": release, "packages_index": index}
         with mock.patch.object(prepare.debian_snapshot, "verify_signature"):
             snapshot, archives = prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
-            self.assertEqual(snapshot["package_count"], 7)
-            self.assertEqual(len(archives), 7)
+            self.assertEqual(snapshot["package_count"], len(manifest))
+            self.assertEqual(len(archives), len(manifest))
             held_snapshot = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             self.lock["snapshot"] = f"https://snapshot.debian.org/archive/debian/{held_snapshot}/"
             with self.assertRaisesRegex(ValueError, "seven-day hold"):
@@ -201,11 +215,34 @@ class CandidateTests(unittest.TestCase):
     def test_missing_required_guest_package_is_rejected(self):
         path = self.inputs / "package_manifest"
         packages = json.loads(path.read_text())
-        for required in ("systemd-resolved", "udev", "e2fsprogs", "kmod"):
+        for required in ("systemd-resolved", "udev", "e2fsprogs", "kmod", prepare.KERNEL_PACKAGE):
             path.write_text(json.dumps([p for p in packages if p["name"] != required]))
             self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
-            with self.assertRaisesRegex(ValueError, "guest package surface"):
+            with self.assertRaisesRegex(ValueError, "kernel package" if required == prepare.KERNEL_PACKAGE else "guest package surface"):
                 prepare.validate_lock(self.lock, self.inputs)
+
+    def test_other_kernel_package_version_or_architecture_is_rejected(self):
+        path = self.inputs / "package_manifest"
+        original = json.loads(path.read_text())
+        for name, version, architecture, append in (
+            ("linux-image-unsigned-6.12.107+deb13-cloud-amd64", prepare.KERNEL_PACKAGE_VERSION, "amd64", False),
+            ("linux-image-6.12.108+deb13-cloud-amd64", prepare.KERNEL_PACKAGE_VERSION, "amd64", False),
+            (prepare.KERNEL_PACKAGE, "6.12.107-2", "amd64", False),
+            (prepare.KERNEL_PACKAGE, prepare.KERNEL_PACKAGE_VERSION, "all", False),
+            ("linux-image-unsigned-6.12.107+deb13-cloud-amd64", prepare.KERNEL_PACKAGE_VERSION, "amd64", True),
+        ):
+            packages = copy.deepcopy(original)
+            alternate = packages[-1].copy()
+            alternate.update(name=name, version=version, architecture=architecture)
+            if append:
+                packages.append(alternate)
+            else:
+                packages[-1] = alternate
+            path.write_text(json.dumps(packages))
+            self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
+            with self.subTest(name=name, version=version, architecture=architecture, append=append):
+                with self.assertRaisesRegex(ValueError, "exact signed Debian cloud kernel package required"):
+                    prepare.validate_lock(self.lock, self.inputs)
 
     def test_duplicate_fields_cannot_override_a_digest(self):
         path = self.root / "duplicate.json"

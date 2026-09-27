@@ -228,3 +228,48 @@ configuration: no base tree was configured, the candidate-specific package
 cache resolved inside the staging directory, and the implicit modules initrd
 was disabled. This was a parser/staging check only; it did not install the
 packages, execute scripts, build a UKI, or inspect a real kernel or initrd.
+
+## Cloud kernel source policy, 2026-09-27 UTC
+
+The previous staging path copied a separate `kernel` artifact into
+`ExtraTrees` at `/usr/lib/modules/<kernel_version>/vmlinuz`. That path let
+staging combine a kernel with modules installed from a different source.
+Lock schema 4 removes the `kernel` artifact role and rejects schema-3 locks.
+The sole accepted `linux-image-*` package is Debian
+`linux-image-6.12.107+deb13-cloud-amd64` version `6.12.107-1` for `amd64`,
+with `kernel_version=6.12.107+deb13-cloud-amd64`. A manifest containing an
+alternate or additional `linux-image-*` package, including an unsigned
+variant, is refused before staging. As with all locked Debian packages, the
+local archive must match the signed snapshot index before its bytes can be
+staged.
+
+Pinned mkosi 25.3 installs packages before applying `ExtraTrees`. Its
+`fixup_vmlinuz_location()` copies an installed `/boot/vmlinuz-<version>` into
+the installed `/usr/lib/modules/<version>` tree, and
+`gen_kernel_images()` discovers the kernel there for UKI generation. The
+staged `rootfs` now contributes no kernel or module tree. This is a source-side
+policy and synthetic staging check. It does not show that the Debian package
+was installed, that its expected kernel and modules appeared in an image, or
+that mkosi built or booted a UKI. The separate initrd still needs provenance
+and compatibility review against this exact kernel. The builder toolchain,
+installed package closure, final UKI, and real TDX acceptance remain
+unverified; private mode remains unapproved.
+
+An offline, no-download APT simulation with the exact kernel package selected
+104 unique package identities: the earlier 95 plus `cpio`, `dracut-install`,
+`initramfs-tools`, `initramfs-tools-bin`, `initramfs-tools-core`,
+`klibc-utils`, `libklibc`, `linux-base`, and the cloud kernel. All 104 local
+archives matched the September 18 signed index's size and SHA-256; the
+candidate manifest SHA-256 is
+`a6994a27c6bcfbed584751ed6eb10cb393c21808c58b628b3ff1584a570b0ca5`.
+The exact kernel archive is 34,402,644 bytes with SHA-256
+`04434ff520f860423eafe4203d986a35682ce73c2f71baa39e988ca0da93ac91`.
+Script-free inspection found its `/boot/vmlinuz-*`, `/boot/config-*`, and
+matching `/usr/lib/modules/*` tree. Its configuration reports Intel TDX guest,
+NVMe, and ext4 built in, with dm-verity, gVNIC, TSM reports, and the TDX guest
+driver as modules. Those four inspected modules have signature trailers; their
+signers and the kernel's effective trust database have not been verified.
+Schema-4 staging with these 104 archives and synthetic non-package inputs
+returned `staged-unbuilt-unapproved`, `package_count: 104`, and no kernel
+overlay. This does not execute package scripts, verify the installed image,
+prove early dm-verity loading, or establish a bootable or approved artifact.
