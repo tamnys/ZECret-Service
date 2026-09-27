@@ -385,7 +385,10 @@ jobs:
           inner = {name: os.readlink("/proc/self/ns/" + name) for name in outer}
           if (inner["user"] == outer["user"] or inner["mnt"] == outer["mnt"]
                   or inner["net"] != outer["net"] or inner["pid"] != outer["pid"]):
-              raise ValueError("mkosi APT-equivalent namespace boundary changed")
+              raise ValueError(
+                  "mkosi APT-equivalent namespace boundary changed: "
+                  + json.dumps({"outer": outer, "inner": inner}, sort_keys=True)
+              )
           if os.getenv("SYSTEMD_OFFLINE") != "0":
               raise ValueError("mkosi network=True option was not retained")
           if len(Path("/proc/net/route").read_text().splitlines()) != 1:
