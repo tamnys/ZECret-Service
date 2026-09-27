@@ -142,8 +142,9 @@ def validate_lock(lock, source):
             raise ValueError("invalid package identity")
         names.add(package["name"])
     # networkd/resolved, stable /dev/disk links, the direct UKI/verity path,
-    # and x-systemd.makefs for the public ext4 data disk need these binaries.
-    if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs"} <= names:
+    # x-systemd.makefs for the public ext4 data disk, and mkosi's depmod step
+    # need these binaries.
+    if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "kmod"} <= names:
         raise ValueError("guest package surface does not match appliance policy")
     runtime = lock["runtime"]
     if set(runtime) != {"listen_port", "max_connections", "max_quotes", "quote_spacing_ms", "node_startup_timeout_secs", "node_poll_interval_ms"} or any(type(value) is not int or value <= 0 for value in runtime.values()) or runtime["listen_port"] > 65535:
