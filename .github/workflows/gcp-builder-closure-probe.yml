@@ -97,7 +97,7 @@ jobs:
           data = path.read_bytes()
           report = json.loads(data)
           if (report["status"] != "diagnostic-builder-payloads-staged-unbuilt" or
-                  report["package_count"] != 195 or
+                  report["package_count"] != 199 or
                   report["signed_snapshot_rechecked"] is not False or
                   report["package_scripts_executed"] is not False or
                   report["runtime_execution_verified"] is not False or
@@ -234,7 +234,7 @@ jobs:
               Path("/zrpc-apt-scratch"),
           )
           if (report["status"] != "diagnostic-signed-builder-apt-plan-matched-unbuilt"
-                  or report["package_count"] != 195
+                  or report["package_count"] != 199
                   or report["complete_builder_toolchain"] is not False
                   or report["image_built"] is not False
                   or report["private_mode_approved"] is not False):
@@ -270,6 +270,7 @@ jobs:
             run_staged /usr/bin/mkosi --version
             run_staged /usr/bin/systemd-repart --version
             run_staged /usr/bin/ukify --version
+            run_staged /usr/bin/reprepro --version
             echo "Diagnostic staged tool startup passed; no image built or approved."
           ' _ "$scratch/staged" "$runner_uid" "$runner_gid" \
             "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command" \
@@ -294,7 +295,7 @@ jobs:
 
           report = json.loads(Path(sys.argv[1]).read_bytes())
           if (report["status"] != "diagnostic-builder-payloads-staged-unbuilt"
-                  or report["package_count"] != 195
+                  or report["package_count"] != 199
                   or report["package_scripts_executed"] is not False
                   or report["complete_builder_toolchain"] is not False
                   or report["image_built"] is not False
@@ -302,6 +303,7 @@ jobs:
               raise SystemExit("signed builder staging did not retain diagnostic status")
           PY
           test -x "$staged/usr/bin/mkosi-sandbox"
+          test -x "$staged/usr/bin/reprepro"
           test -f "$staged/usr/lib/python3/dist-packages/mkosi/sandbox.py"
           test -x "$staged/usr/bin/true"
 
@@ -318,6 +320,7 @@ jobs:
           sudo -n cmp -s -- "$staged/.zrpc-builder-toolchain.json" \
             "$root_scratch/.zrpc-builder-toolchain.json"
           sudo -n cmp -s -- "$staged/usr/bin/mkosi-sandbox" "$root_scratch/usr/bin/mkosi-sandbox"
+          sudo -n cmp -s -- "$staged/usr/bin/reprepro" "$root_scratch/usr/bin/reprepro"
           sudo -n cmp -s -- "$staged/usr/lib/python3/dist-packages/mkosi/sandbox.py" \
             "$root_scratch/usr/lib/python3/dist-packages/mkosi/sandbox.py"
           sudo -n cmp -s -- "$staged/usr/bin/true" "$root_scratch/usr/bin/true"

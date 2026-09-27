@@ -5,7 +5,7 @@
   "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
   "packages_index_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
   "signed_release_date_epoch": 1789199741,
-  "direct_lock_sha256": "26e36ea4af71b701e472e514e207392232bd0b8868c0ab141fc87ade89d59039",
+  "direct_lock_sha256": "d52154835df0a3e1558ce10f24137e2862821bcb1962c4c86d55fed3e394b4dc",
   "resolver": {
     "package": "apt",
     "version": "3.0.3",
@@ -329,6 +329,14 @@
       "sha256": "fdcc9f780c7de466c7f0038e6e242c73cb63c8f9fe2781a3185a2c810984ab0a"
     },
     {
+      "name": "libarchive13t64",
+      "version": "3.7.4-4+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/liba/libarchive/libarchive13t64_3.7.4-4+deb13u1_amd64.deb",
+      "size": 350192,
+      "sha256": "12e06195a899e8db371803ed70111fc7302573d3ed84e967d3d48ef2d543ace8"
+    },
+    {
       "name": "libassuan9",
       "version": "3.0.2-2",
       "architecture": "amd64",
@@ -607,6 +615,14 @@
       "filename": "pool/main/libg/libgpg-error/libgpg-error0_1.51-4_amd64.deb",
       "size": 82108,
       "sha256": "22b95570fd41c113ef6f5651563b4d748292844baab1278a46eb940c1dec2322"
+    },
+    {
+      "name": "libgpgme11t64",
+      "version": "1.24.2-3",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gpgme1.0/libgpgme11t64_1.24.2-3_amd64.deb",
+      "size": 345612,
+      "sha256": "6650203af59ccf73b22cd6904fb179a799cb70d62885b19ae725c0655c04241c"
     },
     {
       "name": "libgssapi-krb5-2",
@@ -1217,6 +1233,14 @@
       "sha256": "c1bf4c4c3ff48c57fabf93307dfb56996b60cfa33927afc4158b5db36fb2721e"
     },
     {
+      "name": "libxml2",
+      "version": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
+      "architecture": "amd64",
+      "filename": "pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3_amd64.deb",
+      "size": 699724,
+      "sha256": "e0c6b63ce4602a036a526f60fe5e6c1586710688058d98fc1001b9b3147b7efd"
+    },
+    {
       "name": "libxxhash0",
       "version": "0.8.3-2",
       "architecture": "amd64",
@@ -1431,6 +1455,14 @@
       "filename": "pool/main/r/readline/readline-common_8.2-6_all.deb",
       "size": 69360,
       "sha256": "f77e8aa0bf0de618f11cb0b21658a4ed60f177d63b3cf26d7fc3706b6d0eaaa9"
+    },
+    {
+      "name": "reprepro",
+      "version": "5.4.6+really5.3.2-1+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/r/reprepro/reprepro_5.4.6+really5.3.2-1+deb13u1_amd64.deb",
+      "size": 449320,
+      "sha256": "65e79fec4d40fc8bb71fb39d4d7048388313b634910dcc2d9a09c8a5a11147fc"
     },
     {
       "name": "sbsigntool",
