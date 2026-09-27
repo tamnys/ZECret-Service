@@ -30,7 +30,7 @@ class PackageClosureTests(unittest.TestCase):
             self.packages.append({"name": name, "version": version, "architecture": "amd64", "filename": "synthetic", "size": 1, "sha256": "00" * 32, "path": "synthetic"})
         package_bytes = json.dumps(self.packages).encode()
         self.lock = {
-            "schema_version": 5,
+            "schema_version": 6,
             "mkosi_source_commit": prepare.SOURCE_COMMIT,
             "source_date_epoch": 1,
             "kernel_version": prepare.KERNEL_VERSION,
@@ -152,6 +152,12 @@ class PackageClosureTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.verify()
                 self.root_manifest, self.initrd_manifest, self.lock = root, initrd, lock
+
+    def test_legacy_input_lock_schema_fails_closed(self):
+        self.lock["schema_version"] = 5
+        self.write()
+        with self.assertRaisesRegex(ValueError, "unsupported staged input lock"):
+            self.verify()
 
     def test_duplicate_json_fields_are_rejected(self):
         self.paths["root"].write_text('{"manifest_version":1,"manifest_version":1}')
