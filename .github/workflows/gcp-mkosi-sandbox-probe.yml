@@ -1,0 +1,65 @@
+name: GCP pinned mkosi sandbox probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    name: Diagnostic pinned sandbox capability check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Verify pinned source and run sandbox without network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(uname -m)" = x86_64
+          commit=54c625c380ef5500f17460981a3c67b109b6a847
+          tree=f5d828707aa0b1bd0235c55e13f7d4b41dba409e
+          archive_sha256=16a58d4aab33a8f28dc996dc4c816711686d1e58fa6af23131b8e84ff11917d0
+          archive_bytes=1536000
+          scratch="$(mktemp -d "$GITHUB_WORKSPACE/zrpc-mkosi-sandbox.XXXXXX")"
+          trap 'rm -rf -- "$scratch"' EXIT
+          chmod 755 "$scratch"
+
+          git init -q "$scratch/source-git"
+          git -C "$scratch/source-git" fetch -q --no-tags --depth=1 \
+            https://github.com/systemd/mkosi.git "$commit"
+          test "$(git -C "$scratch/source-git" rev-parse FETCH_HEAD)" = "$commit"
+          test "$(git -C "$scratch/source-git" rev-parse FETCH_HEAD^{tree})" = "$tree"
+          git -C "$scratch/source-git" archive --format=tar FETCH_HEAD > "$scratch/mkosi.tar"
+          test "$(stat -c %s "$scratch/mkosi.tar")" -eq "$archive_bytes"
+          printf '%s  %s\n' "$archive_sha256" "$scratch/mkosi.tar" | sha256sum --check --status
+          mkdir "$scratch/mkosi"
+          tar -xf "$scratch/mkosi.tar" -C "$scratch/mkosi" --no-same-owner --no-same-permissions
+          test -f "$scratch/mkosi/mkosi/sandbox.py"
+          echo 'Pinned mkosi 25.3 Git archive: SHA-256 and tree matched'
+
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          parent_pid_ns="$(readlink /proc/self/ns/pid)"
+          sudo -n unshare --user --map-root-user --mount --net --pid --fork \
+            --mount-proc --propagation private bash -c '
+            set -euo pipefail
+            test "$(readlink /proc/self/ns/user)" != "$2"
+            test "$(readlink /proc/self/ns/mnt)" != "$3"
+            test "$(readlink /proc/self/ns/net)" != "$4"
+            test "$(readlink /proc/self/ns/pid)" != "$5"
+            test "$(id -u):$(id -g)" = 0:0
+            read -r inner outer count < /proc/self/uid_map
+            test "$inner:$outer:$count" = 0:0:1
+            read -r inner outer count < /proc/self/gid_map
+            test "$inner:$outer:$count" = 0:0:1
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            python3 -I "$1/mkosi/sandbox.py" \
+              --ro-bind / / --unshare-net -- /usr/bin/true
+            echo "Pinned mkosi sandbox true-command: passed inside isolated namespaces"
+          ' _ "$scratch/mkosi" "$parent_user_ns" "$parent_mount_ns" \
+            "$parent_net_ns" "$parent_pid_ns"
+
+          echo 'Diagnostic sandbox only; no guest image or release was built or approved.'
