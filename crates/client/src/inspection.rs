@@ -4,9 +4,7 @@ use std::{
     net::SocketAddrV4,
     time::{Duration, Instant},
 };
-use zrpc_protocol::{
-    Backend, ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError, parse_request,
-};
+use zrpc_protocol::{Backend, ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
 use zrpc_transport::{
     EndpointInspection, IsolationLabel, RemoteEndpoint, TorConfig, UnverifiedGcpEvidence,
     UnverifiedPublicEvidence, VerifiedRpcSession,
@@ -144,8 +142,7 @@ pub async fn query_endpoint(
     body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
 ) -> Result<Value, SafeError> {
     let session = connect_verified(config, collateral_json, raw_app_compose, selection).await?;
-    let request = parse_request(&body()?)?;
-    session.query(&request).await
+    session.query_from_body(body).await
 }
 
 async fn request_evidence(config: &PublicInspectionConfig) -> Result<NativeEvidence, SafeError> {

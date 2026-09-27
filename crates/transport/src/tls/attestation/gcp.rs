@@ -1,6 +1,7 @@
 //! GCP evidence can authorize only the connection that produced its exporter.
 use super::{
-    EndpointInspection, EndpointInspectionIssue, UnverifiedGcpEvidence, VerifiedRpcSession,
+    EndpointInspection, EndpointInspectionIssue, PrivateDeadline, UnverifiedGcpEvidence,
+    VerifiedRpcSession,
 };
 use crate::tls::MAX_CONNECTION_LIFETIME;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -40,22 +41,27 @@ impl UnverifiedGcpEvidence {
                 "This client has no selected reviewed GCP release.",
             ));
         }
-        let approved = releases.iter().any(|release| {
-            release
-                .gcp_workload()
-                .is_some_and(|policy| self.inspect_against(collateral, policy).diagnostic_passed())
+        let collateral_deadline = releases.iter().find_map(|release| {
+            release.gcp_workload().and_then(|policy| {
+                let report = self.inspect_against(collateral, policy);
+                report
+                    .diagnostic_passed()
+                    .then_some(report.private_collateral_deadline)
+                    .flatten()
+            })
         });
-        if !approved {
+        let Some(collateral_deadline) = collateral_deadline else {
             return Err(SafeError::new(
                 ErrorCode::PrivateModeUnavailable,
                 "Hardware, workload, freshness or live TLS key did not match a reviewed release.",
             ));
-        }
-        Ok(VerifiedRpcSession {
-            session: self.connection.session,
-            deadline: self.connection.deadline,
-            authority: self.connection.authority,
-        })
+        };
+        VerifiedRpcSession::from_authenticated_inspection(
+            self.connection.session,
+            self.connection.deadline,
+            self.connection.authority,
+            collateral_deadline,
+        )
     }
 
     fn inspect_against(&self, collateral: &[u8], policy: &GcpWorkloadPolicy) -> EndpointInspection {
@@ -91,6 +97,7 @@ impl UnverifiedGcpEvidence {
             &self.connection.expected_report_data,
         ));
         self.check_session(&mut report);
+        let after_instant = Instant::now();
         let after = SystemTime::now();
         let Ok(after_unix) = after.duration_since(UNIX_EPOCH) else {
             report.local_clock = InspectionStatus::Rejected;
@@ -112,13 +119,19 @@ impl UnverifiedGcpEvidence {
                 report.issue = Some(EndpointInspectionIssue::ClockChangedDuringInspection);
             }
             _ => {
-                if inspection
-                    .collateral_earliest_expiration_unix_seconds
-                    .is_some_and(|expiry| after_unix.as_secs() >= expiry)
-                {
-                    report
-                        .issue
-                        .get_or_insert(EndpointInspectionIssue::CollateralExpiredDuringInspection);
+                if let Some(expiration) = inspection.collateral_earliest_expiration_unix_seconds {
+                    match PrivateDeadline::from_inspection_snapshot(
+                        expiration,
+                        after,
+                        after_instant,
+                    ) {
+                        Some(deadline) => report.private_collateral_deadline = Some(deadline),
+                        None => {
+                            report.issue.get_or_insert(
+                                EndpointInspectionIssue::CollateralExpiredDuringInspection,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -163,6 +176,7 @@ mod tests {
             connect_pair, server_config,
         },
     };
+    use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
     async fn fixture(
@@ -224,6 +238,36 @@ mod tests {
                 .code,
             ErrorCode::UnknownRelease
         );
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gcp_synthetic_session_expiry_prevents_body_read_and_transmission() {
+        let (result, peer) = fixture(body).await;
+        let evidence = result.unwrap();
+        // Unit-only construction bypasses the empty release catalog to test
+        // the retained sender. No synthetic quote becomes accepted evidence.
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + Duration::from_millis(200),
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let mut body_read = false;
+        let error = session
+            .query_from_body(|| {
+                body_read = true;
+                Ok(b"SYNTHETIC_PRIVATE_CANARY".to_vec())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ExpiredCollateral);
+        assert!(!body_read);
         peer.await.unwrap();
     }
 

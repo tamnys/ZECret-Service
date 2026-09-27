@@ -7,6 +7,7 @@ use crate::tls::{
         connect_pair, server_config,
     },
 };
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use zrpc_verifier::{
     ReleasePolicy,
@@ -31,6 +32,36 @@ async fn synthetic_evidence_and_local_policy_cannot_send_a_private_body() {
     policy.approved_release_ids.push("SYNTHETIC".into());
     assert!(evidence.authorize(b"{}", b"{}", &policy).is_err());
     drop(close);
+    peer.await.unwrap();
+}
+
+#[tokio::test]
+async fn phala_synthetic_session_expiry_prevents_body_read_and_transmission() {
+    let (evidence, close, peer) = received_fixture().await;
+    // Unit-only construction bypasses the empty release catalog to exercise
+    // the retained connection guard; it authenticates no synthetic quote.
+    let session = VerifiedRpcSession::from_authenticated_inspection(
+        evidence._session,
+        evidence.deadline,
+        evidence.authority,
+        PrivateDeadline {
+            monotonic: Instant::now() + Duration::from_millis(200),
+            collateral_expiration_unix_seconds: u64::MAX,
+        },
+    )
+    .unwrap();
+    drop(close);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let mut body_read = false;
+    let error = session
+        .query_from_body(|| {
+            body_read = true;
+            Ok(b"SYNTHETIC_PRIVATE_CANARY".to_vec())
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, zrpc_protocol::ErrorCode::ExpiredCollateral);
+    assert!(!body_read);
     peer.await.unwrap();
 }
 
