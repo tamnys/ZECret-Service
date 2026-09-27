@@ -20,7 +20,10 @@ archive, release manifest, boot policy, memory measurements, reproducibility
 report, DER Secure Boot PK/KEK/db certificates, and a reviewed binary `dbx`
 revocation database. The package supplies all four Secure Boot variables to
 the image API; omitting `dbx` would select Google's default. Keep signing
-private keys outside this package.
+private keys outside this package. These files are hash-bound review
+attachments. The operator package's `release_manifest` is not a client-embedded
+approved release, and matching file hashes do not show that the raw disk
+contains the claimed boot inputs.
 
 Save the JSON output of the offline `gcp_import_archive.py pack` command and
 supply it as the `import_receipt` artifact. Supply `import_verifier_python` as
@@ -96,7 +99,10 @@ the original runtime-file identity.
 Live creation currently fails closed because the Compute adapter cannot safely
 delete a specific resource incarnation when another actor replaces its name
 between observation and deletion. Compute deletion also fails closed. Resolve
-that provider contract before using this tool for a hosted experiment.
+that provider contract before using this tool for a hosted experiment. Live
+creation also requires a pinned offline inspector of the exact raw disk's GPT,
+ESP, signed UKI, command line, verity root, installed components, and selected
+Secure Boot policy; no such image inspection is currently available.
 Cloud Storage deletion uses the recorded generation and a generation
 precondition. Staging buckets must have public access prevention enabled and
 must not retain deleted objects through versioning, soft delete, or retention

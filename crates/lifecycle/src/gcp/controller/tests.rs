@@ -881,9 +881,20 @@ fn operation_scope_uses_documented_global_regional_and_zonal_collections() {
 }
 
 #[test]
-fn live_creation_stays_blocked_until_compute_deletion_contract_is_resolved() {
+fn placeholder_review_attachments_cannot_enable_live_creation() {
+    let f = Fixture::new();
+    assert!(f.package.validate(1000).is_ok());
+    assert_eq!(
+        fs::read(&f.package.spec.release_manifest.path).unwrap(),
+        b"SYNTHETIC - NOT A BOOTABLE IMAGE"
+    );
     let error = crate::gcp::ensure_live_creation_ready().unwrap_err();
-    assert!(error.0.contains("incarnation"));
+    assert!(error.0.contains("post-build image inspection"));
+    assert!(
+        crate::gcp::LIVE_DEPLOYMENT_BLOCKERS
+            .iter()
+            .any(|blocker| blocker.contains("incarnation"))
+    );
 }
 
 #[tokio::test]
