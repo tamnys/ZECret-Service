@@ -293,6 +293,26 @@ jobs:
           sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
           import stage_guest_payload
 
+          audit = stage_guest_payload.audit_unsupported_members(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+          )
+          summary = {key: value for key, value in audit.items()
+                     if key != "unsupported_members"}
+          print(json.dumps(summary, sort_keys=True))
+          for member in audit["unsupported_members"]:
+              print(json.dumps({"unsupported_member": member}, sort_keys=True))
+          if (audit["package_count"] != 104
+                  or audit["signed_snapshot_rechecked"] is not True
+                  or audit["archive_bytes_checked"] is not True
+                  or audit["payload_tree_staged"] is not False
+                  or audit["installed_closure_checked"] is not False
+                  or audit["package_scripts_executed"] is not False
+                  or audit["image_built"] is not False
+                  or audit["private_mode_approved"] is not False):
+              raise ValueError("unsupported-member audit changed acceptance status")
+          if audit["unsupported_count"]:
+              raise ValueError("signed guest payload contains unsupported members")
+
           report = stage_guest_payload.stage(
               Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
               Path("/zrpc-guest-payload-parent/tree"),

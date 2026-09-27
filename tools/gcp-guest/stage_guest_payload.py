@@ -24,7 +24,7 @@ MANIFEST = ".zrpc-guest-payload.json"
 STATUS = "diagnostic-signed-guest-payloads-staged-data-only"
 
 
-def stage(metadata, archives, output, workspace):
+def signed_packages(metadata, archives):
     # This invokes the staged gpgv and accepts only the source-reviewed guest
     # closure and the exact binary package records in the authenticated index.
     identities = guest.authenticated_packages(Path(metadata))
@@ -40,6 +40,64 @@ def stage(metadata, archives, output, workspace):
                              builder.locked_archive(archive_identity, archives_fd)))
     finally:
         os.close(archives_fd)
+    return packages
+
+
+def canonical_hardlink_target(target):
+    """Interpret a tar hardlink name from the archive root for audit only."""
+    if not target or not target.isascii() or target.startswith("/"):
+        return None
+    path = target[2:] if target.startswith("./") else target
+    if any(part in {"", ".", ".."} for part in path.split("/")):
+        return None
+    return path
+
+
+def audit_unsupported_members(metadata, archives):
+    """List every hardlink/special member without extracting any payload."""
+    packages = signed_packages(metadata, archives)
+    unsupported = []
+    for package, archive in packages:
+        payload = builder_closure.deb_data_tar(archive)
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as contents:
+            members = list(contents)
+        regular = set()
+        for member in members:
+            if member.type == tarfile.REGTYPE:
+                try:
+                    regular.add(builder.member_path(member))
+                except ValueError:
+                    # The staging preflight will reject malformed regular
+                    # members; they cannot count as safe hardlink targets.
+                    pass
+        for member in members:
+            if member.type in {tarfile.DIRTYPE, tarfile.REGTYPE, tarfile.SYMTYPE}:
+                continue
+            target = (canonical_hardlink_target(member.linkname)
+                      if member.type == tarfile.LNKTYPE else None)
+            unsupported.append({
+                "package": package,
+                "path": member.name,
+                "tar_type_hex": member.type.hex(),
+                "kind": "hardlink" if member.type == tarfile.LNKTYPE else "special",
+                "target": member.linkname if member.type == tarfile.LNKTYPE else None,
+                "canonical_target_path": target,
+                "target_is_regular_in_package": target in regular if target is not None else False,
+            })
+    return {
+        "status": ("diagnostic-unsupported-guest-payload-members-found"
+                   if unsupported else "diagnostic-no-unsupported-guest-payload-members"),
+        "package_count": len(packages), "unsupported_count": len(unsupported),
+        "unsupported_members": unsupported,
+        "signed_snapshot_rechecked": True, "archive_bytes_checked": True,
+        "payload_tree_staged": False, "installed_closure_checked": False,
+        "package_scripts_executed": False, "runtime_execution_verified": False,
+        "image_built": False, "private_mode_approved": False,
+    }
+
+
+def stage(metadata, archives, output, workspace):
+    packages = signed_packages(metadata, archives)
 
     # The common preflight rejects traversals, hardlinks, special files,
     # escaping symlinks, file collisions, and symlink/missing parents before

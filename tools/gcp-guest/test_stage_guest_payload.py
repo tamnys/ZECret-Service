@@ -76,6 +76,36 @@ class GuestPayloadTests(unittest.TestCase):
                 stage.stage(self.metadata, self.archives, self.output, self.root)
         self.assertFalse(self.output.exists())
 
+    def test_audit_lists_all_unsupported_types_and_hardlink_targets(self):
+        data = package([
+            ("directory", "./usr/", None, 0o755),
+            ("directory", "./usr/bin/", None, 0o755),
+            ("file", "./usr/bin/busybox", b"inert", 0o755),
+            ("hardlink", "./usr/bin/gzip", "./usr/bin/busybox", 0o755),
+            ("hardlink", "./usr/bin/escape", "../../outside", 0o755),
+            ("special", "./usr/device", None, 0o644),
+        ])
+        digest = hashlib.sha256(data).hexdigest()
+        (self.archives / (digest + ".deb")).write_bytes(data)
+        identity = {"name": "alpha", "version": "1", "architecture": "amd64",
+                    "filename": "pool/main/a/alpha_1_amd64.deb", "size": len(data),
+                    "sha256": digest, "path": f"debs/{digest}.deb"}
+        with mock.patch.object(stage.guest, "authenticated_packages", return_value=[identity]):
+            report = stage.audit_unsupported_members(self.metadata, self.archives)
+        self.assertEqual(report["unsupported_count"], 3)
+        self.assertEqual(report["status"],
+                         "diagnostic-unsupported-guest-payload-members-found")
+        self.assertEqual([item["path"] for item in report["unsupported_members"]],
+                         ["./usr/bin/gzip", "./usr/bin/escape", "./usr/device"])
+        self.assertEqual(report["unsupported_members"][0]["canonical_target_path"],
+                         "usr/bin/busybox")
+        self.assertTrue(report["unsupported_members"][0]["target_is_regular_in_package"])
+        self.assertFalse(report["unsupported_members"][1]["target_is_regular_in_package"])
+        self.assertEqual(report["unsupported_members"][2]["tar_type_hex"], "33")
+        self.assertFalse(report["payload_tree_staged"])
+        self.assertFalse(report["private_mode_approved"])
+        self.assertFalse(self.output.exists())
+
     def test_rejects_unsafe_paths_links_and_special_members_before_output(self):
         directory = [("directory", "./usr/", None, 0o755)]
         cases = [
