@@ -88,6 +88,14 @@ let browserStage='startup';
     assert.equal(await livePage.locator('#scenario').isHidden(),true);
     await livePage.locator('#run').click();
     browserStage='live-query';
+    await livePage.waitForFunction(() => {
+      if (document.getElementById('run').disabled) return false;
+      try {
+        return JSON.parse(document.getElementById('result').textContent).mode === 'private_blocked';
+      } catch {
+        return false;
+      }
+    });
     await livePage.locator('#result-label').filter({hasText:'PRIVATE MODE BLOCKED'}).waitFor();
     const blocked=JSON.parse(await livePage.locator('#result').textContent());
     assert.equal(blocked.private_accepted,false);
