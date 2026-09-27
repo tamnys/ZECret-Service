@@ -30,7 +30,6 @@ jobs:
         run: |
           set -euo pipefail
           test "$(uname -m)" = x86_64
-          command -v gpgv
           command -v readelf
           source="$GITHUB_WORKSPACE/source"
           mkdir "$source"
@@ -46,13 +45,58 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/source"
           scratch="$GITHUB_WORKSPACE/initrd-input"
-          mkdir "$scratch" "$scratch/metadata" "$scratch/archives"
+          mkdir "$scratch" "$scratch/bin" "$scratch/builder-archives" \
+            "$scratch/metadata" "$scratch/archives"
           python3 -B -m unittest discover -s tools/gcp-guest \
             -p 'test_*base_tree.py'
           python3 -B tools/gcp-guest/fetch_guest_closure.py metadata \
             --directory "$scratch/metadata"
           python3 -B tools/gcp-guest/fetch_guest_closure.py prefetch \
             --archives "$scratch/archives"
+
+          # Bootstrap the exact source-reviewed gpgv bytes before trusting the
+          # downloaded Debian metadata. Do not execute package control scripts.
+          ZRPC_SCRATCH="$scratch" python3 -I - <<'PY'
+          import hashlib
+          import io
+          import os
+          from pathlib import Path
+          import sys
+          import tarfile
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import debian_snapshot
+          import fetch_builder_closure as builder
+          import verify_builder_closure as closure
+
+          scratch = Path(os.environ["ZRPC_SCRATCH"])
+          lock, _, _ = builder.reviewed_lock(closure.LOCK)
+          package = next(item for item in lock["packages"] if item["name"] == "gpgv")
+          archives = scratch / "builder-archives"
+          directory = os.open(archives, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+          try:
+              builder.download_one(directory, package, lock["snapshot"])
+              if not builder.verify_cached(directory, package):
+                  raise ValueError("reviewed gpgv archive missing")
+          finally:
+              os.close(directory)
+          data = (archives / (package["sha256"] + ".deb")).read_bytes()
+          if hashlib.sha256(data).hexdigest() != package["sha256"]:
+              raise ValueError("reviewed gpgv archive differs")
+          with tarfile.open(fileobj=io.BytesIO(closure.deb_data_tar(data)), mode="r:xz") as payload:
+              member = payload.getmember("./usr/bin/gpgv")
+              if not member.isfile() or member.uid != 0 or member.gid != 0:
+                  raise ValueError("reviewed gpgv payload differs")
+              binary = payload.extractfile(member).read()
+          if (len(binary) != debian_snapshot.GPGV_SIZE or
+                  hashlib.sha256(binary).hexdigest() != debian_snapshot.GPGV_SHA256):
+              raise ValueError("reviewed gpgv executable differs")
+          executable = scratch / "bin/gpgv"
+          executable.write_bytes(binary)
+          executable.chmod(0o555)
+          PY
+          export PATH="$scratch/bin:$PATH"
+
           python3 -B tools/gcp-guest/fetch_guest_closure.py verify-archives \
             --metadata-directory "$scratch/metadata" --archives "$scratch/archives"
           python3 -B tools/gcp-guest/assemble_initrd_base_tree.py assemble \
