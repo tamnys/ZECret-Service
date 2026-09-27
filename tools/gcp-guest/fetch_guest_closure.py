@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Fetch the source-reviewed guest package closure from one signed snapshot.
+"""Stage and check the source-reviewed guest package closure.
 
-Metadata acquisition alone checks hashes, not the Debian signature. Archive
-acquisition first verifies that signature, the signed package index, and every
-source-pinned package identity. No package is installed or executed here, and
-neither command builds or approves a guest image.
+The networked phase fetches exact source-pinned hashes without executing
+packages. The offline phase checks the Debian signature, signed index
+membership, and every cached archive, with no download path. Neither phase
+installs packages, builds a guest image, or approves private mode.
 """
 
 import argparse
@@ -165,14 +165,12 @@ def verify_index(metadata, *, manifest_path=prepare.PACKAGE_CLOSURE_LOCK,
             "private_mode_approved": False}
 
 
-def fetch_archives(metadata, archives, *, open_url=None,
-                   manifest_path=prepare.PACKAGE_CLOSURE_LOCK,
-                   manifest_sha256=prepare.PACKAGE_CLOSURE_SHA256,
-                   manifest_bytes=MANIFEST_BYTES):
-    packages = authenticated_packages(
-        metadata, manifest_path=manifest_path, manifest_sha256=manifest_sha256,
-        manifest_bytes=manifest_bytes,
-    )
+def prefetch_archives(archives, *, open_url=None,
+                      manifest_path=prepare.PACKAGE_CLOSURE_LOCK,
+                      manifest_sha256=prepare.PACKAGE_CLOSURE_SHA256,
+                      manifest_bytes=MANIFEST_BYTES):
+    _, packages = reviewed_manifest(manifest_path, manifest_sha256, manifest_bytes)
+    reviewed_snapshot_time()
     fd = open_directory(archives, "guest archive")
     downloaded = reused = 0
     try:
@@ -186,12 +184,36 @@ def fetch_archives(metadata, archives, *, open_url=None,
             downloaded += 1
     finally:
         os.close(fd)
+    return {"status": "diagnostic-guest-archive-hashes-matched-signature-unchecked",
+            "guest_package_closure_sha256": manifest_sha256,
+            "package_count": len(packages), "downloaded_count": downloaded,
+            "reused_count": reused, "signed_snapshot_rechecked": False,
+            "archive_hashes_matched_source_lock": True,
+            "installed_closure_checked": False,
+            "package_scripts_executed": False, "image_built": False,
+            "private_mode_approved": False}
+
+
+def verify_cached_archives(metadata, archives, *,
+                           manifest_path=prepare.PACKAGE_CLOSURE_LOCK,
+                           manifest_sha256=prepare.PACKAGE_CLOSURE_SHA256,
+                           manifest_bytes=MANIFEST_BYTES):
+    packages = authenticated_packages(
+        metadata, manifest_path=manifest_path, manifest_sha256=manifest_sha256,
+        manifest_bytes=manifest_bytes,
+    )
+    fd = open_directory(archives, "guest archive")
+    try:
+        for package in packages:
+            if not snapshot_fetch.verify_cached(fd, package):
+                raise ValueError("guest archive absent from offline cache")
+    finally:
+        os.close(fd)
     return {"status": "diagnostic-guest-archives-matched-signed-snapshot-unbuilt",
             "guest_package_closure_sha256": manifest_sha256,
             "signed_inrelease_sha256": INRELEASE_SHA256,
             "signed_packages_index_sha256": PACKAGES_SHA256,
-            "package_count": len(packages), "downloaded_count": downloaded,
-            "reused_count": reused, "signed_snapshot_rechecked": True,
+            "package_count": len(packages), "signed_snapshot_rechecked": True,
             "archive_bytes_checked": True, "installed_closure_checked": False,
             "package_scripts_executed": False, "image_built": False,
             "private_mode_approved": False}
@@ -204,7 +226,9 @@ def main(argv=None):
     metadata.add_argument("--directory", required=True, type=Path)
     verification = sub.add_parser("verify-index")
     verification.add_argument("--metadata-directory", required=True, type=Path)
-    archives = sub.add_parser("archives")
+    prefetch = sub.add_parser("prefetch")
+    prefetch.add_argument("--archives", required=True, type=Path)
+    archives = sub.add_parser("verify-archives")
     archives.add_argument("--metadata-directory", required=True, type=Path)
     archives.add_argument("--archives", required=True, type=Path)
     args = parser.parse_args(argv)
@@ -213,8 +237,10 @@ def main(argv=None):
             report = fetch_metadata(args.directory)
         elif args.command == "verify-index":
             report = verify_index(args.metadata_directory)
+        elif args.command == "prefetch":
+            report = prefetch_archives(args.archives)
         else:
-            report = fetch_archives(args.metadata_directory, args.archives)
+            report = verify_cached_archives(args.metadata_directory, args.archives)
     except (OSError, ValueError, KeyError, TypeError, UnicodeError,
             urllib.error.URLError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error),

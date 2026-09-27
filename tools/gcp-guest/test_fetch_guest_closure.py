@@ -94,9 +94,16 @@ class GuestFetchTests(unittest.TestCase):
             manifest_bytes=self.manifest_bytes,
         )
 
-    def fetch_archives(self, opener):
-        return fetcher.fetch_archives(
-            self.metadata, self.archives, open_url=opener,
+    def prefetch(self, opener):
+        return fetcher.prefetch_archives(
+            self.archives, open_url=opener,
+            manifest_path=self.manifest, manifest_sha256=self.manifest_sha256,
+            manifest_bytes=self.manifest_bytes,
+        )
+
+    def verify_cached(self):
+        return fetcher.verify_cached_archives(
+            self.metadata, self.archives,
             manifest_path=self.manifest, manifest_sha256=self.manifest_sha256,
             manifest_bytes=self.manifest_bytes,
         )
@@ -136,14 +143,16 @@ class GuestFetchTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "source-reviewed candidate"):
                 self.fetch_metadata(lambda _: self.fail("changed manifest used network"))
             with self.assertRaisesRegex(ValueError, "source-reviewed candidate"):
-                self.fetch_archives(lambda _: self.fail("changed manifest used network"))
+                self.prefetch(lambda _: self.fail("changed manifest used network"))
+            with self.assertRaisesRegex(ValueError, "source-reviewed candidate"):
+                self.verify_cached()
         self.assertEqual(list(self.archives.iterdir()), [])
 
-    def test_signed_index_disagreement_fails_before_archive_network(self):
+    def test_signed_index_disagreement_fails_offline(self):
         self.records[("example", "1.0", "amd64")]["SHA256"] = "00" * 32
         with self.overrides():
             with self.assertRaisesRegex(ValueError, "differs from signed Debian index"):
-                self.fetch_archives(lambda _: self.fail("unsigned archive used network"))
+                self.verify_cached()
         self.assertEqual(list(self.archives.iterdir()), [])
 
     def test_offline_index_membership_cannot_approve_archive_or_image(self):
@@ -164,10 +173,10 @@ class GuestFetchTests(unittest.TestCase):
         with self.overrides():
             with mock.patch.object(fetcher, "SIGNED_RELEASE_EPOCH", 1):
                 with self.assertRaisesRegex(ValueError, "signed guest snapshot differs"):
-                    self.fetch_archives(lambda _: self.fail("wrong snapshot used network"))
+                    self.verify_cached()
         self.assertEqual(list(self.archives.iterdir()), [])
 
-    def test_exact_archive_is_downloaded_once_and_never_executed(self):
+    def test_exact_archive_is_prefetched_then_verified_offline(self):
         urls = []
 
         def opener(request):
@@ -175,15 +184,23 @@ class GuestFetchTests(unittest.TestCase):
             return Response(self.archive, request.full_url)
 
         with self.overrides():
-            report = self.fetch_archives(opener)
+            report = self.prefetch(opener)
             self.assertEqual((report["downloaded_count"], report["reused_count"]), (1, 0))
-            self.assertTrue(report["signed_snapshot_rechecked"])
-            for key in ("package_scripts_executed", "image_built", "private_mode_approved"):
+            self.assertFalse(report["signed_snapshot_rechecked"])
+            self.assertTrue(report["archive_hashes_matched_source_lock"])
+            for key in ("installed_closure_checked", "package_scripts_executed",
+                        "image_built", "private_mode_approved"):
                 self.assertFalse(report[key])
             self.assertEqual(urls, [fetcher.SNAPSHOT + self.package["filename"]])
             self.assertEqual((self.archives / (self.package["sha256"] + ".deb")).read_bytes(),
                              self.archive)
-            report = self.fetch_archives(
+            report = self.verify_cached()
+            self.assertTrue(report["signed_snapshot_rechecked"])
+            self.assertTrue(report["archive_bytes_checked"])
+            for key in ("installed_closure_checked", "package_scripts_executed",
+                        "image_built", "private_mode_approved"):
+                self.assertFalse(report[key])
+            report = self.prefetch(
                 lambda _: self.fail("cached archive unexpectedly used network"),
             )
             self.assertEqual((report["downloaded_count"], report["reused_count"]), (0, 1))
@@ -191,12 +208,12 @@ class GuestFetchTests(unittest.TestCase):
     def test_bad_download_and_redirect_publish_no_archive(self):
         with self.overrides():
             with self.assertRaisesRegex(ValueError, "downloaded builder archive"):
-                self.fetch_archives(lambda request: Response(
+                self.prefetch(lambda request: Response(
                     b"!<arch>\n" + b"x" * (len(self.archive) - 8), request.full_url,
                 ))
             self.assertEqual(list(self.archives.iterdir()), [])
             with self.assertRaisesRegex(ValueError, "redirect escaped"):
-                self.fetch_archives(lambda _: Response(
+                self.prefetch(lambda _: Response(
                     self.archive, "https://example.invalid/archive.deb",
                 ))
             self.assertEqual(list(self.archives.iterdir()), [])
@@ -206,8 +223,16 @@ class GuestFetchTests(unittest.TestCase):
         target.write_bytes(b"corrupt")
         with self.overrides():
             with self.assertRaisesRegex(ValueError, "existing builder archive"):
-                self.fetch_archives(lambda _: self.fail("corrupt cache used network"))
+                self.prefetch(lambda _: self.fail("corrupt cache used network"))
+            with self.assertRaisesRegex(ValueError, "existing builder archive"):
+                self.verify_cached()
         self.assertEqual(target.read_bytes(), b"corrupt")
+
+    def test_missing_cached_archive_fails_without_network(self):
+        with self.overrides():
+            with self.assertRaisesRegex(ValueError, "absent from offline cache"):
+                self.verify_cached()
+        self.assertEqual(list(self.archives.iterdir()), [])
 
 
 if __name__ == "__main__":
