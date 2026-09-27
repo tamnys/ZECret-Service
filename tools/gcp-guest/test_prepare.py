@@ -32,7 +32,7 @@ class CandidateTests(unittest.TestCase):
         self.inputs.mkdir()
         artifacts = {}
         for role in prepare.ROLES:
-            if role in prepare.BINARIES:
+            if role in prepare.BINARIES or role == prepare.EARLY_INIT_ROLE:
                 data = bytearray(b"SYNTHETIC_NOT_EXECUTABLE".ljust(64, b"_"))
                 data[:6] = b"\x7fELF\x02\x01"
                 data[18:20] = b"\x3e\x00"
@@ -52,7 +52,7 @@ class CandidateTests(unittest.TestCase):
             (self.inputs / role).write_bytes(data)
             artifacts[role] = {"path": role, "sha256": hashlib.sha256(data).hexdigest()}
         # Values exercise branches only and are never production defaults.
-        self.lock = {"schema_version": 5, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": prepare.KERNEL_VERSION, "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
+        self.lock = {"schema_version": 6, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": prepare.KERNEL_VERSION, "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
         # Keep the test-only manifest separate from mutable input bytes. This
         # exercises the same source-closure check without treating synthetic
         # packages as a production input.
@@ -229,11 +229,17 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "candidate-manifest.json").exists())
 
     def test_missing_identity_changed_artifact_and_escape_fail(self):
-        for change in (lambda lock: lock.update(schema_version=4), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].update(initrd={"path": "initrd", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(kernel={"path": "kernel", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["wrapper"].update(path="../wrapper"), lambda lock: lock.update(kernel_version="other-abi"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
+        for change in (lambda lock: lock.update(schema_version=5), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].update(initrd={"path": "initrd", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(kernel={"path": "kernel", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["wrapper"].update(path="../wrapper"), lambda lock: lock.update(kernel_version="other-abi"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
             lock = copy.deepcopy(self.lock)
             change(lock)
             with self.assertRaises(ValueError):
                 prepare.validate_lock(lock, self.inputs)
+
+    def test_missing_early_init_artifact_rejected(self):
+        lock = copy.deepcopy(self.lock)
+        lock["artifacts"].pop("early_init")
+        with self.assertRaisesRegex(ValueError, "exact complete input role set required"):
+            prepare.validate_lock(lock, self.inputs)
 
     def test_staging_is_explicitly_unbuilt_and_masks_administration(self):
         lock_path = self.root / "synthetic.lock.json"
@@ -278,10 +284,17 @@ class CandidateTests(unittest.TestCase):
         initrd = (output / "mkosi.images/initrd/mkosi.conf").read_text()
         self.assertIn("MakeInitrd=yes", initrd)
         self.assertIn("Packages=dmsetup=1.0~synthetic,kmod=1.0~synthetic,systemd=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,udev=1.0~synthetic", initrd)
+        self.assertIn("ExtraTrees=rootfs", initrd)
         self.assertIn("FinalizeScripts=audit-initrd.py", initrd)
         audit = output / "mkosi.images/initrd/audit-initrd.py"
-        self.assertEqual(audit.read_bytes(), (Path(__file__).with_name("audit-initrd.py")).read_bytes())
+        expected_init_hash = self.lock["artifacts"]["early_init"]["sha256"]
+        self.assertIn(expected_init_hash, audit.read_text())
+        self.assertNotIn("__STAGED_INIT_SHA256__", audit.read_text())
         self.assertEqual(audit.stat().st_mode & 0o777, 0o555)
+        staged_init = output / "mkosi.images/initrd/rootfs/init"
+        self.assertEqual(prepare.digest(staged_init), expected_init_hash)
+        self.assertEqual(staged_init.stat().st_mode & 0o777, 0o555)
+        self.assertFalse((output / "rootfs/init").exists())
         self.assertNotIn("Include=mkosi-initrd", initrd)
         self.assertNotIn("linux-image", initrd)
         esp = (output / "repart/30-esp.conf").read_text()

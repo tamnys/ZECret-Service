@@ -29,7 +29,8 @@ KERNEL_VERSION = "6.12.107+deb13-cloud-amd64"
 KERNEL_PACKAGE = f"linux-image-{KERNEL_VERSION}"
 KERNEL_PACKAGE_VERSION = "6.12.107-1"
 BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
-ROLES = set(BINARIES) | {"secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
+EARLY_INIT_ROLE = "early_init"
+ROLES = set(BINARIES) | {EARLY_INIT_ROLE, "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
@@ -353,7 +354,7 @@ def preflight():
     return {"schema_version": 1, "status": "blocked" if blockers else "capabilities-present-input-review-required", "architecture": platform.machine(), "tools": tools, "blockers": blockers, "image_built": False, "private_mode_approved": False}
 
 def validate_lock(lock, source):
-    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 5 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
+    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 6 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
         raise ValueError("unsupported or incomplete input lock")
     if type(lock["source_date_epoch"]) is not int or lock["source_date_epoch"] <= 0:
         raise ValueError("source date must derive from authenticated inputs")
@@ -374,7 +375,7 @@ def validate_lock(lock, source):
         path = source / relative
         if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(source.resolve()) or digest(path) != entry["sha256"]:
             raise ValueError("input digest or path mismatch")
-        if role in BINARIES:
+        if role in BINARIES or role == EARLY_INIT_ROLE:
             with path.open("rb") as stream:
                 header = stream.read(64)
             if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
@@ -448,9 +449,6 @@ def stage(lock_path, source, destination):
     validate_boot_profile(destination, staged_copy=True)
     shutil.copyfile(Path(__file__).with_name("audit-rootfs.py"), destination / "audit-rootfs.py")
     (destination / "audit-rootfs.py").chmod(0o555)
-    initrd_audit = destination / "mkosi.images/initrd/audit-initrd.py"
-    shutil.copyfile(Path(__file__).with_name("audit-initrd.py"), initrd_audit)
-    initrd_audit.chmod(0o555)
     artifacts = destination / "artifacts"
     artifacts.mkdir()
     for role, path in paths.items():
@@ -458,6 +456,20 @@ def stage(lock_path, source, destination):
         shutil.copyfile(path, target)
         if digest(target) != lock["artifacts"][role]["sha256"]:
             raise ValueError("artifact changed during staging")
+    initrd_tree = destination / "mkosi.images/initrd/rootfs"
+    initrd_tree.mkdir()
+    init_path = initrd_tree / "init"
+    shutil.copyfile(artifacts / EARLY_INIT_ROLE, init_path)
+    init_path.chmod(0o555)
+    if digest(init_path) != lock["artifacts"][EARLY_INIT_ROLE]["sha256"]:
+        raise ValueError("early init changed during staging")
+    audit_template = Path(__file__).with_name("audit-initrd.py").read_text()
+    marker = "__STAGED_INIT_SHA256__"
+    if audit_template.count(marker) != 1:
+        raise ValueError("early init audit template differs")
+    initrd_audit = destination / "mkosi.images/initrd/audit-initrd.py"
+    initrd_audit.write_text(audit_template.replace(marker, lock["artifacts"][EARLY_INIT_ROLE]["sha256"]))
+    initrd_audit.chmod(0o555)
     package_directory = destination / "packages"
     package_directory.mkdir()
     # mkosi otherwise reuses the invoking user's shared APT cache and lists.
@@ -499,14 +511,14 @@ def stage(lock_path, source, destination):
     with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
         versions = {package["name"]: package["version"] for package in package_manifest}
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))
-        stream.write(f"\nPackages={initrd_packages}\nFinalizeScripts=audit-initrd.py\n")
+        stream.write(f"\nPackages={initrd_packages}\nExtraTrees=rootfs\nFinalizeScripts=audit-initrd.py\n")
     (destination / "inputs.lock.json").write_bytes(lock_bytes)
     root_fd = open_stage_directory(destination)
     try:
         entries = staged_inventory(root_fd)
     finally:
         os.close(root_fd)
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": lock_sha256, "repart_seed": str(seed), "repart_seed_derivation": {"algorithm": "UUIDv5", "namespace": str(uuid.NAMESPACE_URL), "name": REPART_SEED_NAME_PREFIX + lock_sha256}, "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual initrd contents and test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": lock_sha256, "repart_seed": str(seed), "repart_seed_derivation": {"algorithm": "UUIDv5", "namespace": str(uuid.NAMESPACE_URL), "name": REPART_SEED_NAME_PREFIX + lock_sha256}, "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual appended initrd /init and x86_64 early-init runtime closure", "test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "prove exact signed UKI boot policy excludes unreviewed addons and profiles", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     manifest_path = destination / "candidate-manifest.json"
     manifest_path.write_text(json.dumps(report, indent=2) + "\n")
     # Return these for recording outside the mutable stage. They cannot be

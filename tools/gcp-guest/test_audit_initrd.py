@@ -1,5 +1,6 @@
 """Synthetic initrd surface checks; no generated cpio or boot is exercised."""
 
+import hashlib
 import importlib.util
 from pathlib import Path
 import stat
@@ -23,10 +24,13 @@ class InitrdAuditTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="gcp-initrd-audit-", dir=cache)
         self.root = Path(self.temporary.name) / "initrd"
         self.root.mkdir()
-        for relative in ("etc/systemd/system", "usr/lib/systemd/system",
+        for relative in ("proc", "etc/systemd/system", "usr/lib/systemd/system",
                          "usr/lib/systemd/system-generators", "usr/bin", "usr/sbin"):
             (self.root / relative).mkdir(parents=True, exist_ok=True)
-        (self.root / "init").symlink_to("/usr/lib/systemd/systemd")
+        self.init_bytes = b"synthetic Rust PID1 artifact"
+        (self.root / "init").write_bytes(self.init_bytes)
+        (self.root / "init").chmod(0o555)
+        self.init_sha256 = hashlib.sha256(self.init_bytes).hexdigest()
         (self.root / "etc/initrd-release").symlink_to("/etc/os-release")
         (self.root / "etc/os-release").symlink_to("../usr/lib/os-release")
         (self.root / "usr/lib/os-release").write_text("ID=debian\n")
@@ -42,7 +46,7 @@ class InitrdAuditTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_synthetic_minimum_passes(self):
-        audit_initrd.audit(self.root)
+        audit_initrd.audit(self.root, self.init_sha256)
 
     def test_required_boot_components_and_ownership_fail_closed(self):
         for relative in audit_initrd.REQUIRED_EXECUTABLES:
@@ -50,41 +54,42 @@ class InitrdAuditTests(unittest.TestCase):
                 path = self.root / relative
                 path.unlink()
                 with self.assertRaisesRegex(ValueError, "required file missing"):
-                    audit_initrd.audit(self.root)
+                    audit_initrd.audit(self.root, self.init_sha256)
                 path.write_bytes(b"synthetic executable")
                 path.chmod(0o755)
         path = self.root / "usr/lib/systemd/systemd-veritysetup"
         path.chmod(0o777)
         with self.assertRaisesRegex(ValueError, "permissions differ"):
-            audit_initrd.audit(self.root)
+            audit_initrd.audit(self.root, self.init_sha256)
 
     def test_initrd_identity_symlinks_and_root_redirection_fail_closed(self):
         init = self.root / "init"
         init.unlink()
-        init.symlink_to("/usr/bin/sh")
-        with self.assertRaisesRegex(ValueError, "initrd entry missing or redirected"):
-            audit_initrd.audit(self.root)
-        init.unlink()
         init.symlink_to("/usr/lib/systemd/systemd")
+        with self.assertRaisesRegex(ValueError, "required file missing or redirected"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        init.unlink()
+        init.write_bytes(self.init_bytes)
+        init.chmod(0o555)
         release = self.root / "etc/os-release"
         release.unlink()
         release.symlink_to("/etc/os-release")
         with self.assertRaisesRegex(ValueError, "initrd entry missing or redirected"):
-            audit_initrd.audit(self.root)
+            audit_initrd.audit(self.root, self.init_sha256)
         release.unlink()
         release.symlink_to("../usr/lib/os-release")
         udevd = self.root / "usr/lib/systemd/systemd-udevd"
         udevd.unlink()
         udevd.symlink_to("/usr/bin/other")
         with self.assertRaisesRegex(ValueError, "initrd entry missing or redirected"):
-            audit_initrd.audit(self.root)
+            audit_initrd.audit(self.root, self.init_sha256)
         udevd.unlink()
         udevd.symlink_to("../../bin/udevadm")
         user_bin = self.root / "usr/bin"
         user_bin.rename(self.root / "usr/actual-bin")
         user_bin.symlink_to("actual-bin")
         with self.assertRaisesRegex(ValueError, "directory missing or redirected"):
-            audit_initrd.audit(self.root)
+            audit_initrd.audit(self.root, self.init_sha256)
 
     def test_rescue_shell_alias_and_privileged_file_fail_closed(self):
         for relative in ("usr/lib/systemd/system/rescue.target",
@@ -95,12 +100,12 @@ class InitrdAuditTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.symlink_to("../rescue.target")
                 with self.assertRaises(ValueError):
-                    audit_initrd.audit(self.root)
+                    audit_initrd.audit(self.root, self.init_sha256)
                 path.unlink()
         path = self.root / "usr/lib/systemd/system/innocent.target"
         path.symlink_to("rescue.target")
         with self.assertRaisesRegex(ValueError, "administrative unit"):
-            audit_initrd.audit(self.root)
+            audit_initrd.audit(self.root, self.init_sha256)
         path.unlink()
         path = self.root / "usr/bin/unreviewed"
         path.write_bytes(b"synthetic")
@@ -116,7 +121,7 @@ class InitrdAuditTests(unittest.TestCase):
 
         with mock.patch.object(Path, "lstat", lstat_with_setuid):
             with self.assertRaisesRegex(ValueError, "privileged file"):
-                audit_initrd.audit(self.root)
+                audit_initrd.audit(self.root, self.init_sha256)
 
     def test_early_boot_payloads_and_credentials_fail_closed(self):
         for relative in ("usr/lib/modules/kernel/drivers/md/dm-verity.ko.xz",
@@ -127,7 +132,7 @@ class InitrdAuditTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"synthetic")
                 with self.assertRaises(ValueError):
-                    audit_initrd.audit(self.root)
+                    audit_initrd.audit(self.root, self.init_sha256)
                 path.unlink()
                 parent = path.parent
                 while parent != self.root and not any(parent.iterdir()):
@@ -136,7 +141,24 @@ class InitrdAuditTests(unittest.TestCase):
         credentials = self.root / "usr/lib/credstore"
         credentials.symlink_to("/tmp/other")
         with self.assertRaisesRegex(ValueError, "credential store"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_early_init_identity_and_base_companions_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "artifact identity absent"):
             audit_initrd.audit(self.root)
+        init = self.root / "init"
+        init.chmod(0o755)
+        init.write_bytes(b"changed PID1")
+        init.chmod(0o555)
+        with self.assertRaisesRegex(ValueError, "differs from pinned artifact"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        init.chmod(0o755)
+        init.write_bytes(self.init_bytes)
+        init.chmod(0o555)
+        extra = self.root / ".extra"
+        extra.mkdir()
+        with self.assertRaisesRegex(ValueError, "stub companion tree"):
+            audit_initrd.audit(self.root, self.init_sha256)
 
 
 if __name__ == "__main__":

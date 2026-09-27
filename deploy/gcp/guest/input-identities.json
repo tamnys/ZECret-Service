@@ -44,6 +44,7 @@
     "reviewed_kernel_systemd_and_initramfs",
     "verified_eligible_zebra_x86_64",
     "target_built_wrapper_broker_and_guard",
+    "target_built_early_init",
     "reviewed_resource_limits",
     "operator_secure_boot_public_certificate",
     "external_signing_key_reference",
