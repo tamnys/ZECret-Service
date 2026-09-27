@@ -579,6 +579,88 @@ async fn create_intents_are_durable_and_cleanup_tracks_every_owned_resource() {
     assert!(store.journal().billing_evidence_sha256.is_none());
 }
 #[tokio::test]
+async fn out_of_band_disappearance_does_not_complete_cleanup_or_admit_billing_evidence() {
+    let f = Fixture::new();
+    let mut store = Store::open(&f.state).unwrap();
+    let mut provider = f.mock();
+    deploy_all(&mut store, &mut provider, &f.package).await;
+
+    provider.objects.clear();
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1001)
+            .await
+            .unwrap_err()
+            .0,
+        "resource absent without recorded deletion; cleanup uncertain"
+    );
+    assert!(store.journal().teardown_started);
+    assert!(provider.deletes.is_empty());
+    assert!(store.journal().resources.iter().all(|r| r.delete.is_none()));
+
+    observe(&mut store, &mut provider, 1002).await.unwrap();
+    assert!(store.journal().resources.iter().all(|r| r.observed_absent));
+    assert!(
+        store
+            .record_billing_evidence(&f.package.spec.release_manifest)
+            .is_err()
+    );
+    assert!(store.journal().billing_evidence_sha256.is_none());
+}
+
+#[tokio::test]
+async fn failed_done_deletion_does_not_complete_cleanup_or_admit_billing_evidence() {
+    let f = Fixture::new();
+    let mut store = Store::open(&f.state).unwrap();
+    let mut provider = f.mock();
+    deploy_all(&mut store, &mut provider, &f.package).await;
+    for _ in &f.package.resources {
+        assert_eq!(
+            teardown_once(&mut store, &mut provider, 1001)
+                .await
+                .unwrap(),
+            Progress::Pending
+        );
+    }
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1002)
+            .await
+            .unwrap(),
+        Progress::ResourcesAbsentBillingUnreconciled
+    );
+
+    let index = f.package.resources.len() - 1;
+    let resource = &f.package.resources[index];
+    let state = &store.journal().resources[index];
+    let mut operation = provider.op(
+        resource,
+        &state.delete.as_ref().unwrap().request_id,
+        state.identity.as_ref().unwrap(),
+    );
+    operation.error = Some(json!({"errors": [{"code": "synthetic"}]}));
+    accept_operation(&mut store, index, resource, operation, true).unwrap();
+    assert!(
+        store.journal().resources[index]
+            .delete
+            .as_ref()
+            .unwrap()
+            .failed
+    );
+
+    assert_eq!(
+        teardown_once(&mut store, &mut provider, 1003)
+            .await
+            .unwrap_err()
+            .0,
+        "deletion operation failed; original intent retained"
+    );
+    assert!(
+        store
+            .record_billing_evidence(&f.package.spec.release_manifest)
+            .is_err()
+    );
+    assert!(store.journal().billing_evidence_sha256.is_none());
+}
+#[tokio::test]
 async fn billing_reference_is_post_cleanup_append_only_and_never_changes_status() {
     let f = Fixture::new();
     let mut store = Store::open(&f.state).unwrap();
