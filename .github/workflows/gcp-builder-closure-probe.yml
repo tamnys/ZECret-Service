@@ -275,3 +275,86 @@ jobs:
             "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command" \
             "$source" "$scratch/archives" "$scratch/metadata" \
             "$scratch/guest-archives"
+
+      - name: Diagnostic packaged mkosi sandbox in root-owned namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(git -C "$GITHUB_WORKSPACE/source" rev-parse HEAD)" = "$GITHUB_SHA"
+
+          # The preceding step rechecked the Debian signature, exact builder
+          # APT plan, and guest archive bytes before executing staged tools.
+          # This is a separate capability diagnostic, not an image build.
+          staged="$GITHUB_WORKSPACE/builder-closure/staged"
+          python3 - "$staged/.zrpc-builder-toolchain.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          report = json.loads(Path(sys.argv[1]).read_bytes())
+          if (report["status"] != "diagnostic-builder-payloads-staged-unbuilt"
+                  or report["package_count"] != 195
+                  or report["package_scripts_executed"] is not False
+                  or report["complete_builder_toolchain"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise SystemExit("signed builder staging did not retain diagnostic status")
+          PY
+          test -x "$staged/usr/bin/mkosi-sandbox"
+          test -f "$staged/usr/lib/python3/dist-packages/mkosi/sandbox.py"
+          test -x "$staged/usr/bin/true"
+
+          # The UID 0:0 map cannot traverse the runner-owned home/workspace.
+          # Copy only the already-staged public Debian tree to root-owned
+          # scratch. No signing key, cloud credential, source write, or upload
+          # enters this diagnostic. chroot is not a security boundary.
+          root_scratch="$(sudo -n mktemp -d /var/tmp/zrpc-packaged-mkosi.XXXXXX)"
+          trap 'sudo -n rm -rf -- "$root_scratch"' EXIT
+          sudo -n cp -a --no-preserve=ownership -- "$staged"/. "$root_scratch"/
+          sudo -n test ! -L "$root_scratch/tmp"
+          sudo -n install -d -m 1777 "$root_scratch/tmp"
+          test "$(sudo -n stat -c %u "$root_scratch/usr/bin/mkosi-sandbox")" = 0
+          sudo -n cmp -s -- "$staged/.zrpc-builder-toolchain.json" \
+            "$root_scratch/.zrpc-builder-toolchain.json"
+          sudo -n cmp -s -- "$staged/usr/bin/mkosi-sandbox" "$root_scratch/usr/bin/mkosi-sandbox"
+          sudo -n cmp -s -- "$staged/usr/lib/python3/dist-packages/mkosi/sandbox.py" \
+            "$root_scratch/usr/lib/python3/dist-packages/mkosi/sandbox.py"
+          sudo -n cmp -s -- "$staged/usr/bin/true" "$root_scratch/usr/bin/true"
+
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          parent_pid_ns="$(readlink /proc/self/ns/pid)"
+          chroot_command="$(command -v chroot)"
+          sudo -n unshare --user --map-root-user --mount --net --pid --fork \
+            --mount-proc --propagation private bash -c '
+            set -euo pipefail
+            root=$1
+            test "$(readlink /proc/self/ns/user)" != "$2"
+            test "$(readlink /proc/self/ns/mnt)" != "$3"
+            test "$(readlink /proc/self/ns/net)" != "$4"
+            test "$(readlink /proc/self/ns/pid)" != "$5"
+            test "$(id -u):$(id -g)" = 0:0
+            read -r inner outer count < /proc/self/uid_map
+            test "$inner:$outer:$count" = 0:0:1
+            read -r inner outer count < /proc/self/gid_map
+            test "$inner:$outer:$count" = 0:0:1
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            # mkosi changes / mount propagation before creating its sandbox.
+            # A plain chroot directory is not a mount point for that operation.
+            mount --bind "$root" "$root"
+            mountpoint -q "$root"
+            test -d "$root/proc" && test ! -L "$root/proc"
+            mount -t proc proc "$root/proc"
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+              LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+              "$6" "$root" /usr/bin/mkosi-sandbox \
+                --ro-bind / / --unshare-net -- /usr/bin/true
+            echo "Packaged mkosi sandbox true-command: passed in root-owned no-route namespace"
+          ' _ "$root_scratch" "$parent_user_ns" "$parent_mount_ns" \
+            "$parent_net_ns" "$parent_pid_ns" "$chroot_command"
+
+          printf '%s\n' '{"status":"diagnostic-packaged-mkosi-sandbox-passed-unbuilt","package_scripts_executed":false,"image_built":false,"approved_release":false,"private_mode_approved":false}'
