@@ -363,6 +363,40 @@ jobs:
               raise ValueError("guest payload staging changed acceptance status")
           print(json.dumps(report, sort_keys=True))
           PY
+            # Inventory original package ownership/modes and the actual inert
+            # staged tree. The full report stays on the runner workspace; only
+            # its digest and unresolved gaps enter the public job log.
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import preflight_guest_base_tree
+
+          report_path = Path("/zrpc-guest-payload-parent/boot-root-preflight.json")
+          sys.argv = ["preflight_guest_base_tree", "--metadata", "/zrpc-metadata",
+                      "--archives", "/zrpc-guest-archives", "--staged-root",
+                      "/zrpc-guest-payload-parent/tree", "--output", str(report_path)]
+          if preflight_guest_base_tree.main():
+              raise ValueError("guest BaseTrees diagnostic failed")
+          report = json.loads(report_path.read_bytes())
+          if (report["status"] != preflight_guest_base_tree.STATUS
+                  or len(report["packages"]) != 104
+                  or not report["root_archive_entries"]
+                  or not report["initrd_seed_archive_entries"]
+                  or not report["staged_root_entries"]
+                  or not report["gaps"]
+                  or report["signed_snapshot_rechecked"] is not True
+                  or report["archive_bytes_checked"] is not True
+                  or report["staged_payload_content_rechecked"] is not False
+                  or report["initrd_seed_tree_staged"] is not False
+                  or report["package_scripts_executed"] is not False
+                  or report["image_built"] is not False
+                  or report["boot_verified"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("BaseTrees diagnostic changed acceptance status")
+          PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"
             run_staged /lib64/ld-linux-x86-64.so.2 --list /usr/bin/systemd-repart
