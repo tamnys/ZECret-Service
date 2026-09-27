@@ -85,10 +85,12 @@ Late usage and corrections can appear after an earlier query, and
 [invoice-month totals can differ from usage-time totals](https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-tables/standard-usage).
 The ledger's optional billing evidence digest is therefore an immutable audit
 reference after observed cleanup, not an automated settlement verdict. The
-controller continues to report `ResourcesAbsentBillingUnreconciled` even when
-that digest is present. An operator still needs a separately reviewed export,
-invoice/adjustment comparison, and resource inventory covering the actual
-project and staging bucket. No fixed wait interval proves reconciliation.
+controller reports `PlannedResourcesAbsentBillingUnreconciled` even when that
+digest is present. It only checks the eight resources in the package; it does
+not inventory the whole project or shared staging bucket. An operator still
+needs a separately reviewed export, invoice/adjustment comparison, and
+resource inventory covering the actual project and staging bucket. No fixed
+wait interval proves reconciliation.
 
 The follow-up code rejects a malformed, early, changed, or removed billing
 evidence digest. Its synthetic test also confirms that recording the digest
