@@ -30,7 +30,8 @@ SOURCE_MTIME_NS = 0  # assemble_guest_base_tree.tar_header sets mtime=0.
 def stable_stat(value):
     """Fields that must not change while this process reads an entry."""
     return (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
-            value.st_gid, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+            value.st_gid, value.st_nlink, value.st_size, value.st_mtime_ns,
+            value.st_ctime_ns)
 
 
 def reject_xattrs(descriptor, path):
@@ -76,7 +77,8 @@ def observed_entry(parent_fd, name, path, root_device):
                 raise ValueError(f"produced root file changed during scan: {path}")
         finally:
             os.close(fd)
-        result.update(kind="file", size=size, sha256=digest.hexdigest())
+        result.update(kind="file", size=size, sha256=digest.hexdigest(),
+                      nlink=before.st_nlink)
         return result, {}
     if stat.S_ISLNK(before.st_mode):
         if os.listxattr(f"/proc/self/fd/{parent_fd}/{name}", follow_symlinks=False):
@@ -120,6 +122,13 @@ def scan_root(root):
         rows.update(scan_directory(fd, ".", before.st_dev))
         if stable_stat(os.fstat(fd)) != stable_stat(before):
             raise ValueError("produced mkosi root changed during scan")
+        aliases = {}
+        for row in rows.values():
+            if row["kind"] == "file":
+                aliases[row["inode"]] = aliases.get(row["inode"], 0) + 1
+        for row in rows.values():
+            if row["kind"] == "file" and row["nlink"] != aliases[row["inode"]]:
+                raise ValueError(f"produced root file has an outside hardlink: {row['path']}")
         return rows
     finally:
         os.close(fd)

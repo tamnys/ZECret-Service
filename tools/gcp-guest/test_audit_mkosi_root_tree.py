@@ -142,6 +142,11 @@ class ProducedRootAuditTests(unittest.TestCase):
         self.assertIn(("bin/runner-hardlink", "hardlink"), changes)
         self.assertIn(("etc/config", "owner"), changes)
 
+    def test_external_hardlink_to_signed_file_is_rejected(self):
+        os.link(self.root / "etc/config", self.workspace / "mutable-alias")
+        with self.assertRaisesRegex(ValueError, "outside hardlink: etc/config"):
+            self.run_audit()
+
     def test_timestamp_and_xattr_drift_are_not_silent(self):
         os.utime(self.root / "etc/config", ns=(1_000_000_000, 1_000_000_000))
         self.assertIn(("etc/config", "mtime"), self.changed(self.run_audit()))
