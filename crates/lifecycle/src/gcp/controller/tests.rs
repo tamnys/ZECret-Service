@@ -292,6 +292,49 @@ fn image_package_requires_the_reviewed_raw_disk_inside_the_import_archive() {
 }
 
 #[test]
+fn custom_image_package_rejects_incompatible_c3_tdx_machine_types() {
+    let f = Fixture::new();
+    for machine_type in [
+        "c3-standard-4",
+        "c3-standard-8",
+        "c3-standard-22",
+        "c3-standard-44",
+        "c3-standard-88",
+        "c3-standard-176",
+    ] {
+        let mut spec = f.package.spec.clone();
+        spec.machine_type = machine_type.into();
+        let package = Package::prepare(spec, 1000).unwrap();
+        let instance = package
+            .resources
+            .iter()
+            .find(|resource| resource.kind == ResourceKind::Instance)
+            .unwrap();
+        assert_eq!(
+            instance.create_body["machineType"],
+            format!("projects/synthetic-project/zones/us-central1-a/machineTypes/{machine_type}")
+        );
+    }
+    for machine_type in [
+        "c3-standard-4-lssd",
+        "c3-standard-44-lssd",
+        "c3-standard-12",
+        "c3-standard-192-metal",
+        "c3-highcpu-4",
+        "c3-highmem-4",
+        "c3d-standard-4",
+        "c4-standard-4",
+    ] {
+        let mut spec = f.package.spec.clone();
+        spec.machine_type = machine_type.into();
+        assert!(
+            Package::prepare(spec, 1000).is_err(),
+            "must reject {machine_type} for this custom Debian TDX image"
+        );
+    }
+}
+
+#[test]
 fn import_receipt_binds_candidate_media_and_local_executables_without_approval() {
     let f = Fixture::new();
     let original: Value =
