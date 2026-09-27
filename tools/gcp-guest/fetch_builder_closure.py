@@ -29,6 +29,21 @@ import verify_builder_packages as direct
 CHUNK_BYTES = 1024 * 1024
 
 
+class SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    """Reject a redirect before urllib can issue a request to another origin."""
+
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        source = urllib.parse.urlsplit(request.full_url)
+        target = urllib.parse.urlsplit(urllib.parse.urljoin(request.full_url, newurl))
+        if (target.scheme, target.netloc) != (source.scheme, source.netloc):
+            raise ValueError("builder archive redirect escaped signed snapshot")
+        return super().redirect_request(request, fp, code, msg, headers, newurl)
+
+
+def open_snapshot_url(request):
+    return urllib.request.build_opener(SameOriginRedirects()).open(request)
+
+
 def authenticated_packages(inrelease, packages_index, *, lock_path=closure.LOCK):
     lock_bytes = debian_snapshot.bounded_regular_bytes(
         lock_path, closure.LOCK_BYTES, "builder closure lock",
@@ -119,7 +134,7 @@ def verify_cached(directory_fd, entry):
 
 def download_one(directory_fd, entry, snapshot, *, open_url=None):
     if open_url is None:
-        open_url = urllib.request.urlopen
+        open_url = open_snapshot_url
     url = urllib.parse.urljoin(snapshot, entry["filename"])
     if urllib.parse.urlsplit(url).netloc != "snapshot.debian.org":
         raise ValueError("builder archive URL escaped signed snapshot")

@@ -2,12 +2,15 @@
 
 from contextlib import ExitStack
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
 from pathlib import Path
 import tempfile
+from threading import Thread
 import unittest
+import urllib.request
 from unittest import mock
 
 import fetch_builder_closure as fetcher
@@ -136,6 +139,50 @@ class FetchBuilderClosureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "redirect escaped"):
                 self.fetch(lambda _: Response(self.good_archive, "https://example.invalid/file.deb"))
         self.assertEqual(list(self.archives.iterdir()), [])
+
+    def test_default_opener_rejects_redirect_before_off_origin_request(self):
+        hits = []
+
+        class SilentHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+        class Destination(SilentHandler):
+            def do_GET(self):
+                hits.append("destination")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"should never be fetched")
+
+        servers = []
+        try:
+            destination = ThreadingHTTPServer(("127.0.0.1", 0), Destination)
+            destination_thread = Thread(target=destination.serve_forever, daemon=True)
+            destination_thread.start()
+            servers.append((destination, destination_thread))
+
+            class Source(SilentHandler):
+                def do_GET(self):
+                    hits.append("source")
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{destination.server_port}/leak")
+                    self.end_headers()
+
+            source = ThreadingHTTPServer(("127.0.0.1", 0), Source)
+            source_thread = Thread(target=source.serve_forever, daemon=True)
+            source_thread.start()
+            servers.append((source, source_thread))
+
+            request = urllib.request.Request(f"http://127.0.0.1:{source.server_port}/archive.deb")
+            with mock.patch.object(fetcher.urllib.request, "getproxies", return_value={}):
+                with self.assertRaisesRegex(ValueError, "redirect escaped"):
+                    fetcher.open_snapshot_url(request)
+            self.assertEqual(hits, ["source"])
+        finally:
+            for server, thread in reversed(servers):
+                server.shutdown()
+                server.server_close()
+                thread.join()
 
 
 if __name__ == "__main__":
