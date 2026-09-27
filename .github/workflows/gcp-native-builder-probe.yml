@@ -142,3 +142,74 @@ jobs:
             exit 1
           fi
           echo 'Rootless host capability probe passed; no guest image was built or approved.'
+
+  rust_base:
+    name: Diagnostic pinned Rust base capability check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Inspect exact source and pinned native container without Cargo
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          echo 'Diagnostic only: no Cargo fetch/build, guest image, release approval, or private mode.'
+          df -B1 "$GITHUB_WORKSPACE"
+          grep -E '^Mem(Total|Available):' /proc/meminfo
+
+          source="$GITHUB_WORKSPACE/zrpc-rust-base-source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$source" show "$GITHUB_SHA:rust-toolchain.toml" > "$source/rust-toolchain.toml"
+          git -C "$source" show "$GITHUB_SHA:scripts/gcp-rust-builder-probe.sh" > "$source/probe.sh"
+          python3 - "$source/rust-toolchain.toml" <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          toolchain = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+          if toolchain.get("toolchain", {}).get("channel") != "1.94.1":
+              raise SystemExit("selected source lacks the reviewed Rust 1.94.1 pin")
+          PY
+          sha256sum "$source/rust-toolchain.toml" "$source/probe.sh"
+
+          # Pulling the reviewed OCI digest is the only image network operation.
+          # The probe itself has no route, writable image root, source mount, or host environment.
+          docker pull --platform linux/amd64 "$RUST_IMAGE"
+          image_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$RUST_IMAGE")"
+          repo_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$RUST_IMAGE")"
+          image_id="$(docker image inspect --format '{{.Id}}' "$RUST_IMAGE")"
+          test "$image_platform" = linux/amd64
+          case "$repo_digests" in
+            *"${RUST_IMAGE##*@}"*) ;;
+            *) echo 'Pulled image lacks the reviewed repository digest' >&2; exit 1 ;;
+          esac
+          printf 'image_platform=%s\nimage_id=%s\nrepo_digests=%s\n' \
+            "$image_platform" "$image_id" "$repo_digests"
+          df -B1 "$GITHUB_WORKSPACE"
+
+          docker run --rm --interactive --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user 65534:65534 --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/tmp PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/tmp/cargo \
+            RUSTUP_AUTO_INSTALL=0 RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            CARGO_NET_OFFLINE=true LANG=C LC_ALL=C TZ=UTC \
+            /bin/bash -s -- 1.94.1 < "$source/probe.sh" | tee "$source/probe.log"
+          for expected in \
+            'probe_kind=diagnostic_pinned_rust_base_only' \
+            'full_managed_image_verified=false' \
+            'cargo_dependency_closure_verified=false' \
+            'cargo_fetch_executed=false' \
+            'cargo_build_executed=false' \
+            'guest_image_built=false' \
+            'approved_release=false' \
+            'private_mode_approved=false' \
+            'hard_prerequisites_for_rust_only_probe=present'; do
+            grep -Fx "$expected" "$source/probe.log"
+          done
