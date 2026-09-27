@@ -343,6 +343,30 @@ fn all_signed_registers_and_artifact_binding_are_required() {
 }
 
 #[test]
+fn policy_rejects_empty_boot_configuration_and_kernel_register_references() {
+    let policy = synthetic_policy();
+    for register in [0, 1, 2] {
+        let mut changed = policy.clone();
+        match register {
+            0 => changed.rtmr0 = [0; 48],
+            1 => changed.rtmr1 = [0; 48],
+            _ => changed.rtmr2 = [0; 48],
+        }
+        assert_eq!(changed.validate(), Err(GcpWorkloadIssue::InvalidPolicy));
+    }
+    for register in [1, 3] {
+        let mut changed = policy.clone();
+        for event in &mut changed.expected_events {
+            if event.mr_index == register {
+                event.event_type = ccel::EV_NO_ACTION;
+            }
+        }
+        assert_eq!(changed.validate(), Err(GcpWorkloadIssue::InvalidPolicy));
+    }
+    assert_eq!(policy.validate(), Ok(()));
+}
+
+#[test]
 fn policies_reject_missing_duplicate_unknown_and_wrong_shape_fields() {
     let p = synthetic_policy();
     let raw = serde_json::to_vec(&p).unwrap();

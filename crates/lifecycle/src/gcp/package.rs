@@ -68,6 +68,8 @@ pub struct DeploymentSpec {
     pub secure_boot_pk_der: Artifact,
     pub secure_boot_kek_der: Artifact,
     pub secure_boot_db_der: Artifact,
+    /// Reviewed EFI revocation database; never inherit Google's mutable default.
+    pub secure_boot_dbx_bin: Artifact,
     pub pricing: Pricing,
 }
 
@@ -116,7 +118,7 @@ pub(crate) fn name(value: &str) -> bool {
 }
 impl DeploymentSpec {
     pub fn validate(&self, at: u64) -> Result<()> {
-        if self.schema_version != 1
+        if self.schema_version != 2
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -196,7 +198,7 @@ impl DeploymentSpec {
         }
         Ok(())
     }
-    pub fn artifacts(&self) -> [&Artifact; 9] {
+    pub fn artifacts(&self) -> [&Artifact; 10] {
         [
             &self.raw_image_tar_gz,
             &self.release_manifest,
@@ -206,6 +208,7 @@ impl DeploymentSpec {
             &self.secure_boot_pk_der,
             &self.secure_boot_kek_der,
             &self.secure_boot_db_der,
+            &self.secure_boot_dbx_bin,
             &self.pricing.evidence,
         ]
     }
@@ -233,9 +236,17 @@ impl Package {
         let subnet = format!("{r}/subnetworks/{n}-subnet");
         let boot = format!("{z}/disks/{n}-boot");
         let data = format!("{z}/disks/{n}-public-data");
-        let cert = |a: &Artifact| -> Result<Value> {
-            Ok(json!({"fileType":"X509", "content":STANDARD.encode(read_regular(&a.path)?)}))
+        let secure_boot_file = |a: &Artifact, file_type| -> Result<Value> {
+            let bytes = read_regular(&a.path)?;
+            if bytes.is_empty() {
+                return Err(Error("Secure Boot policy input must not be empty"));
+            }
+            if digest(&bytes) != a.sha256 {
+                return Err(Error("Secure Boot policy input changed during preparation"));
+            }
+            Ok(json!({"fileType":file_type, "content":STANDARD.encode(bytes)}))
         };
+        let cert = |a: &Artifact| secure_boot_file(a, "X509");
         let resources = vec![
             ResourcePlan {
                 kind: ResourceKind::StagingObject,
@@ -260,7 +271,7 @@ impl Package {
             ResourcePlan {
                 kind: ResourceKind::Image,
                 path: image.clone(),
-                create_body: json!({"name":format!("{n}-image"),"description":ownership,"architecture":"X86_64","rawDisk":{"source":format!("https://storage.googleapis.com/{}/{}",spec.staging_bucket,spec.object_name()),"containerType":"TAR"},"guestOsFeatures":[{"type":"UEFI_COMPATIBLE"},{"type":"GVNIC"},{"type":"TDX_CAPABLE"}],"shieldedInstanceInitialState":{"pk":cert(&spec.secure_boot_pk_der)?,"keks":[cert(&spec.secure_boot_kek_der)?],"dbs":[cert(&spec.secure_boot_db_der)?]}}),
+                create_body: json!({"name":format!("{n}-image"),"description":ownership,"architecture":"X86_64","rawDisk":{"source":format!("https://storage.googleapis.com/{}/{}",spec.staging_bucket,spec.object_name()),"containerType":"TAR"},"guestOsFeatures":[{"type":"UEFI_COMPATIBLE"},{"type":"GVNIC"},{"type":"TDX_CAPABLE"}],"shieldedInstanceInitialState":{"pk":cert(&spec.secure_boot_pk_der)?,"keks":[cert(&spec.secure_boot_kek_der)?],"dbs":[cert(&spec.secure_boot_db_der)?],"dbxs":[secure_boot_file(&spec.secure_boot_dbx_bin, "BIN")?]}}),
             },
             ResourcePlan {
                 kind: ResourceKind::BootDisk,
@@ -279,14 +290,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
         let expected = Self::prepare(self.spec.clone(), at)?;
-        if self.schema_version != 1 || self.resources != expected.resources {
+        if self.schema_version != 2 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));

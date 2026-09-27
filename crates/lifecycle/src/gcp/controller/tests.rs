@@ -36,7 +36,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 1,
+            schema_version: 2,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -57,6 +57,7 @@ impl Fixture {
             secure_boot_pk_der: a.clone(),
             secure_boot_kek_der: a.clone(),
             secure_boot_db_der: a.clone(),
+            secure_boot_dbx_bin: a.clone(),
             pricing: Pricing {
                 source: "https://example.invalid/synthetic-quote".into(),
                 quoted_at: 900,
@@ -92,6 +93,49 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
+
+#[test]
+fn image_package_pins_the_complete_secure_boot_policy() {
+    let f = Fixture::new();
+    let image = f
+        .package
+        .resources
+        .iter()
+        .find(|r| r.kind == ResourceKind::Image)
+        .unwrap();
+    let state = &image.create_body["shieldedInstanceInitialState"];
+    assert_eq!(state["pk"]["fileType"], "X509");
+    assert_eq!(state["keks"][0]["fileType"], "X509");
+    assert_eq!(state["dbs"][0]["fileType"], "X509");
+    assert_eq!(state["dbxs"][0]["fileType"], "BIN");
+    assert_eq!(
+        state["dbxs"][0]["content"],
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"SYNTHETIC - NOT A BOOTABLE IMAGE"
+        )
+    );
+
+    let mut missing_dbx = serde_json::to_value(&f.package.spec).unwrap();
+    missing_dbx
+        .as_object_mut()
+        .unwrap()
+        .remove("secure_boot_dbx_bin");
+    assert!(serde_json::from_value::<DeploymentSpec>(missing_dbx).is_err());
+
+    let mut inherited_default = f.package.clone();
+    inherited_default
+        .resources
+        .iter_mut()
+        .find(|r| r.kind == ResourceKind::Image)
+        .unwrap()
+        .create_body["shieldedInstanceInitialState"]
+        .as_object_mut()
+        .unwrap()
+        .remove("dbxs");
+    assert!(inherited_default.validate(1000).is_err());
+}
+
 struct Mock {
     state: PathBuf,
     objects: BTreeMap<String, Value>,
