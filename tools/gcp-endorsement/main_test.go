@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"math/big"
+	"os"
 	"testing"
 	"time"
 
@@ -122,6 +123,114 @@ func TestSyntheticSignedGenericReferenceIsDiagnosticOnly(t *testing.T) {
 	}
 	if result.MRTD != upstreamSyntheticMRTD || result.PrivateModeApproved || result.MeasurementProfile != "google_current_generic" {
 		t.Fatalf("wrong diagnostic result: %+v", result)
+	}
+}
+
+func TestLegacySelectionRequiresExplicitSupportedShapeAndEarlyAccept(t *testing.T) {
+	for _, input := range [][2]string{{"", "true"}, {"c3-standard-22", ""}, {"c3-standard-22", "1"}, {"c3-standard-22-lssd", "true"}, {"c3-standard-6", "false"}} {
+		if _, err := parseLaunchSelection(input[0], input[1]); err == nil {
+			t.Fatalf("accepted incomplete or unsupported legacy selection: %q, %q", input[0], input[1])
+		}
+	}
+	for _, early := range []string{"true", "false"} {
+		selected, err := parseLaunchSelection("c3-standard-22", early)
+		if err != nil || !selected.legacy || selected.earlyAccept != (early == "true") {
+			t.Fatalf("explicit legacy selection failed: %+v, %v", selected, err)
+		}
+	}
+}
+
+func TestSyntheticSignedLegacyC3VariantRejectsAbsentAmbiguousAndWrongMeasurement(t *testing.T) {
+	s := synthetic(t)
+	options := tdx.LaunchOptionsDefaultTDHOBBug("c3-standard-22")
+	options.DisableUnacceptedMemory = true
+	legacyMRTD, err := tdx.MRTD(options, s.firmware)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed := &epb.VMTdx_Measurement{RamGib: 88, EarlyAccept: true, Mrtd: legacyMRTD[:]}
+	s.golden.Tdx.Measurements = append(s.golden.Tdx.Measurements, signed)
+	selected := launchSelection{legacyMachineType: "c3-standard-22", earlyAccept: true, legacy: true}
+	good := s.signed(t)
+	result, err := inspectSelected(good, s.firmware, s.roots, s.now, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MRTD != hex.EncodeToString(legacyMRTD[:]) || result.MeasurementProfile != "google_legacy_c3_tdhob_bug" || result.MachineType != "c3-standard-22" || result.RamGiB != 88 || result.EarlyAccept == nil || !*result.EarlyAccept || result.PrivateModeApproved {
+		t.Fatalf("wrong unapproved legacy diagnostic: %+v", result)
+	}
+	for _, wrong := range []launchSelection{
+		{legacyMachineType: "c3-standard-8", earlyAccept: true, legacy: true},
+		{legacyMachineType: "c3-standard-22", earlyAccept: false, legacy: true},
+	} {
+		if _, err := inspectSelected(good, s.firmware, s.roots, s.now, wrong); err == nil {
+			t.Fatalf("accepted absent selected variant: %+v", wrong)
+		}
+	}
+	signed.Mrtd[0] ^= 1
+	if _, err := inspectSelected(s.signed(t), s.firmware, s.roots, s.now, selected); err == nil {
+		t.Fatal("accepted incorrect signed selected measurement")
+	}
+	signed.Mrtd[0] ^= 1
+	s.golden.Tdx.Measurements = append(s.golden.Tdx.Measurements, &epb.VMTdx_Measurement{
+		RamGib: 88, EarlyAccept: true, Mrtd: append([]byte(nil), signed.Mrtd...),
+	})
+	if _, err := inspectSelected(s.signed(t), s.firmware, s.roots, s.now, selected); err == nil {
+		t.Fatal("accepted ambiguous signed selected measurement")
+	}
+}
+
+// The historical Google files are intentionally kept out of the repository.
+// Supply both exact local paths to exercise this signed, shape-specific vector.
+func TestHistoricalGoogleSignedC3Standard22EarlyAccept(t *testing.T) {
+	endorsementPath := os.Getenv("ZRPC_TEST_GOOGLE_ENDORSEMENT")
+	firmwarePath := os.Getenv("ZRPC_TEST_GOOGLE_FIRMWARE")
+	if endorsementPath == "" && firmwarePath == "" {
+		t.Skip("set ZRPC_TEST_GOOGLE_ENDORSEMENT and ZRPC_TEST_GOOGLE_FIRMWARE to run the historical signed vector")
+	}
+	if endorsementPath == "" || firmwarePath == "" {
+		t.Fatal("historical signed vector requires both local artifact paths")
+	}
+	endorsement, err := os.ReadFile(endorsementPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firmware, err := os.ReadFile(firmwarePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sha256.Sum256(endorsement); hex.EncodeToString(got[:]) != "2e0cf3a75a4316e5879a2da9a9281ae157be0e89122f31c87a6e83e55e9b42eb" {
+		t.Fatal("historical endorsement bytes differ from recorded Google object")
+	}
+	if got := sha256.Sum256(firmware); hex.EncodeToString(got[:]) != "59e277baccd6a037e42454911d68beae8c16f55e8df9189348eea0dfac10e06d" {
+		t.Fatal("historical firmware bytes differ from recorded Google object")
+	}
+	roots, err := trustedRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fix the archived-review date so this remains a reproducible historical
+	// vector. The CLI instead verifies certificate validity at the live clock.
+	reviewedAt := time.Date(2026, time.September, 27, 0, 0, 0, 0, time.UTC)
+	selected := launchSelection{legacyMachineType: "c3-standard-22", earlyAccept: true, legacy: true}
+	result, err := inspectSelected(endorsement, firmware, roots, reviewedAt, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MRTD != "038de02f6584df60c9ad245045aecf6f0b9d90018eeff5736357334c37965b1cd5bf09032a94e6b721f34fa8973a1086" || result.PrivateModeApproved {
+		t.Fatalf("wrong historical 88-GiB unapproved reference: %+v", result)
+	}
+	for _, other := range []launchSelection{
+		{legacyMachineType: "c3-standard-8", earlyAccept: true, legacy: true},
+		{legacyMachineType: "c3-standard-22", earlyAccept: false, legacy: true},
+	} {
+		alternative, err := inspectSelected(endorsement, firmware, roots, reviewedAt, other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if alternative.MRTD == result.MRTD || alternative.PrivateModeApproved {
+			t.Fatalf("wrong shape or acceptance produced selected 88-GiB reference: %+v", alternative)
+		}
 	}
 }
 

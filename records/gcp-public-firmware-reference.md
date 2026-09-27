@@ -25,8 +25,8 @@ The object metadata dates are September–October 2024. They indicate a
 historical pair; they do not prove deployment then or now. The endorsement's
 signed TDX section reports SVN 2 and 13 measurements. The object filename
 matches its `ram_gib=88, early_accept=true` MRTD. That shape-specific value
-was decoded for context, not independently reconstructed by this tool. The
-tool separately reconstructed and compared the signed **generic**
+was decoded for context. The first checkpoint reconstructed and compared only
+the signed **generic**
 `ram_gib=0, early_accept=false` MRTD:
 
 ```text
@@ -64,3 +64,42 @@ prepackage only independently reviewed references and must reject an actual
 boot outside them; the public listing cannot fill that selection gap by itself.
 RTMR0–3, Secure Boot state, signed UKI, rootfs, guest administration, and
 hardware acceptance remain separate unresolved gates.
+
+## Explicit historical C3 launch variant
+
+The offline tool also reconstructs an explicitly selected legacy C3 variant
+using the pinned Google library's `LaunchOptionsDefaultTDHOBBug` and the
+selected `DisableUnacceptedMemory` setting. Both
+`--legacy-machine-type` and `--legacy-early-accept=true|false` are required;
+an absent, duplicate, or mismatching signed entry fails. These compatibility
+measurements describe Google's older TDHOB behavior, not a prediction of the
+current launch configuration. The generic output above remains unchanged.
+
+With the same generation-pinned, hash-checked files in local scratch, the
+following command reconstructed the signed 88 GiB, early-accept entry:
+
+```sh
+cd /workspace/tools/gcp-endorsement
+go run -mod=readonly . \
+  --endorsement /workspace/.codex-tmp/gcp-public-firmware/endorsement.binarypb \
+  --firmware /workspace/.codex-tmp/gcp-public-firmware/firmware.fd \
+  --legacy-machine-type=c3-standard-22 --legacy-early-accept=true
+```
+
+Its selected output fields were
+`"measurement_profile":"google_legacy_c3_tdhob_bug"`,
+`"machine_type":"c3-standard-22"`, `"ram_gib":88`,
+`"early_accept":true`, and MRTD
+`038de02f6584df60c9ad245045aecf6f0b9d90018eeff5736357334c37965b1cd5bf09032a94e6b721f34fa8973a1086`.
+The status remained `signed_firmware_reference_reconstructed_unapproved` and
+`private_mode_approved` remained `false`. Container Go tests exercised that
+exact Google-signed pair and synthetic absent, ambiguous, changed, wrong-shape,
+and wrong-early-accept cases. The test uses the recorded review date for
+repeatability; the CLI checks certificate validity against the current clock.
+
+This establishes only a diagnostic reference for a historical Google-signed
+firmware variant. Selecting a different machine type or early-accept setting
+produces a different signed reference when that entry exists. Neither the
+object name nor any unexamined quote chooses the approved launch configuration.
+The native verifier still reports firmware endorsement and artifact provenance
+as `not_checked`, and the approved-release catalog remains empty.
