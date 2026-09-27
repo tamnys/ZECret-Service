@@ -1,0 +1,117 @@
+name: GCP pinned builder payload staging probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  stage:
+    name: Diagnostic signed-snapshot lock payload staging
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact source commit and locked Debian payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/builder-closure"
+          mkdir "$source" "$scratch" "$scratch/archives"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          cd "$source"
+
+          ZRPC_BUILDER_ARCHIVES="$scratch/archives" python3 -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          root = Path.cwd()
+          sys.path.insert(0, str(root / "tools/gcp-guest"))
+          import debian_snapshot
+          import fetch_builder_closure
+          import verify_builder_closure
+          import verify_builder_packages
+
+          lock_path = verify_builder_closure.LOCK
+          lock_bytes = debian_snapshot.bounded_regular_bytes(
+              lock_path, verify_builder_closure.LOCK_BYTES, "builder closure lock"
+          )
+          if (len(lock_bytes) != verify_builder_closure.LOCK_BYTES or
+                  hashlib.sha256(lock_bytes).hexdigest() != verify_builder_closure.LOCK_SHA256):
+              raise ValueError("builder closure differs from source-reviewed candidate")
+          lock = json.loads(lock_bytes, object_pairs_hook=verify_builder_packages.unique_object)
+          if (lock.get("schema_version") != 1 or
+                  lock.get("status") != "apt-resolved-candidate-unbuilt-unapproved" or
+                  lock.get("snapshot") !=
+                  "https://snapshot.debian.org/archive/debian/20260918T000000Z/" or
+                  not isinstance(lock.get("packages"), list) or not lock["packages"]):
+              raise ValueError("unsupported builder closure")
+          names = [entry.get("name") for entry in lock["packages"]]
+          if names != sorted(set(names)):
+              raise ValueError("builder closure package order differs from review")
+
+          archives = Path(os.environ["ZRPC_BUILDER_ARCHIVES"])
+          directory = os.open(
+              archives, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          )
+          try:
+              for entry in lock["packages"]:
+                  fetch_builder_closure.download_one(
+                      directory, entry, lock["snapshot"]
+                  )
+                  if not fetch_builder_closure.verify_cached(directory, entry):
+                      raise ValueError("locked builder archive missing after download")
+          finally:
+              os.close(directory)
+          print(json.dumps({
+              "status": "diagnostic-locked-builder-archives-fetched-unbuilt",
+              "closure_lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+              "package_count": len(lock["packages"]),
+              "signed_snapshot_rechecked": False,
+              "package_scripts_executed": False,
+              "runtime_execution_verified": False,
+              "complete_builder_toolchain": False,
+              "image_built": False,
+              "private_mode_approved": False,
+          }, sort_keys=True))
+          PY
+
+          CODEX_WORKSPACE_DIR="$GITHUB_WORKSPACE" \
+            python3 tools/gcp-guest/stage_builder_toolchain.py \
+              --archives "$scratch/archives" --output "$scratch/staged"
+          python3 - "$scratch/staged/.zrpc-builder-toolchain.json" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          data = path.read_bytes()
+          report = json.loads(data)
+          if (report["status"] != "diagnostic-builder-payloads-staged-unbuilt" or
+                  report["package_count"] != 194 or
+                  report["signed_snapshot_rechecked"] is not False or
+                  report["package_scripts_executed"] is not False or
+                  report["runtime_execution_verified"] is not False or
+                  report["complete_builder_toolchain"] is not False or
+                  report["image_built"] is not False or
+                  report["private_mode_approved"] is not False):
+              raise ValueError("staging diagnostic changed acceptance status")
+          print(json.dumps({
+              "status": report["status"],
+              "manifest_sha256": hashlib.sha256(data).hexdigest(),
+              "package_count": report["package_count"],
+              "entry_count": len(report["entries"]),
+              "runtime_execution_verified": False,
+              "image_built": False,
+              "private_mode_approved": False,
+          }, sort_keys=True))
+          PY
