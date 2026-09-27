@@ -6,7 +6,41 @@ use crate::gcp::{
     store::Journal,
 };
 use serde_json::json;
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, sync::OnceLock};
+
+fn synthetic_import_archive() -> &'static (Vec<u8>, String) {
+    static IMAGE: OnceLock<(Vec<u8>, String)> = OnceLock::new();
+    IMAGE.get_or_init(|| {
+        let base = PathBuf::from(
+            std::env::var_os("CODEX_TMP_DIR").expect("managed workspace scratch required"),
+        );
+        let root = base.join(format!("gcp-import-fixture-{}", uuid().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let raw = root.join("disk.raw");
+        fs::File::create(&raw)
+            .unwrap()
+            .set_len(1024 * 1024 * 1024)
+            .unwrap();
+        let archive = root.join("synthetic.tar.gz");
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/gcp-guest/gcp_import_archive.py");
+        let output = Command::new("/usr/bin/python3")
+            .arg("-I")
+            .arg(script)
+            .arg("pack")
+            .arg(&raw)
+            .arg(&archive)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "synthetic archive creation failed");
+        let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(receipt["private_mode_approved"], false);
+        let bytes = fs::read(archive).unwrap();
+        let raw_sha256 = receipt["raw_disk_sha256"].as_str().unwrap().to_owned();
+        fs::remove_dir_all(root).unwrap();
+        (bytes, raw_sha256)
+    })
+}
 
 #[test]
 fn older_journal_without_upload_proof_defaults_to_unverified() {
@@ -33,6 +67,13 @@ impl Fixture {
             path: artifact_path,
             sha256: digest(b"SYNTHETIC - NOT A BOOTABLE IMAGE"),
         };
+        let (image_bytes, raw_disk_sha256) = synthetic_import_archive();
+        let archive_path = root.join("synthetic.tar.gz");
+        fs::write(&archive_path, image_bytes).unwrap();
+        let raw_image_tar_gz = Artifact {
+            path: archive_path,
+            sha256: digest(image_bytes),
+        };
         let components = [
             "compute",
             "boot_disk",
@@ -46,7 +87,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 2,
+            schema_version: 3,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -59,7 +100,9 @@ impl Fixture {
             staging_bucket: "synthetic-staging-bucket".into(),
             start_unix_seconds: 1000,
             deadline_unix_seconds: 1000 + crate::MAX_LIFETIME_SECONDS,
-            raw_image_tar_gz: a.clone(),
+            raw_image_tar_gz,
+            raw_disk_sha256: raw_disk_sha256.clone(),
+            raw_disk_bytes: 1024 * 1024 * 1024,
             release_manifest: a.clone(),
             boot_policy: a.clone(),
             memory_measurement: a.clone(),
@@ -147,6 +190,30 @@ fn image_package_pins_the_complete_secure_boot_policy() {
         .unwrap()
         .remove("dbxs");
     assert!(inherited_default.validate(1000).is_err());
+}
+
+#[test]
+fn image_package_requires_the_reviewed_raw_disk_inside_the_import_archive() {
+    let f = Fixture::new();
+    let mut wrong_raw = f.package.spec.clone();
+    wrong_raw.raw_disk_sha256 = "0".repeat(64);
+    assert!(Package::prepare(wrong_raw, 1000).is_err());
+
+    let mut undersized_boot = f.package.spec.clone();
+    undersized_boot.raw_disk_bytes = 11 * 1024 * 1024 * 1024;
+    assert!(Package::prepare(undersized_boot, 1000).is_err());
+
+    let mut oversized_boot = f.package.spec.clone();
+    oversized_boot.boot_disk_gib = 2049;
+    assert!(Package::prepare(oversized_boot, 1000).is_err());
+
+    let mut wrong_archive = f.package.spec.clone();
+    wrong_archive.raw_image_tar_gz = wrong_archive.release_manifest.clone();
+    assert!(Package::prepare(wrong_archive, 1000).is_err());
+
+    let mut old_schema = f.package.spec.clone();
+    old_schema.schema_version = 2;
+    assert!(Package::prepare(old_schema, 1000).is_err());
 }
 
 struct Mock {

@@ -10,7 +10,53 @@ use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{Mutex, OnceLock},
 };
+
+const IMPORT_GIB: u64 = 1024 * 1024 * 1024;
+// Google manual boot-disk import caps this raw-disk workflow at 2048 GB (2 TB).
+// https://docs.cloud.google.com/compute/docs/import/import-existing-image
+const MAX_IMPORT_GIB: u64 = 2048;
+// Embed the checked source so a path next to the operator binary cannot
+// replace the import validator. Python's maintained gzip/tarfile decoders are
+// required on the operator's reviewed Linux host; absence fails closed.
+const IMPORT_CHECKER: &str = include_str!("../../../../tools/gcp-guest/gcp_import_archive.py");
+
+fn verify_import_archive(archive: &Artifact, raw_sha256: &str, raw_bytes: u64) -> Result<()> {
+    static CHECKED: OnceLock<Mutex<BTreeMap<String, (String, u64)>>> = OnceLock::new();
+    let checked = CHECKED.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut cache = checked
+        .lock()
+        .map_err(|_| Error("import archive cache poisoned"))?;
+    if cache.get(&archive.sha256) == Some(&(raw_sha256.to_owned(), raw_bytes)) {
+        return Ok(());
+    }
+    let status = Command::new("/usr/bin/python3")
+        .arg("-I")
+        .arg("-c")
+        .arg(IMPORT_CHECKER)
+        .arg("verify")
+        .arg(&archive.path)
+        .arg(&archive.sha256)
+        .arg(raw_sha256)
+        .arg(raw_bytes.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| Error("offline import archive validator unavailable"))?;
+    if !status.success() {
+        return Err(Error(
+            "raw image archive is not the reviewed oldgnu disk.raw",
+        ));
+    }
+    // The artifact hash is checked before and after the decoder. A changed
+    // upload is also rejected by the provider's streaming media hash check.
+    archive.verify()?;
+    cache.insert(archive.sha256.clone(), (raw_sha256.to_owned(), raw_bytes));
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +107,9 @@ pub struct DeploymentSpec {
     pub start_unix_seconds: u64,
     pub deadline_unix_seconds: u64,
     pub raw_image_tar_gz: Artifact,
+    /// SHA-256 of logical disk.raw bytes after GNU sparse expansion.
+    pub raw_disk_sha256: String,
+    pub raw_disk_bytes: u64,
     pub release_manifest: Artifact,
     pub boot_policy: Artifact,
     pub memory_measurement: Artifact,
@@ -118,7 +167,7 @@ pub(crate) fn name(value: &str) -> bool {
 }
 impl DeploymentSpec {
     pub fn validate(&self, at: u64) -> Result<()> {
-        if self.schema_version != 2
+        if self.schema_version != 3
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -128,10 +177,21 @@ impl DeploymentSpec {
             || !name(&self.machine_type)
             || !self.machine_type.starts_with("c3-")
             || self.boot_disk_gib == 0
+            || self.boot_disk_gib > MAX_IMPORT_GIB
             || self.public_data_disk_gib == 0
             || self.wrapper_port == 0
         {
             return Err(Error("invalid GCP C3 TDX resource configuration"));
+        }
+        if !valid_digest(&self.raw_disk_sha256)
+            || self.raw_disk_bytes == 0
+            || self.raw_disk_bytes % IMPORT_GIB != 0
+            || self.raw_disk_bytes / IMPORT_GIB > self.boot_disk_gib
+            || self.raw_disk_bytes / IMPORT_GIB > MAX_IMPORT_GIB
+        {
+            return Err(Error(
+                "reviewed disk.raw identity or boot disk size invalid",
+            ));
         }
         // Strict subset avoids object/glob syntax and path/query injection.
         if !name(&self.staging_bucket) {
@@ -196,6 +256,11 @@ impl DeploymentSpec {
         for artifact in self.artifacts() {
             artifact.verify()?;
         }
+        verify_import_archive(
+            &self.raw_image_tar_gz,
+            &self.raw_disk_sha256,
+            self.raw_disk_bytes,
+        )?;
         Ok(())
     }
     pub fn artifacts(&self) -> [&Artifact; 10] {
@@ -290,14 +355,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 2,
+            schema_version: 3,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
         let expected = Self::prepare(self.spec.clone(), at)?;
-        if self.schema_version != 2 || self.resources != expected.resources {
+        if self.schema_version != 3 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));
