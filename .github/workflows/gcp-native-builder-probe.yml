@@ -44,21 +44,30 @@ jobs:
             fi
           done
 
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          parent_pid_ns="$(readlink /proc/self/ns/pid)"
           mkdir "$scratch/mount"
-          if sudo -n unshare --mount --propagation private bash -c '
+          if sudo -n unshare --mount --net --pid --fork --mount-proc --propagation private bash -c '
             set -euo pipefail
+            test "$(readlink /proc/self/ns/mnt)" != "$2"
+            test "$(readlink /proc/self/ns/net)" != "$3"
+            test "$(readlink /proc/self/ns/pid)" != "$4"
+            test "$(ip -o link show | wc -l)" -eq 1
+            ip link show lo > /dev/null
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
             mount -t tmpfs tmpfs "$1"
             test "$(stat -f -c %T "$1")" = tmpfs
             umount "$1"
-          ' _ "$scratch/mount"; then
-            echo 'Rootful isolated tmpfs mount: passed'
+          ' _ "$scratch/mount" "$parent_mount_ns" "$parent_net_ns" "$parent_pid_ns"; then
+            echo 'Rootful mount/network/PID namespace smoke check: passed'
           else
-            echo 'Rootful isolated tmpfs mount: unavailable'
-            failed=1
+            echo 'Rootful mount/network/PID namespace smoke check: unavailable'
           fi
 
           if [ "$failed" -ne 0 ]; then
-            echo 'This runner has not passed the guest-builder capability probe.'
+            echo 'The current rootless guest-builder path is blocked on this runner.'
             exit 1
           fi
-          echo 'Host capability probe passed; no guest image was built or approved.'
+          echo 'Rootless host capability probe passed; no guest image was built or approved.'
