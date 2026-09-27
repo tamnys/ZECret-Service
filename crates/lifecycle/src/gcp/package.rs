@@ -18,6 +18,20 @@ const IMPORT_GIB: u64 = 1024 * 1024 * 1024;
 // Google manual boot-disk import caps this raw-disk workflow at 2048 GB (2 TB).
 // https://docs.cloud.google.com/compute/docs/import/import-existing-image
 const MAX_IMPORT_GIB: u64 = 2048;
+// The custom Debian image package uses only Google's listed non-Local-SSD C3
+// standard VM types for TDX. TDX on c3-standard-*-lssd has a separate image
+// support list containing only COS families, so it cannot admit this image.
+// Re-review both lists before adding a type:
+// https://docs.cloud.google.com/confidential-computing/confidential-vm/docs/supported-configurations
+// https://docs.cloud.google.com/compute/docs/general-purpose-machines#c3_machine_types
+const CUSTOM_IMAGE_C3_TDX_MACHINE_TYPES: [&str; 6] = [
+    "c3-standard-4",
+    "c3-standard-8",
+    "c3-standard-22",
+    "c3-standard-44",
+    "c3-standard-88",
+    "c3-standard-176",
+];
 // Embed the checked source so a path next to the operator binary cannot
 // replace the import validator. Python's maintained gzip/tarfile decoders are
 // required on the operator's reviewed Linux host; absence fails closed.
@@ -247,7 +261,7 @@ impl DeploymentSpec {
             || !name(&self.zone)
             || !self.zone.starts_with(&format!("{}-", self.region))
             || !name(&self.machine_type)
-            || !self.machine_type.starts_with("c3-")
+            || !CUSTOM_IMAGE_C3_TDX_MACHINE_TYPES.contains(&self.machine_type.as_str())
             || self.boot_disk_gib == 0
             || self.boot_disk_gib > MAX_IMPORT_GIB
             || self.public_data_disk_gib == 0
