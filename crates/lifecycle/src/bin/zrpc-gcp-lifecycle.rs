@@ -10,7 +10,7 @@ use zrpc_lifecycle::gcp::{
     package::{Artifact, DeploymentSpec, Package},
     provider::{GoogleClient, Runtime},
     store::Store,
-    watchdog::{self, Controls},
+    watchdog::{self, Controls, WatchdogBinding},
 };
 
 fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
@@ -96,9 +96,20 @@ async fn run() -> Result<()> {
     }
     if command == "export-watchdog" {
         let controls_path = path(&options, "--controls")?;
-        let controls: Controls = read(&controls_path)?;
+        let controls_bytes = gcp::read_regular(&controls_path)?;
+        let controls: Controls = serde_json::from_slice(&controls_bytes)
+            .map_err(|_| Error("invalid typed operator input"))?;
         if controls.package_sha256 != package.sha256()? {
             return Err(Error("controls bind another package"));
+        }
+        if let Some(original) = &store.journal().watchdog {
+            if original.controls_path != controls_path
+                || original.controls_sha256 != gcp::digest(&controls_bytes)
+            {
+                return Err(Error(
+                    "admitted watchdog controls cannot be re-exported differently",
+                ));
+            }
         }
         watchdog::export(
             &controls,
@@ -108,31 +119,64 @@ async fn run() -> Result<()> {
         )?;
         return print(&json!({"units_exported":true,"units_installed":false,"network_used":false}));
     }
+    if command == "watchdog-once" && store.journal().watchdog.is_none() {
+        if store.journal().resources.iter().any(|r| r.create.is_some()) {
+            return Err(Error("created resources lack original watchdog admission"));
+        }
+        // Enabled startup reconciliation can run before the separately
+        // approved deploy command. There is nothing to clean up yet.
+        return print(&json!({"cleanup":"not_admitted","network_used":false}));
+    }
     let runtime_path = path(&options, "--runtime")?;
-    let runtime: Runtime = read(&runtime_path)?;
+    let runtime_bytes = gcp::read_regular(&runtime_path)?;
+    let runtime: Runtime = serde_json::from_slice(&runtime_bytes)
+        .map_err(|_| Error("invalid typed operator input"))?;
     let mut due = false;
-    if command == "deploy" || command == "watchdog-once" {
+    if command == "deploy" {
         let controls_path = path(&options, "--controls")?;
-        let controls: Controls = read(&controls_path)?;
+        let controls_bytes = gcp::read_regular(&controls_path)?;
+        let controls: Controls = serde_json::from_slice(&controls_bytes)
+            .map_err(|_| Error("invalid typed operator input"))?;
         if controls.package_sha256 != package.sha256()?
             || controls.state_directory != state_path
             || controls.runtime_file.path != runtime_path
-            || gcp::digest(&gcp::read_regular(&runtime_path)?) != controls.runtime_file.sha256
+            || gcp::digest(&runtime_bytes) != controls.runtime_file.sha256
         {
             return Err(Error(
                 "external controls do not bind this journal and runtime",
             ));
         }
-        watchdog::verify_controls_path(&controls_path, controls.controller_uid)?;
-        if command == "deploy" {
-            if value(&options, "--approve-package")? != package.sha256()? {
-                return Err(Error("explicit approval must match frozen package SHA-256"));
-            }
-            gcp::ensure_live_creation_ready()?;
-            package.validate(at)?;
-            controls.verify_live(&package, &controls_path, at)?;
-        } else {
-            due = at >= controls.deletion_start(&package)? || store.journal().teardown_started;
+        if value(&options, "--approve-package")? != package.sha256()? {
+            return Err(Error("explicit approval must match frozen package SHA-256"));
+        }
+        gcp::ensure_live_creation_ready()?;
+        package.validate(at)?;
+        controls.verify_live(&package, &controls_path, at)?;
+        store.admit_watchdog(WatchdogBinding::from_admitted(
+            &controls,
+            &controls_path,
+            &controls_bytes,
+            &package,
+        )?)?;
+    } else {
+        // Every cloud command uses the original fsynced admission. Controls
+        // changes never supply a later cleanup trigger after a restart.
+        let original = store
+            .journal()
+            .watchdog
+            .as_ref()
+            .ok_or(Error("cloud command requires admitted watchdog controls"))?;
+        if runtime_path != original.runtime_file.path
+            || gcp::digest(&runtime_bytes) != original.runtime_file.sha256
+        {
+            return Err(Error("runtime differs from admitted watchdog binding"));
+        }
+        if command == "watchdog-once" {
+            due = original.due(
+                &path(&options, "--controls")?,
+                at,
+                store.journal().teardown_started,
+            )?;
         }
     }
     // No OAuth/network operation occurs before all applicable admission above.

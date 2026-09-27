@@ -197,6 +197,11 @@ pub async fn deploy_once<P: Provider>(
 ) -> Result<Progress> {
     let package = store.package()?;
     package.validate(at)?;
+    if store.journal().watchdog.is_none() {
+        return Err(Error(
+            "deployment requires durably admitted watchdog controls",
+        ));
+    }
     if at < store.journal().original_start || store.journal().teardown_started {
         return Err(Error(
             "deployment outside original window or teardown already started",

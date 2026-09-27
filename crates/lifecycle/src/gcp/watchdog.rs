@@ -1,10 +1,10 @@
 //! External Linux/systemd controls. Export never installs or enables units.
 //! Live admission reads effective units and current clock state locally.
 use super::{
-    Error, Result,
+    Error, Result, digest,
     package::{Artifact, Package},
     provider::Runtime,
-    read_regular,
+    read_regular, valid_digest,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,7 +16,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Controls {
     pub package_sha256: String,
@@ -31,6 +31,71 @@ pub struct Controls {
     pub systemd_delay_seconds: u64,
     pub deletion_rehearsal: Artifact,
     pub independent_backstop: Artifact,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WatchdogBinding {
+    pub controls_path: PathBuf,
+    pub controls_sha256: String,
+    pub runtime_file: Artifact,
+    pub controller_uid: u32,
+    pub deletion_start_unix_seconds: u64,
+}
+impl WatchdogBinding {
+    /// The exact Controls bytes and cleanup trigger admitted with the
+    /// installed units are journaled before authentication or provider calls.
+    pub fn from_admitted(
+        controls: &Controls,
+        controls_path: &Path,
+        controls_bytes: &[u8],
+        package: &Package,
+    ) -> Result<Self> {
+        let parsed: Controls = serde_json::from_slice(controls_bytes)
+            .map_err(|_| Error("invalid admitted controls bytes"))?;
+        if parsed != *controls || controls.package_sha256 != package.sha256()? {
+            return Err(Error("admitted controls differ from reviewed package"));
+        }
+        let binding = Self {
+            controls_path: controls_path.to_owned(),
+            controls_sha256: digest(controls_bytes),
+            runtime_file: controls.runtime_file.clone(),
+            controller_uid: controls.controller_uid,
+            deletion_start_unix_seconds: controls.deletion_start(package)?,
+        };
+        binding.validate(
+            package.spec.start_unix_seconds,
+            package.spec.deadline_unix_seconds,
+        )?;
+        Ok(binding)
+    }
+
+    pub fn validate(&self, original_start: u64, original_deadline: u64) -> Result<()> {
+        safe_path(&self.controls_path)?;
+        safe_path(&self.runtime_file.path)?;
+        if !valid_digest(&self.controls_sha256)
+            || !valid_digest(&self.runtime_file.sha256)
+            || self.controller_uid == 0
+            || self.controller_uid == u32::MAX
+            || self.deletion_start_unix_seconds <= original_start
+            || self.deletion_start_unix_seconds >= original_deadline
+        {
+            return Err(Error("invalid admitted watchdog binding"));
+        }
+        Ok(())
+    }
+
+    /// A changed, missing or replaceable Controls file makes cleanup due
+    /// immediately. The current file never supplies a later deletion time.
+    pub fn due(&self, controls_path: &Path, at: u64, teardown_started: bool) -> Result<bool> {
+        if controls_path != self.controls_path {
+            return Err(Error("watchdog controls path differs from admitted path"));
+        }
+        let unchanged = read_regular(controls_path)
+            .map(|bytes| digest(&bytes) == self.controls_sha256)
+            .unwrap_or(false)
+            && verify_controls_path(controls_path, self.controller_uid).is_ok();
+        Ok(teardown_started || !unchanged || at >= self.deletion_start_unix_seconds)
+    }
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,8 +160,12 @@ pub fn verify_controls_path(path: &Path, controller_uid: u32) -> Result<()> {
 }
 impl Controls {
     pub fn deletion_start(&self, package: &Package) -> Result<u64> {
-        let runtime: Runtime = serde_json::from_slice(&read_regular(&self.runtime_file.path)?)
-            .map_err(|_| Error("invalid runtime file"))?;
+        let runtime_bytes = read_regular(&self.runtime_file.path)?;
+        if digest(&runtime_bytes) != self.runtime_file.sha256 {
+            return Err(Error("runtime differs from controls identity"));
+        }
+        let runtime: Runtime =
+            serde_json::from_slice(&runtime_bytes).map_err(|_| Error("invalid runtime file"))?;
         // A timer cannot interrupt a running oneshot. Include its entire
         // admitted budget in the original deadline reserve.
         let lead = self
