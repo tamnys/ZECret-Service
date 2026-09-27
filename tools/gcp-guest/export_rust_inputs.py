@@ -69,14 +69,28 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def git_bytes(revision, path):
+def git_output(arguments):
+    # A caller's Git state must not substitute another tree for the selected
+    # commit. Match the reproduction command's no-replacement rule for every
+    # source read, including the tree identity check.
+    environment = {name: value for name, value in os.environ.items()
+                   if not name.startswith("GIT_")}
+    environment.update({"GIT_NO_REPLACE_OBJECTS": "1",
+                        "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_CONFIG_GLOBAL": "/dev/null",
+                        "GIT_OPTIONAL_LOCKS": "0",
+                        "GIT_TERMINAL_PROMPT": "0"})
     result = subprocess.run(
-        ["git", "show", f"{revision}:{path}"], cwd=ROOT,
+        ["git", *arguments], cwd=ROOT, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
     )
     if result.returncode:
         raise ValueError("selected commit lacks a required source input")
     return result.stdout
+
+
+def git_bytes(revision, path):
+    return git_output(["show", f"{revision}:{path}"])
 
 
 def selected_guest_roles(revision):
@@ -126,11 +140,8 @@ def inspect(bundle, revision):
     if (not isinstance(version, str)
             or re.search(r"^host: x86_64-unknown-linux-gnu$", version, re.MULTILINE) is None):
         raise ValueError("reproduction did not use the x86_64 Rust host")
-    source_tree = subprocess.run(
-        ["git", "show", "-s", "--format=%T", revision], cwd=ROOT,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-    )
-    if source_tree.returncode or manifest.get("source_tree") != source_tree.stdout.decode().strip():
+    if manifest.get("source_tree") != git_output(
+            ["show", "-s", "--format=%T", revision]).decode().strip():
         raise ValueError("reproduction source tree differs from selected commit")
     input_hashes = manifest.get("input_sha256")
     if not isinstance(input_hashes, dict):

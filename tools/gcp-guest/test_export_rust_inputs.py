@@ -3,10 +3,12 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -111,6 +113,38 @@ class GuestRustInputTests(unittest.TestCase):
         (self.bundle / "manifest.json").write_text(json.dumps(self.manifest))
         with self.assertRaisesRegex(ValueError, "did not use the x86_64 Rust host"):
             exporter.inspect(self.bundle, self.revision)
+
+    def test_replace_ref_cannot_substitute_selected_source_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            environment = {name: value for name, value in os.environ.items()
+                           if not name.startswith("GIT_")}
+            environment.update({"GIT_CONFIG_NOSYSTEM": "1",
+                                "GIT_CONFIG_GLOBAL": "/dev/null"})
+
+            def local_git(*arguments):
+                return subprocess.check_output(
+                    ["git", "-C", str(repository), *arguments],
+                    env=environment, stderr=subprocess.DEVNULL,
+                ).strip()
+
+            local_git("init", "-q")
+            (repository / "marker").write_text("original")
+            local_git("add", "marker")
+            local_git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                      "commit", "-qm", "original")
+            original = local_git("rev-parse", "HEAD").decode()
+            original_tree = local_git("show", "-s", "--format=%T", original)
+            (repository / "marker").write_text("substituted")
+            local_git("add", "marker")
+            local_git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                      "commit", "-qm", "substituted")
+            local_git("replace", original, local_git("rev-parse", "HEAD").decode())
+            self.assertEqual(local_git("show", f"{original}:marker"), b"substituted")
+            with mock.patch.object(exporter, "ROOT", repository):
+                self.assertEqual(exporter.git_bytes(original, "marker"), b"original")
+                self.assertEqual(exporter.git_output(
+                    ["show", "-s", "--format=%T", original]).strip(), original_tree)
 
 
 if __name__ == "__main__":
