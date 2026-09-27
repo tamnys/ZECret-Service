@@ -30,7 +30,7 @@ def locked_packages(lock, manifest_bytes):
     if (
         not isinstance(lock, dict)
         or set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"}
-        or lock["schema_version"] != 5
+        or lock["schema_version"] != 6
         or lock["mkosi_source_commit"] != prepare.SOURCE_COMMIT
         or lock["kernel_version"] != prepare.KERNEL_VERSION
         or not isinstance(lock["artifacts"], dict)
