@@ -262,6 +262,37 @@ jobs:
               raise ValueError("signed snapshot check changed diagnostic acceptance status")
           print(json.dumps(report, sort_keys=True))
           PY
+            # The builder closure above is extracted as inert payloads, not
+            # installed by dpkg. This inventories the guest packages that a
+            # later mkosi build would install, without executing any control
+            # archive member or accepting a private-mode release.
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import inventory_guest_scripts
+
+          report = inventory_guest_scripts.inventory(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+          )
+          if (report["status"] != inventory_guest_scripts.STATUS
+                  or report["package_count"] != 104
+                  or report["control_file_count"] != 477
+                  or report["maintainer_script_count"] != 95
+                  or report["trigger_file_count"] != 57
+                  or report["signed_snapshot_rechecked"] is not True
+                  or report["archive_bytes_checked"] is not True
+                  or report["package_scripts_executed"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("guest control inventory changed diagnostic acceptance status")
+          print(json.dumps({key: value for key, value in report.items()
+                            if key != "packages"}, sort_keys=True))
+          for package in report["packages"]:
+              print(json.dumps({"guest_control_package": package}, sort_keys=True))
+          PY
             run_staged /usr/bin/python3 -I - <<"PY"
           import json
           from pathlib import Path
