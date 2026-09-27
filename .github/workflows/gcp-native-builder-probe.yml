@@ -95,12 +95,13 @@ jobs:
               test "$(ip -o link show | wc -l)" -eq 1
               test -z "$(ip -4 route show)"
               test -z "$(ip -6 route show)"
+              echo "Nested mount/network namespaces: created"
               mount -t tmpfs tmpfs "$1"
               test "$(stat -f -c %T "$1")" = tmpfs
               umount "$1"
             '\'' _ "$1" "$outer_mount_ns" "$outer_net_ns"
             echo "Nested mount/network namespace smoke check: passed"
-          ' _ "$scratch/mount" "$parent_user_ns" "$parent_mount_ns" \
+          ' _ /tmp "$parent_user_ns" "$parent_mount_ns" \
             "$parent_net_ns" "$parent_pid_ns"; then
             echo 'Root-owned user namespace and nested sandbox capabilities: available'
           else
