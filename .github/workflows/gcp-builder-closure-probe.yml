@@ -97,7 +97,7 @@ jobs:
           data = path.read_bytes()
           report = json.loads(data)
           if (report["status"] != "diagnostic-builder-payloads-staged-unbuilt" or
-                  report["package_count"] != 194 or
+                  report["package_count"] != 195 or
                   report["signed_snapshot_rechecked"] is not False or
                   report["package_scripts_executed"] is not False or
                   report["runtime_execution_verified"] is not False or

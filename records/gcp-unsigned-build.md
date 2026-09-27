@@ -160,3 +160,40 @@ No package maintainer script, staged executable, mkosi image build, signing
 operation, or cloud API ran. This resolves the case-sensitive payload-staging
 feasibility question on the free runner; it does not authenticate a runnable
 builder closure or a production build environment.
+
+## 2026-09-27 isolated staged-tool diagnostic and coreutils correction
+
+The manually dispatched [chroot startup probe](https://github.com/tamnys/ZECret-service/actions/runs/36335785016)
+ran on merged commit `d012a8965aa34b811c12f77fa35ee3c821905cfe` and exited 127.
+It fetched and hash-checked the same 194 archives and reproduced the 8,240-entry
+staging manifest above. In a distinct mount and network namespace with no IP
+routes, the root-owned `chroot` dropped to the runner UID. The staged Python
+UID check passed, the ELF loader listed staged systemd-repart dependencies, and
+`mkosi --version` and `systemd-repart --version` printed 25.3 and 257.
+`/usr/bin/ukify --version` then failed with `No such file or directory`. The
+hash-checked `systemd-ukify` archive contains a regular executable at that
+path, but its `#!/usr/bin/env python3` shebang needs `/usr/bin/env`; the original
+194-package lock omitted `coreutils`, which supplies it. The run lists zero
+uploaded artifacts and did not build or sign an image.
+
+In the emulated AMD64 managed container, the pinned `gpgv` accepted the
+September 18 Debian InRelease with the reviewed archive signer; its signed
+`Packages.xz` lists `coreutils 9.7-3` with archive SHA-256
+`1299ab6f9389a288eb2f5f3dd222c26cc777b9a2d5ecb6ee4cbd340cebcdada2`.
+The hash-matched archive contains a regular executable `/usr/bin/env`.
+Selecting `coreutils` as a direct tool-runtime seed in the pinned offline APT
+simulation adds exactly that package: 195 selected, none removed or changed.
+The updated direct-lock SHA-256 is
+`26e36ea4af71b701e472e514e207392232bd0b8868c0ab141fc87ade89d59039`;
+the updated closure-lock SHA-256 is
+`d663fd006afa141c8e7686bd13a94dafe33cd055ee4e09ad1409ed311e1f6714`.
+Both signed-index/direct-archive and offline APT-closure verifiers passed over
+the 195 local hash-matched archives. Individual managed-container test suites
+passed for direct packages (9), closure (7), fetch (7), and staging (5). A
+combined wildcard test invocation instead segfaulted; its cause is unproven,
+and no combined passing result is claimed.
+
+This local correction has not yet been rerun on the public runner. Even a
+passing version probe would establish only those staged startup paths within
+the tested isolation, not the complete builder runtime closure, a signed
+image, or private-mode acceptance. The release catalog remains empty.

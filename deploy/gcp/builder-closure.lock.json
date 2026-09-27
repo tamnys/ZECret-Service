@@ -5,7 +5,7 @@
   "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
   "packages_index_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
   "signed_release_date_epoch": 1789199741,
-  "direct_lock_sha256": "9e6d797bc4ae9ca3e1431105ffc55da137c8e3ccf9b922201d72958db657a023",
+  "direct_lock_sha256": "26e36ea4af71b701e472e514e207392232bd0b8868c0ab141fc87ade89d59039",
   "resolver": {
     "package": "apt",
     "version": "3.0.3",
@@ -63,6 +63,14 @@
       "filename": "pool/main/c/coolkey/coolkey_1.1.0-16.1_amd64.deb",
       "size": 90776,
       "sha256": "810651211a549aee137eab506123462dcd42a33d4da620b8b4cac280fa88df96"
+    },
+    {
+      "name": "coreutils",
+      "version": "9.7-3",
+      "architecture": "amd64",
+      "filename": "pool/main/c/coreutils/coreutils_9.7-3_amd64.deb",
+      "size": 3023556,
+      "sha256": "1299ab6f9389a288eb2f5f3dd222c26cc777b9a2d5ecb6ee4cbd340cebcdada2"
     },
     {
       "name": "cpio",
