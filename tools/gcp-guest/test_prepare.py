@@ -50,8 +50,19 @@ class CandidateTests(unittest.TestCase):
             artifacts[role] = {"path": role, "sha256": hashlib.sha256(data).hexdigest()}
         # Values exercise branches only and are never production defaults.
         self.lock = {"schema_version": 5, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": prepare.KERNEL_VERSION, "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
+        # Keep the test-only manifest separate from mutable input bytes. This
+        # exercises the same source-closure check without treating synthetic
+        # packages as a production input.
+        self.closure = self.root / "synthetic-package-closure.lock.json"
+        self.closure.write_bytes((self.inputs / "package_manifest").read_bytes())
+        self.closure_patch = mock.patch.object(prepare, "PACKAGE_CLOSURE_LOCK", self.closure)
+        self.closure_patch.start()
+        self.closure_hash_patch = mock.patch.object(prepare, "PACKAGE_CLOSURE_SHA256", prepare.digest(self.closure))
+        self.closure_hash_patch.start()
 
     def tearDown(self):
+        self.closure_hash_patch.stop()
+        self.closure_patch.stop()
         self.temporary.cleanup()
 
     def test_missing_identity_changed_artifact_and_escape_fail(self):
@@ -140,6 +151,7 @@ class CandidateTests(unittest.TestCase):
         shutil.copytree(prepare.PROFILE / "repart", profile / "repart")
         (profile / "rootfs").mkdir()
         (profile / "input-identities.json").write_text("{}")
+        shutil.copy2(prepare.PROFILE / "package-closure.lock.json", profile / "package-closure.lock.json")
         prepare.validate_boot_profile(profile)
         changes = (
             ("repart/30-esp.conf", "CopyFiles=/efi:/", "CopyFiles=/boot:/"),
@@ -261,6 +273,29 @@ class CandidateTests(unittest.TestCase):
         path.write_text(json.dumps(packages))
         self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
         with self.assertRaises(ValueError):
+            prepare.validate_lock(self.lock, self.inputs)
+
+    def test_signed_package_selection_cannot_change_reviewed_closure(self):
+        path = self.inputs / "package_manifest"
+        packages = json.loads(path.read_text())
+        package = next(item for item in packages if item["name"] == "systemd")
+        package["version"] = "2.0~synthetic"
+        path.write_text(json.dumps(packages))
+        self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
+        with mock.patch.object(prepare.debian_snapshot, "verify_snapshot") as verify:
+            with self.assertRaisesRegex(ValueError, "source-reviewed candidate closure"):
+                prepare.validate_lock(self.lock, self.inputs)
+            verify.assert_not_called()
+        # Replacing both caller input and the source lock cannot bypass the
+        # reviewed digest embedded in the staging code.
+        self.closure.write_bytes(path.read_bytes())
+        with self.assertRaisesRegex(ValueError, "source-reviewed candidate closure"):
+            prepare.validate_lock(self.lock, self.inputs)
+        # The lock must also exist as a regular source file. An input-controlled
+        # symlink cannot redirect which closure the builder accepts.
+        self.closure.rename(self.root / "moved-closure.json")
+        self.closure.symlink_to(self.root / "moved-closure.json")
+        with self.assertRaisesRegex(ValueError, "source-reviewed candidate closure"):
             prepare.validate_lock(self.lock, self.inputs)
 
     def test_missing_required_guest_package_is_rejected(self):
