@@ -113,3 +113,23 @@ does not avoid the namespace requirement. The next image-building step needs a
 reviewed managed builder with that capability and a fully authenticated
 toolchain; changing this guest preparer cannot make the current container
 build-capable.
+
+## Snapshot hold correction, 2026-09-27 UTC
+
+The September 26 snapshot URL above had authenticated metadata, but did not
+meet the managed APT policy's seven-day snapshot hold. The
+[September 18 snapshot](https://snapshot.debian.org/archive/debian/20260918T000000Z/)
+does meet that hold. Its `dists/trixie/InRelease`,
+`main/binary-amd64/Packages.xz`, and `main/source/Sources.xz` were fetched into
+ignored workspace scratch storage through the managed untrusted amd64 container.
+Their respective SHA-256 values were exactly the previously authenticated
+`0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675`,
+`7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498`,
+and `6002f81f463a2d976d84b34170367cc16da2d60bd0ba9ab9d868d6e1c1a935d9`.
+The signed archive contents therefore remain byte-identical while the selected
+snapshot timestamp clears the hold. `input-identities.json` now names the older
+snapshot. The pinned `verify_mkosi_source.py` accepted the September 18
+InRelease and Sources index with status
+`source-membership-verified-toolchain-unreviewed`; its four synthetic tests
+passed. No package closure, builder toolchain, or guest image was accepted by
+this check.

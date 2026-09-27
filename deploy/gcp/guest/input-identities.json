@@ -16,7 +16,7 @@
     "mkosi_25.3.orig.tar.gz_sha256_from_dsc": "7b039fb3b34e1680173a7f4af1bc24b475465afe335c8b21c213167734061e35",
     "mkosi_25.3-7.debian.tar.xz_sha256_from_dsc": "2d91b18e25cf2906b874cda68240e03f5fac3eafc60ca5fadb609f9969b80ec6",
     "trixie_snapshot_candidate": {
-      "url": "https://snapshot.debian.org/archive/debian/20260926T000000Z/",
+      "url": "https://snapshot.debian.org/archive/debian/20260918T000000Z/",
       "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
       "main_binary_amd64_packages_xz_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
       "main_binary_amd64_packages_xz_size": 9678380,
