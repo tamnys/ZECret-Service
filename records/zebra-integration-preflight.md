@@ -43,6 +43,24 @@ The v6.4.2 ARM64 archive's recorded publication time is September 25 at
 or approval: recheck immutable artifact identity, signatures/provenance,
 withdrawals and advisories before selecting it. No hold exception was applied.
 
+For the GCP TDX x86_64 target, the official [v6.4.2 release
+metadata](https://api.github.com/repos/ZcashFoundation/zebra/releases/tags/v6.4.2)
+lists `zebrad-6.4.2-x86_64-unknown-linux-gnu.tar.gz` at 67,178,756 bytes,
+created September 25, 2026 at 19:59:10 UTC, with GitHub asset SHA-256
+`505cab2c616dac1a5bc1c414716206a775f38f41ca6f70a60729df40c29e7b8b`.
+The companion `.sha256` asset has GitHub asset SHA-256
+`9a5c526c894c0b56d7b85c792404bbaf413dc4f4111202068fffbd7dc4c7645a`;
+`SHA256SUMS` and `SHA256SUMS.sigstore.json` are also listed. These are metadata
+observations, not a downloaded, independently checksum- and provenance-verified
+binary. The x86_64 archive reaches the existing seven-day age threshold no
+earlier than October 2, 2026 at 19:59:10 UTC. As of September 27 UTC, no
+eligible patched x86_64 artifact has been selected or staged. The [6.4.2
+release](https://github.com/ZcashFoundation/zebra/releases/tag/v6.4.2) remains
+the latest published upstream release in this check; [the security
+advisory](https://github.com/ZcashFoundation/zebra/security/advisories/GHSA-h5rr-8pqv-grp9)
+marks 6.4.0 and 6.4.1 affected and 6.4.2 patched. Recheck the release and
+advisories at actual selection time.
+
 ## Local decoder correction
 
 The advisory prompted inspection of the already locked `zcash_primitives 0.30.1`,
