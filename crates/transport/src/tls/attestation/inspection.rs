@@ -1,6 +1,6 @@
 //! Diagnostic authentication consumes the session but never grants query authority.
 
-use super::{UnverifiedPublicEvidence, VerifiedRpcSession};
+use super::{PrivateDeadline, UnverifiedPublicEvidence, VerifiedRpcSession};
 use crate::tls::MAX_CONNECTION_LIFETIME;
 use serde::Serialize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -43,6 +43,10 @@ pub struct EndpointInspection {
     pub query_sent: bool,
     pub network_used: bool,
     pub issue: Option<EndpointInspectionIssue>,
+    // Only the authorization path consumes this in-memory timestamp. It is
+    // derived from the authenticated QVL claim and never serialized as policy.
+    #[serde(skip)]
+    pub(super) private_collateral_deadline: Option<PrivateDeadline>,
 }
 
 impl EndpointInspection {
@@ -64,6 +68,7 @@ impl EndpointInspection {
             // Construction follows the consumed nonce-only public exchange.
             network_used: true,
             issue: None,
+            private_collateral_deadline: None,
         }
     }
 
@@ -130,28 +135,32 @@ impl UnverifiedPublicEvidence {
                 "This client has no selected reviewed release.",
             ));
         }
-        let approved = releases.iter().any(|release| {
+        let collateral_deadline = releases.iter().find_map(|release| {
             let Some(policy) = release.workload() else {
-                return false;
+                return None;
             };
             if !release.matches_launch_config(raw_app_compose) {
-                return false;
+                return None;
             }
             let report = self.inspect_against(collateral_json, raw_app_compose, policy);
-            report.diagnostic_passed()
+            report
+                .diagnostic_passed()
+                .then_some(report.private_collateral_deadline)
+                .flatten()
         });
-        if !approved {
+        let Some(collateral_deadline) = collateral_deadline else {
             return Err(zrpc_protocol::SafeError::new(
                 zrpc_protocol::ErrorCode::PrivateModeUnavailable,
                 "Hardware, workload, freshness or live TLS key did not match a reviewed release.",
             ));
-        }
+        };
         // Ownership moves, so this is the same sender that received the quote.
-        Ok(VerifiedRpcSession {
-            session: self._session,
-            deadline: self.deadline,
-            authority: self.authority,
-        })
+        VerifiedRpcSession::from_authenticated_inspection(
+            self._session,
+            self.deadline,
+            self.authority,
+            collateral_deadline,
+        )
     }
 
     fn inspect_against(
@@ -194,6 +203,7 @@ impl UnverifiedPublicEvidence {
         // Recheck after synchronous cryptographic/event-log work: its cost must
         // not extend the original lifetime or leave a closed session accepted.
         self.check_session(&mut report);
+        let after_instant = Instant::now();
         let after = SystemTime::now();
         let Ok(after_unix) = after.duration_since(UNIX_EPOCH) else {
             report.local_clock = InspectionStatus::Rejected;
@@ -217,13 +227,19 @@ impl UnverifiedPublicEvidence {
             _ => {
                 // The original authenticated validity instant is reported by
                 // QVL. Evidence that expires during CPU work cannot pass now.
-                if inspection
-                    .collateral_earliest_expiration_unix_seconds
-                    .is_some_and(|expiration| after_unix.as_secs() >= expiration)
-                {
-                    report
-                        .issue
-                        .get_or_insert(EndpointInspectionIssue::CollateralExpiredDuringInspection);
+                if let Some(expiration) = inspection.collateral_earliest_expiration_unix_seconds {
+                    match PrivateDeadline::from_inspection_snapshot(
+                        expiration,
+                        after,
+                        after_instant,
+                    ) {
+                        Some(deadline) => report.private_collateral_deadline = Some(deadline),
+                        None => {
+                            report.issue.get_or_insert(
+                                EndpointInspectionIssue::CollateralExpiredDuringInspection,
+                            );
+                        }
+                    }
                 }
             }
         }

@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use std::{
     fmt, io,
     pin::Pin,
+    sync::{Arc, OnceLock},
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use zrpc_protocol::{
@@ -19,6 +20,7 @@ use zrpc_protocol::{
     MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Method,
     PublicAttestationRequest, PublicAttestationResponse, Request as RpcRequest, RequestId,
     SafeError, Verbosity, parse_attestation_response, parse_gcp_attestation_response,
+    parse_request,
 };
 
 mod inspection;
@@ -46,10 +48,54 @@ fn expired() -> SafeError {
     )
 }
 
+fn collateral_expired() -> SafeError {
+    SafeError::new(
+        ErrorCode::ExpiredCollateral,
+        "Verified quote collateral expired; establish a new connection with fresh evidence.",
+    )
+}
+
+/// The QVL-authenticated expiration is anchored to the local monotonic clock
+/// during inspection. A later wall-clock rollback cannot extend the session;
+/// a forward jump still closes it immediately.
+#[derive(Debug, Clone, Copy)]
+struct PrivateDeadline {
+    monotonic: Instant,
+    collateral_expiration_unix_seconds: u64,
+}
+
+impl PrivateDeadline {
+    fn from_inspection_snapshot(
+        expiration: u64,
+        wall_now: SystemTime,
+        monotonic_before_wall_now: Instant,
+    ) -> Option<Self> {
+        let elapsed = wall_now.duration_since(UNIX_EPOCH).ok()?;
+        let remaining = Duration::from_secs(expiration).checked_sub(elapsed)?;
+        if remaining.is_zero() {
+            return None;
+        }
+        Some(Self {
+            monotonic: monotonic_before_wall_now.checked_add(remaining)?,
+            collateral_expiration_unix_seconds: expiration,
+        })
+    }
+
+    fn is_expired(self) -> bool {
+        Instant::now() >= self.monotonic
+            || SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(true, |now| {
+                    now >= Duration::from_secs(self.collateral_expiration_unix_seconds)
+                })
+    }
+}
+
 struct OwnedHttpSession {
     // Retain ownership but never expose this application-writing capability.
     sender: http1::SendRequest<Full<Bytes>>,
     driver: tokio::task::JoinHandle<()>,
+    private_deadline: Arc<OnceLock<PrivateDeadline>>,
 }
 
 // The timer around an HTTP future is not a write barrier: Tokio polls the
@@ -58,14 +104,20 @@ struct OwnedHttpSession {
 struct DeadlineIo {
     stream: BootstrapStream,
     deadline: Instant,
+    private_deadline: Arc<OnceLock<PrivateDeadline>>,
 }
 
 impl DeadlineIo {
     fn check_deadline(&self) -> io::Result<()> {
-        if Instant::now() >= self.deadline {
+        if Instant::now() >= self.deadline
+            || self
+                .private_deadline
+                .get()
+                .is_some_and(|deadline| deadline.is_expired())
+        {
             Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "TLS session expired",
+                "Verified session expired",
             ))
         } else {
             Ok(())
@@ -204,9 +256,11 @@ impl PendingChallenge {
             .map_err(|_| unavailable())?;
         // Hyper receives the owned TLS stream. This API neither opens a socket
         // nor resolves a host, follows a redirect, retries, or consults proxies.
+        let private_deadline = Arc::new(OnceLock::new());
         let (sender, connection) = http1::handshake(TokioIo::new(DeadlineIo {
             stream: self.tls.stream,
             deadline,
+            private_deadline: Arc::clone(&private_deadline),
         }))
         .await
         .map_err(|_| unavailable())?;
@@ -215,6 +269,7 @@ impl PendingChallenge {
             driver: tokio::spawn(async move {
                 let _ = connection.await;
             }),
+            private_deadline,
         };
         let response = session
             .sender
@@ -367,21 +422,71 @@ pub struct VerifiedRpcSession {
 }
 
 impl VerifiedRpcSession {
-    pub async fn query(mut self, request: &RpcRequest) -> Result<Value, SafeError> {
-        if Instant::now() >= self.deadline
-            || self.session.sender.is_closed()
-            || self.session.driver.is_finished()
-        {
+    fn from_authenticated_inspection(
+        session: OwnedHttpSession,
+        deadline: Instant,
+        authority: String,
+        collateral_deadline: PrivateDeadline,
+    ) -> Result<Self, SafeError> {
+        session
+            .private_deadline
+            .set(collateral_deadline)
+            .map_err(|_| unavailable())?;
+        let verified = Self {
+            session,
+            deadline,
+            authority,
+        };
+        verified.ensure_private_ready()?;
+        Ok(verified)
+    }
+
+    fn ensure_lifetimes(&self) -> Result<(), SafeError> {
+        if Instant::now() >= self.deadline {
             return Err(expired());
         }
+        match self.session.private_deadline.get() {
+            Some(deadline) if !deadline.is_expired() => Ok(()),
+            Some(_) => Err(collateral_expired()),
+            None => Err(unavailable()),
+        }
+    }
+
+    fn ensure_private_ready(&self) -> Result<(), SafeError> {
+        self.ensure_lifetimes()?;
+        if self.session.sender.is_closed() || self.session.driver.is_finished() {
+            return Err(expired());
+        }
+        Ok(())
+    }
+
+    /// Read a caller-supplied body only while the verified connection remains
+    /// live, then parse the typed allowlist and recheck before sending it.
+    pub async fn query_from_body(
+        self,
+        body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
+    ) -> Result<Value, SafeError> {
+        self.ensure_private_ready()?;
+        let request = parse_request(&body()?)?;
+        self.query(&request).await
+    }
+
+    pub async fn query(mut self, request: &RpcRequest) -> Result<Value, SafeError> {
+        self.ensure_private_ready()?;
         let body = encode_request(request)?;
         let http = Request::post("/rpc")
-            .header(header::HOST, self.authority)
+            .header(header::HOST, self.authority.as_str())
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json")
             .header(header::ACCEPT_ENCODING, "identity")
             .body(Full::new(Bytes::from(body)))
             .map_err(|_| unavailable())?;
+        let private_deadline = self
+            .session
+            .private_deadline
+            .get()
+            .ok_or_else(unavailable)?;
+        let operation_deadline = self.deadline.min(private_deadline.monotonic);
         // The only sender here is the one retained from POST /attestation.
         let operation = async {
             let response = self
@@ -432,10 +537,15 @@ impl VerifiedRpcSession {
             }
             Ok(response.result.unwrap())
         };
-        let result =
-            tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), operation)
-                .await
-                .map_err(|_| expired())?;
+        let result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(operation_deadline),
+            operation,
+        )
+        .await;
+        // A peer may close after a complete response; only expiry must still
+        // be checked before returning the decoded result.
+        self.ensure_lifetimes()?;
+        let result = result.map_err(|_| expired())?;
         // Tokio cannot preempt synchronous JSON decoding inside the timeout.
         // Check again before a result escapes the original TLS session deadline.
         finish_before_deadline(self.deadline, result)
@@ -527,6 +637,33 @@ mod deadline_tests {
     use tokio::io::AsyncWriteExt;
 
     #[test]
+    fn collateral_snapshot_uses_subsecond_remaining_time_and_rejects_expiry() {
+        let instant = Instant::now();
+        let wall = UNIX_EPOCH + Duration::from_millis(1_500);
+        let deadline = PrivateDeadline::from_inspection_snapshot(2, wall, instant).unwrap();
+        assert_eq!(
+            deadline.monotonic.duration_since(instant),
+            Duration::from_millis(500)
+        );
+        assert!(
+            PrivateDeadline::from_inspection_snapshot(
+                2,
+                UNIX_EPOCH + Duration::from_secs(2),
+                instant
+            )
+            .is_none()
+        );
+        assert!(
+            PrivateDeadline::from_inspection_snapshot(
+                2,
+                UNIX_EPOCH + Duration::from_secs(3),
+                instant
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn decoded_private_result_cannot_escape_expired_session() {
         // Synthetic wire data exercises the final gate without approving any
         // release or constructing a private-capable connection.
@@ -552,6 +689,7 @@ mod deadline_tests {
         let mut io = DeadlineIo {
             stream: client.unwrap().stream,
             deadline: Instant::now(),
+            private_deadline: Arc::new(OnceLock::new()),
         };
         assert_eq!(
             io.write_all(b"SYNTHETIC_PRIVATE_CANARY")
@@ -570,6 +708,7 @@ mod deadline_tests {
         let io = DeadlineIo {
             stream: client.unwrap().stream,
             deadline: Instant::now(),
+            private_deadline: Arc::new(OnceLock::new()),
         };
         let (mut sender, connection) = http1::handshake(TokioIo::new(io)).await.unwrap();
         let driver = tokio::spawn(async move { connection.await });
@@ -579,6 +718,34 @@ mod deadline_tests {
         assert!(sender.send_request(request).await.is_err());
         drop(sender);
         let _ = driver.await.unwrap();
+        assert_no_application_bytes(server.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn collateral_expiry_closes_tls_write_barrier_before_private_bytes() {
+        let (client, server) = connect_pair(server_config(false, Some(ALPN))).await;
+        let private_deadline = Arc::new(OnceLock::new());
+        let mut io = DeadlineIo {
+            stream: client.unwrap().stream,
+            deadline: Instant::now() + MAX_CONNECTION_LIFETIME,
+            private_deadline: Arc::clone(&private_deadline),
+        };
+        // Synthetic deadline injected after the TLS connection exists. This
+        // tests the I/O barrier, not quote validity or release approval.
+        private_deadline
+            .set(PrivateDeadline {
+                monotonic: Instant::now(),
+                collateral_expiration_unix_seconds: u64::MAX,
+            })
+            .unwrap();
+        assert_eq!(
+            io.write_all(b"SYNTHETIC_PRIVATE_CANARY")
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        drop(io);
         assert_no_application_bytes(server.unwrap()).await;
     }
 }
