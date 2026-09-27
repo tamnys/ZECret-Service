@@ -67,12 +67,27 @@ quote broker, and startup guard run as direct processes. Code and configuration
 belong in the authenticated read-only image; writable durable storage is reserved
 for public node state. Runtime state and TLS keys belong in memory.
 
-The guest preparation tool checks local input hashes and stages source files.
-Its `preflight` command reports missing build capabilities; staging neither
-authenticates the package archive nor builds or approves an image. Release-age
-and provenance review must establish eligibility of the node artifact. Image
-building requires a supported managed Linux environment; ordinary CLI
-development does not require image-building privileges.
+The guest preparation tool checks the pinned Debian snapshot signature, package
+index, and local package archive hashes before staging source files. Its
+`preflight` command reports missing build capabilities. Staging does not
+authenticate the complete builder toolchain, build or approve an image, or
+establish Zebra release eligibility. Image building requires a supported
+managed Linux environment; ordinary CLI development does not require
+image-building privileges.
+
+Record the `manifest_sha256` and `manifest_bytes` returned by `stage` outside
+the staged directory. Immediately before handing that directory to a builder,
+check its complete input inventory against those recorded values:
+
+```sh
+python3 tools/gcp-guest/prepare.py verify-stage \
+  --output "$STAGE_DIR" \
+  --expected-manifest-sha256 "$MANIFEST_SHA256" \
+  --expected-manifest-bytes "$MANIFEST_BYTES"
+```
+
+This checks staged bytes at inspection time. It does not freeze the directory,
+inspect a built disk, or grant private-mode approval.
 
 `zrpc-gcp-lifecycle` provides local package preparation and separate operator
 actions. Run its `--help` for exact inputs. A package binds image identities,
