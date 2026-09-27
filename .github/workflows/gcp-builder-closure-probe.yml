@@ -97,7 +97,7 @@ jobs:
           data = path.read_bytes()
           report = json.loads(data)
           if (report["status"] != "diagnostic-builder-payloads-staged-unbuilt" or
-                  report["package_count"] != 195 or
+                  report["package_count"] != 199 or
                   report["signed_snapshot_rechecked"] is not False or
                   report["package_scripts_executed"] is not False or
                   report["runtime_execution_verified"] is not False or
@@ -219,13 +219,11 @@ jobs:
                 "$chroot_command" --userspec="$run_uid:$run_gid" "$staged" "$@"
             }
             run_staged /usr/bin/python3 -I - <<"PY"
-          import io
           import json
           from pathlib import Path
           import sys
 
           sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
-          import debian_snapshot
           import verify_builder_closure
 
           report = verify_builder_closure.verify(
@@ -236,62 +234,12 @@ jobs:
               Path("/zrpc-apt-scratch"),
           )
           if (report["status"] != "diagnostic-signed-builder-apt-plan-matched-unbuilt"
-                  or report["package_count"] != 195
+                  or report["package_count"] != 199
                   or report["complete_builder_toolchain"] is not False
                   or report["image_built"] is not False
                   or report["private_mode_approved"] is not False):
               raise ValueError("signed snapshot check changed diagnostic acceptance status")
           print(json.dumps(report, sort_keys=True))
-
-          # Diagnose the missing mkosi PackageDirectories helper using the
-          # already-authenticated 195-package builder and sealed APT resolver.
-          # This only prints a candidate dependency delta; no new archive is
-          # trusted, installed, or executed by this diagnostic.
-          lock = verify_builder_closure.direct.read_json(
-              verify_builder_closure.LOCK
-          )
-          direct_lock = verify_builder_closure.direct.read_json(
-              verify_builder_closure.DIRECT_LOCK
-          )
-          _, _, index_bytes = debian_snapshot.authenticated_index_bytes(
-              Path("/zrpc-metadata/InRelease"),
-              Path("/zrpc-metadata/Packages.xz"),
-              lock["inrelease_sha256"],
-          )
-          records = debian_snapshot.package_records(io.BytesIO(index_bytes))
-          record = records[("reprepro", "5.4.6+really5.3.2-1+deb13u1", "amd64")]
-          helper = {
-              "name": record["Package"], "version": record["Version"],
-              "architecture": record["Architecture"],
-              "filename": record["Filename"], "size": int(record["Size"]),
-              "sha256": record["SHA256"],
-          }
-          runtime = {}
-          for entry in lock["packages"]:
-              if entry["name"] in verify_builder_closure.APT_ELF_PACKAGES:
-                  indexed = records[(entry["name"], entry["version"], entry["architecture"])]
-                  runtime[entry["name"]] = verify_builder_closure.indexed_archive(
-                      entry, indexed, Path("/zrpc-archives"), keep_bytes=True
-                  )
-          resolved, _ = verify_builder_closure.apt_plan(
-              index_bytes, Path("/zrpc-apt-scratch"), Path("/usr/bin/apt-get"),
-              lock["resolver"], [*direct_lock["packages"], helper],
-              lock["snapshot"], runtime,
-          )
-          original = {entry["name"]: (entry["version"], entry["architecture"])
-                      for entry in lock["packages"]}
-          if any(resolved.get(name) != identity for name, identity in original.items()):
-              raise ValueError("candidate helper changed reviewed APT selections")
-          delta = {name: resolved[name] for name in sorted(resolved) if name not in original}
-          if "reprepro" not in delta:
-              raise ValueError("candidate helper absent from signed APT plan")
-          print(json.dumps({
-              "status": "diagnostic-signed-reprepro-apt-delta-unbuilt",
-              "package_count": len(resolved), "new_packages": delta,
-              "new_archive_bytes_checked": False,
-              "package_scripts_executed": False, "image_built": False,
-              "private_mode_approved": False,
-          }, sort_keys=True))
           PY
             run_staged /usr/bin/python3 -I - <<"PY"
           import json
@@ -322,6 +270,7 @@ jobs:
             run_staged /usr/bin/mkosi --version
             run_staged /usr/bin/systemd-repart --version
             run_staged /usr/bin/ukify --version
+            run_staged /usr/bin/reprepro --version
             echo "Diagnostic staged tool startup passed; no image built or approved."
           ' _ "$scratch/staged" "$runner_uid" "$runner_gid" \
             "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command" \
@@ -346,7 +295,7 @@ jobs:
 
           report = json.loads(Path(sys.argv[1]).read_bytes())
           if (report["status"] != "diagnostic-builder-payloads-staged-unbuilt"
-                  or report["package_count"] != 195
+                  or report["package_count"] != 199
                   or report["package_scripts_executed"] is not False
                   or report["complete_builder_toolchain"] is not False
                   or report["image_built"] is not False
@@ -354,6 +303,7 @@ jobs:
               raise SystemExit("signed builder staging did not retain diagnostic status")
           PY
           test -x "$staged/usr/bin/mkosi-sandbox"
+          test -x "$staged/usr/bin/reprepro"
           test -f "$staged/usr/lib/python3/dist-packages/mkosi/sandbox.py"
           test -x "$staged/usr/bin/true"
 
@@ -362,7 +312,8 @@ jobs:
           # scratch. No signing key, cloud credential, source write, or upload
           # enters this diagnostic. chroot is not a security boundary.
           root_scratch="$(sudo -n mktemp -d /var/tmp/zrpc-packaged-mkosi.XXXXXX)"
-          trap 'sudo -n rm -rf -- "$root_scratch"' EXIT
+          host_canary="$(mktemp /var/tmp/zrpc-host-only.XXXXXX)"
+          trap 'sudo -n rm -rf -- "$root_scratch"; rm -f -- "$host_canary"' EXIT
           sudo -n cp -a --no-preserve=ownership -- "$staged"/. "$root_scratch"/
           sudo -n test ! -L "$root_scratch/tmp"
           sudo -n install -d -m 1777 "$root_scratch/tmp"
@@ -370,6 +321,7 @@ jobs:
           sudo -n cmp -s -- "$staged/.zrpc-builder-toolchain.json" \
             "$root_scratch/.zrpc-builder-toolchain.json"
           sudo -n cmp -s -- "$staged/usr/bin/mkosi-sandbox" "$root_scratch/usr/bin/mkosi-sandbox"
+          sudo -n cmp -s -- "$staged/usr/bin/reprepro" "$root_scratch/usr/bin/reprepro"
           sudo -n cmp -s -- "$staged/usr/lib/python3/dist-packages/mkosi/sandbox.py" \
             "$root_scratch/usr/lib/python3/dist-packages/mkosi/sandbox.py"
           sudo -n cmp -s -- "$staged/usr/bin/true" "$root_scratch/usr/bin/true"
@@ -395,6 +347,8 @@ jobs:
             test "$(ip -o link show | wc -l)" -eq 1
             test -z "$(ip -4 route show)"
             test -z "$(ip -6 route show)"
+            test -f "$7"
+            test ! -e "$root$7"
             # mkosi changes / mount propagation before creating its sandbox.
             # A plain chroot directory is not a mount point for that operation.
             mount --bind "$root" "$root"
@@ -405,8 +359,60 @@ jobs:
               LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
               "$6" "$root" /usr/bin/mkosi-sandbox \
                 --ro-bind / / --unshare-net -- /usr/bin/true
-            echo "Packaged mkosi sandbox true-command: passed in root-owned no-route namespace"
+            # Apt.sandbox(network=True) sets SYSTEMD_OFFLINE=0 and does not
+            # request an inner network namespace. Test those exact network
+            # options with its become-root/suppress-chown flags and a harmless
+            # command. This does not run APT or any package hook.
+            outer_user="$(readlink /proc/self/ns/user)"
+            outer_mount="$(readlink /proc/self/ns/mnt)"
+            outer_net="$(readlink /proc/self/ns/net)"
+            outer_pid="$(readlink /proc/self/ns/pid)"
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+              LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+              "$6" "$root" /usr/bin/mkosi-sandbox \
+                --proc /proc --ro-bind / / \
+                --setenv SYSTEMD_OFFLINE 0 \
+                --unshare-ipc --become-root --suppress-chown -- \
+                /usr/bin/python3 -I - "$outer_user" "$outer_mount" \
+                  "$outer_net" "$outer_pid" "$7" <<"PY"
+          import errno
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          outer = dict(zip(("user", "mnt", "net", "pid"), sys.argv[1:5]))
+          inner = {name: os.readlink("/proc/self/ns/" + name) for name in outer}
+          if (inner["user"] == outer["user"] or inner["mnt"] == outer["mnt"]
+                  or inner["net"] != outer["net"] or inner["pid"] != outer["pid"]):
+              raise ValueError("mkosi APT-equivalent namespace boundary changed")
+          if os.getenv("SYSTEMD_OFFLINE") != "0":
+              raise ValueError("mkosi network=True option was not retained")
+          if len(Path("/proc/net/route").read_text().splitlines()) != 1:
+              raise ValueError("IPv4 route appeared inside mkosi sandbox")
+          ipv6 = Path("/proc/net/ipv6_route")
+          if ipv6.exists() and ipv6.read_text().strip():
+              raise ValueError("IPv6 route appeared inside mkosi sandbox")
+          if Path(sys.argv[5]).exists():
+              raise ValueError("host-only canary entered mkosi sandbox")
+          try:
+              descriptor = os.open("/.zrpc-builder-toolchain.json", os.O_WRONLY)
+          except OSError as error:
+              if error.errno not in (errno.EROFS, errno.EACCES, errno.EPERM):
+                  raise
+          else:
+              os.close(descriptor)
+              raise ValueError("reviewed builder manifest was writable")
+          print(json.dumps({
+              "status": "diagnostic-mkosi-network-true-canary-passed-unbuilt",
+              "outer_network_namespace_retained": True,
+              "ipv4_routes": 0, "ipv6_routes": 0,
+              "host_canary_visible": False, "reviewed_manifest_writable": False,
+              "package_scripts_executed": False, "image_built": False,
+              "private_mode_approved": False,
+          }, sort_keys=True))
+          PY
           ' _ "$root_scratch" "$parent_user_ns" "$parent_mount_ns" \
-            "$parent_net_ns" "$parent_pid_ns" "$chroot_command"
+            "$parent_net_ns" "$parent_pid_ns" "$chroot_command" "$host_canary"
 
           printf '%s\n' '{"status":"diagnostic-packaged-mkosi-sandbox-passed-unbuilt","package_scripts_executed":false,"image_built":false,"approved_release":false,"private_mode_approved":false}'

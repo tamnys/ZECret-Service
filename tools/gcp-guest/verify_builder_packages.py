@@ -29,7 +29,7 @@ IDENTITIES = ROOT / "deploy/gcp/guest/input-identities.json"
 # dependencies and the remaining mkosi tools are deliberately out of scope.
 DIRECT_PACKAGES = frozenset({
     "apt", "coreutils", "cryptsetup-bin", "dpkg", "gpgv", "gzip", "mkosi", "mount",
-    "sbsigntool", "systemd-boot-efi", "systemd-boot-tools",
+    "reprepro", "sbsigntool", "systemd-boot-efi", "systemd-boot-tools",
     "systemd-repart", "systemd-ukify", "tar", "util-linux", "zstd",
 })
 PACKAGE_FIELDS = {"name", "version", "architecture", "filename", "size", "sha256"}
