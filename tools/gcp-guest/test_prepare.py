@@ -1,5 +1,6 @@
 """Synthetic input/packaging tests; no image build or hardware evidence."""
 import copy
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
@@ -121,6 +122,14 @@ class CandidateTests(unittest.TestCase):
             prepare.stage(lock_path, self.inputs, self.root / "candidate")
         self.assertFalse((self.root / "candidate").exists())
 
+    def test_snapshot_hold_clears_at_seven_days(self):
+        selected = datetime(2026, 9, 20, tzinfo=timezone.utc)
+        with self.assertRaisesRegex(ValueError, "seven-day hold"):
+            prepare.debian_snapshot.require_snapshot_age(
+                selected, selected + timedelta(days=7, seconds=-1)
+            )
+        prepare.debian_snapshot.require_snapshot_age(selected, selected + timedelta(days=7))
+
     def test_manifest_version_cannot_inject_mkosi_settings(self):
         path = self.inputs / "package_manifest"
         packages = json.loads(path.read_text())
@@ -145,6 +154,11 @@ class CandidateTests(unittest.TestCase):
             snapshot, archives = prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
             self.assertEqual(snapshot["package_count"], 4)
             self.assertEqual(len(archives), 4)
+            held_snapshot = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            self.lock["snapshot"] = f"https://snapshot.debian.org/archive/debian/{held_snapshot}/"
+            with self.assertRaisesRegex(ValueError, "seven-day hold"):
+                prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
+            self.lock["snapshot"] = "https://snapshot.debian.org/archive/debian/20200101T000000Z/"
             index.write_bytes(index.read_bytes() + b"TAMPER")
             with self.assertRaisesRegex(ValueError, "index differs"):
                 prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)

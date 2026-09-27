@@ -5,7 +5,7 @@ authenticated metadata and compares its hashes to local files. It does not
 resolve dependencies or make a staged candidate deployable.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
 import lzma
@@ -24,6 +24,14 @@ TRIXIE_ARCHIVE_FINGERPRINT = "04B54C3CDCA79751B16BC6B5225629DF75B188BD"
 INDEX_PATH = "main/binary-amd64/Packages.xz"
 SOURCE_INDEX_PATH = "main/source/Sources.xz"
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# Match the managed APT snapshot hold in SUPPLY_CHAIN_HARDENING.md. An
+# authenticated archive snapshot is not yet eligible for package consumption.
+MIN_SNAPSHOT_AGE = timedelta(days=7)
+
+
+def require_snapshot_age(snapshot_time, now):
+    if now - snapshot_time < MIN_SNAPSHOT_AGE:
+        raise ValueError("Debian snapshot has not cleared the seven-day hold")
 
 
 def sha256(path):
@@ -142,6 +150,7 @@ def verify_snapshot(lock, paths, inputs, manifest):
     snapshot_time = datetime.strptime(lock["snapshot"].rstrip("/").rsplit("/", 1)[-1], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
     if epoch > int(snapshot_time.timestamp()):
         raise ValueError("signed Debian Release postdates selected snapshot")
+    require_snapshot_age(snapshot_time, datetime.now(timezone.utc))
     index = paths["packages_index"]
     if index.stat().st_size != index_size or sha256(index) != index_hash:
         raise ValueError("Debian package index differs from signed Release")
