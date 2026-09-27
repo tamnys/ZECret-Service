@@ -1,13 +1,19 @@
 //! One nonce-only public request on the challenge's original TLS connection.
 
-use super::{MAX_CONNECTION_LIFETIME, PendingChallenge, unavailable};
+use super::{BootstrapStream, MAX_CONNECTION_LIFETIME, PendingChallenge, unavailable};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Request, StatusCode, Version, client::conn::http1, header};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{fmt, time::Instant};
+use std::{
+    fmt, io,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Instant,
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, ErrorCode, GcpAttestationResponse, MAX_ATTESTATION_REQUEST_BYTES,
     MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Method,
@@ -44,6 +50,67 @@ struct OwnedHttpSession {
     // Retain ownership but never expose this application-writing capability.
     sender: http1::SendRequest<Full<Bytes>>,
     driver: tokio::task::JoinHandle<()>,
+}
+
+// The timer around an HTTP future is not a write barrier: Tokio polls the
+// future before checking its timeout. Guard the actual TLS I/O so a delayed
+// Hyper driver cannot transmit a private body after the connection expires.
+struct DeadlineIo {
+    stream: BootstrapStream,
+    deadline: Instant,
+}
+
+impl DeadlineIo {
+    fn check_deadline(&self) -> io::Result<()> {
+        if Instant::now() >= self.deadline {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "TLS session expired",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl AsyncRead for DeadlineIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for DeadlineIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Err(error) = self.check_deadline() {
+            return Poll::Ready(Err(error));
+        }
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 impl Drop for OwnedHttpSession {
@@ -137,9 +204,12 @@ impl PendingChallenge {
             .map_err(|_| unavailable())?;
         // Hyper receives the owned TLS stream. This API neither opens a socket
         // nor resolves a host, follows a redirect, retries, or consults proxies.
-        let (sender, connection) = http1::handshake(TokioIo::new(self.tls.stream))
-            .await
-            .map_err(|_| unavailable())?;
+        let (sender, connection) = http1::handshake(TokioIo::new(DeadlineIo {
+            stream: self.tls.stream,
+            deadline,
+        }))
+        .await
+        .map_err(|_| unavailable())?;
         let mut session = OwnedHttpSession {
             sender,
             driver: tokio::spawn(async move {
@@ -428,5 +498,51 @@ impl fmt::Debug for UnverifiedPublicEvidence {
             .field("evidence_authenticated", &false)
             .field("private_rpc_allowed", &false)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use crate::tls::{
+        ALPN,
+        tests::{assert_no_application_bytes, connect_pair, server_config},
+    };
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn expired_tls_write_is_rejected_before_application_bytes() {
+        let (client, server) = connect_pair(server_config(false, Some(ALPN))).await;
+        let mut io = DeadlineIo {
+            stream: client.unwrap().stream,
+            deadline: Instant::now(),
+        };
+        assert_eq!(
+            io.write_all(b"SYNTHETIC_PRIVATE_CANARY")
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+        drop(io);
+        assert_no_application_bytes(server.unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn expired_http_driver_cannot_write_private_body() {
+        let (client, server) = connect_pair(server_config(false, Some(ALPN))).await;
+        let io = DeadlineIo {
+            stream: client.unwrap().stream,
+            deadline: Instant::now(),
+        };
+        let (mut sender, connection) = http1::handshake(TokioIo::new(io)).await.unwrap();
+        let driver = tokio::spawn(async move { connection.await });
+        let request = Request::post("/rpc")
+            .body(Full::new(Bytes::from_static(b"SYNTHETIC_PRIVATE_CANARY")))
+            .unwrap();
+        assert!(sender.send_request(request).await.is_err());
+        drop(sender);
+        let _ = driver.await.unwrap();
+        assert_no_application_bytes(server.unwrap()).await;
     }
 }
