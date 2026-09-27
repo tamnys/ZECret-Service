@@ -35,6 +35,8 @@ jobs:
           mkdir "$scratch/mkosi"
           tar -xf "$scratch/mkosi.tar" -C "$scratch/mkosi" --no-same-owner --no-same-permissions
           test -f "$scratch/mkosi/mkosi/sandbox.py"
+          chmod 755 "$scratch/mkosi" "$scratch/mkosi/mkosi"
+          chmod 644 "$scratch/mkosi/mkosi/sandbox.py"
           echo 'Pinned mkosi 25.3 Git archive: SHA-256 and tree matched'
 
           parent_user_ns="$(readlink /proc/self/ns/user)"
@@ -56,6 +58,8 @@ jobs:
             test "$(ip -o link show | wc -l)" -eq 1
             test -z "$(ip -4 route show)"
             test -z "$(ip -6 route show)"
+            namei -l "$1/mkosi/sandbox.py"
+            test -r "$1/mkosi/sandbox.py"
             python3 -I "$1/mkosi/sandbox.py" \
               --ro-bind / / --unshare-net -- /usr/bin/true
             echo "Pinned mkosi sandbox true-command: passed inside isolated namespaces"
