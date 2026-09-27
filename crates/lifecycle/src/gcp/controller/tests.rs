@@ -97,6 +97,11 @@ impl Fixture {
         let (image_bytes, raw_disk_sha256, receipt_bytes) = synthetic_import_archive();
         let uki_sha256 = digest(b"SYNTHETIC UKI BYTES");
         let uki_pe_coff_sha256 = digest(b"SYNTHETIC PE/COFF IMAGE DIGEST");
+        let fixed_cmdline = include_str!("../../../../../deploy/gcp/guest/mkosi.conf")
+            .lines()
+            .find_map(|line| line.strip_prefix("KernelCommandLine="))
+            .unwrap();
+        let uki_cmdline = format!("roothash={} {fixed_cmdline}", "a".repeat(64));
         let esp_diagnostic = diagnostic_artifact(
             &root,
             "esp-diagnostic.json",
@@ -106,7 +111,29 @@ impl Fixture {
                 "raw_disk_bytes":1024 * 1024 * 1024,
                 "uki_sha256":uki_sha256,
                 "uki_bytes":19,
+                "uki_cmdline_for_review":uki_cmdline,
+                "complete_builder_toolchain":false,
                 "signed_uki_checked":false,
+                "cmdline_approved":false,
+                "dm_verity_checked":false,
+                "image_built":false,
+                "private_mode_approved":false
+            }),
+        );
+        let verity_diagnostic = diagnostic_artifact(
+            &root,
+            "verity-diagnostic.json",
+            &json!({
+                "status":"diagnostic-raw-root-verity-unapproved",
+                "raw_disk_sha256":raw_disk_sha256,
+                "raw_disk_bytes":1024 * 1024 * 1024,
+                "uki_sha256":uki_sha256,
+                "uki_cmdline_for_review":uki_cmdline,
+                "verity_userspace_verified":true,
+                "complete_builder_toolchain":false,
+                "signed_uki_checked":false,
+                "cmdline_approved":false,
+                "dm_verity_boot_checked":false,
                 "image_built":false,
                 "private_mode_approved":false
             }),
@@ -163,7 +190,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 5,
+            schema_version: 6,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -187,6 +214,7 @@ impl Fixture {
             reproducibility_report: a.clone(),
             esp_diagnostic,
             uki_digest_diagnostic,
+            verity_diagnostic,
             secure_boot_pk_der: a.clone(),
             secure_boot_kek_der: a.clone(),
             secure_boot_db_esl,
@@ -298,6 +326,18 @@ impl Fixture {
         *artifact = diagnostic_artifact(
             &self.root,
             &format!("edited-diagnostic-{}.json", uuid().unwrap()),
+            &report,
+        );
+        spec
+    }
+    fn spec_with_verity_edit(&self, edit: impl FnOnce(&mut Value)) -> DeploymentSpec {
+        let mut spec = self.package.spec.clone();
+        let mut report: Value =
+            serde_json::from_slice(&fs::read(&spec.verity_diagnostic.path).unwrap()).unwrap();
+        edit(&mut report);
+        spec.verity_diagnostic = diagnostic_artifact(
+            &self.root,
+            &format!("edited-verity-{}.json", uuid().unwrap()),
             &report,
         );
         spec
@@ -423,9 +463,42 @@ fn image_package_rejects_diagnostic_substitution_or_unlinked_disk() {
         f.spec_with_diagnostic_edit(false, |v| v["uki_sha256"] = json!("1".repeat(64))),
         f.spec_with_diagnostic_edit(false, |v| v["uki_pe_coff_sha256"] = json!("1".repeat(64))),
         f.spec_with_diagnostic_edit(false, |v| v["release_approved"] = json!(true)),
+        f.spec_with_diagnostic_edit(true, |v| {
+            v["uki_cmdline_for_review"] = json!("roothash=00 extra=1")
+        }),
     ] {
         assert!(Package::prepare(spec, 1000).is_err());
     }
+}
+
+#[test]
+fn image_package_requires_the_same_diagnostic_root_verity_pair() {
+    let f = Fixture::new();
+    for spec in [
+        f.spec_with_verity_edit(|v| v["status"] = json!("private-approved")),
+        f.spec_with_verity_edit(|v| v["raw_disk_sha256"] = json!("0".repeat(64))),
+        f.spec_with_verity_edit(|v| v["raw_disk_bytes"] = json!(42)),
+        f.spec_with_verity_edit(|v| v["uki_sha256"] = json!("1".repeat(64))),
+        f.spec_with_verity_edit(|v| {
+            let old = v["uki_cmdline_for_review"].as_str().unwrap();
+            v["uki_cmdline_for_review"] = json!(old.replacen('a', "b", 1));
+        }),
+        f.spec_with_verity_edit(|v| v["verity_userspace_verified"] = json!(false)),
+        f.spec_with_verity_edit(|v| v["complete_builder_toolchain"] = json!(true)),
+        f.spec_with_verity_edit(|v| v["signed_uki_checked"] = json!(true)),
+        f.spec_with_verity_edit(|v| v["cmdline_approved"] = json!(true)),
+        f.spec_with_verity_edit(|v| v["dm_verity_boot_checked"] = json!(true)),
+        f.spec_with_verity_edit(|v| v["image_built"] = json!(true)),
+        f.spec_with_verity_edit(|v| v["private_mode_approved"] = json!(true)),
+    ] {
+        assert!(Package::prepare(spec, 1000).is_err());
+    }
+    let mut missing = serde_json::to_value(&f.package.spec).unwrap();
+    missing.as_object_mut().unwrap().remove("verity_diagnostic");
+    assert!(serde_json::from_value::<DeploymentSpec>(missing).is_err());
+    let mut old_schema = f.package.spec.clone();
+    old_schema.schema_version = 5;
+    assert!(Package::prepare(old_schema, 1000).is_err());
 }
 
 #[test]

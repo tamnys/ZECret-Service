@@ -95,7 +95,29 @@ struct EspDiagnostic {
     raw_disk_bytes: u64,
     uki_sha256: String,
     uki_bytes: u64,
+    uki_cmdline_for_review: String,
+    complete_builder_toolchain: bool,
     signed_uki_checked: bool,
+    cmdline_approved: bool,
+    dm_verity_checked: bool,
+    image_built: bool,
+    private_mode_approved: bool,
+}
+
+/// Userspace root/verity inspection of this same raw disk. Its affirmative
+/// verification field records a local tool result, not a boot or release fact.
+#[derive(Debug, Deserialize)]
+struct VerityDiagnostic {
+    status: String,
+    raw_disk_sha256: String,
+    raw_disk_bytes: u64,
+    uki_sha256: String,
+    uki_cmdline_for_review: String,
+    verity_userspace_verified: bool,
+    complete_builder_toolchain: bool,
+    signed_uki_checked: bool,
+    cmdline_approved: bool,
+    dm_verity_boot_checked: bool,
     image_built: bool,
     private_mode_approved: bool,
 }
@@ -121,6 +143,27 @@ fn read_hashed_diagnostic(artifact: &Artifact) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn reviewed_roothash(cmdline: &str) -> Option<&str> {
+    // Keep the package consumer bound to the compiled source profile as well
+    // as the two diagnostic records for the same extracted UKI.
+    let source = include_str!("../../../../deploy/gcp/guest/mkosi.conf");
+    let mut lines = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("KernelCommandLine="));
+    let fixed = lines.next()?;
+    if fixed.is_empty() || lines.next().is_some() {
+        return None;
+    }
+    let (prefix, rest) = cmdline.split_once(' ')?;
+    let hash = prefix.strip_prefix("roothash=")?;
+    (hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && rest == fixed)
+        .then_some(hash)
+}
+
 // UEFI 2.10 §32: EFI_SIGNATURE_LIST with EFI_CERT_SHA256_GUID, no signature
 // header, and one EFI_SIGNATURE_DATA (16-byte owner GUID + 32-byte image hash).
 // GUID fields are little-endian on the EFI wire. This is a structural policy
@@ -137,12 +180,19 @@ fn verify_exact_uki_db(spec: &DeploymentSpec) -> Result<()> {
     let uki: UkiDigestDiagnostic =
         serde_json::from_slice(&read_hashed_diagnostic(&spec.uki_digest_diagnostic)?)
             .map_err(|_| Error("invalid typed UKI digest diagnostic"))?;
+    let verity: VerityDiagnostic =
+        serde_json::from_slice(&read_hashed_diagnostic(&spec.verity_diagnostic)?)
+            .map_err(|_| Error("invalid typed root/verity diagnostic"))?;
     if esp.status != "diagnostic-esp-uki-sections-unapproved"
         || esp.raw_disk_sha256 != spec.raw_disk_sha256
         || esp.raw_disk_bytes != spec.raw_disk_bytes
         || !valid_digest(&esp.uki_sha256)
         || esp.uki_bytes == 0
+        || reviewed_roothash(&esp.uki_cmdline_for_review).is_none()
+        || esp.complete_builder_toolchain
         || esp.signed_uki_checked
+        || esp.cmdline_approved
+        || esp.dm_verity_checked
         || esp.image_built
         || esp.private_mode_approved
         || uki.schema_version != 1
@@ -154,8 +204,20 @@ fn verify_exact_uki_db(spec: &DeploymentSpec) -> Result<()> {
         || uki.boot_measurement_checked
         || uki.release_approved
         || uki.private_mode_approved
+        || verity.status != "diagnostic-raw-root-verity-unapproved"
+        || verity.raw_disk_sha256 != spec.raw_disk_sha256
+        || verity.raw_disk_bytes != spec.raw_disk_bytes
+        || verity.uki_sha256 != esp.uki_sha256
+        || verity.uki_cmdline_for_review != esp.uki_cmdline_for_review
+        || !verity.verity_userspace_verified
+        || verity.complete_builder_toolchain
+        || verity.signed_uki_checked
+        || verity.cmdline_approved
+        || verity.dm_verity_boot_checked
+        || verity.image_built
+        || verity.private_mode_approved
     {
-        return Err(Error("UKI diagnostic does not bind the reviewed raw disk"));
+        return Err(Error("boot diagnostics do not bind the reviewed raw disk"));
     }
     let db = read_regular(&spec.secure_boot_db_esl.path)?;
     if digest(&db) != spec.secure_boot_db_esl.sha256 {
@@ -327,6 +389,8 @@ pub struct DeploymentSpec {
     pub esp_diagnostic: Artifact,
     /// Diagnostic Authenticode digest of that same extracted UKI.
     pub uki_digest_diagnostic: Artifact,
+    /// Userspace root/verity check against that disk's extracted UKI roothash.
+    pub verity_diagnostic: Artifact,
     pub secure_boot_pk_der: Artifact,
     pub secure_boot_kek_der: Artifact,
     /// One EFI_CERT_SHA256_GUID EFI_SIGNATURE_LIST, not a signer certificate.
@@ -381,7 +445,7 @@ pub(crate) fn name(value: &str) -> bool {
 }
 impl DeploymentSpec {
     pub fn validate(&self, at: u64) -> Result<()> {
-        if self.schema_version != 5
+        if self.schema_version != 6
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -481,7 +545,7 @@ impl DeploymentSpec {
         verify_exact_uki_db(self)?;
         Ok(())
     }
-    pub fn artifacts(&self) -> [&Artifact; 14] {
+    pub fn artifacts(&self) -> [&Artifact; 15] {
         [
             &self.raw_image_tar_gz,
             &self.import_receipt,
@@ -492,6 +556,7 @@ impl DeploymentSpec {
             &self.reproducibility_report,
             &self.esp_diagnostic,
             &self.uki_digest_diagnostic,
+            &self.verity_diagnostic,
             &self.secure_boot_pk_der,
             &self.secure_boot_kek_der,
             &self.secure_boot_db_esl,
@@ -580,14 +645,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 5,
+            schema_version: 6,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
         let expected = Self::prepare(self.spec.clone(), at)?;
-        if self.schema_version != 5 || self.resources != expected.resources {
+        if self.schema_version != 6 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));

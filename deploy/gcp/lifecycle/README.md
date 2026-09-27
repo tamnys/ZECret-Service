@@ -13,7 +13,7 @@ Run build and test commands through the project's managed container.
 
 ## Prepare a package
 
-Supply a `DeploymentSpec` JSON object with `schema_version: 5`, matching
+Supply a `DeploymentSpec` JSON object with `schema_version: 6`, matching
 `crates/lifecycle/src/gcp/package.rs`. Its artifact fields are objects containing
 an absolute `path` and lowercase `sha256`. Required inputs include the raw disk
 archive, release manifest, boot policy, memory measurements, reproducibility
@@ -21,11 +21,13 @@ report, DER Secure Boot PK/KEK certificates, a binary `secure_boot_db_esl`, and
 a reviewed binary `dbx` revocation database. The `db` file must be one UEFI
 `EFI_CERT_SHA256_GUID` signature list with exactly one PE/COFF image hash for
 the intended UKI. A signer certificate in `db` is rejected because it would also
-authorize other images signed by that key. Supply `esp_diagnostic` and
-`uki_digest_diagnostic` artifacts from offline inspection of the exact raw disk
-and extracted UKI; the package matches their disk, UKI-file, and PE/COFF image
-hashes to the `db` entry. These reports do not verify the UKI signature or
-establish boot or release approval. The package supplies all four Secure Boot
+authorize other images signed by that key. Supply `esp_diagnostic`,
+`uki_digest_diagnostic`, and `verity_diagnostic` artifacts from offline
+inspection of the exact raw disk. The package matches their disk and UKI-file
+hashes, requires the same reviewed UKI command line and reported userspace
+root/verity check, and matches the PE/COFF image hash to the `db` entry. These
+reports do not verify the UKI signature, establish a successful dm-verity boot,
+or grant release approval. The package supplies all four Secure Boot
 variables to the image API; omitting `dbx` would select Google's default. Keep
 signing private keys outside this package. The operator package's `release_manifest`
 is not a client-embedded approved release.
@@ -137,7 +139,7 @@ between observation and deletion. Compute deletion also fails closed. Resolve
 that provider contract before using this tool for a hosted experiment. Live
 creation also requires complete inspection of the exact raw disk's GPT, signed
 UKI, command line, verity root, installed components, and effective Secure Boot
-policy. The ESP and UKI digest reports are insufficient for this admission.
+policy. The diagnostic reports are insufficient for this admission.
 Google C3 TDX hash-only `db` behavior also requires a production-platform test.
 Cloud Storage deletion uses the recorded generation and a generation
 precondition. Staging buckets must have public access prevention enabled and
