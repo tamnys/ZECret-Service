@@ -503,7 +503,7 @@ jobs:
             echo "Diagnostic profile read-only remount succeeded"
             profile_options="$(findmnt -n -o OPTIONS --target "$profile_root")"
             printf "Diagnostic profile observed mount options: %s\n" "$profile_options"
-            test "$(printf '%s\n' "$profile_options" | tr , '\n' | grep -x ro)" = ro
+            case ",$profile_options," in *,ro,*) ;; *) exit 1 ;; esac
             echo "Diagnostic profile read-only assertion succeeded"
             run_staged_root() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
