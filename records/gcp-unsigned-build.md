@@ -75,3 +75,46 @@ x86_64 Linux builder with case-sensitive workspace-backed storage, or a
 separately reviewed equivalent environment, is still needed before an
 unsigned image build can be attempted. The approved-release catalog remains
 empty. No cloud resource was created, and no private query was sent.
+
+## 2026-09-27 native x86 runner probes and unsigned guest binaries
+
+The manually dispatched [public standard GitHub runner probe](https://github.com/tamnys/ZECret-service/actions/runs/36332370259)
+ran on `x86_64` with a case-sensitive workspace. A root-owned mount, network,
+and PID namespace smoke test mounted and unmounted a temporary `tmpfs` and
+observed no routes. The runner account's user-namespace mapping failed with
+`write failed /proc/self/uid_map: Operation not permitted`. Mapping a new
+user namespace's root to the runner UID from a root-owned process also failed:
+`newuidmap: uid range [0-1) -> [1001-1002) not allowed`. This workflow used no
+checkout, dependencies, cache, artifact upload, or signing key. The rootful
+smoke test stayed in the initial user namespace; it does not establish the
+mkosi offline build boundary or a production builder.
+
+A later [root-owned user-namespace probe](https://github.com/tamnys/ZECret-service/actions/runs/36333351728)
+mapped UID/GID 0 to 0, isolated mount/network/PID namespaces, and let a nested
+process create another mount/network namespace and mount `tmpfs` at `/tmp`.
+The earlier attempt to mount over a runner-owned workspace scratch directory
+failed; `/tmp` is the pinned mkosi sandbox's actual mount target. The workflow
+still exits 1 because its original unprivileged user-namespace checks fail.
+No mkosi sandbox, authenticated package installation, or complete image build
+ran. This is a possible root-owned builder capability, not proof that the
+offline build boundary or resulting artifact is safe.
+
+A separate locked, offline build in the emulated `linux/amd64` managed
+container produced five **unsigned candidate binaries** from repository commit
+`5afdbe2`. They are ELF x86-64 inputs for later review, not a reproducible
+image, boot evidence, or an approved release. The local, ignored output is
+`.codex-tmp/gcp-guest-binaries-5afdbe2`; SHA-256 values are:
+
+| Binary | SHA-256 |
+| --- | --- |
+| `zrpc-gcp-cookie` | `ece15c31e1c0fa123316b208b1d69a208f19aecf8cabf4c5191946248ded749f` |
+| `zrpc-gcp-early-init` | `a91fec6ed83727ce76216824dca6de76d9ddf1ed9c0d827d168c6c1d497559a3` |
+| `zrpc-gcp-guard` | `a1e5a09f61dcc097fc3556346bf41465482b226f1684407b4bf26f901c74fe25` |
+| `zrpc-gcp-quote-broker` | `021c0f4844fb173c0b48a444d3c1323c42117b61ce9f3a875d0a7b1ac78990a5` |
+| `zrpc-node-wrapper` | `5bd17278b188684cc43ec4a54e00f063f383bd619747e5f51eac4070c821f875` |
+
+An escalated local recheck created a disposable 64 MiB case-sensitive APFS
+image, but `hdiutil attach` still returned `Permission denied` at the
+project-local mountpoint. `hdiutil info` and the mount table showed no attached
+image; the image and empty mountpoint were removed. The case-sensitive staging
+problem remains open independently of the x86 namespace problem.
