@@ -36,7 +36,7 @@ class CandidateTests(unittest.TestCase):
                 self.synthetic_deb_sha = hashlib.sha256(self.synthetic_deb).hexdigest()
                 (self.inputs / "debs").mkdir()
                 (self.inputs / "debs" / (self.synthetic_deb_sha + ".deb")).write_bytes(self.synthetic_deb)
-                data = json.dumps([{"name": name, "version": "1.0~synthetic", "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_1.0~synthetic_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"} for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup")]).encode()
+                data = json.dumps([{"name": name, "version": "1.0~synthetic", "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_1.0~synthetic_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"} for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved")]).encode()
             else:
                 data = b"SYNTHETIC_NOT_A_SIGNED_ARTIFACT"
             (self.inputs / role).write_bytes(data)
@@ -72,7 +72,7 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("--check wrapper", wrapper)
         config = (output / "mkosi.conf").read_text()
         self.assertIn("PackageDirectories=packages", config)
-        self.assertIn("Packages=systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd=1.0~synthetic", config)
+        self.assertIn("Packages=systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic", config)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
         self.assertNotIn("CopyFiles=/boot:/", esp)
@@ -143,8 +143,8 @@ class CandidateTests(unittest.TestCase):
         paths = {"snapshot_inrelease": release, "packages_index": index}
         with mock.patch.object(prepare.debian_snapshot, "verify_signature"):
             snapshot, archives = prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
-            self.assertEqual(snapshot["package_count"], 3)
-            self.assertEqual(len(archives), 3)
+            self.assertEqual(snapshot["package_count"], 4)
+            self.assertEqual(len(archives), 4)
             index.write_bytes(index.read_bytes() + b"TAMPER")
             with self.assertRaisesRegex(ValueError, "index differs"):
                 prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
@@ -166,14 +166,21 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare.validate_lock(self.lock, self.inputs)
 
+    def test_missing_resolved_package_is_rejected(self):
+        path = self.inputs / "package_manifest"
+        packages = json.loads(path.read_text())
+        path.write_text(json.dumps([p for p in packages if p["name"] != "systemd-resolved"]))
+        self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
+        with self.assertRaisesRegex(ValueError, "guest package surface"):
+            prepare.validate_lock(self.lock, self.inputs)
+
     def test_duplicate_fields_cannot_override_a_digest(self):
         path = self.root / "duplicate.json"
         path.write_text('{"sha256":"first","sha256":"second"}')
         with self.assertRaises(ValueError):
             prepare.read_json(path)
 
-    def test_rootfs_audit_rejects_admin_and_boot_companions(self):
-        self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
+    def synthetic_guest_root(self):
         root = self.root / "synthetic-root"
         (root / "etc/systemd/system").mkdir(parents=True)
         (root / "usr/lib/zrpc").mkdir(parents=True)
@@ -185,6 +192,29 @@ class CandidateTests(unittest.TestCase):
         for name in prepare.BINARIES.values():
             (root / "usr/lib/zrpc" / name).write_text("SYNTHETIC")
             (root / "usr/lib/zrpc" / name).chmod(0o555)
+        return root
+
+    def test_rootfs_audit_rejects_base_tree_kernel_cmdline(self):
+        root = self.synthetic_guest_root()
+        audit_rootfs.audit(root)
+        # These represent files inherited from a checksum-pinned base tree.
+        # Both regular files and dangling links can become mkosi cmdline input.
+        for name in ("etc/kernel/cmdline", "usr/lib/kernel/cmdline"):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("init=/bin/sh\n")
+            with self.assertRaisesRegex(ValueError, "unreviewed kernel command line source"):
+                audit_rootfs.audit(root)
+            path.unlink()
+            path.symlink_to("/nonexistent/cmdline")
+            with self.assertRaisesRegex(ValueError, "unreviewed kernel command line source"):
+                audit_rootfs.audit(root)
+            path.unlink()
+        audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_admin_and_boot_companions(self):
+        self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
+        root = self.synthetic_guest_root()
         audit_rootfs.audit(root)
         group = root / "etc/group"
         good_group = group.read_text()

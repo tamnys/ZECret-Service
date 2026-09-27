@@ -124,7 +124,7 @@ def validate_lock(lock, source):
         if set(package) != {"name", "version", "architecture", "filename", "size", "sha256", "path"} or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package["name"]) or not re.fullmatch(r"[0-9][A-Za-z0-9.+:~-]*", package["version"]) or not re.fullmatch("[0-9a-f]{64}", package["sha256"]) or package["name"] in names:
             raise ValueError("invalid package identity")
         names.add(package["name"])
-    if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup"} <= names:
+    if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved"} <= names:
         raise ValueError("guest package surface does not match appliance policy")
     runtime = lock["runtime"]
     if set(runtime) != {"listen_port", "max_connections", "max_quotes", "quote_spacing_ms", "node_startup_timeout_secs", "node_poll_interval_ms"} or any(type(value) is not int or value <= 0 for value in runtime.values()) or runtime["listen_port"] > 65535:
@@ -199,7 +199,7 @@ def stage(lock_path, source, destination):
         else:
             entry = {"type": "directory", "mode": path.stat().st_mode & 0o777}
         entries[str(path.relative_to(destination))] = entry
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["complete installed package closure comparison after build", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["complete installed package closure comparison after build", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     (destination / "candidate-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
