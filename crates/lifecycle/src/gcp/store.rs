@@ -1,6 +1,10 @@
 //! Append-only, fsync-backed journal with an exclusive cooperating-writer lock.
 //! Hostile rollback by the operator UID is outside the external-host trust model.
-use super::{Error, Result, digest, package::Package, read_regular, valid_digest, valid_uuid};
+use super::{
+    Error, Result, digest,
+    package::{Artifact, Package},
+    read_regular, valid_digest, valid_uuid,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, DirBuilder, File, OpenOptions},
@@ -196,6 +200,23 @@ impl Store {
     }
     pub fn journal(&self) -> &Journal {
         &self.journal
+    }
+    /// Preserve a reviewed billing artifact's identity after cleanup. This
+    /// records evidence only; it cannot establish invoice finality.
+    pub fn record_billing_evidence(&mut self, evidence: &Artifact) -> Result<()> {
+        evidence.verify()?;
+        if let Some(existing) = &self.journal.billing_evidence_sha256 {
+            return if existing == &evidence.sha256 {
+                Ok(())
+            } else {
+                Err(Error(
+                    "billing evidence reference cannot be changed or removed",
+                ))
+            };
+        }
+        let mut next = self.journal.clone();
+        next.billing_evidence_sha256 = Some(evidence.sha256.clone());
+        self.commit(next)
     }
     pub fn commit(&mut self, mut next: Journal) -> Result<()> {
         if self.poisoned {

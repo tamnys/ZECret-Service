@@ -289,7 +289,18 @@ async fn billing_reference_is_post_cleanup_append_only_and_never_changes_status(
     let f = Fixture::new();
     let mut store = Store::open(&f.state).unwrap();
     let mut provider = f.mock();
-    let hash = digest(b"synthetic billing evidence, not reconciliation");
+    let bytes = b"synthetic billing evidence, not reconciliation";
+    let evidence_path = f.root.join("billing-evidence");
+    fs::write(&evidence_path, bytes).unwrap();
+    let hash = digest(bytes);
+    let evidence = Artifact {
+        path: evidence_path.clone(),
+        sha256: hash.clone(),
+    };
+
+    let initial_generation = store.journal().generation;
+    assert!(store.record_billing_evidence(&evidence).is_err());
+    assert_eq!(store.journal().generation, initial_generation);
 
     let mut early = store.journal().clone();
     early.billing_evidence_sha256 = Some(hash.clone());
@@ -319,15 +330,22 @@ async fn billing_reference_is_post_cleanup_append_only_and_never_changes_status(
     malformed.billing_evidence_sha256 = Some("not-a-sha256".into());
     assert!(store.commit(malformed).is_err());
 
-    let mut recorded = store.journal().clone();
-    recorded.billing_evidence_sha256 = Some(hash.clone());
-    store.commit(recorded).unwrap();
+    let mut wrong_digest = evidence.clone();
+    wrong_digest.sha256 = digest(b"other bytes");
+    assert!(store.record_billing_evidence(&wrong_digest).is_err());
+    assert!(store.journal().billing_evidence_sha256.is_none());
+    store.record_billing_evidence(&evidence).unwrap();
+    let recorded_generation = store.journal().generation;
+    store.record_billing_evidence(&evidence).unwrap();
+    assert_eq!(store.journal().generation, recorded_generation);
     let mut replaced = store.journal().clone();
     replaced.billing_evidence_sha256 = Some(digest(b"replacement"));
     assert!(store.commit(replaced).is_err());
     let mut removed = store.journal().clone();
     removed.billing_evidence_sha256 = None;
     assert!(store.commit(removed).is_err());
+    fs::write(evidence_path, b"changed billing evidence").unwrap();
+    assert!(store.record_billing_evidence(&evidence).is_err());
     assert_eq!(
         teardown_once(&mut store, &mut provider, 1002)
             .await
