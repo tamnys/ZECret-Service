@@ -188,13 +188,17 @@ installed package set observable rather than inheriting unreviewed binaries
 from a prebuilt root. The authenticated 94-package APT result is only a
 candidate for that bootstrap; the builder still needs an actual isolated run,
 exact archive/toolchain verification, and an installed-package comparison.
+Pinned mkosi invokes `depmod` during image assembly; the 94-package candidate
+does not include the `kmod` package that supplies it, so that candidate cannot
+yet be treated as a build-ready package lock.
 
 The guest modules-load profile now requests `gve`, matching the Google NIC
 module in Debian's exact-version
 [cloud kernel file list](https://packages.debian.org/trixie/amd64/linux-image-6.12.107%2Bdeb13-cloud-amd64/filelist).
-The old `gvnic` name did not match that package. This is a source-profile
-correction, not validation of the selected kernel's configuration, signed
-modules, boot initramfs, or actual Google TDX boot.
+The old `gvnic` name did not match that package. The systemd-networkd driver
+match now uses `gve` too. This is a source-profile correction, not validation
+of the selected kernel's configuration, signed modules, boot initramfs, or
+actual Google TDX boot.
 
 Pinned mkosi defaults to appending a generated kernel-modules initrd to every
 direct UKI; with no filter it copies the installed module tree. The source

@@ -1,5 +1,5 @@
 [Match]
-Driver=gvnic
+Driver=gve
 
 [Network]
 DHCP=ipv4
