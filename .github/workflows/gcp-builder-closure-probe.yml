@@ -463,6 +463,75 @@ jobs:
               raise ValueError("root BaseTrees extraction changed diagnostic status")
           print(json.dumps(report, sort_keys=True))
           PY
+            # This separate diagnostic profile snapshots the signed-source
+            # BaseTrees tar and configures custom mkosi with no packages. It
+            # cannot emit a UKI, disk, initrd, or private-mode approval.
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import prepare_guest_basetree_profile as diagnostic
+
+          metadata = Path("/zrpc-metadata")
+          archives = Path("/zrpc-guest-archives")
+          artifact = Path("/zrpc-guest-payload-parent/root-basetree")
+          profile = Path("/zrpc-guest-payload-parent/mkosi-root-profile")
+          workspace = Path("/zrpc-guest-payload-parent")
+          prepared = diagnostic.prepare_profile(
+              metadata, archives, artifact, profile, workspace,
+          )
+          checked = diagnostic.verify_profile(
+              metadata, archives, artifact, profile, workspace,
+          )
+          if (prepared != checked or prepared["status"] != diagnostic.STATUS
+                  or prepared["package_install_configured"] is not False
+                  or prepared["package_scripts_executed"] is not False
+                  or prepared["root_directory_built"] is not False
+                  or prepared["disk_image_built"] is not False
+                  or prepared["boot_verified"] is not False
+                  or prepared["private_mode_approved"] is not False):
+              raise ValueError("mkosi BaseTrees profile changed diagnostic status")
+          print(json.dumps(prepared, sort_keys=True))
+          PY
+            profile_input="$staged/zrpc-guest-payload-parent/mkosi-root-profile/input"
+            mount --bind "$profile_input" "$profile_input"
+            mount -o remount,bind,ro "$profile_input"
+            test "$(findmnt -n -o OPTIONS --target "$profile_input" | tr , '\n' | grep -x ro)" = ro
+            run_staged_root() {
+              /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+                LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                "$chroot_command" "$staged" "$@"
+            }
+            # Pinned mkosi still runs its sysusers/tmpfiles/preset/depmod/
+            # firstboot/hwdb and output stages. This exercises those stages
+            # only for a root directory, which remains unaudited and unbootable.
+            run_staged_root /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import prepare_guest_basetree_profile as diagnostic
+
+          result = diagnostic.build_root_directory(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+              Path("/zrpc-guest-payload-parent/root-basetree"),
+              Path("/zrpc-guest-payload-parent/mkosi-root-profile"),
+              Path("/zrpc-guest-payload-parent"),
+          )
+          if (result["status"] != "diagnostic-root-directory-built-unapproved"
+                  or result["package_install_configured"] is not False
+                  or result["package_scripts_executed"] is not False
+                  or result["root_directory_built"] is not True
+                  or result["post_mkosi_tree_audited"] is not False
+                  or result["disk_image_built"] is not False
+                  or result["boot_verified"] is not False
+                  or result["private_mode_approved"] is not False):
+              raise ValueError("mkosi root directory changed diagnostic status")
+          print(json.dumps(result, sort_keys=True))
+          PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"
             run_staged /lib64/ld-linux-x86-64.so.2 --list /usr/bin/systemd-repart
