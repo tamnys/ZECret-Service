@@ -315,12 +315,34 @@ class DigestSink:
         return len(data)
 
 
+def artifact_identity(info):
+    """Fields that must remain fixed while signed-source bytes are checked."""
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def check_artifact_metadata(info, *, directory, label):
+    expected_mode = 0o700 if directory else 0o600
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if (not expected_type(info.st_mode) or stat.S_IMODE(info.st_mode) != expected_mode
+            or info.st_uid != os.geteuid() or (not directory and info.st_nlink != 1)):
+        raise ValueError(f"{label} ownership, type, links, or mode differs")
+
+
+def require_stable(descriptor, before, label):
+    if artifact_identity(os.fstat(descriptor)) != artifact_identity(before):
+        raise ValueError(f"{label} changed during verification")
+
+
 def verify(metadata, archives, artifact):
     authenticated = preflight.authenticated_archives(Path(metadata), Path(archives))
     payloads, entries = selected_source_plan(authenticated)
     artifact = Path(artifact)
     directory = guest.open_directory(artifact, "initrd BaseTrees input")
     try:
+        directory_info = os.fstat(directory)
+        check_artifact_metadata(directory_info, directory=True,
+                                label="initrd BaseTrees input directory")
         if set(os.listdir(directory)) != {ARCHIVE, MANIFEST}:
             raise ValueError("initrd BaseTrees input contains unreviewed files")
         sink = DigestSink()
@@ -329,9 +351,12 @@ def verify(metadata, archives, artifact):
                              dir_fd=directory)
         with os.fdopen(descriptor, "rb") as stream:
             info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size != sink.size:
+            check_artifact_metadata(info, directory=False,
+                                    label="initrd BaseTrees archive")
+            if info.st_size != sink.size:
                 raise ValueError("initrd BaseTrees archive size differs")
             observed_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+            require_stable(stream.fileno(), info, "initrd BaseTrees archive")
             if observed_sha256 != sink.digest.hexdigest():
                 raise ValueError("initrd BaseTrees archive differs from signed package data")
         expected = canonical_bytes(source_manifest(authenticated, entries,
@@ -339,11 +364,16 @@ def verify(metadata, archives, artifact):
         descriptor = os.open(MANIFEST, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
                              dir_fd=directory)
         with os.fdopen(descriptor, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                raise ValueError("initrd BaseTrees manifest is not regular")
+            manifest_info = os.fstat(stream.fileno())
+            check_artifact_metadata(manifest_info, directory=False,
+                                    label="initrd BaseTrees manifest")
             observed = stream.read(len(expected) + 1)
-            if observed != expected or stream.read(1):
+            require_stable(stream.fileno(), manifest_info, "initrd BaseTrees manifest")
+            if observed != expected:
                 raise ValueError("initrd BaseTrees manifest differs from signed source plan")
+        require_stable(directory, directory_info, "initrd BaseTrees input directory")
+        if artifact_identity(os.stat(artifact, follow_symlinks=False)) != artifact_identity(directory_info):
+            raise ValueError("initrd BaseTrees input directory changed during verification")
     finally:
         os.close(directory)
     return {"status": STATUS, "archive_sha256": observed_sha256,

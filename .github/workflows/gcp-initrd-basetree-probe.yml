@@ -1,6 +1,19 @@
 name: GCP initrd BaseTrees input probe
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/gcp-initrd-basetree-probe.yml
+      - deploy/gcp/guest/package-closure.lock.json
+      - tools/gcp-guest/assemble_guest_base_tree.py
+      - tools/gcp-guest/assemble_initrd_base_tree.py
+      - tools/gcp-guest/debian_snapshot.py
+      - tools/gcp-guest/fetch_guest_closure.py
+      - tools/gcp-guest/preflight_guest_base_tree.py
+      - tools/gcp-guest/prepare.py
+      - tools/gcp-guest/stage_builder_toolchain.py
+      - tools/gcp-guest/test_assemble_initrd_base_tree.py
+      - tools/gcp-guest/trust/**
   workflow_dispatch:
 
 permissions: {}
@@ -9,6 +22,8 @@ jobs:
   initrd-input:
     name: Signed Debian data-only initrd input on native x86
     runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Fetch the exact public source commit
         shell: bash
@@ -21,8 +36,8 @@ jobs:
           mkdir "$source"
           git -C "$source" init -q
           git -C "$source" fetch -q --no-tags --depth=1 \
-            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
-          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" checkout -q --detach FETCH_HEAD
 
       - name: Authenticate inputs and assemble only inert package data

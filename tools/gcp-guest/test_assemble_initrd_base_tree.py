@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -127,6 +128,48 @@ class InitrdInputAssemblyTests(unittest.TestCase):
             manifest.write_bytes(candidate.canonical_bytes(record))
             with self.assertRaisesRegex(ValueError, "manifest differs"):
                 candidate.verify(self.metadata, self.archives, self.artifact)
+
+    def test_artifact_permissions_and_owner_are_required(self):
+        with (mock.patch.object(candidate.preflight, "authenticated_archives",
+                                return_value=self.authenticated()),
+              mock.patch.object(candidate, "selected_source_plan", side_effect=self.plan)):
+            candidate.assemble(self.metadata, self.archives, self.artifact, self.workspace)
+            for path, label, changed_mode, original_mode in (
+                (self.artifact, "directory", 0o755, 0o700),
+                (self.artifact / candidate.ARCHIVE, "archive", 0o644, 0o600),
+                (self.artifact / candidate.MANIFEST, "manifest", 0o644, 0o600),
+            ):
+                with self.subTest(path=path):
+                    path.chmod(changed_mode)
+                    with self.assertRaisesRegex(ValueError, f"{label} ownership"):
+                        candidate.verify(self.metadata, self.archives, self.artifact)
+                    path.chmod(original_mode)
+            info = (self.artifact / candidate.ARCHIVE).stat()
+            foreign = SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1,
+                                      st_nlink=info.st_nlink)
+            with self.assertRaisesRegex(ValueError, "archive ownership"):
+                candidate.check_artifact_metadata(foreign, directory=False,
+                                                  label="initrd BaseTrees archive")
+
+    def test_archive_metadata_change_during_read_rejects(self):
+        with (mock.patch.object(candidate.preflight, "authenticated_archives",
+                                return_value=self.authenticated()),
+              mock.patch.object(candidate, "selected_source_plan", side_effect=self.plan)):
+            candidate.assemble(self.metadata, self.archives, self.artifact, self.workspace)
+            archive = self.artifact / candidate.ARCHIVE
+            before = archive.stat()
+            real_digest = candidate.hashlib.file_digest
+
+            def change_metadata_after_read(stream, algorithm):
+                result = real_digest(stream, algorithm)
+                os.utime(archive, ns=(before.st_atime_ns,
+                                      before.st_mtime_ns + 1_000_000_000))
+                return result
+
+            with mock.patch.object(candidate.hashlib, "file_digest",
+                                   side_effect=change_metadata_after_read):
+                with self.assertRaisesRegex(ValueError, "archive changed during verification"):
+                    candidate.verify(self.metadata, self.archives, self.artifact)
 
     def test_authentication_error_and_existing_artifact_fail_closed(self):
         with mock.patch.object(candidate.preflight, "authenticated_archives",
