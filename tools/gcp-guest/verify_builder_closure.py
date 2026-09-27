@@ -46,6 +46,7 @@ LOADER_OBJECT = re.compile(r"\s*(/proc/self/fd/[0-9]+) \(0x[0-9a-f]+\)\Z")
 LOADER_INTERPRETER = re.compile(
     r"\s*/lib64/ld-linux-x86-64\.so\.2 => (/proc/self/fd/[0-9]+) \(0x[0-9a-f]+\)\Z"
 )
+LOADER_VDSO = re.compile(r"\tlinux-vdso\.so\.1 \(0x[0-9a-f]+\)\Z")
 # Exact SONAME providers observed for apt-get 3.0.3 in the reviewed signed
 # snapshot. A new resolver or dependency graph requires source review.
 APT_ELF_PROVIDERS = (
@@ -235,18 +236,25 @@ def sealed_elf_bytes(data):
 
 
 def check_loader_report(result, loader, preloads):
-    """Reject any loader-reported file object outside the sealed fds."""
+    """Reject file objects outside the sealed fds; identify the kernel vDSO."""
     if result.returncode != 0 or result.stderr.strip():
         raise ValueError("signed APT ELF loader inspection failed")
     expected = {str(loader), *(str(path) for path in preloads)}
     found = []
-    for line in result.stdout.splitlines():
+    vdso_observed = False
+    for index, line in enumerate(result.stdout.splitlines()):
+        if LOADER_VDSO.fullmatch(line):
+            if index != 0 or vdso_observed:
+                raise ValueError("duplicate or relocated kernel vDSO loader report")
+            vdso_observed = True
+            continue
         match = LOADER_INTERPRETER.fullmatch(line) or LOADER_OBJECT.fullmatch(line)
         if match is None:
             raise ValueError("unrecognized signed APT ELF loader report")
         found.append(match.group(1))
     if len(found) != len(expected) or set(found) != expected:
         raise ValueError("signed APT ELF loader used missing or ambient objects")
+    return vdso_observed
 
 
 def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot, runtime_archives):
@@ -308,12 +316,12 @@ def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot, runtime
                 [*prefix, "--list", str(program)], capture_output=True, text=True,
                 check=False, pass_fds=file_descriptors, env=env,
             )
-            check_loader_report(inspection, loader, preloads)
+            vdso_observed = check_loader_report(inspection, loader, preloads)
             result = subprocess.run(
                 [*prefix, str(program), *arguments], capture_output=True, text=True,
                 check=False, pass_fds=file_descriptors, env=env,
             )
-    return parse_apt_plan(result)
+    return parse_apt_plan(result), vdso_observed
 
 
 def verify(inrelease, packages_index, archive_dir, apt_get, scratch, *,
@@ -396,8 +404,8 @@ def verify(inrelease, packages_index, archive_dir, apt_get, scratch, *,
     if (len(extracted) != resolver["executable_size"]
             or hashlib.sha256(extracted).hexdigest() != resolver["executable_sha256"]):
         raise ValueError("APT resolver executable differs from signed apt archive")
-    resolved = apt_plan(index_bytes, scratch, apt_get, resolver, anchors,
-                        lock["snapshot"], runtime_archives)
+    resolved, vdso_observed = apt_plan(index_bytes, scratch, apt_get, resolver, anchors,
+                                      lock["snapshot"], runtime_archives)
     if selected != resolved:
         raise ValueError("builder closure differs from offline APT package plan")
     return {
@@ -410,6 +418,11 @@ def verify(inrelease, packages_index, archive_dir, apt_get, scratch, *,
         "apt_resolver_binary_matches_signed_package": True,
         "apt_loader_reported_file_objects_from_signed_archives": True,
         "apt_loader_reported_file_object_count": len(APT_ELF_PROVIDERS) + 1,
+        "apt_kernel_vdso": {
+            "observed": vdso_observed,
+            "disk_authenticated": False,
+            "reason": "kernel-provided virtual ELF object, not a Debian disk file",
+        },
         "apt_post_start_elf_loads_verified": False,
         "complete_builder_toolchain": False,
         "image_built": False,
