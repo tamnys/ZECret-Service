@@ -22,9 +22,11 @@ import subprocess
 TRUST = Path(__file__).with_name("trust")
 KEYRING = TRUST / "debian-trixie-signers.gpg"
 KEYRING_SHA256 = "c042cf3ba41a234f709a6f50053ce3c23031d2d4f109a563ffc1193403b26895"
+KEYRING_SIZE = 18360  # reviewed, committed binary keyring
 # Debian trixie gpgv 2.4.7-21+deb13u1+b5 amd64, extracted without scripts
 # from the package whose archive hash is bound by the signed Packages.xz.
 GPGV_SHA256 = "3f29dddc10e4089aeac5b2675313f4e5fe822abe5ab3bf7898d238c32d758304"
+GPGV_SIZE = 532840  # /usr/bin/gpgv in that signed Debian package
 TRIXIE_ARCHIVE_FINGERPRINT = "04B54C3CDCA79751B16BC6B5225629DF75B188BD"
 INDEX_PATH = "main/binary-amd64/Packages.xz"
 SOURCE_INDEX_PATH = "main/source/Sources.xz"
@@ -67,18 +69,62 @@ def bounded_regular_bytes(path, maximum, label):
     return data
 
 
+@contextmanager
+def sealed_reviewed_file(path, expected_sha256, expected_size, label, *, executable=False):
+    """Hash the exact copied bytes, then keep them immutable for the child.
+
+    This pins the executable and public keyring, not their dynamic libraries.
+    The builder's complete toolchain closure remains a separate release gate.
+    """
+    source = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(source)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+            raise ValueError(f"{label} differs from reviewed input identity")
+        sealed = os.memfd_create("zrpc-reviewed-input", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        try:
+            digest = hashlib.sha256()
+            remaining = expected_size
+            while remaining:
+                chunk = os.read(source, min(remaining, 1024 * 1024))
+                if not chunk:
+                    raise ValueError(f"{label} changed during verification")
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(sealed, view)
+                    if written == 0:
+                        raise OSError(f"{label} could not be copied into sealed memory")
+                    view = view[written:]
+                remaining -= len(chunk)
+            after = os.fstat(source)
+            before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            if os.read(source, 1) or before_identity != after_identity:
+                raise ValueError(f"{label} changed during verification")
+            if digest.hexdigest() != expected_sha256:
+                raise ValueError(f"{label} differs from reviewed input identity")
+            os.fchmod(sealed, 0o500 if executable else 0o400)
+            fcntl.fcntl(sealed, fcntl.F_ADD_SEALS,
+                        fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+            yield Path(f"/proc/self/fd/{sealed}"), sealed
+        finally:
+            os.close(sealed)
+    finally:
+        os.close(source)
+
+
 def verify_signature(inrelease, *, pass_fds=()):
-    if sha256(KEYRING) != KEYRING_SHA256:
-        raise ValueError("Debian trust keyring differs from reviewed identity")
     executable = shutil.which("gpgv")
     if executable is None:
         raise ValueError("gpgv is required for Debian archive authentication")
-    if sha256(Path(executable)) != GPGV_SHA256:
-        raise ValueError("gpgv executable differs from reviewed input identity")
-    result = subprocess.run(
-        [executable, "--status-fd", "1", "--keyring", str(KEYRING), str(inrelease)],
-        capture_output=True, text=True, check=False, pass_fds=pass_fds,
-    )
+    with sealed_reviewed_file(KEYRING, KEYRING_SHA256, KEYRING_SIZE, "Debian trust keyring") as (keyring, keyring_fd):
+        with sealed_reviewed_file(Path(executable), GPGV_SHA256, GPGV_SIZE, "gpgv executable", executable=True) as (program, program_fd):
+            result = subprocess.run(
+                [str(program), "--status-fd", "1", "--keyring", str(keyring), str(inrelease)],
+                capture_output=True, text=True, check=False,
+                pass_fds=(*pass_fds, keyring_fd, program_fd),
+            )
     signatures = []
     for line in result.stdout.splitlines():
         if line.startswith("[GNUPG:] VALIDSIG "):
