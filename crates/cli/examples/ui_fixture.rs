@@ -7,11 +7,11 @@ async fn main() {
         .await
         .unwrap();
     let session = if std::env::var_os("ZRPC_BROWSER_LIVE").is_some() {
-        let config = zrpc_client::inspection::PublicInspectionConfig::for_platform(
+        let config = zrpc_client::inspection::PrivateEndpointConfig::for_platform(
             zrpc_protocol::Backend::GcpTdx,
             "192.0.2.1",
             443,
-            "127.0.0.1:9",
+            "/missing/local/tor",
         )
         .unwrap();
         zrpc_cli::LocalSession::new_live(

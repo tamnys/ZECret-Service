@@ -1,6 +1,6 @@
 //! TLS handshake possession is not attested server identity or query authority.
 
-use crate::{RequirePassword, UnverifiedChannel};
+use crate::{ProxySocket, RequirePassword, TransportOrigin, UnverifiedChannel};
 use rustls::{
     ClientConfig, DigitallySignedStruct, Error, HandshakeKind, SignatureScheme,
     client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
@@ -12,7 +12,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 use tokio_socks::tcp::Socks5Stream;
 use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
@@ -23,7 +22,7 @@ pub use attestation::{
     VerifiedRpcSession,
 };
 
-type BootstrapStream = TlsStream<Socks5Stream<RequirePassword<TcpStream>>>;
+type BootstrapStream = TlsStream<Socks5Stream<RequirePassword<ProxySocket>>>;
 
 // Design §7 limits each connection to five minutes before a new handshake and
 // challenge. This is an upper lifetime bound, not evidence of quote freshness.
@@ -113,6 +112,7 @@ impl UnverifiedChannel {
     /// This verifies TLS key possession only. No certificate identity is trusted.
     pub async fn start_tls(self) -> Result<PublicBootstrapTls, SafeError> {
         let socket = self.socket.ok_or_else(unavailable)?;
+        self.origin.ensure_usable()?;
         let authority = self.authority.ok_or_else(unavailable)?;
         let name = ServerName::try_from(self.server_name.ok_or_else(unavailable)?)
             .map_err(|_| unavailable())?;
@@ -135,6 +135,7 @@ impl UnverifiedChannel {
             stream,
             established: Instant::now(),
             authority,
+            origin: self.origin,
         })
     }
 }
@@ -163,6 +164,7 @@ pub struct PublicBootstrapTls {
     stream: BootstrapStream,
     established: Instant,
     authority: String,
+    origin: TransportOrigin,
 }
 
 impl PublicBootstrapTls {

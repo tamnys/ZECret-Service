@@ -1,6 +1,7 @@
 //! One nonce-only public request on the challenge's original TLS connection.
 
 use super::{BootstrapStream, MAX_CONNECTION_LIFETIME, PendingChallenge, unavailable};
+use crate::TransportOrigin;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Request, StatusCode, Version, client::conn::http1, header};
@@ -8,7 +9,9 @@ use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    fmt, io,
+    fmt,
+    future::Future,
+    io,
     pin::Pin,
     sync::{Arc, OnceLock},
     task::{Context, Poll},
@@ -96,6 +99,7 @@ struct OwnedHttpSession {
     sender: http1::SendRequest<Full<Bytes>>,
     driver: tokio::task::JoinHandle<()>,
     private_deadline: Arc<OnceLock<PrivateDeadline>>,
+    origin: TransportOrigin,
 }
 
 // The timer around an HTTP future is not a write barrier: Tokio polls the
@@ -105,11 +109,13 @@ struct DeadlineIo {
     stream: BootstrapStream,
     deadline: Instant,
     private_deadline: Arc<OnceLock<PrivateDeadline>>,
+    origin: TransportOrigin,
 }
 
 impl DeadlineIo {
     fn check_deadline(&self) -> io::Result<()> {
-        if Instant::now() >= self.deadline
+        if self.origin.ensure_usable().is_err()
+            || Instant::now() >= self.deadline
             || self
                 .private_deadline
                 .get()
@@ -226,6 +232,7 @@ impl PendingChallenge {
         let nonce = self.nonce;
         let established = self.tls.established;
         let authority = self.tls.authority.clone();
+        let origin = self.tls.origin.clone();
         let deadline = established
             .checked_add(MAX_CONNECTION_LIFETIME)
             .ok_or_else(expired)?;
@@ -261,6 +268,7 @@ impl PendingChallenge {
             stream: self.tls.stream,
             deadline,
             private_deadline: Arc::clone(&private_deadline),
+            origin: origin.clone(),
         }))
         .await
         .map_err(|_| unavailable())?;
@@ -270,6 +278,7 @@ impl PendingChallenge {
                 let _ = connection.await;
             }),
             private_deadline,
+            origin,
         };
         let response = session
             .sender
@@ -428,6 +437,7 @@ impl VerifiedRpcSession {
         authority: String,
         collateral_deadline: PrivateDeadline,
     ) -> Result<Self, SafeError> {
+        session.origin.require_managed()?;
         session
             .private_deadline
             .set(collateral_deadline)
@@ -453,6 +463,7 @@ impl VerifiedRpcSession {
     }
 
     fn ensure_private_ready(&self) -> Result<(), SafeError> {
+        self.session.origin.require_managed()?;
         self.ensure_lifetimes()?;
         if self.session.sender.is_closed() || self.session.driver.is_finished() {
             return Err(expired());
@@ -466,8 +477,19 @@ impl VerifiedRpcSession {
         self,
         body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
     ) -> Result<Value, SafeError> {
+        self.query_from_body_async(|| async move { body() }).await
+    }
+
+    /// Async local body sources, such as the dashboard's HTTP request stream,
+    /// are polled only while the managed Tor lease is still usable. A second
+    /// check in `query` guards the wire write after body collection.
+    pub async fn query_from_body_async<F, Fut>(self, body: F) -> Result<Value, SafeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, SafeError>>,
+    {
         self.ensure_private_ready()?;
-        let request = parse_request(&body()?)?;
+        let request = parse_request(&body().await?)?;
         self.query(&request).await
     }
 
@@ -690,6 +712,7 @@ mod deadline_tests {
             stream: client.unwrap().stream,
             deadline: Instant::now(),
             private_deadline: Arc::new(OnceLock::new()),
+            origin: TransportOrigin::DiagnosticTcp,
         };
         assert_eq!(
             io.write_all(b"SYNTHETIC_PRIVATE_CANARY")
@@ -709,6 +732,7 @@ mod deadline_tests {
             stream: client.unwrap().stream,
             deadline: Instant::now(),
             private_deadline: Arc::new(OnceLock::new()),
+            origin: TransportOrigin::DiagnosticTcp,
         };
         let (mut sender, connection) = http1::handshake(TokioIo::new(io)).await.unwrap();
         let driver = tokio::spawn(async move { connection.await });
@@ -729,6 +753,7 @@ mod deadline_tests {
             stream: client.unwrap().stream,
             deadline: Instant::now() + MAX_CONNECTION_LIFETIME,
             private_deadline: Arc::clone(&private_deadline),
+            origin: TransportOrigin::DiagnosticTcp,
         };
         // Synthetic deadline injected after the TLS connection exists. This
         // tests the I/O barrier, not quote validity or release approval.

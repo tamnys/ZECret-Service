@@ -11,7 +11,7 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use zrpc_client::inspection::PublicInspectionConfig;
+use zrpc_client::inspection::PrivateEndpointConfig;
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_verifier::ReleasePolicy;
 
@@ -80,7 +80,7 @@ impl LiveVerification {
 
 /// Files and endpoint settings are loaded by the native CLI, not the browser.
 pub struct LiveConfiguration {
-    config: PublicInspectionConfig,
+    config: PrivateEndpointConfig,
     collateral: Vec<u8>,
     compose: Vec<u8>,
     policy: ReleasePolicy,
@@ -88,7 +88,7 @@ pub struct LiveConfiguration {
 
 impl LiveConfiguration {
     pub fn new(
-        config: PublicInspectionConfig,
+        config: PrivateEndpointConfig,
         collateral: Vec<u8>,
         compose: Vec<u8>,
         policy: ReleasePolicy,
@@ -248,23 +248,20 @@ async fn query(State(session): State<LocalSession>, request: Request) -> Respons
                 "platform":live.config.platform(),
                 "verification":LiveVerification::rejected(),"chain_readiness":"not_checked","result":null})).into_response(),
         };
-        let body = match to_bytes(body, MAX_BODY).await {
-            Ok(body) => body,
-            Err(_) => {
-                return (StatusCode::PAYLOAD_TOO_LARGE, "request body unavailable").into_response();
-            }
-        };
-        let request = match zrpc_protocol::parse_request(&body) {
-            Ok(request) => request,
-            Err(error) => {
-                return Json(
-                    json!({"mode":"private_verified_invalid_request","simulation":false,
-                "private_accepted":true,"query_sent":false,"error":error,"result":null}),
-                )
-                .into_response();
-            }
-        };
-        return match session.query(&request).await {
+        let result = session
+            .query_from_body_async(move || async move {
+                to_bytes(body, MAX_BODY)
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|_| {
+                        zrpc_protocol::SafeError::new(
+                            zrpc_protocol::ErrorCode::RequestTooLarge,
+                            "Private request body unavailable or too large.",
+                        )
+                    })
+            })
+            .await;
+        return match result {
             Ok(result) => Json(
                 json!({"mode":"private","simulation":false,"private_accepted":true,
                 "platform":live.config.platform(),
@@ -272,8 +269,22 @@ async fn query(State(session): State<LocalSession>, request: Request) -> Respons
                 "query_sent":true,"error":null,"result":result}),
             )
             .into_response(),
+            Err(error) if error.code == zrpc_protocol::ErrorCode::RequestTooLarge => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "request body unavailable").into_response()
+            }
+            Err(error) if error.code == zrpc_protocol::ErrorCode::TorUnavailable => Json(
+                json!({"mode":"private_blocked","simulation":false,
+                "private_accepted":false,"query_sent":false,"error":error,"result":null}),
+            ).into_response(),
+            Err(error) if matches!(error.code,
+                zrpc_protocol::ErrorCode::InvalidRequest |
+                zrpc_protocol::ErrorCode::MethodNotAllowed |
+                zrpc_protocol::ErrorCode::InvalidParameters) => Json(
+                    json!({"mode":"private_verified_invalid_request","simulation":false,
+                    "private_accepted":false,"query_sent":false,"error":error,"result":null}),
+                ).into_response(),
             Err(error) => Json(
-                json!({"mode":"private_error","simulation":false,"private_accepted":true,
+                json!({"mode":"private_error","simulation":false,"private_accepted":false,
                 "query_sent":"unknown","error":error,"result":null}),
             )
             .into_response(),
@@ -471,8 +482,13 @@ mod tests {
             zrpc_protocol::Backend::GcpTdx,
         ] {
             let live = LiveConfiguration::new(
-                PublicInspectionConfig::for_platform(platform, "192.0.2.1", 443, "127.0.0.1:9")
-                    .unwrap(),
+                PrivateEndpointConfig::for_platform(
+                    platform,
+                    "192.0.2.1",
+                    443,
+                    "/missing/local/tor",
+                )
+                .unwrap(),
                 b"{}".to_vec(),
                 if platform == zrpc_protocol::Backend::PhalaDstack {
                     b"{}".to_vec()
@@ -510,11 +526,14 @@ mod tests {
             zrpc_protocol::Backend::GcpTdx,
             zrpc_protocol::Backend::PhalaDstack,
         ] {
-            let proxy_trap = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            proxy_trap.set_nonblocking(true).unwrap();
-            let socks = proxy_trap.local_addr().unwrap().to_string();
             let live = LiveConfiguration::new(
-                PublicInspectionConfig::for_platform(platform, "192.0.2.1", 443, &socks).unwrap(),
+                PrivateEndpointConfig::for_platform(
+                    platform,
+                    "192.0.2.1",
+                    443,
+                    "/missing/local/tor",
+                )
+                .unwrap(),
                 b"{}".to_vec(),
                 if platform == zrpc_protocol::Backend::PhalaDstack {
                     b"{}".to_vec()
@@ -547,10 +566,6 @@ mod tests {
                 assert_eq!(report["verification"][check], "not_checked");
             }
             assert_eq!(report["verification"]["release_approval"], "not_approved");
-            assert_eq!(
-                proxy_trap.accept().unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock
-            );
         }
     }
     #[test]

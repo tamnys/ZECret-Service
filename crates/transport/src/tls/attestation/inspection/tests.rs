@@ -7,6 +7,8 @@ use crate::tls::{
         connect_pair, server_config,
     },
 };
+#[cfg(unix)]
+use crate::{ManagedTor, TransportOrigin};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use zrpc_verifier::{
@@ -22,7 +24,7 @@ async fn synthetic_evidence_and_local_policy_cannot_send_a_private_body() {
         .authorize(b"{}", b"{}", &ReleasePolicy::default())
         .err()
         .expect("empty reviewed catalog must reject");
-    assert_eq!(error.code, zrpc_protocol::ErrorCode::UnknownRelease);
+    assert_eq!(error.code, zrpc_protocol::ErrorCode::TorUnavailable);
     drop(close);
     peer.await.unwrap();
 
@@ -35,9 +37,12 @@ async fn synthetic_evidence_and_local_policy_cannot_send_a_private_body() {
     peer.await.unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn phala_synthetic_session_expiry_prevents_body_read_and_transmission() {
-    let (evidence, close, peer) = received_fixture().await;
+    let (mut evidence, close, peer) = received_fixture().await;
+    let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+    evidence._session.origin = TransportOrigin::Managed(tor);
     // Unit-only construction bypasses the empty release catalog to exercise
     // the retained connection guard; it authenticates no synthetic quote.
     let session = VerifiedRpcSession::from_authenticated_inspection(

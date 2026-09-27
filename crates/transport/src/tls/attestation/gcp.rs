@@ -31,6 +31,7 @@ impl UnverifiedGcpEvidence {
         collateral: &[u8],
         selection: &ReleasePolicy,
     ) -> Result<VerifiedRpcSession, SafeError> {
+        self.connection.session.origin.require_managed()?;
         let releases = ApprovedRelease::selected(selection)?;
         if !releases
             .iter()
@@ -201,6 +202,8 @@ mod tests {
             connect_pair, server_config,
         },
     };
+    #[cfg(unix)]
+    use crate::{ManagedTor, TransportOrigin};
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
@@ -261,15 +264,18 @@ mod tests {
                 .err()
                 .unwrap()
                 .code,
-            ErrorCode::UnknownRelease
+            ErrorCode::TorUnavailable
         );
         peer.await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn gcp_synthetic_session_expiry_prevents_body_read_and_transmission() {
         let (result, peer) = fixture(body).await;
-        let evidence = result.unwrap();
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor);
         // Unit-only construction bypasses the empty release catalog to test
         // the retained sender. No synthetic quote becomes accepted evidence.
         let session = VerifiedRpcSession::from_authenticated_inspection(
@@ -293,6 +299,66 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::ExpiredCollateral);
         assert!(!body_read);
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn synthetic_child_death_closes_private_session_before_body_read() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor.clone());
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + MAX_CONNECTION_LIFETIME,
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        tor.terminate_synthetic_child();
+        let error = session
+            .query_from_body(|| panic!("body read after synthetic child death"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::TorUnavailable);
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn synthetic_socket_replacement_closes_private_session_before_body_read() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, original_listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor.clone());
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + MAX_CONNECTION_LIFETIME,
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        std::fs::remove_file(tor.synthetic_socket_path()).unwrap();
+        let replacement = tokio::net::UnixListener::bind(tor.synthetic_socket_path()).unwrap();
+        let callback_called = std::cell::Cell::new(false);
+        let error = session
+            .query_from_body_async(|| {
+                callback_called.set(true);
+                async { Ok(Vec::new()) }
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::TorUnavailable);
+        assert!(!callback_called.get());
+        drop(replacement);
+        drop(original_listener);
         peer.await.unwrap();
     }
 

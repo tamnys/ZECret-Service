@@ -1,8 +1,9 @@
 //! SOCKS/TLS bootstrap and a connection-owned verified RPC path.
 //! The compiled reviewed-release catalog is currently empty, so no genuine
 //! private session can be constructed in this client release.
-//! Connections go only to the configured numeric loopback socket. A successful
-//! SOCKS handshake does not establish that the proxy is Tor or attest its peer.
+//! Public diagnostics use only the configured numeric loopback SOCKS socket;
+//! private sessions require a managed child and private Unix socket. A
+//! successful SOCKS handshake does not prove Tor's identity or attest its peer.
 #![forbid(unsafe_code)]
 
 use std::{
@@ -11,6 +12,8 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
@@ -19,7 +22,11 @@ use tokio_socks::tcp::Socks5Stream;
 use zrpc_protocol::{ErrorCode, Request, SafeError};
 use zrpc_verifier::VerifiedChannel;
 
+#[cfg(unix)]
+mod managed_tor;
 mod tls;
+#[cfg(unix)]
+pub use managed_tor::ManagedTor;
 pub use tls::{
     EndpointInspection, EndpointInspectionIssue, PendingChallenge, PublicBootstrapTls,
     UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
@@ -63,32 +70,131 @@ impl TorConfig {
                 "Configured loopback SOCKS endpoint is unavailable.",
             )
         })?;
-        // Use the maintained implementation's already-connected-socket API:
-        // neither the endpoint nor a proxy hostname enters a local resolver.
-        // The guard requires password negotiation because tokio-socks also
-        // offers no-auth, which would omit the Tor isolation parameter.
-        let socket = Socks5Stream::connect_with_password_and_socket(
-            RequirePassword::new(socket),
-            (endpoint.hostname.as_str(), endpoint.port),
-            "<torS0X>0",
-            &isolation.0,
+        negotiate_socks(
+            ProxySocket::Tcp(socket),
+            endpoint,
+            isolation,
+            TransportOrigin::DiagnosticTcp,
         )
         .await
-        .map_err(|_| {
-            SafeError::new(
-                ErrorCode::TorUnavailable,
-                "SOCKS authentication or connection negotiation failed.",
-            )
-        })?;
-        Ok(UnverifiedChannel {
-            socket: Some(socket),
-            server_name: Some(endpoint.hostname.clone()),
-            authority: Some(match endpoint.hostname.parse::<IpAddr>() {
-                Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", endpoint.port),
-                _ => format!("{}:{}", endpoint.hostname, endpoint.port),
-            }),
-        })
     }
+}
+
+/// The diagnostic TCP path can obtain public evidence but never promote it to
+/// a private session. The managed child is retained from SOCKS through RPC.
+#[derive(Clone, Default)]
+pub(crate) enum TransportOrigin {
+    #[default]
+    DiagnosticTcp,
+    #[cfg(unix)]
+    Managed(ManagedTor),
+}
+
+impl TransportOrigin {
+    pub(crate) fn ensure_usable(&self) -> Result<(), SafeError> {
+        match self {
+            Self::DiagnosticTcp => Ok(()),
+            #[cfg(unix)]
+            Self::Managed(tor) => tor.ensure_live(),
+        }
+    }
+
+    pub(crate) fn require_managed(&self) -> Result<(), SafeError> {
+        match self {
+            Self::DiagnosticTcp => Err(SafeError::new(
+                ErrorCode::TorUnavailable,
+                "A managed local Tor process is required for private RPC.",
+            )),
+            #[cfg(unix)]
+            Self::Managed(tor) => tor.ensure_live(),
+        }
+    }
+}
+
+/// Both socket types use the maintained SOCKS library's connected-socket API.
+/// The enum keeps the TLS/attestation stack a single concrete owned type.
+pub(crate) enum ProxySocket {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl AsyncRead for ProxySocket {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Tcp(socket) => Pin::new(socket).poll_read(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(socket) => Pin::new(socket).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ProxySocket {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match &mut *self {
+            Self::Tcp(socket) => Pin::new(socket).poll_write(cx, buf),
+            #[cfg(unix)]
+            Self::Unix(socket) => Pin::new(socket).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Tcp(socket) => Pin::new(socket).poll_flush(cx),
+            #[cfg(unix)]
+            Self::Unix(socket) => Pin::new(socket).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match &mut *self {
+            Self::Tcp(socket) => Pin::new(socket).poll_shutdown(cx),
+            #[cfg(unix)]
+            Self::Unix(socket) => Pin::new(socket).poll_shutdown(cx),
+        }
+    }
+}
+
+pub(crate) async fn negotiate_socks(
+    socket: ProxySocket,
+    endpoint: &RemoteEndpoint,
+    isolation: IsolationLabel,
+    origin: TransportOrigin,
+) -> Result<UnverifiedChannel, SafeError> {
+    // Use the maintained implementation's already-connected-socket API:
+    // neither the endpoint nor a proxy hostname enters a local resolver.
+    // The guard requires password negotiation because tokio-socks also
+    // offers no-auth, which would omit the Tor isolation parameter.
+    let socket = Socks5Stream::connect_with_password_and_socket(
+        RequirePassword::new(socket),
+        (endpoint.hostname.as_str(), endpoint.port),
+        "<torS0X>0",
+        &isolation.0,
+    )
+    .await
+    .map_err(|_| {
+        SafeError::new(
+            ErrorCode::TorUnavailable,
+            "SOCKS authentication or connection negotiation failed.",
+        )
+    })?;
+    Ok(UnverifiedChannel {
+        socket: Some(socket),
+        origin,
+        server_name: Some(endpoint.hostname.clone()),
+        authority: Some(match endpoint.hostname.parse::<IpAddr>() {
+            Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", endpoint.port),
+            _ => format!("{}:{}", endpoint.hostname, endpoint.port),
+        }),
+    })
 }
 
 /// A DNS hostname or numeric IP and port, always sent through SOCKS.
@@ -254,7 +360,8 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for RequirePassword<S> {
 /// ```
 #[derive(Default)]
 pub struct UnverifiedChannel {
-    socket: Option<Socks5Stream<RequirePassword<TcpStream>>>,
+    socket: Option<Socks5Stream<RequirePassword<ProxySocket>>>,
+    origin: TransportOrigin,
     server_name: Option<String>,
     authority: Option<String>,
 }

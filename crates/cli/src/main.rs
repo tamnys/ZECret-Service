@@ -7,7 +7,7 @@ use std::{
 };
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
-use zrpc_protocol::Backend;
+use zrpc_protocol::{Backend, ErrorCode, SafeError};
 
 mod ledger;
 mod provider_deletion;
@@ -20,10 +20,10 @@ const USAGE: &str = "zrpc doctor
 zrpc inspect-quote --quote FILE --collateral FILE
 zrpc inspect-workload [--platform gcp-tdx|phala-dstack] --quote FILE --collateral FILE --event-log FILE --policy FILE
 zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --policy FILE
-zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --release-policy FILE
-zrpc query --stdin [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --release-policy FILE
+zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
+zrpc query --stdin [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
-zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --release-policy FILE [--no-open]
+zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
 zrpc demo [--no-open]
 zrpc plan --input FILE
 zrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER
@@ -31,7 +31,7 @@ zrpc teardown --simulate --manifest FILE
 zrpc lifecycle --help
 GCP operator tooling: zrpc-gcp-lifecycle --help
 The default platform is gcp-tdx. Phala commands additionally require --app-compose FILE.
-All remote endpoints use the configured local Tor SOCKS; no direct mode exists.
+Public inspection uses the configured local SOCKS. Once an approved release exists, private commands start a local Tor child with a private Unix SOCKS socket; no direct mode exists.
 The compiled approved-release catalog is empty; private queries remain blocked.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
@@ -117,7 +117,7 @@ async fn run() -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str(){
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
-        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"tor":"not_checked; requires explicitly configured local Tor SOCKS","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"tor":"not_checked; inspection uses explicit SOCKS, private sessions require a selected local Tor executable","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-endpoint"=>inspect_endpoint_command(args).await,
         "lifecycle"=>provider_observation::run(args).await,
         "inspect-quote"=>{
@@ -200,22 +200,29 @@ async fn run() -> Result<(), String> {
                 if !stdin && method.is_none(){return Err("private query requires --stdin or --method".into())}
                 let session=zrpc_client::inspection::connect_verified(&live.config,&live.collateral,&live.compose,&live.policy)
                     .await.map_err(|error|error.to_string())?;
-                // Read/serialize only after genuine local approval of this socket.
-                let bytes=if stdin {
-                    let mut bytes=Vec::new();
-                    io::stdin().take((zrpc_protocol::MAX_REQUEST_BYTES+1) as u64).read_to_end(&mut bytes)
-                        .map_err(|_|"stdin unavailable")?;
-                    bytes
-                } else {
-                    serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":method.unwrap(),"params":[]}))
-                        .map_err(|_|"request unavailable")?
-                };
-                let request=zrpc_protocol::parse_request(&bytes).map_err(|error|error.to_string())?;
-                match session.query(&request).await {
+                // The retained session checks the managed Tor lease before
+                // this closure reads or constructs any private body.
+                let result=session.query_from_body(move || {
+                    if stdin {
+                        let mut bytes=Vec::new();
+                        io::stdin().take((zrpc_protocol::MAX_REQUEST_BYTES+1) as u64).read_to_end(&mut bytes)
+                            .map_err(|_|SafeError::new(ErrorCode::InvalidRequest,"Private input unavailable."))?;
+                        Ok(bytes)
+                    } else {
+                        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":method.unwrap(),"params":[]}))
+                            .map_err(|_|SafeError::new(ErrorCode::InvalidRequest,"Private request unavailable."))
+                    }
+                }).await;
+                match result {
                     Ok(result)=>print_json(json!({"mode":"private","simulation":false,"private_accepted":true,"query_sent":true,"result":result})),
+                    Err(error) if matches!(error.code,ErrorCode::InvalidRequest|ErrorCode::RequestTooLarge|ErrorCode::MethodNotAllowed|ErrorCode::InvalidParameters)=>Err(error.to_string()),
+                    Err(error) if error.code == ErrorCode::TorUnavailable=>{
+                        print_json(json!({"mode":"private_blocked","simulation":false,"private_accepted":false,"query_sent":false,"error":error}))?;
+                        std::process::exit(1)
+                    },
                     Err(error)=>{
                         // The sender may have transmitted before a response failed.
-                        print_json(json!({"mode":"private_error","private_accepted":true,"query_sent":"unknown","error":error}))?;
+                        print_json(json!({"mode":"private_error","simulation":false,"private_accepted":false,"query_sent":"unknown","error":error}))?;
                         std::process::exit(1)
                     }
                 }?;
@@ -268,7 +275,7 @@ async fn run() -> Result<(), String> {
 }
 
 struct LiveInputs {
-    config: zrpc_client::inspection::PublicInspectionConfig,
+    config: zrpc_client::inspection::PrivateEndpointConfig,
     collateral: Vec<u8>,
     compose: Vec<u8>,
     policy: zrpc_verifier::ReleasePolicy,
@@ -280,13 +287,17 @@ fn live_inputs(args: &mut Vec<String>) -> Result<LiveInputs, String> {
     let port = required(args, "--endpoint-port")?
         .parse::<u16>()
         .map_err(|_| "invalid endpoint port")?;
-    let socks = required(args, "--socks")?;
+    let tor_executable = required(args, "--tor-executable")?;
     let collateral_path = required(args, "--collateral")?;
     let compose = compose_input(args, backend)?;
     let release_path = required(args, "--release-policy")?;
-    let config =
-        zrpc_client::inspection::PublicInspectionConfig::for_platform(backend, &host, port, &socks)
-            .map_err(|error| error.to_string())?;
+    let config = zrpc_client::inspection::PrivateEndpointConfig::for_platform(
+        backend,
+        &host,
+        port,
+        tor_executable,
+    )
+    .map_err(|error| error.to_string())?;
     let policy = zrpc_verifier::ReleasePolicy::from_json(
         &fs::read(release_path).map_err(|_| "release policy unavailable")?,
     )
