@@ -816,7 +816,7 @@ async fn create_intents_are_durable_and_cleanup_tracks_every_owned_resource() {
         teardown_once(&mut store, &mut provider, 1001)
             .await
             .unwrap(),
-        Progress::ResourcesAbsentBillingUnreconciled
+        Progress::PlannedResourcesAbsentBillingUnreconciled
     );
     assert_eq!(
         provider.deletes,
@@ -830,6 +830,46 @@ async fn create_intents_are_durable_and_cleanup_tracks_every_owned_resource() {
     assert!(store.journal().resources.iter().all(|r| r.observed_absent));
     assert!(store.journal().billing_evidence_sha256.is_none());
 }
+
+#[tokio::test]
+async fn completion_status_does_not_claim_project_wide_inventory() {
+    let f = Fixture::new();
+    let mut store = Store::open(&f.state).unwrap();
+    let mut provider = f.mock();
+    let unplanned_name = format!("{}-untracked", f.package.spec.experiment);
+    let unplanned = format!(
+        "projects/{}/global/images/{unplanned_name}",
+        f.package.spec.project
+    );
+    provider.objects.insert(
+        unplanned.clone(),
+        json!({"id":"987654321","name":unplanned_name}),
+    );
+    deploy_all(&mut store, &mut provider, &f.package).await;
+    for _ in &f.package.resources {
+        assert_eq!(
+            teardown_once(&mut store, &mut provider, 1001)
+                .await
+                .unwrap(),
+            Progress::Pending
+        );
+    }
+    let progress = teardown_once(&mut store, &mut provider, 1001)
+        .await
+        .unwrap();
+    assert_eq!(
+        progress,
+        Progress::PlannedResourcesAbsentBillingUnreconciled
+    );
+    assert_eq!(
+        serde_json::to_value(progress).unwrap(),
+        json!("planned_resources_absent_billing_unreconciled")
+    );
+    assert!(provider.objects.contains_key(&unplanned));
+    assert!(!provider.deletes.contains(&unplanned));
+    assert!(store.journal().billing_evidence_sha256.is_none());
+}
+
 #[tokio::test]
 async fn out_of_band_disappearance_does_not_complete_cleanup_or_admit_billing_evidence() {
     let f = Fixture::new();
@@ -877,7 +917,7 @@ async fn failed_done_deletion_does_not_complete_cleanup_or_admit_billing_evidenc
         teardown_once(&mut store, &mut provider, 1002)
             .await
             .unwrap(),
-        Progress::ResourcesAbsentBillingUnreconciled
+        Progress::PlannedResourcesAbsentBillingUnreconciled
     );
 
     let index = f.package.resources.len() - 1;
@@ -952,7 +992,7 @@ async fn billing_reference_is_post_cleanup_append_only_and_never_changes_status(
         teardown_once(&mut store, &mut provider, 1002)
             .await
             .unwrap(),
-        Progress::ResourcesAbsentBillingUnreconciled
+        Progress::PlannedResourcesAbsentBillingUnreconciled
     );
     let mut malformed = store.journal().clone();
     malformed.billing_evidence_sha256 = Some("not-a-sha256".into());
@@ -978,7 +1018,7 @@ async fn billing_reference_is_post_cleanup_append_only_and_never_changes_status(
         teardown_once(&mut store, &mut provider, 1002)
             .await
             .unwrap(),
-        Progress::ResourcesAbsentBillingUnreconciled
+        Progress::PlannedResourcesAbsentBillingUnreconciled
     );
     drop(store);
     assert_eq!(
@@ -1047,7 +1087,7 @@ async fn interrupted_staging_upload_cannot_advance_from_metadata_only() {
         teardown_once(&mut store, &mut provider, 1003)
             .await
             .unwrap(),
-        Progress::ResourcesAbsentBillingUnreconciled
+        Progress::PlannedResourcesAbsentBillingUnreconciled
     );
     assert!(store.journal().resources[0].observed_absent);
     assert!(store.journal().resources[0].delete.as_ref().unwrap().done);

@@ -14,7 +14,10 @@ use serde_json::Value;
 pub enum Progress {
     Pending,
     DeployedForSyntheticEvaluation,
-    ResourcesAbsentBillingUnreconciled,
+    /// All package-planned resources were observed absent. This does not
+    /// establish that the project or shared staging bucket has no other
+    /// experiment resources, and it never establishes billing finality.
+    PlannedResourcesAbsentBillingUnreconciled,
 }
 
 fn identity(resource: &ResourcePlan, value: &Value) -> Result<String> {
@@ -412,7 +415,7 @@ pub async fn teardown_once<P: Provider>(
         }
         return Ok(Progress::Pending);
     }
-    Ok(Progress::ResourcesAbsentBillingUnreconciled)
+    Ok(Progress::PlannedResourcesAbsentBillingUnreconciled)
 }
 
 #[cfg(test)]
