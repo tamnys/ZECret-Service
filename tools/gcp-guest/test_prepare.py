@@ -37,7 +37,7 @@ class CandidateTests(unittest.TestCase):
                 self.synthetic_deb_sha = hashlib.sha256(self.synthetic_deb).hexdigest()
                 (self.inputs / "debs").mkdir()
                 (self.inputs / "debs" / (self.synthetic_deb_sha + ".deb")).write_bytes(self.synthetic_deb)
-                data = json.dumps([{"name": name, "version": "1.0~synthetic", "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_1.0~synthetic_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"} for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved")]).encode()
+                data = json.dumps([{"name": name, "version": "1.0~synthetic", "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_1.0~synthetic_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"} for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs")]).encode()
             else:
                 data = b"SYNTHETIC_NOT_A_SIGNED_ARTIFACT"
             (self.inputs / role).write_bytes(data)
@@ -73,7 +73,9 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("--check wrapper", wrapper)
         config = (output / "mkosi.conf").read_text()
         self.assertIn("PackageDirectories=packages", config)
-        self.assertIn("Packages=systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic", config)
+        self.assertIn("PackageCacheDirectory=package-cache", config)
+        self.assertTrue((output / "package-cache").is_dir())
+        self.assertIn("Packages=e2fsprogs=1.0~synthetic,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
         self.assertNotIn("CopyFiles=/boot:/", esp)
@@ -130,6 +132,19 @@ class CandidateTests(unittest.TestCase):
             )
         prepare.debian_snapshot.require_snapshot_age(selected, selected + timedelta(days=7))
 
+    def test_preflight_rejects_unshare_without_a_new_network_namespace(self):
+        parent_net = Path("/proc/self/ns/net").readlink().as_posix()
+        with mock.patch.object(prepare.platform, "system", return_value="Linux"), mock.patch.object(
+            prepare.platform, "machine", return_value="x86_64"
+        ), mock.patch.object(prepare.shutil, "which", return_value="/usr/bin/unshare"), mock.patch.object(
+            prepare.subprocess, "run", side_effect=[
+                mock.Mock(returncode=0), mock.Mock(returncode=0, stdout=parent_net + "\n")
+            ]
+        ):
+            report = prepare.preflight()
+        self.assertEqual(report["status"], "blocked")
+        self.assertIn("outer build network namespace isolation unavailable", report["blockers"])
+
     def test_manifest_version_cannot_inject_mkosi_settings(self):
         path = self.inputs / "package_manifest"
         packages = json.loads(path.read_text())
@@ -152,8 +167,8 @@ class CandidateTests(unittest.TestCase):
         paths = {"snapshot_inrelease": release, "packages_index": index}
         with mock.patch.object(prepare.debian_snapshot, "verify_signature"):
             snapshot, archives = prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
-            self.assertEqual(snapshot["package_count"], 4)
-            self.assertEqual(len(archives), 4)
+            self.assertEqual(snapshot["package_count"], 6)
+            self.assertEqual(len(archives), 6)
             held_snapshot = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             self.lock["snapshot"] = f"https://snapshot.debian.org/archive/debian/{held_snapshot}/"
             with self.assertRaisesRegex(ValueError, "seven-day hold"):
@@ -180,13 +195,14 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare.validate_lock(self.lock, self.inputs)
 
-    def test_missing_resolved_package_is_rejected(self):
+    def test_missing_required_guest_package_is_rejected(self):
         path = self.inputs / "package_manifest"
         packages = json.loads(path.read_text())
-        path.write_text(json.dumps([p for p in packages if p["name"] != "systemd-resolved"]))
-        self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
-        with self.assertRaisesRegex(ValueError, "guest package surface"):
-            prepare.validate_lock(self.lock, self.inputs)
+        for required in ("systemd-resolved", "udev", "e2fsprogs"):
+            path.write_text(json.dumps([p for p in packages if p["name"] != required]))
+            self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
+            with self.assertRaisesRegex(ValueError, "guest package surface"):
+                prepare.validate_lock(self.lock, self.inputs)
 
     def test_duplicate_fields_cannot_override_a_digest(self):
         path = self.root / "duplicate.json"

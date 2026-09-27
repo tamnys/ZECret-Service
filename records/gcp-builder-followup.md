@@ -133,3 +133,47 @@ InRelease and Sources index with status
 `source-membership-verified-toolchain-unreviewed`; its four synthetic tests
 passed. No package closure, builder toolchain, or guest image was accepted by
 this check.
+
+## mkosi upstream tree equality, 2026-09-27 UTC
+
+The caller-supplied Git archive was produced from upstream commit
+`54c625c380ef5500f17460981a3c67b109b6a847`, whose Git tree was
+`f5d828707aa0b1bd0235c55e13f7d4b41dba409e`. The exact archive is
+1,536,000 bytes with SHA-256
+`16a58d4aab33a8f28dc996dc4c816711686d1e58fa6af23131b8e84ff11917d0`;
+its Git archive PAX comment carries the same commit. The offline
+`verify_mkosi_tree.py` pins those identities, first requires the existing
+signed Debian source-membership check, and compares normalized paths, file
+contents, entry types, modes, and symlink targets without extraction. It
+rejects duplicate paths, traversal, and special or hardlink entries.
+
+The exact Debian original tarball and pinned Git archive matched on all 311
+entries, including directories, in the managed untrusted browser-profile
+container. `python3 tools/gcp-guest/test_verify_mkosi_tree.py` passed six
+synthetic cases covering changed content/mode/link/path, wrong pinned bytes or
+commit marker, malformed entries, and failure of the membership gate. This
+adds source-tree equality only. It does not authenticate installed mkosi,
+systemd, APT, or builder libraries, build an image, or approve private mode.
+
+## Offline build boundary and guest package seeds, 2026-09-27 UTC
+
+Pinned mkosi 25.3 runs APT with a network-capable sandbox; `CacheOnly=always`
+skips metadata synchronization but does not itself prove that no package can be
+downloaded. `WithNetwork=no` governs build scripts, and mkosi's own network
+unshare may be omitted when `CAP_NET_ADMIN` is unavailable. A future image
+builder must enter and verify an outer no-network namespace before invoking
+mkosi. The local preflight now reports this namespace capability separately;
+the current managed container remains blocked. Staging now uses a fresh
+candidate-scoped `PackageCacheDirectory` so inherited APT lists cannot silently
+participate. Neither change runs a build or authenticates the builder toolchain.
+
+The guest's configured `/dev/disk/by-id` mount and `x-systemd.makefs` ext4
+path require `udev` and `e2fsprogs`, respectively. Both are now mandatory in a
+staged package manifest. A no-download APT 3.0.3 simulation with an empty dpkg
+status and only the hash-checked local signed-index contents selected 94
+name/version/architecture identities for mkosi's `?essential base-files`
+bootstrap plus the six explicit guest seeds. No forbidden administration or
+container package was selected. The solver executable and its libraries are
+not yet authenticated, package archives were not fetched, and installed-image
+closure cannot be compared until an image exists. The supplied kernel,
+initramfs, and modules remain separate unverified boot inputs.
