@@ -1,0 +1,119 @@
+name: GCP native x86 Cargo dependency gate
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  native_cargo:
+    name: Live source gates, locked fetch, and networkless diagnostic build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact project source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          python3 -I - "$source/rust-toolchain.toml" <<'PY'
+          from pathlib import Path
+          import sys
+          import tomllib
+
+          toolchain = tomllib.loads(Path(sys.argv[1]).read_text())
+          if toolchain.get("toolchain", {}).get("channel") != "1.94.1":
+              raise SystemExit("source lacks the reviewed native Rust toolchain pin")
+          PY
+
+      - name: Check both live source policies before any dependency fetch
+        shell: bash
+        run: |
+          set -uo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          python3 -I "$source/scripts/check-cargo-registry-age.py"
+          registry_status=$?
+          python3 -I "$source/scripts/check-cargo-git-source.py"
+          git_status=$?
+          if (( registry_status != 0 || git_status != 0 )); then
+            echo 'Native Cargo fetch and build refused by live source preflight.' >&2
+            exit 1
+          fi
+          echo 'Both live source preflights passed; no dependency bytes have been fetched.'
+
+      - name: Fetch and inspect the reviewed dstack Git object
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          repository="$GITHUB_WORKSPACE/dstack-source"
+          commit=282eeb27d22d8f091ad0fa5a90e638f85cf68751
+          mkdir "$repository"
+          git -C "$repository" init -q
+          git -C "$repository" fetch -q --no-tags --depth=1 \
+            https://github.com/Dstack-TEE/dstack "$commit"
+          test "$(git -C "$repository" rev-parse FETCH_HEAD)" = "$commit"
+          python3 -I "$source/scripts/check-cargo-fetched-git-source.py" \
+            "$source" "$repository"
+
+      - name: Fetch locked Cargo packages with pinned native Rust
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/native-cargo"
+          mkdir "$scratch" "$scratch/cargo-home" "$scratch/target"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          docker pull --platform linux/amd64 "$RUST_IMAGE"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$RUST_IMAGE")" = linux/amd64
+          case "$(docker image inspect --format '{{json .RepoDigests}}' "$RUST_IMAGE")" in
+            *"${RUST_IMAGE##*@}"*) ;;
+            *) echo 'Pinned Rust image digest differs from review' >&2; exit 1 ;;
+          esac
+          docker run --rm --pull=never --platform linux/amd64 --network bridge \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            cargo fetch --locked --target x86_64-unknown-linux-gnu
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
+          echo 'Locked native dependency fetch completed; no code built or guest image created.'
+
+      - name: Build workspace binaries with no network or source write access
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/native-cargo"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            cargo build --locked --offline --workspace --bins
+          echo 'Diagnostic native build completed; no guest image or release was approved.'
