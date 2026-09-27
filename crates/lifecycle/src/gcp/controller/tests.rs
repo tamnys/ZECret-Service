@@ -9,6 +9,30 @@ use crate::gcp::{
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, sync::OnceLock};
 
+fn diagnostic_artifact(root: &std::path::Path, name: &str, value: &Value) -> Artifact {
+    let bytes = serde_json::to_vec(value).unwrap();
+    let path = root.join(name);
+    fs::write(&path, &bytes).unwrap();
+    Artifact {
+        path,
+        sha256: digest(&bytes),
+    }
+}
+
+fn exact_sha256_esl(image_hash: &str) -> Vec<u8> {
+    // EFI_CERT_SHA256_GUID in EFI mixed-endian wire order; one signature.
+    let mut db = vec![
+        0x26, 0x16, 0xc4, 0xc1, 0x4c, 0x50, 0x92, 0x40, 0xac, 0xa9, 0x41, 0xf9, 0x36, 0x93, 0x43,
+        0x28,
+    ];
+    db.extend_from_slice(&76u32.to_le_bytes());
+    db.extend_from_slice(&0u32.to_le_bytes());
+    db.extend_from_slice(&48u32.to_le_bytes());
+    db.extend_from_slice(&[0xa5; 16]); // Synthetic SignatureOwner GUID.
+    db.extend_from_slice(&hex::decode(image_hash).unwrap());
+    db
+}
+
 fn synthetic_import_archive() -> &'static (Vec<u8>, String, Vec<u8>) {
     static IMAGE: OnceLock<(Vec<u8>, String, Vec<u8>)> = OnceLock::new();
     IMAGE.get_or_init(|| {
@@ -71,6 +95,44 @@ impl Fixture {
             sha256: digest(b"SYNTHETIC - NOT A BOOTABLE IMAGE"),
         };
         let (image_bytes, raw_disk_sha256, receipt_bytes) = synthetic_import_archive();
+        let uki_sha256 = digest(b"SYNTHETIC UKI BYTES");
+        let uki_pe_coff_sha256 = digest(b"SYNTHETIC PE/COFF IMAGE DIGEST");
+        let esp_diagnostic = diagnostic_artifact(
+            &root,
+            "esp-diagnostic.json",
+            &json!({
+                "status":"diagnostic-esp-uki-sections-unapproved",
+                "raw_disk_sha256":raw_disk_sha256,
+                "raw_disk_bytes":1024 * 1024 * 1024,
+                "uki_sha256":uki_sha256,
+                "uki_bytes":19,
+                "signed_uki_checked":false,
+                "image_built":false,
+                "private_mode_approved":false
+            }),
+        );
+        let uki_digest_diagnostic = diagnostic_artifact(
+            &root,
+            "uki-digest-diagnostic.json",
+            &json!({
+                "schema_version":1,
+                "status":"diagnostic-uki-pe-coff-sha384-unapproved",
+                "uki_sha256":uki_sha256,
+                "uki_bytes":19,
+                "uki_pe_coff_sha256":uki_pe_coff_sha256,
+                "signed_uki_checked":false,
+                "boot_measurement_checked":false,
+                "release_approved":false,
+                "private_mode_approved":false
+            }),
+        );
+        let db_bytes = exact_sha256_esl(&uki_pe_coff_sha256);
+        let db_path = root.join("secure-boot-db.esl");
+        fs::write(&db_path, &db_bytes).unwrap();
+        let secure_boot_db_esl = Artifact {
+            path: db_path,
+            sha256: digest(&db_bytes),
+        };
         let archive_path = root.join("synthetic.tar.gz");
         fs::write(&archive_path, image_bytes).unwrap();
         let raw_image_tar_gz = Artifact {
@@ -101,7 +163,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 4,
+            schema_version: 5,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -123,9 +185,11 @@ impl Fixture {
             boot_policy: a.clone(),
             memory_measurement: a.clone(),
             reproducibility_report: a.clone(),
+            esp_diagnostic,
+            uki_digest_diagnostic,
             secure_boot_pk_der: a.clone(),
             secure_boot_kek_der: a.clone(),
-            secure_boot_db_der: a.clone(),
+            secure_boot_db_esl,
             secure_boot_dbx_bin: a.clone(),
             pricing: Pricing {
                 source: "https://example.invalid/synthetic-quote".into(),
@@ -218,6 +282,26 @@ impl Fixture {
         };
         spec
     }
+    fn spec_with_diagnostic_edit(
+        &self,
+        esp: bool,
+        edit: impl FnOnce(&mut Value),
+    ) -> DeploymentSpec {
+        let mut spec = self.package.spec.clone();
+        let artifact = if esp {
+            &mut spec.esp_diagnostic
+        } else {
+            &mut spec.uki_digest_diagnostic
+        };
+        let mut report: Value = serde_json::from_slice(&fs::read(&artifact.path).unwrap()).unwrap();
+        edit(&mut report);
+        *artifact = diagnostic_artifact(
+            &self.root,
+            &format!("edited-diagnostic-{}.json", uuid().unwrap()),
+            &report,
+        );
+        spec
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -237,8 +321,15 @@ fn image_package_pins_the_complete_secure_boot_policy() {
     let state = &image.create_body["shieldedInstanceInitialState"];
     assert_eq!(state["pk"]["fileType"], "X509");
     assert_eq!(state["keks"][0]["fileType"], "X509");
-    assert_eq!(state["dbs"][0]["fileType"], "X509");
+    assert_eq!(state["dbs"][0]["fileType"], "BIN");
     assert_eq!(state["dbxs"][0]["fileType"], "BIN");
+    assert_eq!(
+        state["dbs"][0]["content"],
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            fs::read(&f.package.spec.secure_boot_db_esl.path).unwrap()
+        )
+    );
     assert_eq!(
         state["dbxs"][0]["content"],
         base64::Engine::encode(
@@ -265,6 +356,76 @@ fn image_package_pins_the_complete_secure_boot_policy() {
         .unwrap()
         .remove("dbxs");
     assert!(inherited_default.validate(1000).is_err());
+}
+
+#[test]
+fn image_package_rejects_extra_secure_boot_authorities_and_wrong_hash() {
+    let f = Fixture::new();
+    let original = fs::read(&f.package.spec.secure_boot_db_esl.path).unwrap();
+    let cases = [
+        {
+            let mut db = original.clone();
+            db.extend_from_slice(&original); // A second hash list.
+            db
+        },
+        {
+            let mut db = original.clone();
+            db.extend_from_slice(&db[28..].to_vec()); // A second hash entry.
+            db[16..20].copy_from_slice(&124u32.to_le_bytes());
+            db
+        },
+        {
+            let mut db = original.clone();
+            db[0] ^= 1; // Wrong signature-list type (including X509).
+            db
+        },
+        {
+            let mut db = original.clone();
+            db[20..24].copy_from_slice(&1u32.to_le_bytes()); // Header present.
+            db
+        },
+        {
+            let mut db = original.clone();
+            db[44] ^= 1; // One entry, wrong UKI image digest.
+            db
+        },
+    ];
+    for db in cases {
+        let mut spec = f.package.spec.clone();
+        let path = f.root.join(format!("wrong-db-{}.esl", uuid().unwrap()));
+        fs::write(&path, &db).unwrap();
+        spec.secure_boot_db_esl = Artifact {
+            path,
+            sha256: digest(&db),
+        };
+        assert!(Package::prepare(spec, 1000).is_err());
+    }
+
+    let mut extra_api_authority = f.package.clone();
+    extra_api_authority
+        .resources
+        .iter_mut()
+        .find(|r| r.kind == ResourceKind::Image)
+        .unwrap()
+        .create_body["shieldedInstanceInitialState"]["dbs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"fileType":"X509","content":"synthetic-signer"}));
+    assert!(extra_api_authority.validate(1000).is_err());
+}
+
+#[test]
+fn image_package_rejects_diagnostic_substitution_or_unlinked_disk() {
+    let f = Fixture::new();
+    for spec in [
+        f.spec_with_diagnostic_edit(true, |v| v["raw_disk_sha256"] = json!("0".repeat(64))),
+        f.spec_with_diagnostic_edit(true, |v| v["uki_sha256"] = json!("1".repeat(64))),
+        f.spec_with_diagnostic_edit(false, |v| v["uki_sha256"] = json!("1".repeat(64))),
+        f.spec_with_diagnostic_edit(false, |v| v["uki_pe_coff_sha256"] = json!("1".repeat(64))),
+        f.spec_with_diagnostic_edit(false, |v| v["release_approved"] = json!(true)),
+    ] {
+        assert!(Package::prepare(spec, 1000).is_err());
+    }
 }
 
 #[test]

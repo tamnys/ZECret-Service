@@ -86,6 +86,100 @@ struct ImportReceipt {
     workspace_volume_override_used: bool,
 }
 
+/// Offline ESP inspection and PE hashing are consistency inputs only. Neither
+/// report proves a signed boot or authorizes a client release.
+#[derive(Debug, Deserialize)]
+struct EspDiagnostic {
+    status: String,
+    raw_disk_sha256: String,
+    raw_disk_bytes: u64,
+    uki_sha256: String,
+    uki_bytes: u64,
+    signed_uki_checked: bool,
+    image_built: bool,
+    private_mode_approved: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct UkiDigestDiagnostic {
+    schema_version: u8,
+    status: String,
+    uki_sha256: String,
+    uki_bytes: u64,
+    uki_pe_coff_sha256: String,
+    signed_uki_checked: bool,
+    boot_measurement_checked: bool,
+    release_approved: bool,
+    private_mode_approved: bool,
+}
+
+fn read_hashed_diagnostic(artifact: &Artifact) -> Result<Vec<u8>> {
+    let bytes = read_regular(&artifact.path)?;
+    if digest(&bytes) != artifact.sha256 {
+        return Err(Error("diagnostic report SHA-256 mismatch"));
+    }
+    Ok(bytes)
+}
+
+// UEFI 2.10 §32: EFI_SIGNATURE_LIST with EFI_CERT_SHA256_GUID, no signature
+// header, and one EFI_SIGNATURE_DATA (16-byte owner GUID + 32-byte image hash).
+// GUID fields are little-endian on the EFI wire. This is a structural policy
+// check, not a claim that Google C3 TDX firmware accepts a hash-only db.
+// https://uefi.org/specs/UEFI/2.10/32_Secure_Boot_and_Driver_Signing.html
+const EFI_CERT_SHA256_GUID_WIRE: [u8; 16] = [
+    0x26, 0x16, 0xc4, 0xc1, 0x4c, 0x50, 0x92, 0x40, 0xac, 0xa9, 0x41, 0xf9, 0x36, 0x93, 0x43, 0x28,
+];
+const SINGLE_SHA256_ESL_BYTES: usize = 16 + 4 + 4 + 4 + 16 + 32;
+
+fn verify_exact_uki_db(spec: &DeploymentSpec) -> Result<()> {
+    let esp: EspDiagnostic = serde_json::from_slice(&read_hashed_diagnostic(&spec.esp_diagnostic)?)
+        .map_err(|_| Error("invalid typed ESP diagnostic"))?;
+    let uki: UkiDigestDiagnostic =
+        serde_json::from_slice(&read_hashed_diagnostic(&spec.uki_digest_diagnostic)?)
+            .map_err(|_| Error("invalid typed UKI digest diagnostic"))?;
+    if esp.status != "diagnostic-esp-uki-sections-unapproved"
+        || esp.raw_disk_sha256 != spec.raw_disk_sha256
+        || esp.raw_disk_bytes != spec.raw_disk_bytes
+        || !valid_digest(&esp.uki_sha256)
+        || esp.uki_bytes == 0
+        || esp.signed_uki_checked
+        || esp.image_built
+        || esp.private_mode_approved
+        || uki.schema_version != 1
+        || uki.status != "diagnostic-uki-pe-coff-sha384-unapproved"
+        || uki.uki_sha256 != esp.uki_sha256
+        || uki.uki_bytes != esp.uki_bytes
+        || !valid_digest(&uki.uki_pe_coff_sha256)
+        || uki.signed_uki_checked
+        || uki.boot_measurement_checked
+        || uki.release_approved
+        || uki.private_mode_approved
+    {
+        return Err(Error("UKI diagnostic does not bind the reviewed raw disk"));
+    }
+    let db = read_regular(&spec.secure_boot_db_esl.path)?;
+    if digest(&db) != spec.secure_boot_db_esl.sha256 {
+        return Err(Error("Secure Boot db changed during preparation"));
+    }
+    if db.len() != SINGLE_SHA256_ESL_BYTES
+        || db[..16] != EFI_CERT_SHA256_GUID_WIRE
+        || db[16..20] != (SINGLE_SHA256_ESL_BYTES as u32).to_le_bytes()
+        || db[20..24] != 0u32.to_le_bytes()
+        || db[24..28] != 48u32.to_le_bytes()
+    {
+        return Err(Error(
+            "Secure Boot db must contain one exact UKI SHA-256 hash",
+        ));
+    }
+    let mut reported_hash = [0u8; 32];
+    hex::decode_to_slice(&uki.uki_pe_coff_sha256, &mut reported_hash)
+        .map_err(|_| Error("invalid UKI PE/COFF SHA-256 digest"))?;
+    if db[44..] != reported_hash {
+        return Err(Error("Secure Boot db hash differs from UKI PE/COFF digest"));
+    }
+    Ok(())
+}
+
 fn verify_import_receipt(spec: &DeploymentSpec) -> Result<()> {
     let bytes = read_regular(&spec.import_receipt.path)?;
     if digest(&bytes) != spec.import_receipt.sha256 {
@@ -229,9 +323,14 @@ pub struct DeploymentSpec {
     pub boot_policy: Artifact,
     pub memory_measurement: Artifact,
     pub reproducibility_report: Artifact,
+    /// Diagnostic inspection of the exact raw disk's ESP and extracted UKI.
+    pub esp_diagnostic: Artifact,
+    /// Diagnostic Authenticode digest of that same extracted UKI.
+    pub uki_digest_diagnostic: Artifact,
     pub secure_boot_pk_der: Artifact,
     pub secure_boot_kek_der: Artifact,
-    pub secure_boot_db_der: Artifact,
+    /// One EFI_CERT_SHA256_GUID EFI_SIGNATURE_LIST, not a signer certificate.
+    pub secure_boot_db_esl: Artifact,
     /// Reviewed EFI revocation database; never inherit Google's mutable default.
     pub secure_boot_dbx_bin: Artifact,
     pub pricing: Pricing,
@@ -282,7 +381,7 @@ pub(crate) fn name(value: &str) -> bool {
 }
 impl DeploymentSpec {
     pub fn validate(&self, at: u64) -> Result<()> {
-        if self.schema_version != 4
+        if self.schema_version != 5
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -379,9 +478,10 @@ impl DeploymentSpec {
             self.raw_disk_bytes,
             &self.import_verifier_python,
         )?;
+        verify_exact_uki_db(self)?;
         Ok(())
     }
-    pub fn artifacts(&self) -> [&Artifact; 12] {
+    pub fn artifacts(&self) -> [&Artifact; 14] {
         [
             &self.raw_image_tar_gz,
             &self.import_receipt,
@@ -390,9 +490,11 @@ impl DeploymentSpec {
             &self.boot_policy,
             &self.memory_measurement,
             &self.reproducibility_report,
+            &self.esp_diagnostic,
+            &self.uki_digest_diagnostic,
             &self.secure_boot_pk_der,
             &self.secure_boot_kek_der,
-            &self.secure_boot_db_der,
+            &self.secure_boot_db_esl,
             &self.secure_boot_dbx_bin,
             &self.pricing.evidence,
         ]
@@ -456,7 +558,10 @@ impl Package {
             ResourcePlan {
                 kind: ResourceKind::Image,
                 path: image.clone(),
-                create_body: json!({"name":format!("{n}-image"),"description":ownership,"architecture":"X86_64","rawDisk":{"source":format!("https://storage.googleapis.com/{}/{}",spec.staging_bucket,spec.object_name()),"containerType":"TAR"},"guestOsFeatures":[{"type":"UEFI_COMPATIBLE"},{"type":"GVNIC"},{"type":"TDX_CAPABLE"}],"shieldedInstanceInitialState":{"pk":cert(&spec.secure_boot_pk_der)?,"keks":[cert(&spec.secure_boot_kek_der)?],"dbs":[cert(&spec.secure_boot_db_der)?],"dbxs":[secure_boot_file(&spec.secure_boot_dbx_bin, "BIN")?]}}),
+                // Google accepts BIN database inputs; only hardware readback
+                // can confirm C3 TDX's effective variables and boot behavior.
+                // https://docs.cloud.google.com/compute/shielded-vm/docs/creating-shielded-images
+                create_body: json!({"name":format!("{n}-image"),"description":ownership,"architecture":"X86_64","rawDisk":{"source":format!("https://storage.googleapis.com/{}/{}",spec.staging_bucket,spec.object_name()),"containerType":"TAR"},"guestOsFeatures":[{"type":"UEFI_COMPATIBLE"},{"type":"GVNIC"},{"type":"TDX_CAPABLE"}],"shieldedInstanceInitialState":{"pk":cert(&spec.secure_boot_pk_der)?,"keks":[cert(&spec.secure_boot_kek_der)?],"dbs":[secure_boot_file(&spec.secure_boot_db_esl, "BIN")?],"dbxs":[secure_boot_file(&spec.secure_boot_dbx_bin, "BIN")?]}}),
             },
             ResourcePlan {
                 kind: ResourceKind::BootDisk,
@@ -475,14 +580,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 4,
+            schema_version: 5,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
         let expected = Self::prepare(self.spec.clone(), at)?;
-        if self.schema_version != 4 || self.resources != expected.resources {
+        if self.schema_version != 5 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));
