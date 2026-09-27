@@ -1,0 +1,1572 @@
+{
+  "schema_version": 1,
+  "status": "apt-resolved-candidate-unbuilt-unapproved",
+  "snapshot": "https://snapshot.debian.org/archive/debian/20260918T000000Z/",
+  "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
+  "packages_index_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
+  "signed_release_date_epoch": 1789199741,
+  "direct_lock_sha256": "9e6d797bc4ae9ca3e1431105ffc55da137c8e3ccf9b922201d72958db657a023",
+  "resolver": {
+    "package": "apt",
+    "version": "3.0.3",
+    "executable": "usr/bin/apt-get",
+    "executable_size": 59784,
+    "executable_sha256": "67072be139e90c73ed25007ac92f0525909a7c6d6829aecc2ceff86f9568f98b",
+    "empty_dpkg_status": true,
+    "install_recommends": false
+  },
+  "packages": [
+    {
+      "name": "adduser",
+      "version": "3.152",
+      "architecture": "all",
+      "filename": "pool/main/a/adduser/adduser_3.152_all.deb",
+      "size": 190932,
+      "sha256": "e50984d2e1ef6300e3fd51303839842189a077b10cb5cadff1923df10c61c493"
+    },
+    {
+      "name": "apt",
+      "version": "3.0.3",
+      "architecture": "amd64",
+      "filename": "pool/main/a/apt/apt_3.0.3_amd64.deb",
+      "size": 1452192,
+      "sha256": "55e341fbe92d7502c98faf1b3c235393ea0744db119cf2173603e965b658aef4"
+    },
+    {
+      "name": "base-files",
+      "version": "13.8+deb13u7",
+      "architecture": "amd64",
+      "filename": "pool/main/b/base-files/base-files_13.8+deb13u7_amd64.deb",
+      "size": 88296,
+      "sha256": "fcd42bb5cb63f7bfc4326a92541247872206d60a192fdff65ca14eb83ed408b9"
+    },
+    {
+      "name": "base-passwd",
+      "version": "3.6.7",
+      "architecture": "amd64",
+      "filename": "pool/main/b/base-passwd/base-passwd_3.6.7_amd64.deb",
+      "size": 53712,
+      "sha256": "cf31c6956ab5f65815d9d9ea1615c4f78ecd2893c31119658248a4756cee83e7"
+    },
+    {
+      "name": "btrfs-progs",
+      "version": "6.14-1",
+      "architecture": "amd64",
+      "filename": "pool/main/b/btrfs-progs/btrfs-progs_6.14-1_amd64.deb",
+      "size": 908164,
+      "sha256": "ae3ab86d467b8b765ea1ea3e264c11a07a6f8a73e6b3df665c787d45b9b3491f"
+    },
+    {
+      "name": "coolkey",
+      "version": "1.1.0-16.1",
+      "architecture": "amd64",
+      "filename": "pool/main/c/coolkey/coolkey_1.1.0-16.1_amd64.deb",
+      "size": 90776,
+      "sha256": "810651211a549aee137eab506123462dcd42a33d4da620b8b4cac280fa88df96"
+    },
+    {
+      "name": "cpio",
+      "version": "2.15+dfsg-2",
+      "architecture": "amd64",
+      "filename": "pool/main/c/cpio/cpio_2.15+dfsg-2_amd64.deb",
+      "size": 252116,
+      "sha256": "d8faece250bcf72e91ac15a5fef198be173af18c9f48bae257e7ee937fbc6cdc"
+    },
+    {
+      "name": "cryptsetup-bin",
+      "version": "2:2.7.5-2",
+      "architecture": "amd64",
+      "filename": "pool/main/c/cryptsetup/cryptsetup-bin_2.7.5-2_amd64.deb",
+      "size": 503628,
+      "sha256": "b77b192cf1c35f96da02134300bb227ab92c49eec2444268049fa1ce84fb9bc7"
+    },
+    {
+      "name": "dbus",
+      "version": "1.16.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/d/dbus/dbus_1.16.2-2_amd64.deb",
+      "size": 71632,
+      "sha256": "f5c47639614324dac9a4c0baf5081676f698f815dd846060952b1d2e6e50f274"
+    },
+    {
+      "name": "dbus-bin",
+      "version": "1.16.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/d/dbus/dbus-bin_1.16.2-2_amd64.deb",
+      "size": 80004,
+      "sha256": "a7c0785f89d3763bb83e2912237135a7d1c610e06f487c39b1d6408e88d46fb5"
+    },
+    {
+      "name": "dbus-daemon",
+      "version": "1.16.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/d/dbus/dbus-daemon_1.16.2-2_amd64.deb",
+      "size": 158660,
+      "sha256": "c91558cbd019bd5ec3e9fde0084976d5f61977f4ef0a9ed1ff48fe3a129b91d4"
+    },
+    {
+      "name": "dbus-session-bus-common",
+      "version": "1.16.2-2",
+      "architecture": "all",
+      "filename": "pool/main/d/dbus/dbus-session-bus-common_1.16.2-2_all.deb",
+      "size": 52264,
+      "sha256": "98bd27836c7170839ed9c84b00daad9ed7155bd3d42e3f0ec3faf497aafa5f5f"
+    },
+    {
+      "name": "dbus-system-bus-common",
+      "version": "1.16.2-2",
+      "architecture": "all",
+      "filename": "pool/main/d/dbus/dbus-system-bus-common_1.16.2-2_all.deb",
+      "size": 53540,
+      "sha256": "262e9ec8aae4e38bfa341648f9498b29280a81458601e1c265a36a24771d120a"
+    },
+    {
+      "name": "debconf",
+      "version": "1.5.91",
+      "architecture": "all",
+      "filename": "pool/main/d/debconf/debconf_1.5.91_all.deb",
+      "size": 121088,
+      "sha256": "1ddc7e6c5925f748eefb7ca811d98e049f18c158bb21fbc7e122262ce6011e49"
+    },
+    {
+      "name": "debian-archive-keyring",
+      "version": "2025.1",
+      "architecture": "all",
+      "filename": "pool/main/d/debian-archive-keyring/debian-archive-keyring_2025.1_all.deb",
+      "size": 179244,
+      "sha256": "9ea7778e443144ca490668737a8ab22dd3e748bb99e805e22ec055abeb3c7fac"
+    },
+    {
+      "name": "dirmngr",
+      "version": "2.4.7-21+deb13u1+b5",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gnupg2/dirmngr_2.4.7-21+deb13u1+b5_amd64.deb",
+      "size": 383892,
+      "sha256": "385b4689f43678dbd097ada002ec19733179777ac2a6c0229ae292cae17f0833"
+    },
+    {
+      "name": "dmsetup",
+      "version": "2:1.02.205-2",
+      "architecture": "amd64",
+      "filename": "pool/main/l/lvm2/dmsetup_1.02.205-2_amd64.deb",
+      "size": 82344,
+      "sha256": "4771f7ab0a907a8e5d02a6358ff016ae7cb49124906bada02fa882e141b615a0"
+    },
+    {
+      "name": "dosfstools",
+      "version": "4.2-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/d/dosfstools/dosfstools_4.2-1.2_amd64.deb",
+      "size": 133092,
+      "sha256": "628551496a02e80eee83054b9c696b06ba8177159bf0afe9a5b4ab2fb94b1b41"
+    },
+    {
+      "name": "dpkg",
+      "version": "1.22.22",
+      "architecture": "amd64",
+      "filename": "pool/main/d/dpkg/dpkg_1.22.22_amd64.deb",
+      "size": 1537216,
+      "sha256": "3e800c6d75e8e709007ed1c356e5fa8509a75c1694fb0a1183709abc9cfdc1f3"
+    },
+    {
+      "name": "e2fsprogs",
+      "version": "1.47.2-3+b12",
+      "architecture": "amd64",
+      "filename": "pool/main/e/e2fsprogs/e2fsprogs_1.47.2-3+b12_amd64.deb",
+      "size": 591288,
+      "sha256": "e9e638eb3e22b5f14d01ce0b28aa512a5a22fcc0e70d1c733444579b67ea236b"
+    },
+    {
+      "name": "efitools",
+      "version": "1.9.2-3.5",
+      "architecture": "amd64",
+      "filename": "pool/main/e/efitools/efitools_1.9.2-3.5_amd64.deb",
+      "size": 133360,
+      "sha256": "d78bfff8f9d3b021652cb6983107caded0003e7e7c4afb42382160c7fad09956"
+    },
+    {
+      "name": "erofs-utils",
+      "version": "1.8.6-1",
+      "architecture": "amd64",
+      "filename": "pool/main/e/erofs-utils/erofs-utils_1.8.6-1_amd64.deb",
+      "size": 138944,
+      "sha256": "81042b8c0c3eb63699aa7d0763dceedc675a747d9f5cfebf914b4160233f411e"
+    },
+    {
+      "name": "fdisk",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/fdisk_2.41.5-0+deb13u1_amd64.deb",
+      "size": 158640,
+      "sha256": "7f37094ca3f63c3a07b4431532b0bcc4aa64291e75c48cabebf41bf42ad706b1"
+    },
+    {
+      "name": "gcc-14-base",
+      "version": "14.2.0-19",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gcc-14/gcc-14-base_14.2.0-19_amd64.deb",
+      "size": 49432,
+      "sha256": "5b6825de4263824b78c4c51f6476414f3b4e89c2ab63e81dc8b9b5501e867cf6"
+    },
+    {
+      "name": "gnupg",
+      "version": "2.4.7-21+deb13u1",
+      "architecture": "all",
+      "filename": "pool/main/g/gnupg2/gnupg_2.4.7-21+deb13u1_all.deb",
+      "size": 417112,
+      "sha256": "e68f0fd24a7a62f1112ae3e442564e134f21040492f11d1aefa7b18de93ebf6e"
+    },
+    {
+      "name": "gnupg-l10n",
+      "version": "2.4.7-21+deb13u1",
+      "architecture": "all",
+      "filename": "pool/main/g/gnupg2/gnupg-l10n_2.4.7-21+deb13u1_all.deb",
+      "size": 748620,
+      "sha256": "65c0b5b06123f81f08cfa9b0be313cbc9cf6255c550d70eabd8b175ce8928a35"
+    },
+    {
+      "name": "gpg",
+      "version": "2.4.7-21+deb13u1+b5",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gnupg2/gpg_2.4.7-21+deb13u1+b5_amd64.deb",
+      "size": 636212,
+      "sha256": "3aeedf3d223e5e6aff08f03227af6ce308f4317472609f383350fd2ec20d33ae"
+    },
+    {
+      "name": "gpg-agent",
+      "version": "2.4.7-21+deb13u1+b5",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gnupg2/gpg-agent_2.4.7-21+deb13u1+b5_amd64.deb",
+      "size": 271000,
+      "sha256": "ebc440c05dd5c5ba35f0b0035d7653866ce26c47c826ffbb5a3440773f28da03"
+    },
+    {
+      "name": "gpgconf",
+      "version": "2.4.7-21+deb13u1+b5",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gnupg2/gpgconf_2.4.7-21+deb13u1+b5_amd64.deb",
+      "size": 128880,
+      "sha256": "14668f3f4847d2544bdff03c2ca8dbdd2fe0ad1bc7ded00941db291954c60f1b"
+    },
+    {
+      "name": "gpgsm",
+      "version": "2.4.7-21+deb13u1+b5",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gnupg2/gpgsm_2.4.7-21+deb13u1+b5_amd64.deb",
+      "size": 275832,
+      "sha256": "092f4675a1810ca7b51a1d53595f9e0c3ab65210c15805749e91030769e2301b"
+    },
+    {
+      "name": "gpgv",
+      "version": "2.4.7-21+deb13u1+b5",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gnupg2/gpgv_2.4.7-21+deb13u1+b5_amd64.deb",
+      "size": 241100,
+      "sha256": "104e4c57b98f0b883aa94c68fbe7ec7b48bcdec7c0f9dedf2a51a5054aaeb5ae"
+    },
+    {
+      "name": "gzip",
+      "version": "1.13-1+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gzip/gzip_1.13-1+deb13u1_amd64.deb",
+      "size": 138608,
+      "sha256": "74cf12212beee4ab8d473bdc0107abf9e8cef737492198e2f4944a19f142b0ac"
+    },
+    {
+      "name": "init-system-helpers",
+      "version": "1.69~deb13u1",
+      "architecture": "all",
+      "filename": "pool/main/i/init-system-helpers/init-system-helpers_1.69~deb13u1_all.deb",
+      "size": 39360,
+      "sha256": "addf78073e1cbc5a5508937e11d2571055e29835e00ee8fab52a66775649378f"
+    },
+    {
+      "name": "jq",
+      "version": "1.7.1-6+deb13u3",
+      "architecture": "amd64",
+      "filename": "pool/main/j/jq/jq_1.7.1-6+deb13u3_amd64.deb",
+      "size": 78792,
+      "sha256": "4415dc18d4ea29d8e12d410dd8c71c567d44d8ec5e24afaed3aa7a149b063643"
+    },
+    {
+      "name": "kmod",
+      "version": "34.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/k/kmod/kmod_34.2-2_amd64.deb",
+      "size": 95704,
+      "sha256": "d56f9311beb17cd15447d11d91fd4de94d23a47d4619e8806b1b807b40c72e53"
+    },
+    {
+      "name": "libacl1",
+      "version": "2.3.2-2+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/a/acl/libacl1_2.3.2-2+b1_amd64.deb",
+      "size": 32860,
+      "sha256": "08074f01e384bc07c0c2d79a58cf4a6523f71cf75d1808101c79617656c9a39d"
+    },
+    {
+      "name": "libapparmor1",
+      "version": "4.1.0-1",
+      "architecture": "amd64",
+      "filename": "pool/main/a/apparmor/libapparmor1_4.1.0-1_amd64.deb",
+      "size": 43688,
+      "sha256": "4158976c77038b93021967f425b4cc505df18c4f5e3f444732399e7ed4af4419"
+    },
+    {
+      "name": "libapt-pkg7.0",
+      "version": "3.0.3",
+      "architecture": "amd64",
+      "filename": "pool/main/a/apt/libapt-pkg7.0_3.0.3_amd64.deb",
+      "size": 1112916,
+      "sha256": "fdcc9f780c7de466c7f0038e6e242c73cb63c8f9fe2781a3185a2c810984ab0a"
+    },
+    {
+      "name": "libassuan9",
+      "version": "3.0.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/liba/libassuan/libassuan9_3.0.2-2_amd64.deb",
+      "size": 61520,
+      "sha256": "9d78ef8f016e7f24b5e20d1ce91939fe0f1f897e5f9059793201e930ded7eb8e"
+    },
+    {
+      "name": "libatomic1",
+      "version": "14.2.0-19",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gcc-14/libatomic1_14.2.0-19_amd64.deb",
+      "size": 9308,
+      "sha256": "212b399aae2f7299203d261a57e49372e09565a9a5ea971905f94a3960366c05"
+    },
+    {
+      "name": "libattr1",
+      "version": "1:2.5.2-3",
+      "architecture": "amd64",
+      "filename": "pool/main/a/attr/libattr1_2.5.2-3_amd64.deb",
+      "size": 22876,
+      "sha256": "606b5ee12ea2786be607a17f40c1fb5e65c76ceaff66665bdf8f8c6c1b71d1fb"
+    },
+    {
+      "name": "libaudit-common",
+      "version": "1:4.0.2-2+deb13u1",
+      "architecture": "all",
+      "filename": "pool/main/a/audit/libaudit-common_4.0.2-2+deb13u1_all.deb",
+      "size": 12812,
+      "sha256": "b9d32e5ff04fd747aacb7d6b3ebbbbf734ddefb2f1695f0b1b2a4b5e51b1052e"
+    },
+    {
+      "name": "libaudit1",
+      "version": "1:4.0.2-2+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/a/audit/libaudit1_4.0.2-2+deb13u1_amd64.deb",
+      "size": 57680,
+      "sha256": "3d1dd3f031a56f01b747e2acc0e14575212580e6fa63d800c44cb0a31f1edfd7"
+    },
+    {
+      "name": "libblkid1",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/libblkid1_2.41.5-0+deb13u1_amd64.deb",
+      "size": 171612,
+      "sha256": "81535f3c2c0efc732965907c8749103a0a26377c761622c9ce39b4c92dcde52f"
+    },
+    {
+      "name": "libbrotli1",
+      "version": "1.1.0-2+b7",
+      "architecture": "amd64",
+      "filename": "pool/main/b/brotli/libbrotli1_1.1.0-2+b7_amd64.deb",
+      "size": 306624,
+      "sha256": "0fb79f88db210afbd69282ab9649e525f393ec6950ca34da1a6b359250b8d7db"
+    },
+    {
+      "name": "libbsd0",
+      "version": "0.12.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/libb/libbsd/libbsd0_0.12.2-2_amd64.deb",
+      "size": 130968,
+      "sha256": "e5a85986fa6bec3307ab1bc860736b478b331882bc45e17675a7bdf88eecb43a"
+    },
+    {
+      "name": "libbz2-1.0",
+      "version": "1.0.8-6",
+      "architecture": "amd64",
+      "filename": "pool/main/b/bzip2/libbz2-1.0_1.0.8-6_amd64.deb",
+      "size": 37912,
+      "sha256": "cba4cda04244b5e481bb15524bc3c983a7d1b6f330013b9b381706a2fcb65310"
+    },
+    {
+      "name": "libc6",
+      "version": "2.41-12+deb13u4",
+      "architecture": "amd64",
+      "filename": "pool/main/g/glibc/libc6_2.41-12+deb13u4_amd64.deb",
+      "size": 2846580,
+      "sha256": "967aa62605721081c3eb2a17650611a792aa802d76a6511d1840242623d204c9"
+    },
+    {
+      "name": "libcap-ng0",
+      "version": "0.8.5-4+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/libc/libcap-ng/libcap-ng0_0.8.5-4+b1_amd64.deb",
+      "size": 17584,
+      "sha256": "20a9e4b0619a3eb2566338223bed135dde5a601eaa2f8fdd5f20b94506addcac"
+    },
+    {
+      "name": "libcap2",
+      "version": "1:2.75-10+deb13u1+b3",
+      "architecture": "amd64",
+      "filename": "pool/main/libc/libcap2/libcap2_2.75-10+deb13u1+b3_amd64.deb",
+      "size": 28988,
+      "sha256": "89fc4d34fc7a28ad6f0fcd0c561ab253b9dedf6f77f5a000b47c276c8295bf67"
+    },
+    {
+      "name": "libckyapplet1t64",
+      "version": "1.1.0-16.1",
+      "architecture": "amd64",
+      "filename": "pool/main/c/coolkey/libckyapplet1t64_1.1.0-16.1_amd64.deb",
+      "size": 22576,
+      "sha256": "90ed596206b1fadfb8cc65100ae5528f878d3e706a931b09b02e36523a9bf993"
+    },
+    {
+      "name": "libcom-err2",
+      "version": "1.47.2-3+b12",
+      "architecture": "amd64",
+      "filename": "pool/main/e/e2fsprogs/libcom-err2_1.47.2-3+b12_amd64.deb",
+      "size": 25036,
+      "sha256": "bd43e020b8fed399db3eebf098111f10fba4c436fff99ccad72cc7e27c9764ec"
+    },
+    {
+      "name": "libcrypt1",
+      "version": "1:4.4.38-1",
+      "architecture": "amd64",
+      "filename": "pool/main/libx/libxcrypt/libcrypt1_4.4.38-1_amd64.deb",
+      "size": 90072,
+      "sha256": "0ebc144d662e3197982d1bf3a7b8b35ca845e54c68811de0328b1f0d7c67585c"
+    },
+    {
+      "name": "libcryptsetup12",
+      "version": "2:2.7.5-2",
+      "architecture": "amd64",
+      "filename": "pool/main/c/cryptsetup/libcryptsetup12_2.7.5-2_amd64.deb",
+      "size": 254056,
+      "sha256": "84f6596296c346c1c8f6bb16b0d4d485215b7a23a23ff21e9c28e35822d45a7b"
+    },
+    {
+      "name": "libcurl3t64-gnutls",
+      "version": "8.14.1-2+deb13u5",
+      "architecture": "amd64",
+      "filename": "pool/main/c/curl/libcurl3t64-gnutls_8.14.1-2+deb13u5_amd64.deb",
+      "size": 384460,
+      "sha256": "19da93544615a4c9a3d7df473f5bf8ebca99442454622e9b0460168dadf7b8ae"
+    },
+    {
+      "name": "libcurl4t64",
+      "version": "8.14.1-2+deb13u5",
+      "architecture": "amd64",
+      "filename": "pool/main/c/curl/libcurl4t64_8.14.1-2+deb13u5_amd64.deb",
+      "size": 391492,
+      "sha256": "0dedddfe614fc4a4335c9167b73c64a50136edd76b7991aa851408d0795163eb"
+    },
+    {
+      "name": "libdb5.3t64",
+      "version": "5.3.28+dfsg2-9",
+      "architecture": "amd64",
+      "filename": "pool/main/d/db5.3/libdb5.3t64_5.3.28+dfsg2-9_amd64.deb",
+      "size": 703676,
+      "sha256": "18d02510ee78b67e4504ba050176797a200ff24214a7cd318082ab60ad7bf3fc"
+    },
+    {
+      "name": "libdbus-1-3",
+      "version": "1.16.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/d/dbus/libdbus-1-3_1.16.2-2_amd64.deb",
+      "size": 177904,
+      "sha256": "bbcb711daff7e104b5f80f9b05475b6142674bfe65518a36a56e96a91068a3f5"
+    },
+    {
+      "name": "libdebconfclient0",
+      "version": "0.280",
+      "architecture": "amd64",
+      "filename": "pool/main/c/cdebconf/libdebconfclient0_0.280_amd64.deb",
+      "size": 10632,
+      "sha256": "25acadc8b394bc86d05df16e70975e523f8f839a7d8d6d5e22c1cafdcef741aa"
+    },
+    {
+      "name": "libdeflate0",
+      "version": "1.23-2",
+      "architecture": "amd64",
+      "filename": "pool/main/libd/libdeflate/libdeflate0_1.23-2_amd64.deb",
+      "size": 47344,
+      "sha256": "5fe37fb79d53f5c91da6ba3ac4c1a8453e1f2b1ff0e0ea45189c5338bbfdbf82"
+    },
+    {
+      "name": "libdevmapper1.02.1",
+      "version": "2:1.02.205-2",
+      "architecture": "amd64",
+      "filename": "pool/main/l/lvm2/libdevmapper1.02.1_1.02.205-2_amd64.deb",
+      "size": 134640,
+      "sha256": "e924e0df8823987f271b7d3a375dc2f8adcd76db66f09d0273043c885edb0af0"
+    },
+    {
+      "name": "libeac3",
+      "version": "1.1.2+ds+git20220117+453c3d6b03a0-1.1+b3",
+      "architecture": "amd64",
+      "filename": "pool/main/o/openpace/libeac3_1.1.2+ds+git20220117+453c3d6b03a0-1.1+b3_amd64.deb",
+      "size": 51120,
+      "sha256": "089366fb2b71cadca53fb844cfabb0d0798623463247f5b8fa6ad1cc3ab382f2"
+    },
+    {
+      "name": "libefivar1t64",
+      "version": "38-3.1+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/e/efivar/libefivar1t64_38-3.1+b1_amd64.deb",
+      "size": 58460,
+      "sha256": "34bfb96ca9422af293aeac800438682112b4019adc5ed25728bc35dff4ad4ca4"
+    },
+    {
+      "name": "libexpat1",
+      "version": "2.8.3-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/e/expat/libexpat1_2.8.3-1~deb13u1_amd64.deb",
+      "size": 122672,
+      "sha256": "38abe0e710a07688e9c149d74536e67cfee0364bdb64dd6d644c32a1cfad389f"
+    },
+    {
+      "name": "libext2fs2t64",
+      "version": "1.47.2-3+b12",
+      "architecture": "amd64",
+      "filename": "pool/main/e/e2fsprogs/libext2fs2t64_1.47.2-3+b12_amd64.deb",
+      "size": 212664,
+      "sha256": "9f5783fa48239e42260d41846fbc6c8b19c233251063524456096195660eaa09"
+    },
+    {
+      "name": "libfdisk1",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/libfdisk1_2.41.5-0+deb13u1_amd64.deb",
+      "size": 214600,
+      "sha256": "7f96d173cc01787201691f80ca9b335b8c7d6cdcc6fb81011302d4a005ff5089"
+    },
+    {
+      "name": "libffi8",
+      "version": "3.4.8-2",
+      "architecture": "amd64",
+      "filename": "pool/main/libf/libffi/libffi8_3.4.8-2_amd64.deb",
+      "size": 24144,
+      "sha256": "0ebdc340de33333639c3c63874cd4b15ac2e83dfa1ef3053b7eefaf4919f4f68"
+    },
+    {
+      "name": "libgcc-s1",
+      "version": "14.2.0-19",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gcc-14/libgcc-s1_14.2.0-19_amd64.deb",
+      "size": 72772,
+      "sha256": "3c71917b490d1a17aed43196a2787a256ecf060526cdb20216a74bedc061b150"
+    },
+    {
+      "name": "libgcrypt20",
+      "version": "1.11.0-7+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/libg/libgcrypt20/libgcrypt20_1.11.0-7+deb13u1_amd64.deb",
+      "size": 843104,
+      "sha256": "f0eb41f8cb40896e0822e9ab65611e8383c12b721c76c54764f744abb4a8c247"
+    },
+    {
+      "name": "libglib2.0-0t64",
+      "version": "2.84.4-3~deb13u5",
+      "architecture": "amd64",
+      "filename": "pool/main/g/glib2.0/libglib2.0-0t64_2.84.4-3~deb13u5_amd64.deb",
+      "size": 1521120,
+      "sha256": "e2baf92c57d1db1753e5781a61450d9a01e7833c7bd2dfe87776a6811c11ecc2"
+    },
+    {
+      "name": "libgmp10",
+      "version": "2:6.3.0+dfsg-3",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gmp/libgmp10_6.3.0+dfsg-3_amd64.deb",
+      "size": 560220,
+      "sha256": "d0d0265eb01770f17afd0f7c8c0622f80479dcfbbe13653a0debeec61464e622"
+    },
+    {
+      "name": "libgnutls30t64",
+      "version": "3.8.9-3+deb13u4",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gnutls28/libgnutls30t64_3.8.9-3+deb13u4_amd64.deb",
+      "size": 1469024,
+      "sha256": "18a8bdfd91c7e3bcb01719d55a2b56849c7160b34f1f52b1c4fdfdd41bf1352b"
+    },
+    {
+      "name": "libgpg-error0",
+      "version": "1.51-4",
+      "architecture": "amd64",
+      "filename": "pool/main/libg/libgpg-error/libgpg-error0_1.51-4_amd64.deb",
+      "size": 82108,
+      "sha256": "22b95570fd41c113ef6f5651563b4d748292844baab1278a46eb940c1dec2322"
+    },
+    {
+      "name": "libgssapi-krb5-2",
+      "version": "1.21.3-5+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/k/krb5/libgssapi-krb5-2_1.21.3-5+deb13u1_amd64.deb",
+      "size": 138356,
+      "sha256": "30847c1fde4240567d7ed3aeab4f655dd591203758b857e85e824045aae70299"
+    },
+    {
+      "name": "libhogweed6t64",
+      "version": "3.10.1-1",
+      "architecture": "amd64",
+      "filename": "pool/main/n/nettle/libhogweed6t64_3.10.1-1_amd64.deb",
+      "size": 335240,
+      "sha256": "b059ed155115ac09da295322de48ee1ed58ef5fa45edcc9e12ff0e94636ef25f"
+    },
+    {
+      "name": "libidn2-0",
+      "version": "2.3.8-2",
+      "architecture": "amd64",
+      "filename": "pool/main/libi/libidn2/libidn2-0_2.3.8-2_amd64.deb",
+      "size": 109096,
+      "sha256": "90b039bcdc4578f8e1c4935adf8dbb525e36a164deefdbbb8c45bac347d48278"
+    },
+    {
+      "name": "libjq1",
+      "version": "1.7.1-6+deb13u3",
+      "architecture": "amd64",
+      "filename": "pool/main/j/jq/libjq1_1.7.1-6+deb13u3_amd64.deb",
+      "size": 167952,
+      "sha256": "62444043e4b8f21a5154e5b7084d85db00da509e163c52a950bb8aeb75e4012e"
+    },
+    {
+      "name": "libjson-c5",
+      "version": "0.18+ds-1",
+      "architecture": "amd64",
+      "filename": "pool/main/j/json-c/libjson-c5_0.18+ds-1_amd64.deb",
+      "size": 45956,
+      "sha256": "4fbd5fb4d54c626f05d68abf38a31533fbf1bf4a87068696abe041ee9c974fe0"
+    },
+    {
+      "name": "libk5crypto3",
+      "version": "1.21.3-5+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/k/krb5/libk5crypto3_1.21.3-5+deb13u1_amd64.deb",
+      "size": 81152,
+      "sha256": "7da07ee674b47f1f0be7cc89317c25310086a1f1761217d0f72e6ae2c5a69b84"
+    },
+    {
+      "name": "libkeyutils1",
+      "version": "1.6.3-6",
+      "architecture": "amd64",
+      "filename": "pool/main/k/keyutils/libkeyutils1_1.6.3-6_amd64.deb",
+      "size": 9456,
+      "sha256": "0b11ad17be0300b63ad4eeb4c6450fed24d34b7b740f23e5363dcb29ee6d5eba"
+    },
+    {
+      "name": "libkmod2",
+      "version": "34.2-2",
+      "architecture": "amd64",
+      "filename": "pool/main/k/kmod/libkmod2_34.2-2_amd64.deb",
+      "size": 63196,
+      "sha256": "ee6c50ebac79aa9795e8bf9aa01d94c99984d09d22598c66be0f8ba917b62179"
+    },
+    {
+      "name": "libkrb5-3",
+      "version": "1.21.3-5+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/k/krb5/libkrb5-3_1.21.3-5+deb13u1_amd64.deb",
+      "size": 326056,
+      "sha256": "47d71d6a7f2e59b9bae5f89602397594805113b95889ad18fa703cd53abafc97"
+    },
+    {
+      "name": "libkrb5support0",
+      "version": "1.21.3-5+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/k/krb5/libkrb5support0_1.21.3-5+deb13u1_amd64.deb",
+      "size": 33124,
+      "sha256": "3a0acd8b37955c0e102c756b52c97df2a31f67b96453c35dab70df218d309117"
+    },
+    {
+      "name": "libksba8",
+      "version": "1.6.7-2+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/libk/libksba/libksba8_1.6.7-2+b1_amd64.deb",
+      "size": 136048,
+      "sha256": "45bc1bfaf41a5e1136b1c1f58c495a950888da33a617de24202f3568e45b9572"
+    },
+    {
+      "name": "liblastlog2-2",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/liblastlog2-2_2.41.5-0+deb13u1_amd64.deb",
+      "size": 28772,
+      "sha256": "abb76aecbf51479e6e193873dfddaa1b88667dc0b1db82a11286a67550ba1557"
+    },
+    {
+      "name": "libldap2",
+      "version": "2.6.10+dfsg-1",
+      "architecture": "amd64",
+      "filename": "pool/main/o/openldap/libldap2_2.6.10+dfsg-1_amd64.deb",
+      "size": 193576,
+      "sha256": "60069e4a550ca890113fa89d3001417781b18e146ec5d637d31e368dec9909bd"
+    },
+    {
+      "name": "liblz4-1",
+      "version": "1.10.0-4",
+      "architecture": "amd64",
+      "filename": "pool/main/l/lz4/liblz4-1_1.10.0-4_amd64.deb",
+      "size": 63900,
+      "sha256": "c31ec4c7c82755a38b2f3fe066fc0c5518cc91a601a268fbcd19bdacb1f22e1e"
+    },
+    {
+      "name": "liblzma5",
+      "version": "5.8.1-1+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/x/xz-utils/liblzma5_5.8.1-1+deb13u1_amd64.deb",
+      "size": 309492,
+      "sha256": "1cfcc6e0dc36f438a79b6e2189facdb9d150b08f57d190a60e01c98075c7f896"
+    },
+    {
+      "name": "liblzo2-2",
+      "version": "2.10-3+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/l/lzo2/liblzo2-2_2.10-3+b1_amd64.deb",
+      "size": 55100,
+      "sha256": "f3032201fe2928a87e13f05ce256ff3ac2a7860c7e594dc51ae6d7348a4466ce"
+    },
+    {
+      "name": "libmd0",
+      "version": "1.1.0-2+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/libm/libmd/libmd0_1.1.0-2+b1_amd64.deb",
+      "size": 36272,
+      "sha256": "7244ec3839b61fac0c1884fe08aaa040f26e8f1f35f1f5d3482eacefd30d1b44"
+    },
+    {
+      "name": "libmount1",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/libmount1_2.41.5-0+deb13u1_amd64.deb",
+      "size": 210408,
+      "sha256": "6d00f45f2e80e078e906e3eedecd3ba6913e39fef49bff361ee583f17f00ec05"
+    },
+    {
+      "name": "libncursesw6",
+      "version": "6.5+20250216-2",
+      "architecture": "amd64",
+      "filename": "pool/main/n/ncurses/libncursesw6_6.5+20250216-2_amd64.deb",
+      "size": 135484,
+      "sha256": "47baa2e11579583654583a066b69bd5a5d2f22423081f707ed6c0c3ba6d538b7"
+    },
+    {
+      "name": "libnettle8t64",
+      "version": "3.10.1-1",
+      "architecture": "amd64",
+      "filename": "pool/main/n/nettle/libnettle8t64_3.10.1-1_amd64.deb",
+      "size": 305436,
+      "sha256": "1b03d4a9cd9c8143ba50fe6396f36937e901a317d492d179f4596862c1731cfe"
+    },
+    {
+      "name": "libnghttp2-14",
+      "version": "1.64.0-1.1+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/n/nghttp2/libnghttp2-14_1.64.0-1.1+deb13u1_amd64.deb",
+      "size": 76188,
+      "sha256": "896cb217537c09251fb909b8541349010ac279d802d871e98c06a62a2c67ce2c"
+    },
+    {
+      "name": "libnghttp3-9",
+      "version": "1.8.0-1",
+      "architecture": "amd64",
+      "filename": "pool/main/n/nghttp3/libnghttp3-9_1.8.0-1_amd64.deb",
+      "size": 67656,
+      "sha256": "388e4c33b72829cbf0d098afdc8539fa5ba7458eddb077f5538fdb4d5538716b"
+    },
+    {
+      "name": "libngtcp2-16",
+      "version": "1.11.0-1+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/n/ngtcp2/libngtcp2-16_1.11.0-1+deb13u1_amd64.deb",
+      "size": 131904,
+      "sha256": "627eec81ebbd48c4e6091f5cd9dc5070b792b7075000eed60ab08c7daa961caf"
+    },
+    {
+      "name": "libngtcp2-crypto-gnutls8",
+      "version": "1.11.0-1+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/n/ngtcp2/libngtcp2-crypto-gnutls8_1.11.0-1+deb13u1_amd64.deb",
+      "size": 29524,
+      "sha256": "2a7f109c0c4db6a800e4661c5e5e34e1f1f83c8162482276183d1ada9da7c96c"
+    },
+    {
+      "name": "libnpth0t64",
+      "version": "1.8-3",
+      "architecture": "amd64",
+      "filename": "pool/main/n/npth/libnpth0t64_1.8-3_amd64.deb",
+      "size": 23248,
+      "sha256": "37d489976ef91ca0165a7789a7a7ac5923ee3cfadf316ac3e87582e15d0523d7"
+    },
+    {
+      "name": "libnspr4",
+      "version": "2:4.36-1",
+      "architecture": "amd64",
+      "filename": "pool/main/n/nspr/libnspr4_4.36-1_amd64.deb",
+      "size": 109800,
+      "sha256": "87fc2039ee89cff2b8010fa9535706b1def40031acfc52bf12197dcb3cb7b064"
+    },
+    {
+      "name": "libnss3",
+      "version": "2:3.110-1+deb13u4",
+      "architecture": "amd64",
+      "filename": "pool/main/n/nss/libnss3_3.110-1+deb13u4_amd64.deb",
+      "size": 1394236,
+      "sha256": "8d20d0754039e15e9bd2c8484e98dc9c2982907d4f20834da29a9501913d00b5"
+    },
+    {
+      "name": "libnss3-tools",
+      "version": "2:3.110-1+deb13u4",
+      "architecture": "amd64",
+      "filename": "pool/main/n/nss/libnss3-tools_3.110-1+deb13u4_amd64.deb",
+      "size": 1086124,
+      "sha256": "6504101943837ed2ee0089c9d4d72d69b96db0c51aa21249e0757855905af82e"
+    },
+    {
+      "name": "libonig5",
+      "version": "6.9.9-1+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/libo/libonig/libonig5_6.9.9-1+b1_amd64.deb",
+      "size": 189396,
+      "sha256": "3abee130696244050500bcc7870e3b4cb82ddd87149ece3fd55010c3d4e1d18c"
+    },
+    {
+      "name": "libp11-kit0",
+      "version": "0.25.5-3",
+      "architecture": "amd64",
+      "filename": "pool/main/p/p11-kit/libp11-kit0_0.25.5-3_amd64.deb",
+      "size": 425240,
+      "sha256": "784bf2063e166c8bc851a32623b74ebd85c499043a9d57c5bbd64fa63447f45a"
+    },
+    {
+      "name": "libpam-modules",
+      "version": "1.7.0-5",
+      "architecture": "amd64",
+      "filename": "pool/main/p/pam/libpam-modules_1.7.0-5_amd64.deb",
+      "size": 178696,
+      "sha256": "9679ade117f8775ac0471f48a92652ab8e8dcda4e2ff06de75158cded9cfd83c"
+    },
+    {
+      "name": "libpam-modules-bin",
+      "version": "1.7.0-5",
+      "architecture": "amd64",
+      "filename": "pool/main/p/pam/libpam-modules-bin_1.7.0-5_amd64.deb",
+      "size": 49116,
+      "sha256": "cc72066d008444317738e8e931d6131b301466b4e2dd5ef5baa75fb1a45d61a7"
+    },
+    {
+      "name": "libpam-runtime",
+      "version": "1.7.0-5",
+      "architecture": "all",
+      "filename": "pool/main/p/pam/libpam-runtime_1.7.0-5_all.deb",
+      "size": 248720,
+      "sha256": "b02792c9ed6174db695a653b95ef3629fdac3a73ba1eff1754ab161b5711bfbf"
+    },
+    {
+      "name": "libpam0g",
+      "version": "1.7.0-5",
+      "architecture": "amd64",
+      "filename": "pool/main/p/pam/libpam0g_1.7.0-5_amd64.deb",
+      "size": 69880,
+      "sha256": "4f5bde27d8df2de6ea8990319b42d9974f56a3ba9907ce7296fd0f8964fc9fb1"
+    },
+    {
+      "name": "libpcre2-8-0",
+      "version": "10.46-1~deb13u2",
+      "architecture": "amd64",
+      "filename": "pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_amd64.deb",
+      "size": 298872,
+      "sha256": "1252b96a5bc44bb5db982bef8eb18e54f5047cede2aff641bce4f8e1edb91c3e"
+    },
+    {
+      "name": "libpcsclite1",
+      "version": "2.3.3-1",
+      "architecture": "amd64",
+      "filename": "pool/main/p/pcsc-lite/libpcsclite1_2.3.3-1_amd64.deb",
+      "size": 55248,
+      "sha256": "a8bc4725549060d1e696d358e32a3699d947d5381871553a290389830bebccbd"
+    },
+    {
+      "name": "libpopt0",
+      "version": "1.19+dfsg-2",
+      "architecture": "amd64",
+      "filename": "pool/main/p/popt/libpopt0_1.19+dfsg-2_amd64.deb",
+      "size": 43844,
+      "sha256": "07f649b706852af937654295697dcfc7858f3295718ec18681dce1704663e4f2"
+    },
+    {
+      "name": "libpsl5t64",
+      "version": "0.21.2-1.1+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/libp/libpsl/libpsl5t64_0.21.2-1.1+b1_amd64.deb",
+      "size": 57188,
+      "sha256": "59d42bb1f9ebc0d1776fe616efb08a7a8568b05982e00f70b03c63863db768ab"
+    },
+    {
+      "name": "libpython3-stdlib",
+      "version": "3.13.5-1",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python3-defaults/libpython3-stdlib_3.13.5-1_amd64.deb",
+      "size": 10180,
+      "sha256": "7e142ed64a81ccdd39714f213467bd365736ef341adb2be11be981f638b9175f"
+    },
+    {
+      "name": "libpython3.13-minimal",
+      "version": "3.13.5-2+deb13u5",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python3.13/libpython3.13-minimal_3.13.5-2+deb13u5_amd64.deb",
+      "size": 863168,
+      "sha256": "a4aa6a9a8c77f87bfe545e1d14ec42c001d189ace90e3aa75deec882b39dee49"
+    },
+    {
+      "name": "libpython3.13-stdlib",
+      "version": "3.13.5-2+deb13u5",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python3.13/libpython3.13-stdlib_3.13.5-2+deb13u5_amd64.deb",
+      "size": 1958624,
+      "sha256": "db161322a3481d2c0c3b9a3b9a03c3ab0e2b1718f54b88755fb4a3f939165b84"
+    },
+    {
+      "name": "libreadline8t64",
+      "version": "8.2-6",
+      "architecture": "amd64",
+      "filename": "pool/main/r/readline/libreadline8t64_8.2-6_amd64.deb",
+      "size": 168832,
+      "sha256": "eeadf2b5e755c9f183883feea2d9b5b28560284275d5f54d3e55d0923b1d0967"
+    },
+    {
+      "name": "libreiserfscore0t64",
+      "version": "1:3.6.27-9",
+      "architecture": "amd64",
+      "filename": "pool/main/r/reiserfsprogs/libreiserfscore0t64_3.6.27-9_amd64.deb",
+      "size": 80696,
+      "sha256": "138245c2abc72dc0428328da0a5991cae176d51b20552a313f566ccbca7f8a98"
+    },
+    {
+      "name": "librtmp1",
+      "version": "2.4+20151223.gitfa8646d.1-2+b5",
+      "architecture": "amd64",
+      "filename": "pool/main/r/rtmpdump/librtmp1_2.4+20151223.gitfa8646d.1-2+b5_amd64.deb",
+      "size": 58840,
+      "sha256": "93baa2004cbe6c8721b9e81beed078612540aef120970b4751305c51c6697368"
+    },
+    {
+      "name": "libsasl2-2",
+      "version": "2.1.28+dfsg1-9",
+      "architecture": "amd64",
+      "filename": "pool/main/c/cyrus-sasl2/libsasl2-2_2.1.28+dfsg1-9_amd64.deb",
+      "size": 57512,
+      "sha256": "66e49d7ae026811b49a0050f18b0325960a2625ffd1ff60d91b7844a815fa9d2"
+    },
+    {
+      "name": "libsasl2-modules-db",
+      "version": "2.1.28+dfsg1-9",
+      "architecture": "amd64",
+      "filename": "pool/main/c/cyrus-sasl2/libsasl2-modules-db_2.1.28+dfsg1-9_amd64.deb",
+      "size": 19768,
+      "sha256": "a5c38659fbd62c33c6d9bfa2be43e75a572d1818531aad32dd74d0a58cc4bd19"
+    },
+    {
+      "name": "libseccomp2",
+      "version": "2.6.0-2",
+      "architecture": "amd64",
+      "filename": "pool/main/libs/libseccomp/libseccomp2_2.6.0-2_amd64.deb",
+      "size": 51712,
+      "sha256": "89d5138e05fb6a86b9afd8b54dc0fb4b14f4c27c05e6c5f767c2132bdf808531"
+    },
+    {
+      "name": "libselinux1",
+      "version": "3.8.1-1",
+      "architecture": "amd64",
+      "filename": "pool/main/libs/libselinux/libselinux1_3.8.1-1_amd64.deb",
+      "size": 84680,
+      "sha256": "68bb8d32bd8d6d7d2f5952a169db03d1484b46ae1e52abccdec42a19dccea5d5"
+    },
+    {
+      "name": "libsemanage-common",
+      "version": "3.8.1-1",
+      "architecture": "all",
+      "filename": "pool/main/libs/libsemanage/libsemanage-common_3.8.1-1_all.deb",
+      "size": 7812,
+      "sha256": "65375d886749c236bd1da4d9990b7c2469d2fe66019a28e5614f6814376d3dcb"
+    },
+    {
+      "name": "libsemanage2",
+      "version": "3.8.1-1",
+      "architecture": "amd64",
+      "filename": "pool/main/libs/libsemanage/libsemanage2_3.8.1-1_amd64.deb",
+      "size": 95284,
+      "sha256": "f97da7505d17ad3bdd8fc56302256df7e158e5e0d8b02cb766654199cbc406a9"
+    },
+    {
+      "name": "libsepol2",
+      "version": "3.8.1-1",
+      "architecture": "amd64",
+      "filename": "pool/main/libs/libsepol/libsepol2_3.8.1-1_amd64.deb",
+      "size": 295588,
+      "sha256": "3595d2d3a6d24695e7953f4f00cdfe6974c9242d9a8dfee8998e77fbf7b2ba09"
+    },
+    {
+      "name": "libsmartcols1",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/libsmartcols1_2.41.5-0+deb13u1_amd64.deb",
+      "size": 143216,
+      "sha256": "d96bac9c8805685f2734885098a214b82950da6ebb182c27a6b7a124a0323392"
+    },
+    {
+      "name": "libsqlite3-0",
+      "version": "3.46.1-7+deb13u2",
+      "architecture": "amd64",
+      "filename": "pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_amd64.deb",
+      "size": 914584,
+      "sha256": "0a459adaffd901109f7811ab65f58e7a957b4907d05539cf3d1184efdcde0468"
+    },
+    {
+      "name": "libss2",
+      "version": "1.47.2-3+b12",
+      "architecture": "amd64",
+      "filename": "pool/main/e/e2fsprogs/libss2_1.47.2-3+b12_amd64.deb",
+      "size": 29724,
+      "sha256": "c5d38d71984c1bf774c1254238636e605fc4e0dc24d853f709921eb740327f4a"
+    },
+    {
+      "name": "libssh2-1t64",
+      "version": "1.11.1-1+deb13u2",
+      "architecture": "amd64",
+      "filename": "pool/main/libs/libssh2/libssh2-1t64_1.11.1-1+deb13u2_amd64.deb",
+      "size": 245240,
+      "sha256": "dbb1024c192d4d292b7cfa902b96076cfe81b56a5eed4fb28da36e8bf543e49a"
+    },
+    {
+      "name": "libssl3t64",
+      "version": "3.5.7-1~deb13u2",
+      "architecture": "amd64",
+      "filename": "pool/main/o/openssl/libssl3t64_3.5.7-1~deb13u2_amd64.deb",
+      "size": 2453872,
+      "sha256": "916f7f40b34a06e6ebfaefcdab331bff458328411da672598f126a760472467d"
+    },
+    {
+      "name": "libstdc++6",
+      "version": "14.2.0-19",
+      "architecture": "amd64",
+      "filename": "pool/main/g/gcc-14/libstdc++6_14.2.0-19_amd64.deb",
+      "size": 713628,
+      "sha256": "ab1fa05837aa7a92aae748fd07a18a35f7d18bb4a71c4724fe2bbf0e32089de0"
+    },
+    {
+      "name": "libsystemd-shared",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/libsystemd-shared_257.13-1~deb13u1_amd64.deb",
+      "size": 2154616,
+      "sha256": "2d349824e57f88507e2a33360610d8afc143a4ad5e80ee4bf8f37b826d6f37f9"
+    },
+    {
+      "name": "libsystemd0",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/libsystemd0_257.13-1~deb13u1_amd64.deb",
+      "size": 454648,
+      "sha256": "ab0d4127b5e46e6f8c015a1db15a62ba9ae274cdefa150083adf90ada0600ea1"
+    },
+    {
+      "name": "libtasn1-6",
+      "version": "4.20.0-2+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/libt/libtasn1-6/libtasn1-6_4.20.0-2+deb13u1_amd64.deb",
+      "size": 50112,
+      "sha256": "23fec6e06583ce2bad9b2c04c9b485e90440e259b1abf8677cd80d3ce60831ad"
+    },
+    {
+      "name": "libtinfo6",
+      "version": "6.5+20250216-2",
+      "architecture": "amd64",
+      "filename": "pool/main/n/ncurses/libtinfo6_6.5+20250216-2_amd64.deb",
+      "size": 348380,
+      "sha256": "8b9f6a7983e9418564e48a627518de4c03917b56efe68d7f3e93bd8fffa1cc10"
+    },
+    {
+      "name": "libtss2-esys-3.0.2-0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-esys-3.0.2-0t64_4.1.3-1.2_amd64.deb",
+      "size": 168340,
+      "sha256": "87c0747c54e12be29c149145830385f5c6816b0fd962391858d63d70c921859e"
+    },
+    {
+      "name": "libtss2-fapi1t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-fapi1t64_4.1.3-1.2_amd64.deb",
+      "size": 356360,
+      "sha256": "221f4f9c14fb24bb321eca54a9fc5c04176293f4eb56b381d6df187ae5f56d91"
+    },
+    {
+      "name": "libtss2-mu-4.0.1-0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-mu-4.0.1-0t64_4.1.3-1.2_amd64.deb",
+      "size": 79788,
+      "sha256": "b7e1b9a05623f304aa82b4a577f8948e967f9212e5871c76bd88dd8e96b3e4ea"
+    },
+    {
+      "name": "libtss2-rc0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-rc0t64_4.1.3-1.2_amd64.deb",
+      "size": 33148,
+      "sha256": "e04baea4ffaf6f49011dd42d34b19cfd9f81abe518c24357b1ffa72e7ca74b84"
+    },
+    {
+      "name": "libtss2-sys1t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-sys1t64_4.1.3-1.2_amd64.deb",
+      "size": 57848,
+      "sha256": "ffd806325106fb22cf479e65c6c74ef6c5db598a943dfd3b6a38b1edbdd55e99"
+    },
+    {
+      "name": "libtss2-tcti-cmd0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-tcti-cmd0t64_4.1.3-1.2_amd64.deb",
+      "size": 36444,
+      "sha256": "8249c54706df9ae1a94140126a2b69b2a2f6795ae84abe55795e485f24f7915e"
+    },
+    {
+      "name": "libtss2-tcti-device0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-tcti-device0t64_4.1.3-1.2_amd64.deb",
+      "size": 37796,
+      "sha256": "e2c07f7258f52b611edb96945049dfc5dd0f066b9464cd2338716d73f78fc495"
+    },
+    {
+      "name": "libtss2-tcti-libtpms0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-tcti-libtpms0t64_4.1.3-1.2_amd64.deb",
+      "size": 36660,
+      "sha256": "f120a59a8850c187cc9183b239fa3c4c1f17d34150fbe52ce7403be9865ea232"
+    },
+    {
+      "name": "libtss2-tcti-mssim0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-tcti-mssim0t64_4.1.3-1.2_amd64.deb",
+      "size": 37880,
+      "sha256": "c188d0b78feb285be5e6d4acc741642026b5ec4f3ca6ad4070fdf4fbe142fd6c"
+    },
+    {
+      "name": "libtss2-tcti-spi-helper0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-tcti-spi-helper0t64_4.1.3-1.2_amd64.deb",
+      "size": 36828,
+      "sha256": "d558847e9299d75378056c438a7315409bccfb26229d54a2dfb0994dbaa39298"
+    },
+    {
+      "name": "libtss2-tcti-swtpm0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-tcti-swtpm0t64_4.1.3-1.2_amd64.deb",
+      "size": 38028,
+      "sha256": "b0727b044be2280449fd86aabadea75dd85044632a2e44deaa3534ca59a394e3"
+    },
+    {
+      "name": "libtss2-tctildr0t64",
+      "version": "4.1.3-1.2",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tss/libtss2-tctildr0t64_4.1.3-1.2_amd64.deb",
+      "size": 37128,
+      "sha256": "90a301083c38ae92c16fab7d5bfc2d1f3874a09a33f500d289308bdbb12e135d"
+    },
+    {
+      "name": "libudev1",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/libudev1_257.13-1~deb13u1_amd64.deb",
+      "size": 152300,
+      "sha256": "5d41c284f5a93b05bc7d648b61a02dd2bb9ff05b2261ad1a8b7d96044a0cfa88"
+    },
+    {
+      "name": "libunistring5",
+      "version": "1.3-2",
+      "architecture": "amd64",
+      "filename": "pool/main/libu/libunistring/libunistring5_1.3-2_amd64.deb",
+      "size": 476768,
+      "sha256": "6dd3490bef06ea1096f32d10766b7e016cf579bfae8451d1b7df15ce05b8aa46"
+    },
+    {
+      "name": "libuuid1",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/libuuid1_2.41.5-0+deb13u1_amd64.deb",
+      "size": 37848,
+      "sha256": "c1bf4c4c3ff48c57fabf93307dfb56996b60cfa33927afc4158b5db36fb2721e"
+    },
+    {
+      "name": "libxxhash0",
+      "version": "0.8.3-2",
+      "architecture": "amd64",
+      "filename": "pool/main/x/xxhash/libxxhash0_0.8.3-2_amd64.deb",
+      "size": 27096,
+      "sha256": "81da7064d56fc044f5db4bb3c1e80ff50a4986dcbbf80d958eeca565b44c157f"
+    },
+    {
+      "name": "libzstd1",
+      "version": "1.5.7+dfsg-1",
+      "architecture": "amd64",
+      "filename": "pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-1_amd64.deb",
+      "size": 303836,
+      "sha256": "2f6a2aeacfc925eba8b00ac9139bc4bfccf8cacb09eb93de067074b26948eef9"
+    },
+    {
+      "name": "login.defs",
+      "version": "1:4.17.4-2",
+      "architecture": "all",
+      "filename": "pool/main/s/shadow/login.defs_4.17.4-2_all.deb",
+      "size": 186124,
+      "sha256": "b4bbb8242cbf5588de7aafeb9d578a3dee1db2891f444ab454fd30bd80ccf2b4"
+    },
+    {
+      "name": "logsave",
+      "version": "1.47.2-3+b12",
+      "architecture": "amd64",
+      "filename": "pool/main/e/e2fsprogs/logsave_1.47.2-3+b12_amd64.deb",
+      "size": 24864,
+      "sha256": "aa028720743b79bd054749af34c501c093f0ab5e044e4dc44273765be5e95de5"
+    },
+    {
+      "name": "mawk",
+      "version": "1.3.4.20250131-1",
+      "architecture": "amd64",
+      "filename": "pool/main/m/mawk/mawk_1.3.4.20250131-1_amd64.deb",
+      "size": 140808,
+      "sha256": "ade14470c4dff8921bca6ca8b1ea20eadc0f2178b48caff3c74534b17a633292"
+    },
+    {
+      "name": "media-types",
+      "version": "13.0.0",
+      "architecture": "all",
+      "filename": "pool/main/m/media-types/media-types_13.0.0_all.deb",
+      "size": 29336,
+      "sha256": "0788e4b0b72db1bcf74a19cb24c3511e7770ad0b341f0f30e361701c3072f53e"
+    },
+    {
+      "name": "mkosi",
+      "version": "25.3-7",
+      "architecture": "all",
+      "filename": "pool/main/m/mkosi/mkosi_25.3-7_all.deb",
+      "size": 309040,
+      "sha256": "ef56c81324fd47d65490e944ec4697bb3f6fb21326d0d071bfc2fb5ba5383252"
+    },
+    {
+      "name": "mount",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/mount_2.41.5-0+deb13u1_amd64.deb",
+      "size": 163208,
+      "sha256": "eb70a615114ac40123768beb20e302554d5cb7edb33290be7e418ebe1075c878"
+    },
+    {
+      "name": "mtools",
+      "version": "4.0.48-1",
+      "architecture": "amd64",
+      "filename": "pool/main/m/mtools/mtools_4.0.48-1_amd64.deb",
+      "size": 198228,
+      "sha256": "e7069109ce49f5a450caeca681e454f24dc412f9fdb289cde54e115162203760"
+    },
+    {
+      "name": "netbase",
+      "version": "6.5",
+      "architecture": "all",
+      "filename": "pool/main/n/netbase/netbase_6.5_all.deb",
+      "size": 12436,
+      "sha256": "76bafa92947ebd37b0a6f9ec6570412041f56edebc1c66d323731216d318471e"
+    },
+    {
+      "name": "opensc",
+      "version": "0.26.1-2",
+      "architecture": "amd64",
+      "filename": "pool/main/o/opensc/opensc_0.26.1-2_amd64.deb",
+      "size": 411144,
+      "sha256": "2797d3f18b026f325a8901b91692618f105c3d50d60a5f0263054725a13ea9e5"
+    },
+    {
+      "name": "opensc-pkcs11",
+      "version": "0.26.1-2",
+      "architecture": "amd64",
+      "filename": "pool/main/o/opensc/opensc-pkcs11_0.26.1-2_amd64.deb",
+      "size": 924200,
+      "sha256": "6f278a3a506530d0675c112bc23ffe37a5716300d3eb26304c75b67544de5506"
+    },
+    {
+      "name": "openssl",
+      "version": "3.5.7-1~deb13u2",
+      "architecture": "amd64",
+      "filename": "pool/main/o/openssl/openssl_3.5.7-1~deb13u2_amd64.deb",
+      "size": 1507300,
+      "sha256": "4ff006f431d8c2e69fa736885a3b6e779f2448535f69dbde821d9f0ff87ad8ea"
+    },
+    {
+      "name": "openssl-provider-legacy",
+      "version": "3.5.7-1~deb13u2",
+      "architecture": "amd64",
+      "filename": "pool/main/o/openssl/openssl-provider-legacy_3.5.7-1~deb13u2_amd64.deb",
+      "size": 316132,
+      "sha256": "f155c8191ae6d41da73d792f4182680aeafeb85c3dd223934ee9fdd115c4f1fa"
+    },
+    {
+      "name": "passwd",
+      "version": "1:4.17.4-2",
+      "architecture": "amd64",
+      "filename": "pool/main/s/shadow/passwd_4.17.4-2_amd64.deb",
+      "size": 1228860,
+      "sha256": "c5eaef41c6947d2888fa3462f787a7e02158b997bd0119154283f425ba57b8b8"
+    },
+    {
+      "name": "pesign",
+      "version": "116-8.1",
+      "architecture": "amd64",
+      "filename": "pool/main/p/pesign/pesign_116-8.1_amd64.deb",
+      "size": 120052,
+      "sha256": "35649dcfccecae9fa92cc8ca0e38e54b4ae3912084aa00373d4f674736166f56"
+    },
+    {
+      "name": "pinentry-curses",
+      "version": "1.3.1-2",
+      "architecture": "amd64",
+      "filename": "pool/main/p/pinentry/pinentry-curses_1.3.1-2_amd64.deb",
+      "size": 86388,
+      "sha256": "aed82cd9cc92b8a37f1332f951737f549595a3126aa609e632f9205d95405efc"
+    },
+    {
+      "name": "python3",
+      "version": "3.13.5-1",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python3-defaults/python3_3.13.5-1_amd64.deb",
+      "size": 28244,
+      "sha256": "c1388174dc7140e6c19a6dd39f8a0dcb38a835cd66c65644e0dded43d5223cb0"
+    },
+    {
+      "name": "python3-bcrypt",
+      "version": "4.2.0-2.1+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python-bcrypt/python3-bcrypt_4.2.0-2.1+b1_amd64.deb",
+      "size": 210892,
+      "sha256": "7485d96fc2669e9407056474c61aea5bd83ef5f406b46a1d7500ae17fab0a830"
+    },
+    {
+      "name": "python3-cffi-backend",
+      "version": "1.17.1-3",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python-cffi/python3-cffi-backend_1.17.1-3_amd64.deb",
+      "size": 93396,
+      "sha256": "7cfe53f3eff772127fd22e503876e3dd2b34b4c2a68fe9a524ce214e5bb7927a"
+    },
+    {
+      "name": "python3-cryptography",
+      "version": "43.0.0-3+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python-cryptography/python3-cryptography_43.0.0-3+deb13u1_amd64.deb",
+      "size": 942368,
+      "sha256": "edfc3aab6cbc4941aa19798059867696eeae90eb41b6dc2c5197c521da548972"
+    },
+    {
+      "name": "python3-minimal",
+      "version": "3.13.5-1",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python3-defaults/python3-minimal_3.13.5-1_amd64.deb",
+      "size": 27248,
+      "sha256": "a5d2371bebf3689f676e3f3bae800371bcc4392a8a51269e23d528249b399615"
+    },
+    {
+      "name": "python3-pefile",
+      "version": "2024.8.26-2.1",
+      "architecture": "all",
+      "filename": "pool/main/p/python-pefile/python3-pefile_2024.8.26-2.1_all.deb",
+      "size": 67016,
+      "sha256": "2100cbd75b5dfd8a8ed5a8fe6ee7adf174e78b34004dcbb5885661834d2f972e"
+    },
+    {
+      "name": "python3-zstandard",
+      "version": "0.23.0-4",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python-zstandard/python3-zstandard_0.23.0-4_amd64.deb",
+      "size": 351064,
+      "sha256": "f1c14068258a19023e7b265c6673b0cbcd915c01a27e6cd77775b0408eca9b98"
+    },
+    {
+      "name": "python3.13",
+      "version": "3.13.5-2+deb13u5",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python3.13/python3.13_3.13.5-2+deb13u5_amd64.deb",
+      "size": 757492,
+      "sha256": "460c1fd72845516ac3ce9d1686916f3ab2e4c86f8a9746e14d26243a47e2b98d"
+    },
+    {
+      "name": "python3.13-minimal",
+      "version": "3.13.5-2+deb13u5",
+      "architecture": "amd64",
+      "filename": "pool/main/p/python3.13/python3.13-minimal_3.13.5-2+deb13u5_amd64.deb",
+      "size": 2224552,
+      "sha256": "c1fda9e7b1bf15b2fa75a238d8a8710e142fe14c722fc650c5fc614f078c9073"
+    },
+    {
+      "name": "readline-common",
+      "version": "8.2-6",
+      "architecture": "all",
+      "filename": "pool/main/r/readline/readline-common_8.2-6_all.deb",
+      "size": 69360,
+      "sha256": "f77e8aa0bf0de618f11cb0b21658a4ed60f177d63b3cf26d7fc3706b6d0eaaa9"
+    },
+    {
+      "name": "sbsigntool",
+      "version": "0.9.4-3.2+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/sbsigntool/sbsigntool_0.9.4-3.2+deb13u1_amd64.deb",
+      "size": 67676,
+      "sha256": "b5390c50b1970a98bd5dab6a4a8bba124e41708792da9ea62bb75c0522dd714f"
+    },
+    {
+      "name": "squashfs-tools",
+      "version": "1:4.6.1-1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/squashfs-tools/squashfs-tools_4.6.1-1_amd64.deb",
+      "size": 193888,
+      "sha256": "0e185122f5858132bbc709e26228ba28cf7f0c41f6ed26e3f55f518f2a53b59d"
+    },
+    {
+      "name": "sqv",
+      "version": "1.3.0-3+b2",
+      "architecture": "amd64",
+      "filename": "pool/main/r/rust-sequoia-sqv/sqv_1.3.0-3+b2_amd64.deb",
+      "size": 661428,
+      "sha256": "97760aa17acceee0cace13d9edbed781d891b43e0dec0d6ddc4bd5e4c3ac65aa"
+    },
+    {
+      "name": "systemd",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/systemd_257.13-1~deb13u1_amd64.deb",
+      "size": 3093632,
+      "sha256": "ee81302a1d5b7434762b6e784a572854d4b6cf6235e33e2d104ad4e1cae71ab4"
+    },
+    {
+      "name": "systemd-boot-efi",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/systemd-boot-efi_257.13-1~deb13u1_amd64.deb",
+      "size": 135912,
+      "sha256": "390ecdcef9bbb753f51bb6d8f696bdae2f1dbedde7239c49ccb2512f137a8933"
+    },
+    {
+      "name": "systemd-boot-tools",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/systemd-boot-tools_257.13-1~deb13u1_amd64.deb",
+      "size": 111368,
+      "sha256": "8ea810011e878796fb2fef4e8cd1d51d33e98fe74e44b8657d129e0a4d2ecab1"
+    },
+    {
+      "name": "systemd-container",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/systemd-container_257.13-1~deb13u1_amd64.deb",
+      "size": 674812,
+      "sha256": "b4872b189204a8a3fcd2203d7b225cf623c3fe4c5e23abfe33296c0bf5000ee2"
+    },
+    {
+      "name": "systemd-repart",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/systemd-repart_257.13-1~deb13u1_amd64.deb",
+      "size": 178072,
+      "sha256": "06c6f2c285eb81c8ab1dbcc8f5f8721dd96a2228bc9e6a85beaa22460e0599e1"
+    },
+    {
+      "name": "systemd-ukify",
+      "version": "257.13-1~deb13u1",
+      "architecture": "all",
+      "filename": "pool/main/s/systemd/systemd-ukify_257.13-1~deb13u1_all.deb",
+      "size": 88516,
+      "sha256": "78e1f7921f39d07512d848244b8b3e320e93e77d0b5778c211809e9f3b8b8284"
+    },
+    {
+      "name": "tar",
+      "version": "1.35+dfsg-3.1",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tar/tar_1.35+dfsg-3.1_amd64.deb",
+      "size": 814968,
+      "sha256": "214c02e1aa291076a3147b8a4c4cae02fadf4c67df629186e3e313726faef1de"
+    },
+    {
+      "name": "tpm-udev",
+      "version": "0.6+nmu1",
+      "architecture": "all",
+      "filename": "pool/main/t/tpm-udev/tpm-udev_0.6+nmu1_all.deb",
+      "size": 3244,
+      "sha256": "103aaad530acac082222d8530586041cf2b78098d077ccf1d9418b2866d164af"
+    },
+    {
+      "name": "tpm2-tools",
+      "version": "5.7-1",
+      "architecture": "amd64",
+      "filename": "pool/main/t/tpm2-tools/tpm2-tools_5.7-1_amd64.deb",
+      "size": 757740,
+      "sha256": "350aa9ae50a02df3e489131d9c4dceb05bf5f281fc8033c91616d2b8286579af"
+    },
+    {
+      "name": "tzdata",
+      "version": "2026c-0+deb13u1",
+      "architecture": "all",
+      "filename": "pool/main/t/tzdata/tzdata_2026c-0+deb13u1_all.deb",
+      "size": 264156,
+      "sha256": "813b9bbbe14ccda2b24617b8bade0ade4d745957e75921766c153d249886bd4c"
+    },
+    {
+      "name": "udev",
+      "version": "257.13-1~deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/s/systemd/udev_257.13-1~deb13u1_amd64.deb",
+      "size": 1418624,
+      "sha256": "a9d751b4d73a489120ef68a21caedf0b58fba80598fb22a17f85060f308bfe7e"
+    },
+    {
+      "name": "util-linux",
+      "version": "2.41.5-0+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/u/util-linux/util-linux_2.41.5-0+deb13u1_amd64.deb",
+      "size": 1242392,
+      "sha256": "7d5b1176cc3d8cc6b290b3ec17af458f362d9200845f30da22057a8198744430"
+    },
+    {
+      "name": "xz-utils",
+      "version": "5.8.1-1+deb13u1",
+      "architecture": "amd64",
+      "filename": "pool/main/x/xz-utils/xz-utils_5.8.1-1+deb13u1_amd64.deb",
+      "size": 659488,
+      "sha256": "9e0a39d95373afdaad3c9dfaab3c8b0beb9a2c4654e6be10b4bcf458509a3217"
+    },
+    {
+      "name": "zlib1g",
+      "version": "1:1.3.dfsg+really1.3.1-1+b1",
+      "architecture": "amd64",
+      "filename": "pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1+b1_amd64.deb",
+      "size": 88892,
+      "sha256": "015be740d6236ad114582dea500c1d907f29e16d6db00566ca32fb68d71ac90d"
+    },
+    {
+      "name": "zstd",
+      "version": "1.5.7+dfsg-1",
+      "architecture": "amd64",
+      "filename": "pool/main/libz/libzstd/zstd_1.5.7+dfsg-1_amd64.deb",
+      "size": 756244,
+      "sha256": "6da09b6aad171ef9b50d6a2bb4c62f756b3561aac5e05b452b80516223e5e0f5"
+    }
+  ]
+}
