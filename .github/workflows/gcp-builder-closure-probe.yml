@@ -177,7 +177,7 @@ jobs:
             for path in "$scratch" "$scratch/archives" "$scratch/guest-archives" \
               "$scratch/staged/zrpc-guest-payload-parent/tree"; do
               if test -d "$path"; then
-                du -B1 -s "$path"
+                sudo -n du -B1 -s "$path"
               else
                 echo "absent: $path"
               fi
@@ -396,6 +396,72 @@ jobs:
                   or report["boot_verified"] is not False
                   or report["private_mode_approved"] is not False):
               raise ValueError("BaseTrees diagnostic changed acceptance status")
+          PY
+            # Assemble a separate, rootless tar from the authenticated .deb
+            # data members. It retains numeric owners and link semantics,
+            # recording only the regular-file SUID/SGID removal required by
+            # audit-rootfs.py. This is still not an installed or bootable root.
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import assemble_guest_base_tree as candidate
+
+          artifact = Path("/zrpc-guest-payload-parent/root-basetree")
+          report = candidate.assemble(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+              artifact, Path("/zrpc-guest-payload-parent"),
+          )
+          verified = candidate.verify(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"), artifact,
+          )
+          if (report["status"] != candidate.STATUS
+                  or report["package_count"] != 104
+                  or report["archive_sha256"] != verified["archive_sha256"]
+                  or report["manifest_sha256"] != verified["manifest_sha256"]
+                  or report["signed_snapshot_rechecked"] is not True
+                  or report["archive_bytes_checked"] is not True
+                  or report["package_scripts_executed"] is not False
+                  or report["image_built"] is not False
+                  or report["boot_verified"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("root BaseTrees candidate changed diagnostic status")
+          print(json.dumps(report, sort_keys=True))
+          PY
+            # GNU tar numeric-owner extraction is exercised with effective
+            # root in this already no-route mount/network namespace. The
+            # extracted tree is data only; no file from it is executed.
+            extracted="$staged/zrpc-guest-payload-parent/extracted-root"
+            mkdir "$extracted"
+            tar --numeric-owner --same-permissions --no-overwrite-dir \
+              -xf "$staged/zrpc-guest-payload-parent/root-basetree/guest-root.tar" \
+              -C "$extracted"
+            /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+              LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+              "$chroot_command" "$staged" /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import assemble_guest_base_tree as candidate
+
+          report = candidate.verify_extracted(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+              Path("/zrpc-guest-payload-parent/root-basetree"),
+              Path("/zrpc-guest-payload-parent/extracted-root"),
+          )
+          if (report["status"] != candidate.STATUS
+                  or report["extracted_numeric_owners_checked"] is not True
+                  or report["extracted_contents_checked"] is not True
+                  or report["package_scripts_executed"] is not False
+                  or report["image_built"] is not False
+                  or report["boot_verified"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("root BaseTrees extraction changed diagnostic status")
+          print(json.dumps(report, sort_keys=True))
           PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"
