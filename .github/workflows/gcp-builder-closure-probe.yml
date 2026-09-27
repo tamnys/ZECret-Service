@@ -212,6 +212,26 @@ jobs:
               raise ValueError("signed snapshot check changed diagnostic acceptance status")
           print(json.dumps(report, sort_keys=True))
           PY
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import fetch_guest_closure
+
+          report = fetch_guest_closure.verify_index(Path("/zrpc-metadata"))
+          if (report["status"] != "diagnostic-guest-package-index-membership-only"
+                  or report["package_count"] != 104
+                  or report["signed_snapshot_rechecked"] is not True
+                  or report["archive_bytes_checked"] is not False
+                  or report["installed_closure_checked"] is not False
+                  or report["package_scripts_executed"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("guest package-index diagnostic changed acceptance status")
+          print(json.dumps(report, sort_keys=True))
+          PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"
             run_staged /lib64/ld-linux-x86-64.so.2 --list /usr/bin/systemd-repart
