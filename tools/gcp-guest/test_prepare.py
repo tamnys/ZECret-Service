@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import lzma
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -481,6 +482,49 @@ class CandidateTests(unittest.TestCase):
         with mock.patch.object(prepare.debian_snapshot.shutil, "which", return_value="/bin/true"):
             with self.assertRaisesRegex(ValueError, "gpgv executable differs"):
                 prepare.debian_snapshot.verify_signature(self.inputs / "snapshot_inrelease")
+
+    def test_gpgv_uses_reviewed_bytes_after_source_paths_change(self):
+        # The test executable only reports a synthetic status after reading the
+        # original keyring. It is not evidence of a Debian archive signature.
+        keyring_bytes = b"REVIEWED PUBLIC KEY"
+        program_bytes = ("#!/bin/sh\n"
+                         "[ \"$(cat \"$4\")\" = 'REVIEWED PUBLIC KEY' ] || exit 9\n"
+                         f"printf '[GNUPG:] VALIDSIG 0 {prepare.debian_snapshot.TRIXIE_ARCHIVE_FINGERPRINT}\\n'\n").encode()
+        keyring = self.root / "keyring"
+        program = self.root / "gpgv"
+        original_run = subprocess.run
+        for replacement in (False, True):
+            with self.subTest(replace_pathname=replacement):
+                keyring.write_bytes(keyring_bytes)
+                program.write_bytes(program_bytes)
+                program.chmod(0o700)
+                malicious_program = b"#!/bin/sh\ntouch " + str(self.root / "poison-ran").encode() + b"\nexit 1\n"
+
+                def change_source_then_run(argv, **kwargs):
+                    self.assertTrue(argv[0].startswith("/proc/self/fd/"))
+                    self.assertTrue(argv[4].startswith("/proc/self/fd/"))
+                    if replacement:
+                        poisoned_keyring = self.root / "poison-keyring"
+                        poisoned_program = self.root / "poison-gpgv"
+                        poisoned_keyring.write_bytes(b"POISONED PUBLIC KEY")
+                        poisoned_program.write_bytes(malicious_program)
+                        poisoned_program.chmod(0o700)
+                        os.replace(poisoned_keyring, keyring)
+                        os.replace(poisoned_program, program)
+                    else:
+                        keyring.write_bytes(b"POISONED PUBLIC KEY")
+                        program.write_bytes(malicious_program)
+                    return original_run(argv, **kwargs)
+
+                with mock.patch.object(prepare.debian_snapshot, "KEYRING", keyring), \
+                        mock.patch.object(prepare.debian_snapshot, "KEYRING_SHA256", hashlib.sha256(keyring_bytes).hexdigest()), \
+                        mock.patch.object(prepare.debian_snapshot, "KEYRING_SIZE", len(keyring_bytes)), \
+                        mock.patch.object(prepare.debian_snapshot, "GPGV_SHA256", hashlib.sha256(program_bytes).hexdigest()), \
+                        mock.patch.object(prepare.debian_snapshot, "GPGV_SIZE", len(program_bytes)), \
+                        mock.patch.object(prepare.debian_snapshot.shutil, "which", return_value=str(program)), \
+                        mock.patch.object(prepare.debian_snapshot.subprocess, "run", side_effect=change_source_then_run):
+                    prepare.debian_snapshot.verify_signature(self.inputs / "snapshot_inrelease")
+                self.assertFalse((self.root / "poison-ran").exists())
 
     def test_known_admin_package_is_rejected(self):
         path = self.inputs / "package_manifest"
