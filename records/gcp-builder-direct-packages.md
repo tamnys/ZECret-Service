@@ -61,6 +61,9 @@ and its modules, `systemd-container`, `e2fsprogs`, `dosfstools`, `mtools`,
 installed executable paths, dynamic loader or shared libraries, package
 scripts, Python module load path, selected mkosi Debian packaging contents,
 or the final build environment. The pinned `gpgv` executable's dynamic library
-closure remains unreviewed. Those omissions, the unavailable namespace-capable
+closure remains unreviewed. The existing verifier also hashes its `gpgv`
+executable and public keyring by pathname before invocation, so concurrent
+replacement of either remains a diagnostic-integrity gap. Those omissions,
+the unavailable namespace-capable
 builder, exact Zebra input, signing setup, final-disk inspection, and real TDX
 measurements keep image and private-mode acceptance blocked.
