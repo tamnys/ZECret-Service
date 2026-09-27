@@ -56,7 +56,7 @@ def locked_archive(entry, directory_fd):
     return data
 
 
-def member_path(member):
+def member_path(member, *, allow_hardlink=False):
     """Accept only canonical package paths used by the exact signed closure."""
     if member.name in {".", "./"} and member.type == tarfile.DIRTYPE:
         return None
@@ -68,11 +68,26 @@ def member_path(member):
             or any(part in {"", ".", ".."} for part in path.split("/"))
             or (member.name != "./" + path + ("/" if member.isdir() and member.name.endswith("/") else ""))):
         raise ValueError("unsafe builder payload path")
-    if member.type not in {tarfile.DIRTYPE, tarfile.REGTYPE, tarfile.SYMTYPE}:
+    allowed = {tarfile.DIRTYPE, tarfile.REGTYPE, tarfile.SYMTYPE}
+    if allow_hardlink:
+        allowed.add(tarfile.LNKTYPE)
+    if member.type not in allowed:
         raise ValueError("builder payload contains a hardlink or special file")
     if (type(member.mode) is not int or member.mode < 0 or member.mode > 0o7777
             or member.size < 0 or (member.type != tarfile.REGTYPE and member.size != 0)):
         raise ValueError("invalid builder payload metadata")
+    return path
+
+
+def checked_hardlink_target(target):
+    """Require an archive-root-relative, canonical regular-file target."""
+    if not isinstance(target, str) or not target.startswith("./"):
+        raise ValueError("non-canonical payload hardlink target")
+    path = target[2:]
+    if (not path or not path.isascii()
+            or any(ord(character) < 32 or ord(character) == 127 for character in path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))):
+        raise ValueError("unsafe payload hardlink target")
     return path
 
 
@@ -94,23 +109,28 @@ def checked_link_target(path, target):
     return target
 
 
-def payload_entries(packages):
+def payload_entries(packages, *, allow_hardlinks=False):
     """Preflight every package and collision before creating an output tree."""
     entries = {}
     payloads = {}
     for package, archive in packages:
         payload = closure.deb_data_tar(archive)
         payloads[package] = payload
+        regular_in_package = {}
+        pending_hardlinks = []
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as contents:
             for member in contents:
                 try:
-                    path = member_path(member)
+                    path = member_path(member, allow_hardlink=allow_hardlinks)
                 except ValueError as error:
                     raise ValueError(
                         f"{package} payload member {member.name!r} "
                         f"tar type {member.type!r}: {error}"
                     ) from error
                 if path is None:
+                    continue
+                if member.type == tarfile.LNKTYPE:
+                    pending_hardlinks.append((path, member))
                     continue
                 kind = ("directory" if member.type == tarfile.DIRTYPE else
                         "file" if member.type == tarfile.REGTYPE else "symlink")
@@ -130,6 +150,7 @@ def payload_entries(packages):
                     if size != member.size:
                         raise ValueError("truncated builder payload file")
                     record.update(size=size, sha256=digest.hexdigest())
+                    regular_in_package[path] = record
                 elif kind == "symlink":
                     record["target"] = checked_link_target(path, member.linkname)
                 prior = entries.get(path)
@@ -140,6 +161,19 @@ def payload_entries(packages):
                     prior["packages"].append(package)
                 else:
                     entries[path] = record
+        for path, member in pending_hardlinks:
+            target = checked_hardlink_target(member.linkname)
+            source = regular_in_package.get(target)
+            if source is None or member.mode != source["source_mode"]:
+                raise ValueError(f"{package} hardlink target is not a same-package regular file with matching mode: {path}")
+            if path in entries:
+                raise ValueError(f"builder payload path collision: {path}")
+            entries[path] = {
+                "path": path, "kind": "file", "source_mode": member.mode,
+                "staged_mode": source["staged_mode"], "packages": [package],
+                "size": source["size"], "sha256": source["sha256"],
+                "hardlink_target": target,
+            }
     for path in entries:
         parts = path.split("/")
         for index in range(1, len(parts)):

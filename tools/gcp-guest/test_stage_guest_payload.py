@@ -92,16 +92,17 @@ class GuestPayloadTests(unittest.TestCase):
                     "sha256": digest, "path": f"debs/{digest}.deb"}
         with mock.patch.object(stage.guest, "authenticated_packages", return_value=[identity]):
             report = stage.audit_unsupported_members(self.metadata, self.archives)
-        self.assertEqual(report["unsupported_count"], 3)
+        self.assertEqual(report["unsupported_count"], 2)
+        self.assertEqual(report["accepted_hardlink_count"], 1)
         self.assertEqual(report["status"],
                          "diagnostic-unsupported-guest-payload-members-found")
         self.assertEqual([item["path"] for item in report["unsupported_members"]],
-                         ["./usr/bin/gzip", "./usr/bin/escape", "./usr/device"])
-        self.assertEqual(report["unsupported_members"][0]["canonical_target_path"],
+                         ["./usr/bin/escape", "./usr/device"])
+        self.assertEqual(report["accepted_hardlinks"][0]["canonical_target_path"],
                          "usr/bin/busybox")
-        self.assertTrue(report["unsupported_members"][0]["target_is_regular_in_package"])
-        self.assertFalse(report["unsupported_members"][1]["target_is_regular_in_package"])
-        self.assertEqual(report["unsupported_members"][2]["tar_type_hex"], "33")
+        self.assertTrue(report["accepted_hardlinks"][0]["target_is_regular_in_package"])
+        self.assertFalse(report["unsupported_members"][0]["target_is_regular_in_package"])
+        self.assertEqual(report["unsupported_members"][1]["tar_type_hex"], "33")
         self.assertFalse(report["payload_tree_staged"])
         self.assertFalse(report["private_mode_approved"])
         self.assertFalse(self.output.exists())
@@ -111,7 +112,7 @@ class GuestPayloadTests(unittest.TestCase):
         cases = [
             ("traversal", ("file", "./usr/../../outside", b"bad", 0o644)),
             ("absolute", ("file", "/outside", b"bad", 0o644)),
-            ("hardlink", ("hardlink", "./usr/hard", "target", 0o644)),
+            ("hardlink", ("hardlink", "./usr/hard", "../../outside", 0o644)),
             ("special", ("special", "./usr/device", None, 0o644)),
             ("escaping symlink", ("symlink", "./usr/link", "../../outside", 0o777)),
             ("inventory collision", ("file", "./" + stage.MANIFEST, b"bad", 0o644)),
@@ -120,9 +121,45 @@ class GuestPayloadTests(unittest.TestCase):
             with self.subTest(label=label):
                 with self.assertRaises(ValueError) as failure:
                     self.run_stage([("alpha", package(directory + [bad]))])
-                if label == "hardlink":
-                    self.assertIn("alpha payload member './usr/hard' tar type b'1'",
-                                  str(failure.exception))
+                self.assertFalse(self.output.exists())
+
+    def test_same_package_hardlinks_stage_as_distinct_inert_copies(self):
+        data = package([("directory", "./usr/", None, 0o755),
+                        ("directory", "./usr/bin/", None, 0o755),
+                        ("file", "./usr/bin/gunzip", b"signed bytes", 0o755),
+                        ("hardlink", "./usr/bin/gzip", "./usr/bin/gunzip", 0o755),
+                        ("hardlink", "./usr/bin/zcat", "./usr/bin/gunzip", 0o755)])
+        report = self.run_stage([("alpha", data)])
+        self.assertTrue(report["payload_tree_staged"])
+        for name in ("gunzip", "gzip", "zcat"):
+            self.assertEqual((self.output / "usr/bin" / name).read_bytes(), b"signed bytes")
+        self.assertNotEqual((self.output / "usr/bin/gzip").stat().st_ino,
+                            (self.output / "usr/bin/gunzip").stat().st_ino)
+        entries = {item["path"]: item for item in
+                   json.loads((self.output / stage.MANIFEST).read_bytes())["entries"]}
+        self.assertEqual(entries["usr/bin/gzip"]["hardlink_target"], "usr/bin/gunzip")
+        self.assertEqual(entries["usr/bin/gzip"]["sha256"],
+                         entries["usr/bin/gunzip"]["sha256"])
+
+    def test_rejects_hardlink_to_symlink_other_package_or_different_mode(self):
+        directory = [("directory", "./usr/", None, 0o755),
+                     ("directory", "./usr/bin/", None, 0o755)]
+        cases = [
+            [("alpha", package(directory + [
+                ("symlink", "./usr/bin/target", "real", 0o777),
+                ("hardlink", "./usr/bin/alias", "./usr/bin/target", 0o777)]))],
+            [("alpha", package(directory + [
+                ("hardlink", "./usr/bin/alias", "./usr/bin/target", 0o755)])),
+             ("beta", package(directory + [
+                ("file", "./usr/bin/target", b"other package", 0o755)]))],
+            [("alpha", package(directory + [
+                ("file", "./usr/bin/target", b"same package", 0o755),
+                ("hardlink", "./usr/bin/alias", "./usr/bin/target", 0o644)]))],
+        ]
+        for named_packages in cases:
+            with self.subTest(case=len(named_packages), data=named_packages[0][1][-16:]):
+                with self.assertRaisesRegex(ValueError, "same-package regular file with matching mode"):
+                    self.run_stage(named_packages)
                 self.assertFalse(self.output.exists())
 
     def test_rejects_cross_package_collision_and_symlink_parent(self):

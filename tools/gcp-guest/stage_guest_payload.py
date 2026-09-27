@@ -43,29 +43,20 @@ def signed_packages(metadata, archives):
     return packages
 
 
-def canonical_hardlink_target(target):
-    """Interpret a tar hardlink name from the archive root for audit only."""
-    if not target or not target.isascii() or target.startswith("/"):
-        return None
-    path = target[2:] if target.startswith("./") else target
-    if any(part in {"", ".", ".."} for part in path.split("/")):
-        return None
-    return path
-
-
 def audit_unsupported_members(metadata, archives):
-    """List every hardlink/special member without extracting any payload."""
+    """List safe same-package hardlinks and unsupported members without extraction."""
     packages = signed_packages(metadata, archives)
     unsupported = []
+    accepted_hardlinks = []
     for package, archive in packages:
         payload = builder_closure.deb_data_tar(archive)
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as contents:
             members = list(contents)
-        regular = set()
+        regular = {}
         for member in members:
             if member.type == tarfile.REGTYPE:
                 try:
-                    regular.add(builder.member_path(member))
+                    regular[builder.member_path(member)] = member
                 except ValueError:
                     # The staging preflight will reject malformed regular
                     # members; they cannot count as safe hardlink targets.
@@ -73,9 +64,14 @@ def audit_unsupported_members(metadata, archives):
         for member in members:
             if member.type in {tarfile.DIRTYPE, tarfile.REGTYPE, tarfile.SYMTYPE}:
                 continue
-            target = (canonical_hardlink_target(member.linkname)
-                      if member.type == tarfile.LNKTYPE else None)
-            unsupported.append({
+            target = None
+            if member.type == tarfile.LNKTYPE:
+                try:
+                    builder.member_path(member, allow_hardlink=True)
+                    target = builder.checked_hardlink_target(member.linkname)
+                except ValueError:
+                    pass
+            record = {
                 "package": package,
                 "path": member.name,
                 "tar_type_hex": member.type.hex(),
@@ -83,11 +79,17 @@ def audit_unsupported_members(metadata, archives):
                 "target": member.linkname if member.type == tarfile.LNKTYPE else None,
                 "canonical_target_path": target,
                 "target_is_regular_in_package": target in regular if target is not None else False,
-            })
+            }
+            if (target in regular and member.mode == regular[target].mode):
+                accepted_hardlinks.append(record)
+            else:
+                unsupported.append(record)
     return {
         "status": ("diagnostic-unsupported-guest-payload-members-found"
                    if unsupported else "diagnostic-no-unsupported-guest-payload-members"),
         "package_count": len(packages), "unsupported_count": len(unsupported),
+        "accepted_hardlink_count": len(accepted_hardlinks),
+        "accepted_hardlinks": accepted_hardlinks,
         "unsupported_members": unsupported,
         "signed_snapshot_rechecked": True, "archive_bytes_checked": True,
         "payload_tree_staged": False, "installed_closure_checked": False,
@@ -99,10 +101,10 @@ def audit_unsupported_members(metadata, archives):
 def stage(metadata, archives, output, workspace):
     packages = signed_packages(metadata, archives)
 
-    # The common preflight rejects traversals, hardlinks, special files,
-    # escaping symlinks, file collisions, and symlink/missing parents before
-    # the output directory exists. It also hashes every regular payload file.
-    payloads, entries = builder.payload_entries(packages)
+    # The common preflight rejects traversals, special files, escaping links,
+    # cross-package collisions, and symlink/missing parents before output exists.
+    # Hardlinks are accepted only to matching regular files in the same package.
+    payloads, entries = builder.payload_entries(packages, allow_hardlinks=True)
     if MANIFEST in entries:
         raise ValueError("guest payload collides with inventory")
 
@@ -128,8 +130,13 @@ def stage(metadata, archives, output, workspace):
         written = set()
         for package, _ in packages:
             with tarfile.open(fileobj=io.BytesIO(payloads[package]), mode="r:xz") as contents:
+                regular_members = {
+                    builder.member_path(member): member
+                    for member in contents.getmembers()
+                    if member.type == tarfile.REGTYPE
+                }
                 for member in contents:
-                    path = builder.member_path(member)
+                    path = builder.member_path(member, allow_hardlink=True)
                     if path is None or member.type == tarfile.DIRTYPE:
                         continue
                     record = entries[path]
@@ -142,7 +149,16 @@ def stage(metadata, archives, output, workspace):
                                 raise ValueError("guest symlink changed during staging")
                             os.symlink(member.linkname, name, dir_fd=directory)
                         else:
-                            stream = contents.extractfile(member)
+                            if member.type == tarfile.LNKTYPE:
+                                target = builder.checked_hardlink_target(member.linkname)
+                                if record.get("hardlink_target") != target:
+                                    raise ValueError("guest hardlink changed during staging")
+                                regular = regular_members.get(target)
+                                if regular is None:
+                                    raise ValueError("guest hardlink target missing during staging")
+                                stream = contents.extractfile(regular)
+                            else:
+                                stream = contents.extractfile(member)
                             if stream is None:
                                 raise ValueError("unreadable guest payload file")
                             descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
