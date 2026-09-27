@@ -22,14 +22,18 @@ mounts `/dev/mapper/root` when `roothash=` is present. Thus disabling GPT
 auto-discovery in the fixed command line does not itself disable this verity
 root path. This is a source-level conclusion, not a boot or tamper test.
 
-`SecureBoot=yes` tells mkosi to sign the generated UKI, but the source and
-staged input currently provide only the public certificate. The parser summary
-shows `SecureBoot Signing Key: none`. A key must be supplied from outside the
-guest in a reviewed build invocation; its public certificate must match the
-Google custom image Secure Boot `db` configuration. Google documents that
+`SecureBoot=yes` tells mkosi to sign the generated UKI. The staged config now
+references a builder-only key path at
+`/run/zrpc-build-signing/secure-boot.key`, while its locked artifacts include
+only the public certificate. Staging does not read or copy the key and cannot
+establish that the path exists, is memory-backed, is operator-owned, or matches
+the certificate. A later reviewed builder must establish those properties and
+record the exact mkosi invocation and signed UKI. The public certificate must
+match the Google custom image Secure Boot `db` configuration. Google documents that
 [custom Shielded VM certificates are set when creating the image](https://docs.cloud.google.com/compute/shielded-vm/docs/creating-shielded-images),
 not enrolled interactively in the guest. Neither signing nor platform support
-for the selected configuration has been tested.
+for the selected configuration has been tested. The public GitHub runner has
+not been given a production signing key.
 
 The staging directory is created fresh from the exact reviewed source files;
 it does not copy mkosi companion settings or hooks. A later builder command

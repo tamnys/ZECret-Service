@@ -259,6 +259,7 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse(report["image_built"])
         self.assertFalse(report["private_mode_approved"])
         self.assertIn("real TDX acceptance", report["remaining_gates"])
+        self.assertTrue(any("operator-owned signing key" in gate for gate in report["remaining_gates"]))
         units = output / "rootfs/usr/lib/systemd/system"
         wrapper = (units / "zrpc-wrapper.service").read_text()
         self.assertIn("--platform gcp-tdx", wrapper)
@@ -269,6 +270,15 @@ class CandidateTests(unittest.TestCase):
             self.assertIn("ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec ", unit)
             self.assertNotIn("ExecStartPre=/usr/lib/zrpc/zrpc-gcp-guard --check", unit)
         config = (output / "mkosi.conf").read_text()
+        self.assertIn(
+            "\n[Validation]\n"
+            "SecureBootCertificate=artifacts/secure_boot_certificate\n"
+            "SecureBootKey=/run/zrpc-build-signing/secure-boot.key\n"
+            "[Output]\n", config,
+        )
+        self.assertEqual(config.count("SecureBootKey="), 1)
+        self.assertFalse((output / "artifacts/secure_boot_key").exists())
+        self.assertFalse((output / "rootfs/run/zrpc-build-signing").exists())
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)
         self.assertTrue((output / "package-cache").is_dir())
