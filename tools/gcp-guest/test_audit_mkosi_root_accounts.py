@@ -111,6 +111,15 @@ class ProducedRootAccountTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "produced root account bytes differ"):
             self.run_audit()
 
+    def test_shadow_difference_reports_field_positions_without_contents(self):
+        expected = b"root:!secret:20361:0:99999:7:::\n"
+        observed = b"root:!secret:00000:0:99999:7:::\n"
+        summary = audit.shadow_difference_summary(expected, observed)
+        self.assertEqual(summary, "; differing_lines=1 differing_field_indexes=[2]")
+        self.assertNotIn("secret", summary)
+        self.assertNotIn("20361", summary)
+        self.assertNotIn("00000", summary)
+
     def test_redirected_or_missing_output_is_rejected(self):
         group = self.root / "etc/group"
         group.unlink()

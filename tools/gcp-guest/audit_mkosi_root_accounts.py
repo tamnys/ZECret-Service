@@ -55,6 +55,28 @@ def checked_bytes(directory, name, size, mode, uid, gid, label):
         os.close(descriptor)
 
 
+def shadow_difference_summary(expected, observed):
+    """Report only shape and field positions, never shadow field contents."""
+    expected_lines = expected.splitlines()
+    observed_lines = observed.splitlines()
+    if len(expected_lines) != len(observed_lines):
+        return (f"; expected_lines={len(expected_lines)} "
+                f"observed_lines={len(observed_lines)}")
+    differing_lines = 0
+    fields = set()
+    for source, installed in zip(expected_lines, observed_lines):
+        if source == installed:
+            continue
+        differing_lines += 1
+        source_fields = source.split(b":")
+        installed_fields = installed.split(b":")
+        if len(source_fields) != 9 or len(installed_fields) != 9:
+            return f"; differing_lines={differing_lines} malformed_field_shape=True"
+        fields.update(index for index, pair in enumerate(zip(source_fields, installed_fields))
+                      if pair[0] != pair[1])
+    return f"; differing_lines={differing_lines} differing_field_indexes={sorted(fields)}"
+
+
 def compare_files(root_path, artifact_path, receipt):
     rows = receipt["outputs"]
     expected_names = set(accounts.OUTPUT_FILES)
@@ -81,7 +103,10 @@ def compare_files(root_path, artifact_path, receipt):
                             row["expected_root_uid"], row["expected_root_gid"],
                             "produced root account")
                         if observed != expected:
-                            raise ValueError("produced root account bytes differ: " + name)
+                            summary = (shadow_difference_summary(expected, observed)
+                                       if name == "shadow" else "")
+                            raise ValueError("produced root account bytes differ: " + name +
+                                             summary)
                 finally:
                     os.close(actual_etc)
             finally:
