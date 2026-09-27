@@ -61,6 +61,7 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         self.assertIn("ExtraTrees=" + str(self.output / profile.ACCOUNT_TREE) + "\n",
                       config)
         self.assertIn("Packages=\n", config)
+        self.assertIn(f"SourceDateEpoch={profile.guest.SIGNED_RELEASE_EPOCH}\n", config)
         self.assertIn("WithNetwork=no\nCacheOnly=always\nIncremental=no\n", config)
         self.assertNotIn("FinalizeScripts=", config)
         self.assertNotIn("Initrds=", config)
@@ -77,6 +78,8 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         manifest = json.loads((self.output / profile.MANIFEST).read_bytes())
         self.assertEqual(manifest["project_sysusers_sha256"],
                          hashlib.sha256(account_input.read_bytes()).hexdigest())
+        self.assertEqual(manifest["source_date_epoch"],
+                         profile.guest.SIGNED_RELEASE_EPOCH)
 
     def test_source_authentication_and_snapshot_hash_fail_closed(self):
         with mock.patch.object(profile.base_tree, "verify",
@@ -98,6 +101,9 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         for path, changed, expected in (
                 (archive, b"modified tar bytes", "archive differs"),
                 (config, config.read_bytes() + b"Packages=unreviewed\n", "exceeds bound"),
+                (config, config.read_bytes().replace(
+                    f"SourceDateEpoch={profile.guest.SIGNED_RELEASE_EPOCH}".encode(),
+                    b"SourceDateEpoch=0"), "config differs"),
                 (manifest, profile.canonical_bytes({**json.loads(manifest.read_bytes()),
                                                    "private_mode_approved": True}),
                  "(manifest differs|exceeds bound)")):

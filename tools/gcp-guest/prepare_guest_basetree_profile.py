@@ -60,7 +60,7 @@ def config_bytes(profile):
             f"\n[Content]\nBootable=no\nSsh=no\nAutologin=no\n"
             f"BaseTrees={profile / INPUT}\n"
             f"ExtraTrees={profile / ACCOUNT_TREE}\nPackages=\n"
-            f"CleanPackageMetadata=no\nSourceDateEpoch=0\n"
+            f"CleanPackageMetadata=no\nSourceDateEpoch={guest.SIGNED_RELEASE_EPOCH}\n"
             f"\n[Build]\nWithNetwork=no\nCacheOnly=always\n"
             f"Incremental=no\n"
             f"WorkspaceDirectory={profile.parent / (profile.name + '-work')}\n").encode()
@@ -77,6 +77,7 @@ def expected_manifest(source, archive_size, config, project):
         "base_tree_size": archive_size,
         "project_sysusers_sha256": hashlib.sha256(project).hexdigest(),
         "project_sysusers_size": len(project),
+        "source_date_epoch": guest.SIGNED_RELEASE_EPOCH,
         "mkosi_config_sha256": hashlib.sha256(config).hexdigest(),
         "signed_snapshot_rechecked": True,
         "archive_bytes_checked": True,
