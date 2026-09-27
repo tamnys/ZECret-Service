@@ -5,7 +5,9 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use zrpc_uki_digest::inspect_uki;
 #[cfg(target_os = "linux")]
-use zrpc_uki_digest::{SBVERIFY_SIZE, inspect_signed_uki};
+use zrpc_uki_digest::{
+    ExpectedSignatureInput, SBVERIFY_RUNTIME, SBVERIFY_SIZE, inspect_signed_uki,
+};
 
 #[cfg(not(unix))]
 compile_error!("zrpc-uki-digest requires Unix no-follow file opening");
@@ -56,14 +58,27 @@ fn run_signature(args: &[String]) -> Result<serde_json::Value, &'static str> {
     let uki = read_exact_file(Path::new(&args[2]), uki_bytes)?;
     let verifier = read_exact_file(Path::new(&args[5]), SBVERIFY_SIZE as u64)?;
     let certificate = read_exact_file(Path::new(&args[6]), certificate_bytes)?;
+    let runtime = (0..SBVERIFY_RUNTIME.len())
+        .map(|index| {
+            read_exact_file(
+                Path::new(&args[9 + index]),
+                SBVERIFY_RUNTIME[index].1 as u64,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let report = inspect_signed_uki(
         &uki,
-        &args[3],
-        uki_bytes,
+        ExpectedSignatureInput {
+            sha256: &args[3],
+            bytes: uki_bytes,
+        },
         &certificate,
-        &args[7],
-        certificate_bytes,
+        ExpectedSignatureInput {
+            sha256: &args[7],
+            bytes: certificate_bytes,
+        },
         &verifier,
+        std::array::from_fn(|index| runtime[index].as_slice()),
     )?;
     Ok(serde_json::to_value(report).expect("fixed report is serializable"))
 }
@@ -76,9 +91,11 @@ fn run_signature(_args: &[String]) -> Result<serde_json::Value, &'static str> {
 fn run(args: &[String]) -> Result<serde_json::Value, &'static str> {
     match args {
         [_, _, _, _] => run_digest(args),
-        [_, command, _, _, _, _, _, _, _] if command == "verify-signature" => run_signature(args),
+        [_, command, _, _, _, _, _, _, _, _, _, _, _, _] if command == "verify-signature" => {
+            run_signature(args)
+        }
         _ => Err(
-            "usage: zrpc-uki-digest UKI expected_sha256 expected_bytes | verify-signature UKI expected_sha256 expected_bytes sbverify signer_cert expected_cert_sha256 expected_cert_bytes",
+            "usage: zrpc-uki-digest UKI expected_sha256 expected_bytes | verify-signature UKI expected_sha256 expected_bytes sbverify signer_cert expected_cert_sha256 expected_cert_bytes ld-linux libc libz libzstd libcrypto",
         ),
     }
 }
@@ -91,10 +108,11 @@ fn main() {
             println!(
                 "{}",
                 json!({
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "status": "blocked",
                     "reason": reason,
                     "signed_uki_checked": false,
+                    "verifier_initial_elf_objects_pinned": false,
                     "signer_identity_reviewed": false,
                     "verifier_runtime_closure_checked": false,
                     "boot_measurement_checked": false,
