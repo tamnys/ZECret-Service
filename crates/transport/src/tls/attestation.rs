@@ -383,7 +383,7 @@ impl VerifiedRpcSession {
             .body(Full::new(Bytes::from(body)))
             .map_err(|_| unavailable())?;
         // The only sender here is the one retained from POST /attestation.
-        tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), async {
+        let operation = async {
             let response = self
                 .session
                 .sender
@@ -431,9 +431,14 @@ impl VerifiedRpcSession {
                 return Err(invalid_response());
             }
             Ok(response.result.unwrap())
-        })
-        .await
-        .map_err(|_| expired())?
+        };
+        let result =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(self.deadline), operation)
+                .await
+                .map_err(|_| expired())?;
+        // Tokio cannot preempt synchronous JSON decoding inside the timeout.
+        // Check again before a result escapes the original TLS session deadline.
+        finish_before_deadline(self.deadline, result)
     }
 }
 
@@ -444,6 +449,17 @@ struct WireRpcResponse {
     id: RequestId,
     result: Option<Value>,
     error: Option<Value>,
+}
+
+fn finish_before_deadline<T>(
+    deadline: Instant,
+    result: Result<T, SafeError>,
+) -> Result<T, SafeError> {
+    if Instant::now() >= deadline {
+        Err(expired())
+    } else {
+        result
+    }
 }
 
 fn encode_request(request: &RpcRequest) -> Result<Vec<u8>, SafeError> {
@@ -509,6 +525,26 @@ mod deadline_tests {
         tests::{assert_no_application_bytes, connect_pair, server_config},
     };
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn decoded_private_result_cannot_escape_expired_session() {
+        // Synthetic wire data exercises the final gate without approving any
+        // release or constructing a private-capable connection.
+        let response: WireRpcResponse =
+            serde_json::from_slice(br#"{"jsonrpc":"2.0","id":7,"result":42}"#).unwrap();
+        let result = response.result.unwrap();
+        let expired_deadline = Instant::now();
+        assert_eq!(
+            finish_before_deadline(expired_deadline, Ok(result.clone()))
+                .unwrap_err()
+                .code,
+            ErrorCode::StaleNonce
+        );
+        assert_eq!(
+            finish_before_deadline(Instant::now() + MAX_CONNECTION_LIFETIME, Ok(result)).unwrap(),
+            json!(42)
+        );
+    }
 
     #[tokio::test]
     async fn expired_tls_write_is_rejected_before_application_bytes() {
