@@ -39,7 +39,7 @@ class CandidateTests(unittest.TestCase):
                 (self.inputs / "debs" / (self.synthetic_deb_sha + ".deb")).write_bytes(self.synthetic_deb)
                 # The reviewed kernel identity has deliberately synthetic archive bytes.
                 packages = []
-                for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "kmod", prepare.KERNEL_PACKAGE):
+                for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "dmsetup", "kmod", prepare.KERNEL_PACKAGE):
                     version = prepare.KERNEL_PACKAGE_VERSION if name == prepare.KERNEL_PACKAGE else "1.0~synthetic"
                     packages.append({"name": name, "version": version, "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_{version}_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"})
                 data = json.dumps(packages).encode()
@@ -48,13 +48,13 @@ class CandidateTests(unittest.TestCase):
             (self.inputs / role).write_bytes(data)
             artifacts[role] = {"path": role, "sha256": hashlib.sha256(data).hexdigest()}
         # Values exercise branches only and are never production defaults.
-        self.lock = {"schema_version": 4, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": prepare.KERNEL_VERSION, "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
+        self.lock = {"schema_version": 5, "mkosi_source_commit": prepare.SOURCE_COMMIT, "source_date_epoch": 1, "kernel_version": prepare.KERNEL_VERSION, "snapshot": "https://snapshot.debian.org/archive/debian/20200101T000000Z/", "artifacts": artifacts, "runtime": {"listen_port": 8443, "max_connections": 2, "max_quotes": 1, "quote_spacing_ms": 1, "node_startup_timeout_secs": 1, "node_poll_interval_ms": 1}}
 
     def tearDown(self):
         self.temporary.cleanup()
 
     def test_missing_identity_changed_artifact_and_escape_fail(self):
-        for change in (lambda lock: lock.update(schema_version=3), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].pop("initrd"), lambda lock: lock["artifacts"].update(kernel={"path": "kernel", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["wrapper"].update(path="../wrapper"), lambda lock: lock.update(kernel_version="other-abi"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
+        for change in (lambda lock: lock.update(schema_version=4), lambda lock: lock.pop("snapshot"), lambda lock: lock["artifacts"].update(initrd={"path": "initrd", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(kernel={"path": "kernel", "sha256": "00" * 32}), lambda lock: lock["artifacts"].update(base_tree={"path": "base_tree", "sha256": "00" * 32}), lambda lock: lock["artifacts"]["wrapper"].update(sha256="00" * 32), lambda lock: lock["artifacts"]["wrapper"].update(path="../wrapper"), lambda lock: lock.update(kernel_version="other-abi"), lambda lock: lock["runtime"].update(max_quotes=0), lambda lock: lock.update(snapshot="https://deb.debian.org/debian")):
             lock = copy.deepcopy(self.lock)
             change(lock)
             with self.assertRaises(ValueError):
@@ -83,8 +83,18 @@ class CandidateTests(unittest.TestCase):
         self.assertNotIn("BaseTrees=", config)
         self.assertFalse((output / "artifacts/base_tree.tar").exists())
         self.assertFalse((output / "artifacts/kernel").exists())
+        self.assertFalse((output / "artifacts/initrd").exists())
         self.assertFalse((output / "rootfs/usr/lib/modules").exists())
-        self.assertIn("Packages=e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
+        self.assertIn("Packages=dmsetup=1.0~synthetic,e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
+        self.assertIn("Initrds=output/initrd.cpio.zst", config)
+        self.assertIn("Dependencies=initrd", config)
+        self.assertIn("KernelModulesInitrdInclude=^drivers/md/dm-verity[.]ko[.]xz$", config)
+        self.assertIn("rd.modules_load=dm-verity", config)
+        initrd = (output / "mkosi.images/initrd/mkosi.conf").read_text()
+        self.assertIn("MakeInitrd=yes", initrd)
+        self.assertIn("Packages=dmsetup=1.0~synthetic,kmod=1.0~synthetic,systemd=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,udev=1.0~synthetic", initrd)
+        self.assertNotIn("Include=mkosi-initrd", initrd)
+        self.assertNotIn("linux-image", initrd)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
         self.assertNotIn("CopyFiles=/boot:/", esp)
@@ -98,6 +108,7 @@ class CandidateTests(unittest.TestCase):
         profile = self.root / "profile"
         profile.mkdir()
         shutil.copy2(prepare.PROFILE / "mkosi.conf", profile / "mkosi.conf")
+        shutil.copytree(prepare.PROFILE / "mkosi.images", profile / "mkosi.images")
         shutil.copytree(prepare.PROFILE / "repart", profile / "repart")
         (profile / "rootfs").mkdir()
         (profile / "input-identities.json").write_text("{}")
@@ -107,9 +118,15 @@ class CandidateTests(unittest.TestCase):
             ("repart/10-root.conf", "Verity=data", "Verity=off"),
             ("repart/20-root-verity.conf", "Verity=hash", "Verity=off"),
             ("mkosi.conf", "SecureBoot=yes", "SecureBoot=no"),
-            ("mkosi.conf", "KernelModulesInitrd=no", "KernelModulesInitrd=yes"),
+            ("mkosi.conf", "KernelModulesInitrd=yes", "KernelModulesInitrd=no"),
+            ("mkosi.conf", "KernelModulesInitrdInclude=^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdInclude=.*"),
+            ("mkosi.conf", "KernelModulesInitrdExclude=.*", "KernelModulesInitrdExclude="),
+            ("mkosi.conf", "Dependencies=initrd", "Dependencies="),
             ("mkosi.conf", "Bootloader=uki", "Bootloader=systemd-boot"),
             ("mkosi.conf", "ExtraTrees=rootfs", "ExtraTrees=rootfs\nPostOutputScripts=unreviewed.sh"),
+            ("mkosi.images/initrd/mkosi.conf", "MakeInitrd=yes", "MakeInitrd=no"),
+            ("mkosi.images/initrd/mkosi.conf", "Ssh=no", "Ssh=yes"),
+            ("mkosi.images/initrd/mkosi.conf", "RemoveFiles=/usr/lib/systemd/system/rescue.service", "RemoveFiles=/usr/lib/systemd/system/other.service"),
         )
         for name, original, altered in changes:
             path = profile / name
@@ -127,6 +144,10 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prepare.validate_boot_profile(profile)
         (profile / "mkosi.conf.d").rmdir()
+        (profile / "mkosi.images/initrd/mkosi.postinst").write_text("#!/bin/sh\nexit 0\n")
+        with self.assertRaisesRegex(ValueError, "unexpected initrd subimage input"):
+            prepare.validate_boot_profile(profile)
+        (profile / "mkosi.images/initrd/mkosi.postinst").unlink()
         for source in ("boot", "lib/modules", "usr/lib/modules"):
             path = profile / "rootfs" / source
             path.mkdir(parents=True)
@@ -215,7 +236,7 @@ class CandidateTests(unittest.TestCase):
     def test_missing_required_guest_package_is_rejected(self):
         path = self.inputs / "package_manifest"
         packages = json.loads(path.read_text())
-        for required in ("systemd-resolved", "udev", "e2fsprogs", "kmod", prepare.KERNEL_PACKAGE):
+        for required in ("systemd-resolved", "udev", "e2fsprogs", "dmsetup", "kmod", prepare.KERNEL_PACKAGE):
             path.write_text(json.dumps([p for p in packages if p["name"] != required]))
             self.lock["artifacts"]["package_manifest"]["sha256"] = prepare.digest(path)
             with self.assertRaisesRegex(ValueError, "kernel package" if required == prepare.KERNEL_PACKAGE else "guest package surface"):

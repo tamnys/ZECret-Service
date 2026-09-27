@@ -24,15 +24,16 @@ KERNEL_VERSION = "6.12.107+deb13-cloud-amd64"
 KERNEL_PACKAGE = f"linux-image-{KERNEL_VERSION}"
 KERNEL_PACKAGE_VERSION = "6.12.107-1"
 BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
-ROLES = set(BINARIES) | {"initrd", "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
+ROLES = set(BINARIES) | {"secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
+INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
 
 def validate_boot_profile(profile=PROFILE):
     """Reject source drift that would omit the direct UKI or unbind the root."""
     # mkosi discovers settings and executable hooks by filename. The staged
-    # directory is created fresh from these four reviewed source entries only.
-    if {path.name for path in profile.iterdir()} != {"input-identities.json", "mkosi.conf", "repart", "rootfs"} or any(path.is_symlink() for path in profile.iterdir()):
+    # directory is created fresh from these reviewed source entries only.
+    if {path.name for path in profile.iterdir()} != {"input-identities.json", "mkosi.conf", "mkosi.images", "repart", "rootfs"} or any(path.is_symlink() for path in profile.iterdir()):
         raise ValueError("unexpected mkosi source override or redirected input")
     parser = configparser.ConfigParser(interpolation=None, strict=True)
     parser.optionxform = str
@@ -41,12 +42,30 @@ def validate_boot_profile(profile=PROFILE):
     expected_settings = {
         "Distribution": {"Distribution": "debian", "Release": "trixie", "Architecture": "x86-64", "RepositoryKeyCheck": "yes", "RepositoryKeyFetch": "no"},
         "Output": {"Format": "disk", "Output": "zrpc-gcp", "ManifestFormat": "json", "RepartDirectories": "repart"},
-        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "no", "Autologin": "no", "Ssh": "no", "KernelCommandLine": "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 systemd.unit=zrpc.target rd.emergency=reboot rd.shell=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality", "ExtraTrees": "rootfs"},
+        "Config": {"Dependencies": "initrd"},
+        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality", "ExtraTrees": "rootfs"},
         "Validation": {"SecureBoot": "yes", "SecureBootAutoEnroll": "no", "SignExpectedPcr": "no", "Checksum": "yes"},
         "Build": {"WithNetwork": "no", "CacheOnly": "always", "Incremental": "no"},
     }
     if {section: dict(parser.items(section)) for section in parser.sections()} != expected_settings:
         raise ValueError("direct signed-UKI image recipe differs")
+    images = profile / "mkosi.images"
+    initrd = images / "initrd"
+    if not images.is_dir() or images.is_symlink() or {path.name for path in images.iterdir()} != {"initrd"} or not initrd.is_dir() or initrd.is_symlink() or {path.name for path in initrd.iterdir()} != {"mkosi.conf"}:
+        raise ValueError("unexpected initrd subimage input")
+    initrd_config = initrd / "mkosi.conf"
+    if not initrd_config.is_file() or initrd_config.is_symlink():
+        raise ValueError("initrd subimage missing or redirected")
+    parser = configparser.ConfigParser(interpolation=None, strict=True)
+    parser.optionxform = str
+    with initrd_config.open() as stream:
+        parser.read_file(stream)
+    expected_initrd = {
+        "Output": {"Format": "cpio", "Output": "initrd", "ManifestFormat": "json", "CompressOutput": "zstd"},
+        "Content": {"Bootable": "no", "MakeInitrd": "yes", "Autologin": "no", "Ssh": "no", "CleanPackageMetadata": "yes", "WithDocs": "no", "RemoveFiles": "/usr/lib/systemd/system/rescue.service,/usr/lib/systemd/system/emergency.service,/usr/lib/systemd/system/debug-shell.service,/usr/lib/systemd/system/getty@.service,/usr/lib/systemd/system/serial-getty@.service,/usr/lib/systemd/system/console-getty.service,/usr/lib/systemd/system/container-getty@.service,/usr/lib/systemd/systemd-sulogin-shell,/usr/bin/bash,/usr/bin/dash,/usr/bin/sh,/usr/sbin/sulogin,/usr/bin/login,/usr/bin/su"},
+    }
+    if {section: dict(parser.items(section)) for section in parser.sections()} != expected_initrd:
+        raise ValueError("systemd initrd subimage recipe differs")
     if any((profile / "rootfs" / path).exists() or (profile / "rootfs" / path).is_symlink() for path in ("boot", "lib/modules", "usr/lib/modules")):
         raise ValueError("ExtraTrees must not supply a kernel or module tree")
     repart = profile / "repart"
@@ -111,7 +130,7 @@ def preflight():
     return {"schema_version": 1, "status": "blocked" if blockers else "capabilities-present-input-review-required", "architecture": platform.machine(), "tools": tools, "blockers": blockers, "image_built": False, "private_mode_approved": False}
 
 def validate_lock(lock, source):
-    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 4 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
+    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 5 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
         raise ValueError("unsupported or incomplete input lock")
     if type(lock["source_date_epoch"]) is not int or lock["source_date_epoch"] <= 0:
         raise ValueError("source date must derive from authenticated inputs")
@@ -152,7 +171,7 @@ def validate_lock(lock, source):
     # networkd/resolved, stable /dev/disk links, the direct UKI/verity path,
     # x-systemd.makefs for the public ext4 data disk, and mkosi's depmod step
     # need these binaries.
-    if names & FORBIDDEN_PACKAGES or not {"systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "kmod"} <= names:
+    if names & FORBIDDEN_PACKAGES or not ({"systemd-boot-efi", "systemd-resolved", "e2fsprogs"} | INITRD_PACKAGES) <= names:
         raise ValueError("guest package surface does not match appliance policy")
     runtime = lock["runtime"]
     if set(runtime) != {"listen_port", "max_connections", "max_quotes", "quote_spacing_ms", "node_startup_timeout_secs", "node_poll_interval_ms"} or any(type(value) is not int or value <= 0 for value in runtime.values()) or runtime["listen_port"] > 65535:
@@ -170,6 +189,7 @@ def stage(lock_path, source, destination):
     destination.mkdir(parents=True, mode=0o700)
     shutil.copytree(PROFILE / "rootfs", destination / "rootfs")
     shutil.copytree(PROFILE / "repart", destination / "repart")
+    shutil.copytree(PROFILE / "mkosi.images", destination / "mkosi.images")
     shutil.copy2(PROFILE / "mkosi.conf", destination / "mkosi.conf")
     shutil.copyfile(Path(__file__).with_name("audit-rootfs.py"), destination / "audit-rootfs.py")
     (destination / "audit-rootfs.py").chmod(0o555)
@@ -217,7 +237,11 @@ def stage(lock_path, source, destination):
     (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=artifacts/initrd\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
+    with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
+        versions = {package["name"]: package["version"] for package in package_manifest}
+        initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))
+        stream.write(f"\nPackages={initrd_packages}\n")
     shutil.copyfile(lock_path, destination / "inputs.lock.json")
     entries = {}
     for path in sorted(destination.rglob("*")):
@@ -228,7 +252,7 @@ def stage(lock_path, source, destination):
         else:
             entry = {"type": "directory", "mode": path.stat().st_mode & 0o777}
         entries[str(path.relative_to(destination))] = entry
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and modules came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual initrd contents and test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     (destination / "candidate-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
