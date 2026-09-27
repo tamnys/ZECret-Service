@@ -90,6 +90,75 @@ fn synthetic_report(policy: &GcpWorkloadPolicy) -> TDReport10 {
     td
 }
 
+fn synthetic_provider() -> GcpProviderIdentity {
+    GcpProviderIdentity {
+        ppid: [0xab; 16],
+        host_registry_sha256: [1; 32],
+        project_number: 123456789012,
+        zone: "us-central1-a".into(),
+        instance_id: 112233445566778899,
+        instance_inventory_sha256: [2; 32],
+    }
+}
+
+#[test]
+fn google_pzid_digest_matches_reference_payload() {
+    // Google's go-tdx-guest gce/pzid_test.go vector at
+    // 2108462acb71e7fd471b9535e1af2895d747c7c1.
+    let provider = synthetic_provider();
+    assert_eq!(
+        provider.pzid_payload(),
+        "{\"instanceId\":112233445566778899,\"numericalProjectId\":123456789012,\"zone\":\"us-central1-a\"}"
+    );
+    assert_eq!(
+        hex::encode(provider.pzid_digest()),
+        "c9f79053aed02b9c4a2012fd7af9905c62e5790a9181f23bdedab6405b2a5866c8a68db6e565956d8b4844a3241059f2"
+    );
+    let invalid_zone = GcpProviderIdentity {
+        zone: "us-central1-é".into(),
+        ..provider
+    };
+    assert!(!invalid_zone.validate());
+}
+
+#[test]
+fn provider_binding_rejects_mismatched_pck_ppid_or_any_instance_component() {
+    let provider = synthetic_provider();
+    let mut td = synthetic_report(&synthetic_policy());
+    td.mr_owner = provider.pzid_digest();
+    assert_eq!(
+        compare_provider(&td, &provider.ppid, &provider),
+        (InspectionStatus::Verified, InspectionStatus::Verified)
+    );
+    assert_eq!(
+        compare_provider(&td, &[0xcd; 16], &provider),
+        (InspectionStatus::Rejected, InspectionStatus::Verified)
+    );
+    assert_eq!(
+        compare_provider(&td, &[], &provider),
+        (InspectionStatus::Rejected, InspectionStatus::Verified)
+    );
+    for changed in [
+        GcpProviderIdentity {
+            project_number: provider.project_number + 1,
+            ..provider.clone()
+        },
+        GcpProviderIdentity {
+            zone: "us-central1-b".into(),
+            ..provider.clone()
+        },
+        GcpProviderIdentity {
+            instance_id: provider.instance_id + 1,
+            ..provider.clone()
+        },
+    ] {
+        assert_eq!(
+            compare_provider(&td, &provider.ppid, &changed),
+            (InspectionStatus::Verified, InspectionStatus::Rejected)
+        );
+    }
+}
+
 #[test]
 fn maintained_google_fixture_replay_agrees_without_authentication_or_approval() {
     let bytes = include_bytes!("../../../../tests/fixtures/gcp/cos-113-intel-tdx.bin");
@@ -118,9 +187,16 @@ fn maintained_google_fixture_replay_agrees_without_authentication_or_approval() 
 #[test]
 fn strict_quote_failure_never_runs_gcp_policy_or_report_data_checks() {
     let p = synthetic_policy();
-    let report = inspect_using(&synthetic_log(), &p, Some(&[0; 64]), |inspect| {
-        offline::inspect_fixture_quote_with_claims(QUOTE, COLLATERAL, 1_752_919_234, inspect)
-    });
+    let provider = synthetic_provider();
+    let report = inspect_using(
+        &synthetic_log(),
+        &p,
+        Some(&[0; 64]),
+        Some(&provider),
+        |inspect| {
+            offline::inspect_fixture_quote_with_claims(QUOTE, COLLATERAL, 1_752_919_234, inspect)
+        },
+    );
     assert_eq!(
         report.workload.quote.hardware_authenticity,
         InspectionStatus::Verified
@@ -134,6 +210,14 @@ fn strict_quote_failure_never_runs_gcp_policy_or_report_data_checks() {
         report.authenticated_report_data_match,
         InspectionStatus::NotChecked
     );
+    assert_eq!(
+        report.workload.google_host_ppid_match,
+        InspectionStatus::NotChecked
+    );
+    assert_eq!(
+        report.workload.google_instance_binding,
+        InspectionStatus::NotChecked
+    );
     assert!(!report.diagnostic_passed());
     assert!(
         !report.workload.quote.private_accepted
@@ -145,7 +229,7 @@ fn strict_quote_failure_never_runs_gcp_policy_or_report_data_checks() {
 #[test]
 fn diagnostic_measurement_success_without_provenance_cannot_be_private_ready() {
     let policy = synthetic_policy();
-    let mut report = inspect_using(&synthetic_log(), &policy, Some(&[0; 64]), |inspect| {
+    let mut report = inspect_using(&synthetic_log(), &policy, Some(&[0; 64]), None, |inspect| {
         offline::inspect_fixture_quote_with_claims(QUOTE, COLLATERAL, 1_752_919_234, inspect)
     });
     // Fabricate an otherwise passing diagnostic report in this unit test. No
@@ -165,6 +249,13 @@ fn diagnostic_measurement_success_without_provenance_cannot_be_private_ready() {
     assert!(!report.private_acceptance_ready());
     report.workload.firmware_endorsement_provenance = InspectionStatus::NotChecked;
     report.workload.artifact_provenance = InspectionStatus::Verified;
+    assert!(!report.private_acceptance_ready());
+
+    report.workload.firmware_endorsement_provenance = InspectionStatus::Verified;
+    report.workload.google_instance_binding = InspectionStatus::Verified;
+    assert!(!report.private_acceptance_ready());
+    report.workload.google_instance_binding = InspectionStatus::NotChecked;
+    report.workload.google_host_ppid_match = InspectionStatus::Verified;
     assert!(!report.private_acceptance_ready());
 }
 
