@@ -249,10 +249,12 @@ class CandidateTests(unittest.TestCase):
         units = output / "rootfs/usr/lib/systemd/system"
         wrapper = (units / "zrpc-wrapper.service").read_text()
         self.assertIn("--platform gcp-tdx", wrapper)
-        self.assertIn("--check wrapper", wrapper)
+        self.assertIn("ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec wrapper", wrapper)
         for name in ("zrpc-wrapper", "zrpc-node", "zrpc-cookie", "zrpc-gcp-quote"):
             unit = (units / f"{name}.service").read_text()
             self.assertIn("NoExecPaths=/run /tmp /var /dev\n", unit)
+            self.assertIn("ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec ", unit)
+            self.assertNotIn("ExecStartPre=/usr/lib/zrpc/zrpc-gcp-guard --check", unit)
         config = (output / "mkosi.conf").read_text()
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)

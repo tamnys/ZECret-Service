@@ -14,7 +14,6 @@ User=zrpc-wrapper
 Group=zrpc-wrapper
 SupplementaryGroups=zrpc-cookie
 ExecStartPre=+/usr/lib/zrpc/zrpc-gcp-guard --mark-start wrapper
-ExecStartPre=/usr/lib/zrpc/zrpc-gcp-guard --check wrapper
 # ExecStart is generated from independently measured resource inputs by prepare.py.
 Restart=no
 KillMode=control-group

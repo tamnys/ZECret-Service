@@ -13,7 +13,6 @@ RefuseManualStart=yes
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=+/usr/lib/zrpc/zrpc-gcp-guard --mark-start cookie
-ExecStartPre=/usr/lib/zrpc/zrpc-gcp-guard --check cookie
 # ExecStart and TimeoutStartSec are generated from measured startup timing inputs.
 Restart=no
 LimitCORE=0

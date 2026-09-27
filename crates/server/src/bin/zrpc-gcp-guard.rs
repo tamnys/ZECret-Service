@@ -3,7 +3,9 @@ use std::{
     collections::HashSet,
     fs::{self, OpenOptions},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::process::CommandExt,
     path::Path,
+    process::Command,
 };
 
 #[derive(Debug)]
@@ -281,13 +283,32 @@ fn validate_privileges(status: &str, passwd: &str, service: &str) -> Result<(), 
     }
     Ok(())
 }
+
+fn service_command(service: &str, arguments: &[String]) -> Result<Command, ()> {
+    let path = match service {
+        "broker" if arguments.is_empty() => "/usr/lib/zrpc/zrpc-gcp-quote-broker",
+        "cookie" => "/usr/lib/zrpc/zrpc-gcp-cookie",
+        "zebra" if arguments.is_empty() => "/usr/lib/zrpc/zebrad",
+        "wrapper" => "/usr/lib/zrpc/zrpc-node-wrapper",
+        _ => return Err(()),
+    };
+    let mut command = Command::new(path);
+    if service == "zebra" {
+        command.args(["-c", "/etc/zrpc/zebra.toml", "start"]);
+    } else {
+        command.args(arguments);
+    }
+    Ok(command)
+}
+
 fn run() -> Result<(), ()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let [flag, service] = args.as_slice() else {
+    let [flag, service, arguments @ ..] = args.as_slice() else {
         return Err(());
     };
-    if !["--mark-start", "--check"].contains(&flag.as_str())
+    if !["--mark-start", "--exec"].contains(&flag.as_str())
         || !["broker", "cookie", "zebra", "wrapper"].contains(&service.as_str())
+        || (flag != "--exec" && !arguments.is_empty())
     {
         return Err(());
     }
@@ -295,7 +316,7 @@ fn run() -> Result<(), ()> {
         return Err(());
     }
     let read = |path: &str| fs::read_to_string(path).map_err(|_| ());
-    if flag == "--check" {
+    if flag != "--mark-start" {
         validate_privileges(&read("/proc/self/status")?, &read("/etc/passwd")?, service)?;
     }
     let mountinfo = read("/proc/self/mountinfo")?;
@@ -304,10 +325,10 @@ fn run() -> Result<(), ()> {
         &read("/proc/swaps")?,
         &read("/proc/sys/kernel/core_pattern")?,
         &read("/proc/sys/fs/suid_dumpable")?,
-        if flag == "--check" {
-            Some(service)
-        } else {
+        if flag == "--mark-start" {
             None
+        } else {
+            Some(service)
         },
     )?;
     let uuid = read(&format!("/sys/dev/block/{device}/dm/uuid"))?;
@@ -342,6 +363,13 @@ fn run() -> Result<(), ()> {
             .map_err(|_| ())?;
     }
     if read("/proc/self/mountinfo")? != mountinfo {
+        return Err(());
+    }
+    // systemd creates a separate mount namespace for each ExecStartPre and
+    // ExecStart command. Check and exec the workload in the *same* process;
+    // a pre-start check alone cannot authorize the workload's namespace.
+    if flag == "--exec" {
+        let _ = service_command(service, arguments)?.exec();
         return Err(());
     }
     Ok(())
