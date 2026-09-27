@@ -86,6 +86,61 @@ class FetchBuilderClosureTests(unittest.TestCase):
         return fetcher.fetch(self.inrelease, self.index, self.archives,
                              lock_path=self.lock_path, open_url=opener)
 
+    def metadata_lock(self):
+        self.lock["inrelease_sha256"] = hashlib.sha256(self.inrelease.read_bytes()).hexdigest()
+        self.lock["packages_index_sha256"] = hashlib.sha256(self.index.read_bytes()).hexdigest()
+        self.write_lock()
+
+    def fetch_metadata(self, opener):
+        return fetcher.fetch_reviewed_metadata(
+            self.archives, lock_path=self.lock_path, open_url=opener,
+        )
+
+    def test_metadata_is_hash_checked_before_publication_and_reused(self):
+        self.metadata_lock()
+        urls = []
+        expected = {
+            self.lock["snapshot"] + "dists/trixie/InRelease": self.inrelease.read_bytes(),
+            self.lock["snapshot"] +
+            "dists/trixie/main/binary-amd64/Packages.xz": self.index.read_bytes(),
+        }
+
+        def opener(request):
+            urls.append(request.full_url)
+            return Response(expected[request.full_url], request.full_url)
+
+        with self.authenticated():
+            report = self.fetch_metadata(opener)
+            self.assertEqual((report["downloaded_count"], report["reused_count"]), (2, 0))
+            self.assertFalse(report["signed_snapshot_rechecked"])
+            self.assertEqual(urls, list(expected))
+            self.assertEqual((self.archives / "InRelease").read_bytes(),
+                             self.inrelease.read_bytes())
+            self.assertEqual((self.archives / "Packages.xz").read_bytes(),
+                             self.index.read_bytes())
+            report = self.fetch_metadata(lambda _: self.fail("metadata cache triggered network"))
+            self.assertEqual((report["downloaded_count"], report["reused_count"]), (0, 2))
+
+    def test_bad_or_redirected_metadata_is_not_published(self):
+        self.metadata_lock()
+        with self.authenticated():
+            with self.assertRaisesRegex(ValueError, "metadata differs"):
+                self.fetch_metadata(lambda request: Response(b"wrong bytes", request.full_url))
+            self.assertEqual(list(self.archives.iterdir()), [])
+            with self.assertRaisesRegex(ValueError, "redirect escaped"):
+                self.fetch_metadata(lambda _: Response(
+                    self.inrelease.read_bytes(), "https://example.invalid/InRelease",
+                ))
+            self.assertEqual(list(self.archives.iterdir()), [])
+
+    def test_corrupt_cached_metadata_is_not_replaced(self):
+        self.metadata_lock()
+        (self.archives / "InRelease").write_bytes(b"corrupt")
+        with self.authenticated():
+            with self.assertRaisesRegex(ValueError, "existing builder snapshot metadata"):
+                self.fetch_metadata(lambda _: self.fail("corrupt metadata triggered network"))
+        self.assertEqual((self.archives / "InRelease").read_bytes(), b"corrupt")
+
     def test_downloads_exact_archive_then_reuses_without_network(self):
         urls = []
 

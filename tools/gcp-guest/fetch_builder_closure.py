@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Cache the exact signed-snapshot builder archives without installing them.
 
-Only the source-reviewed closure lock and Debian's signed package index may
-select downloads. Existing archives are checked, never replaced. This does not
-run package scripts, create a toolchain, build an image, or approve private mode.
+The source-reviewed closure lock selects hash-pinned snapshot metadata. The
+signed package index must then authenticate archive membership before package
+fetches. Existing files are checked, never replaced. This does not run package
+scripts, create a toolchain, build an image, or approve private mode.
 """
 
 import argparse
@@ -27,6 +28,12 @@ import verify_builder_packages as direct
 
 
 CHUNK_BYTES = 1024 * 1024
+METADATA = (
+    ("InRelease", "dists/trixie/InRelease", "inrelease_sha256",
+     debian_snapshot.MAX_INRELEASE_BYTES),
+    ("Packages.xz", "dists/trixie/main/binary-amd64/Packages.xz",
+     "packages_index_sha256", debian_snapshot.MAX_SIGNED_INDEX_BYTES),
+)
 
 
 class SameOriginRedirects(urllib.request.HTTPRedirectHandler):
@@ -44,7 +51,7 @@ def open_snapshot_url(request):
     return urllib.request.build_opener(SameOriginRedirects()).open(request)
 
 
-def authenticated_packages(inrelease, packages_index, *, lock_path=closure.LOCK):
+def reviewed_lock(lock_path):
     lock_bytes = debian_snapshot.bounded_regular_bytes(
         lock_path, closure.LOCK_BYTES, "builder closure lock",
     )
@@ -69,6 +76,11 @@ def authenticated_packages(inrelease, packages_index, *, lock_path=closure.LOCK)
         "%Y%m%dT%H%M%SZ",
     ).replace(tzinfo=timezone.utc)
     debian_snapshot.require_snapshot_age(snapshot_time, datetime.now(timezone.utc))
+    return lock, lock_sha256, snapshot_time
+
+
+def authenticated_packages(inrelease, packages_index, *, lock_path=closure.LOCK):
+    lock, lock_sha256, snapshot_time = reviewed_lock(lock_path)
     epoch, (index_sha256, _), index_bytes = debian_snapshot.authenticated_index_bytes(
         inrelease, packages_index, lock["inrelease_sha256"],
     )
@@ -108,6 +120,94 @@ def authenticated_packages(inrelease, packages_index, *, lock_path=closure.LOCK)
     if names != sorted(set(names)):
         raise ValueError("builder closure package order or identity differs from review")
     return lock, packages, lock_sha256, index_sha256
+
+
+def verified_metadata(directory_fd, name, expected_sha256, maximum):
+    """Check an existing metadata file without following a redirected path."""
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             dir_fd=directory_fd)
+    except FileNotFoundError:
+        return False
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
+            raise ValueError("existing builder snapshot metadata differs from reviewed lock")
+        data = stream.read(maximum + 1)
+        after = os.fstat(stream.fileno())
+        identity = lambda item: (item.st_dev, item.st_ino, item.st_size,
+                                 item.st_mtime_ns, item.st_ctime_ns)
+        if (len(data) != before.st_size or identity(before) != identity(after)
+                or hashlib.sha256(data).hexdigest() != expected_sha256):
+            raise ValueError("existing builder snapshot metadata differs from reviewed lock")
+    return True
+
+
+def download_metadata(directory_fd, name, url, expected_sha256, maximum, *, open_url=None):
+    if open_url is None:
+        open_url = open_snapshot_url
+    temporary = ".partial-" + secrets.token_hex(16)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory_fd)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            request = urllib.request.Request(url, headers={"Accept-Encoding": "identity"})
+            with open_url(request) as response:
+                final_url = urllib.parse.urlsplit(response.geturl())
+                if final_url.scheme != "https" or final_url.netloc != "snapshot.debian.org":
+                    raise ValueError("builder snapshot metadata redirect escaped signed snapshot")
+                digest = hashlib.sha256()
+                size = 0
+                while chunk := response.read(CHUNK_BYTES):
+                    size += len(chunk)
+                    if size > maximum:
+                        raise ValueError("builder snapshot metadata exceeds reviewed size")
+                    digest.update(chunk)
+                    output.write(chunk)
+            if not size or digest.hexdigest() != expected_sha256:
+                raise ValueError("builder snapshot metadata differs from reviewed lock")
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                follow_symlinks=False)
+        os.fsync(directory_fd)
+    finally:
+        os.unlink(temporary, dir_fd=directory_fd)
+
+
+def fetch_reviewed_metadata(directory, *, lock_path=closure.LOCK, open_url=None):
+    """Fetch hash-pinned metadata; signature checking remains a separate step."""
+    lock, lock_sha256, _ = reviewed_lock(lock_path)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("builder metadata directory missing or redirected")
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY |
+                         os.O_NOFOLLOW | os.O_CLOEXEC)
+    downloaded = reused = 0
+    try:
+        for name, suffix, field, maximum in METADATA:
+            expected_sha256 = lock[field]
+            if verified_metadata(descriptor, name, expected_sha256, maximum):
+                reused += 1
+                continue
+            download_metadata(descriptor, name, urllib.parse.urljoin(lock["snapshot"], suffix),
+                              expected_sha256, maximum, open_url=open_url)
+            if not verified_metadata(descriptor, name, expected_sha256, maximum):
+                raise ValueError("downloaded builder snapshot metadata missing after publish")
+            downloaded += 1
+    finally:
+        os.close(descriptor)
+    return {
+        "status": "builder-snapshot-metadata-hashes-matched-signature-unchecked",
+        "closure_lock_sha256": lock_sha256,
+        "inrelease_sha256": lock["inrelease_sha256"],
+        "packages_index_sha256": lock["packages_index_sha256"],
+        "downloaded_count": downloaded,
+        "reused_count": reused,
+        "signed_snapshot_rechecked": False,
+        "complete_builder_toolchain": False,
+        "image_built": False,
+        "private_mode_approved": False,
+    }
 
 
 def verify_cached(directory_fd, entry):

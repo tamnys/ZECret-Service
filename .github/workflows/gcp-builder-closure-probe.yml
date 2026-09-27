@@ -116,11 +116,34 @@ jobs:
           }, sort_keys=True))
           PY
 
-          # Only the commands below execute staged code. The outer
-          # namespace has no network route; chroot resolves all executable,
-          # interpreter, Python module, and shared-library paths in the
-          # hash-checked staged tree. Drop to the tree owner's unprivileged UID
-          # before any staged command starts.
+          mkdir "$scratch/metadata"
+          ZRPC_BUILDER_METADATA="$scratch/metadata" python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import fetch_builder_closure
+
+          report = fetch_builder_closure.fetch_reviewed_metadata(
+              Path(os.environ["ZRPC_BUILDER_METADATA"]),
+          )
+          if (report["status"] !=
+                  "builder-snapshot-metadata-hashes-matched-signature-unchecked"
+                  or report["signed_snapshot_rechecked"] is not False
+                  or report["complete_builder_toolchain"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("metadata fetch changed diagnostic acceptance status")
+          print(json.dumps(report, sort_keys=True))
+          PY
+
+          # Only the commands below execute staged code. The outer namespace
+          # has no network route. Signature and APT-plan checks execute using
+          # the hash-checked staged gpgv, Python, apt-get, and shared libraries
+          # before the remaining staged tools are exercised. This still does
+          # not prove the complete installed builder or a guest image.
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
           chroot_command="$(command -v chroot)"
@@ -133,6 +156,9 @@ jobs:
             run_uid=$2
             run_gid=$3
             chroot_command=$7
+            source=$8
+            archives=$9
+            metadata=${10}
             test "$(readlink /proc/self/ns/user)" = "$4"
             test "$(readlink /proc/self/ns/mnt)" != "$5"
             test "$(readlink /proc/self/ns/net)" != "$6"
@@ -142,11 +168,50 @@ jobs:
             echo "Isolated mount namespace: $(readlink /proc/self/ns/mnt)"
             echo "Isolated network namespace: $(readlink /proc/self/ns/net)"
 
+            for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-apt-scratch proc dev; do
+              test ! -L "$staged/$directory"
+              mkdir -p "$staged/$directory"
+            done
+            chown "$run_uid:$run_gid" "$staged/zrpc-apt-scratch"
+            mount --bind "$source" "$staged/zrpc-source"
+            mount -o remount,bind,ro "$staged/zrpc-source"
+            mount --bind "$archives" "$staged/zrpc-archives"
+            mount -o remount,bind,ro "$staged/zrpc-archives"
+            mount --bind "$metadata" "$staged/zrpc-metadata"
+            mount -o remount,bind,ro "$staged/zrpc-metadata"
+            mount -t proc proc "$staged/proc"
+            test ! -e "$staged/dev/null"
+            touch "$staged/dev/null"
+            mount --bind /dev/null "$staged/dev/null"
+
             run_staged() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
                 "$chroot_command" --userspec="$run_uid:$run_gid" "$staged" "$@"
             }
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import verify_builder_closure
+
+          report = verify_builder_closure.verify(
+              Path("/zrpc-metadata/InRelease"),
+              Path("/zrpc-metadata/Packages.xz"),
+              Path("/zrpc-archives"),
+              Path("/usr/bin/apt-get"),
+              Path("/zrpc-apt-scratch"),
+          )
+          if (report["status"] != "diagnostic-signed-builder-apt-plan-matched-unbuilt"
+                  or report["package_count"] != 195
+                  or report["complete_builder_toolchain"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("signed snapshot check changed diagnostic acceptance status")
+          print(json.dumps(report, sort_keys=True))
+          PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"
             run_staged /lib64/ld-linux-x86-64.so.2 --list /usr/bin/systemd-repart
@@ -155,4 +220,5 @@ jobs:
             run_staged /usr/bin/ukify --version
             echo "Diagnostic staged tool startup passed; no image built or approved."
           ' _ "$scratch/staged" "$runner_uid" "$runner_gid" \
-            "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command"
+            "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command" \
+            "$source" "$scratch/archives" "$scratch/metadata"
