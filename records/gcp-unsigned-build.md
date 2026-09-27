@@ -193,7 +193,20 @@ passed for direct packages (9), closure (7), fetch (7), and staging (5). A
 combined wildcard test invocation instead segfaulted; its cause is unproven,
 and no combined passing result is claimed.
 
-This local correction has not yet been rerun on the public runner. Even a
-passing version probe would establish only those staged startup paths within
-the tested isolation, not the complete builder runtime closure, a signed
-image, or private-mode acceptance. The release catalog remains empty.
+The subsequent [merged-main diagnostic](https://github.com/tamnys/ZECret-service/actions/runs/36336741585)
+succeeded on commit `2b170a1625dccf1ce6a5757d554b6b62c12bcd26`. Its full job log
+reports 195 hash-checked archives, 8,601 staged entries, and staging-manifest
+SHA-256 `5d3b8b1d4dc309db01810412ad702bbae6747d3c43d550b21ce1285ac5d8a923`.
+The script checked distinct mount/network namespaces, only loopback link, no
+IPv4 or IPv6 routes, and staged-command UID 1001. Through the chroot it ran
+`mkosi --version` (25.3), `systemd-repart --version` (257.13-1~deb13u1), and
+`ukify --version` (257.13-1~deb13u1); the loader also listed
+`systemd-repart` objects from staged paths. The run exited successfully and
+its GitHub artifact inventory contains zero uploads.
+
+This proves only startup of those exact staged commands under the tested
+isolation. The runner did not recheck the Debian signature
+(`signed_snapshot_rechecked: false`), run package scripts, build or sign an
+image, or verify later-loaded components and every mkosi helper. It did not
+establish a complete runnable builder closure or change private-mode approval.
+The release catalog remains empty.
