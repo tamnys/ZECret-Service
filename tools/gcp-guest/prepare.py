@@ -20,8 +20,11 @@ import debian_snapshot
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "deploy/gcp/guest"
 SOURCE_COMMIT = "54c625c380ef5500f17460981a3c67b109b6a847"
+KERNEL_VERSION = "6.12.107+deb13-cloud-amd64"
+KERNEL_PACKAGE = f"linux-image-{KERNEL_VERSION}"
+KERNEL_PACKAGE_VERSION = "6.12.107-1"
 BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
-ROLES = set(BINARIES) | {"kernel", "initrd", "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
+ROLES = set(BINARIES) | {"initrd", "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
 
@@ -44,6 +47,8 @@ def validate_boot_profile(profile=PROFILE):
     }
     if {section: dict(parser.items(section)) for section in parser.sections()} != expected_settings:
         raise ValueError("direct signed-UKI image recipe differs")
+    if any((profile / "rootfs" / path).exists() or (profile / "rootfs" / path).is_symlink() for path in ("boot", "lib/modules", "usr/lib/modules")):
+        raise ValueError("ExtraTrees must not supply a kernel or module tree")
     repart = profile / "repart"
     expected = {"10-root.conf", "20-root-verity.conf", "30-esp.conf"}
     if {path.name for path in repart.iterdir()} != expected:
@@ -106,12 +111,12 @@ def preflight():
     return {"schema_version": 1, "status": "blocked" if blockers else "capabilities-present-input-review-required", "architecture": platform.machine(), "tools": tools, "blockers": blockers, "image_built": False, "private_mode_approved": False}
 
 def validate_lock(lock, source):
-    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 3 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
+    if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 4 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
         raise ValueError("unsupported or incomplete input lock")
     if type(lock["source_date_epoch"]) is not int or lock["source_date_epoch"] <= 0:
         raise ValueError("source date must derive from authenticated inputs")
-    if not re.fullmatch(r"[A-Za-z0-9.+_-]+", lock["kernel_version"]):
-        raise ValueError("unsafe kernel version")
+    if lock["kernel_version"] != KERNEL_VERSION:
+        raise ValueError("kernel ABI differs from reviewed Debian package")
     if not re.fullmatch(r"https://snapshot\.debian\.org/archive/debian/[0-9]{8}T[0-9]{6}Z/", lock["snapshot"]):
         raise ValueError("immutable Debian snapshot required")
     artifacts = lock["artifacts"]
@@ -141,6 +146,9 @@ def validate_lock(lock, source):
         if set(package) != {"name", "version", "architecture", "filename", "size", "sha256", "path"} or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", package["name"]) or not re.fullmatch(r"[0-9][A-Za-z0-9.+:~-]*", package["version"]) or not re.fullmatch("[0-9a-f]{64}", package["sha256"]) or package["name"] in names:
             raise ValueError("invalid package identity")
         names.add(package["name"])
+    kernel_packages = [package for package in manifest if package["name"].startswith("linux-image-")]
+    if len(kernel_packages) != 1 or (kernel_packages[0]["name"], kernel_packages[0]["version"], kernel_packages[0]["architecture"]) != (KERNEL_PACKAGE, KERNEL_PACKAGE_VERSION, "amd64"):
+        raise ValueError("exact signed Debian cloud kernel package required")
     # networkd/resolved, stable /dev/disk links, the direct UKI/verity path,
     # x-systemd.makefs for the public ext4 data disk, and mkosi's depmod step
     # need these binaries.
@@ -190,9 +198,6 @@ def stage(lock_path, source, destination):
     for role, name in BINARIES.items():
         shutil.copyfile(artifacts / role, binaries / name)
         (binaries / name).chmod(0o555)
-    modules = rootfs / "usr/lib/modules" / lock["kernel_version"]
-    modules.mkdir(parents=True)
-    shutil.copyfile(artifacts / "kernel", modules / "vmlinuz")
     (rootfs / "etc/zrpc").mkdir(parents=True)
     (rootfs / "etc/zrpc/zebra.toml").write_text('[network]\nnetwork = "Testnet"\nlisten_addr = "127.0.0.1:18233"\n[state]\ncache_dir = "/var/lib/zebra"\n[rpc]\nlisten_addr = "127.0.0.1:18232"\ncookie_dir = "/run/zrpc-node"\nenable_cookie_auth = true\n[tracing]\nfilter = "off"\n')
     unit_dir = rootfs / "usr/lib/systemd/system"
@@ -223,7 +228,7 @@ def stage(lock_path, source, destination):
         else:
             entry = {"type": "directory", "mode": path.stat().st_mode & 0o777}
         entries[str(path.relative_to(destination))] = entry
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and modules came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     (destination / "candidate-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
