@@ -9,8 +9,8 @@ use crate::gcp::{
 use serde_json::json;
 use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, sync::OnceLock};
 
-fn synthetic_import_archive() -> &'static (Vec<u8>, String) {
-    static IMAGE: OnceLock<(Vec<u8>, String)> = OnceLock::new();
+fn synthetic_import_archive() -> &'static (Vec<u8>, String, Vec<u8>) {
+    static IMAGE: OnceLock<(Vec<u8>, String, Vec<u8>)> = OnceLock::new();
     IMAGE.get_or_init(|| {
         let base = PathBuf::from(
             std::env::var_os("CODEX_TMP_DIR").expect("managed workspace scratch required"),
@@ -36,10 +36,12 @@ fn synthetic_import_archive() -> &'static (Vec<u8>, String) {
         assert!(output.status.success(), "synthetic archive creation failed");
         let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(receipt["private_mode_approved"], false);
+        assert_eq!(receipt["toolchain_reviewed"], false);
         let bytes = fs::read(archive).unwrap();
         let raw_sha256 = receipt["raw_disk_sha256"].as_str().unwrap().to_owned();
+        let receipt_bytes = serde_json::to_vec(&receipt).unwrap();
         fs::remove_dir_all(root).unwrap();
-        (bytes, raw_sha256)
+        (bytes, raw_sha256, receipt_bytes)
     })
 }
 
@@ -68,12 +70,23 @@ impl Fixture {
             path: artifact_path,
             sha256: digest(b"SYNTHETIC - NOT A BOOTABLE IMAGE"),
         };
-        let (image_bytes, raw_disk_sha256) = synthetic_import_archive();
+        let (image_bytes, raw_disk_sha256, receipt_bytes) = synthetic_import_archive();
         let archive_path = root.join("synthetic.tar.gz");
         fs::write(&archive_path, image_bytes).unwrap();
         let raw_image_tar_gz = Artifact {
             path: archive_path,
             sha256: digest(image_bytes),
+        };
+        let import_receipt_path = root.join("import-receipt.json");
+        fs::write(&import_receipt_path, receipt_bytes).unwrap();
+        let import_receipt = Artifact {
+            path: import_receipt_path,
+            sha256: digest(receipt_bytes),
+        };
+        let import_verifier_python_path = fs::canonicalize("/usr/bin/python3").unwrap();
+        let import_verifier_python = Artifact {
+            sha256: crate::gcp::provider::file_sha256(&import_verifier_python_path).unwrap(),
+            path: import_verifier_python_path,
         };
         let components = [
             "compute",
@@ -88,7 +101,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 3,
+            schema_version: 4,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -104,6 +117,8 @@ impl Fixture {
             raw_image_tar_gz,
             raw_disk_sha256: raw_disk_sha256.clone(),
             raw_disk_bytes: 1024 * 1024 * 1024,
+            import_receipt,
+            import_verifier_python,
             release_manifest: a.clone(),
             boot_policy: a.clone(),
             memory_measurement: a.clone(),
@@ -187,6 +202,22 @@ impl Fixture {
             outage: false,
         }
     }
+    fn spec_with_receipt_edit(&self, edit: impl FnOnce(&mut Value)) -> DeploymentSpec {
+        let mut spec = self.package.spec.clone();
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(&spec.import_receipt.path).unwrap()).unwrap();
+        edit(&mut receipt);
+        let bytes = serde_json::to_vec(&receipt).unwrap();
+        let path = self
+            .root
+            .join(format!("edited-receipt-{}.json", uuid().unwrap()));
+        fs::write(&path, &bytes).unwrap();
+        spec.import_receipt = Artifact {
+            path,
+            sha256: digest(&bytes),
+        };
+        spec
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -256,8 +287,80 @@ fn image_package_requires_the_reviewed_raw_disk_inside_the_import_archive() {
     assert!(Package::prepare(wrong_archive, 1000).is_err());
 
     let mut old_schema = f.package.spec.clone();
-    old_schema.schema_version = 2;
+    old_schema.schema_version = 3;
     assert!(Package::prepare(old_schema, 1000).is_err());
+}
+
+#[test]
+fn import_receipt_binds_candidate_media_and_local_executables_without_approval() {
+    let f = Fixture::new();
+    let original: Value =
+        serde_json::from_slice(&fs::read(&f.package.spec.import_receipt.path).unwrap()).unwrap();
+    assert_eq!(original["toolchain_reviewed"], false);
+    assert_eq!(original["private_mode_approved"], false);
+    assert!(
+        crate::gcp::LIVE_DEPLOYMENT_BLOCKERS
+            .iter()
+            .any(|item| item.contains("operator Python/GNU tar import toolchain"))
+    );
+
+    let mut missing = serde_json::to_value(&f.package.spec).unwrap();
+    missing.as_object_mut().unwrap().remove("import_receipt");
+    assert!(serde_json::from_value::<DeploymentSpec>(missing).is_err());
+    let mut missing_verifier = serde_json::to_value(&f.package.spec).unwrap();
+    missing_verifier
+        .as_object_mut()
+        .unwrap()
+        .remove("import_verifier_python");
+    assert!(serde_json::from_value::<DeploymentSpec>(missing_verifier).is_err());
+
+    for field in ["archive_sha256", "raw_disk_sha256"] {
+        let changed = f.spec_with_receipt_edit(|receipt| receipt[field] = json!("0".repeat(64)));
+        assert!(Package::prepare(changed, 1000).is_err(), "field {field}");
+    }
+    for field in [
+        "python_executable_sha256",
+        "gnu_tar_sha256",
+        "gnu_gzip_sha256",
+    ] {
+        let malformed = f.spec_with_receipt_edit(|receipt| receipt[field] = json!("not-a-sha256"));
+        assert!(Package::prepare(malformed, 1000).is_err(), "field {field}");
+    }
+    let wrong_size = f.spec_with_receipt_edit(|receipt| receipt["raw_disk_bytes"] = json!(2));
+    assert!(Package::prepare(wrong_size, 1000).is_err());
+    for field in ["toolchain_reviewed", "private_mode_approved"] {
+        let false_approval = f.spec_with_receipt_edit(|receipt| receipt[field] = json!(true));
+        assert!(
+            Package::prepare(false_approval, 1000).is_err(),
+            "field {field}"
+        );
+    }
+    let changed_claim =
+        f.spec_with_receipt_edit(|receipt| receipt["oldgnu_single_member_checked"] = json!(false));
+    assert!(Package::prepare(changed_claim, 1000).is_err());
+    // Producer and operator toolchains are distinct. A candidate receipt can
+    // describe another producer without approving it or changing validation.
+    let different_producer = f.spec_with_receipt_edit(|receipt| {
+        for field in [
+            "python_executable_sha256",
+            "gnu_tar_sha256",
+            "gnu_gzip_sha256",
+        ] {
+            receipt[field] = json!("0".repeat(64));
+        }
+    });
+    assert!(Package::prepare(different_producer, 1000).is_ok());
+    let mut wrong_verifier = f.package.spec.clone();
+    wrong_verifier.import_verifier_python.sha256 = "0".repeat(64);
+    assert!(Package::prepare(wrong_verifier, 1000).is_err());
+    let mut selected_verifier = f.package.spec.clone();
+    selected_verifier.import_verifier_python.path = f.package.spec.release_manifest.path.clone();
+    selected_verifier.import_verifier_python.sha256 =
+        f.package.spec.release_manifest.sha256.clone();
+    assert!(Package::prepare(selected_verifier, 1000).is_err());
+    let stale_hash = f.package.spec.clone();
+    fs::write(&stale_hash.import_receipt.path, b"{}%").unwrap();
+    assert!(Package::prepare(stale_hash, 1000).is_err());
 }
 
 struct Mock {

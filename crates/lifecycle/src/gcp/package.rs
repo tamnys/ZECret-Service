@@ -23,16 +23,80 @@ const MAX_IMPORT_GIB: u64 = 2048;
 // required on the operator's reviewed Linux host; absence fails closed.
 const IMPORT_CHECKER: &str = include_str!("../../../../tools/gcp-guest/gcp_import_archive.py");
 
-fn verify_import_archive(archive: &Artifact, raw_sha256: &str, raw_bytes: u64) -> Result<()> {
-    static CHECKED: OnceLock<Mutex<BTreeMap<String, (String, u64)>>> = OnceLock::new();
+/// Candidate producer record. Its executable hashes and status fields cannot
+/// grant toolchain or private-mode approval; the live deployment blocker stays.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportReceipt {
+    archive_sha256: String,
+    raw_disk_sha256: String,
+    raw_disk_bytes: u64,
+    oldgnu_single_member_checked: bool,
+    private_mode_approved: bool,
+    gnu_tar_version: String,
+    gnu_tar_sha256: String,
+    gnu_gzip_version: String,
+    gnu_gzip_sha256: String,
+    python_executable_sha256: String,
+    python_version: String,
+    toolchain_reviewed: bool,
+    workspace_volume_override_used: bool,
+}
+
+fn verify_import_receipt(spec: &DeploymentSpec) -> Result<()> {
+    let bytes = read_regular(&spec.import_receipt.path)?;
+    if digest(&bytes) != spec.import_receipt.sha256 {
+        return Err(Error("import receipt SHA-256 mismatch"));
+    }
+    let receipt: ImportReceipt =
+        serde_json::from_slice(&bytes).map_err(|_| Error("invalid typed import receipt"))?;
+    if receipt.archive_sha256 != spec.raw_image_tar_gz.sha256
+        || receipt.raw_disk_sha256 != spec.raw_disk_sha256
+        || receipt.raw_disk_bytes != spec.raw_disk_bytes
+        || !receipt.oldgnu_single_member_checked
+        || receipt.private_mode_approved
+        || receipt.toolchain_reviewed
+        || !receipt.gnu_tar_version.starts_with("tar (GNU tar) ")
+        || !receipt.gnu_gzip_version.starts_with("gzip ")
+        || receipt.python_version.is_empty()
+        || !valid_digest(&receipt.gnu_tar_sha256)
+        || !valid_digest(&receipt.gnu_gzip_sha256)
+        || !valid_digest(&receipt.python_executable_sha256)
+    {
+        return Err(Error(
+            "import receipt differs from candidate media or status",
+        ));
+    }
+    // These producer hashes and versions describe archive creation. They do
+    // not identify or approve the separate operator-host verifier toolchain.
+    let _ = receipt.workspace_volume_override_used;
+    Ok(())
+}
+
+fn verify_import_archive(
+    archive: &Artifact,
+    raw_sha256: &str,
+    raw_bytes: u64,
+    python: &Artifact,
+) -> Result<()> {
+    // Keep the operator executable separate from the producer receipt. A
+    // caller-supplied executable path must never select arbitrary code here.
+    let system_python = fs::canonicalize("/usr/bin/python3")
+        .map_err(|_| Error("operator Python executable unavailable"))?;
+    if python.path != system_python {
+        return Err(Error("import verifier must use canonical system Python"));
+    }
+    python.verify()?;
+    static CHECKED: OnceLock<Mutex<BTreeMap<(String, String), (String, u64)>>> = OnceLock::new();
     let checked = CHECKED.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut cache = checked
         .lock()
         .map_err(|_| Error("import archive cache poisoned"))?;
-    if cache.get(&archive.sha256) == Some(&(raw_sha256.to_owned(), raw_bytes)) {
+    let key = (archive.sha256.clone(), python.sha256.clone());
+    if cache.get(&key) == Some(&(raw_sha256.to_owned(), raw_bytes)) {
         return Ok(());
     }
-    let status = Command::new("/usr/bin/python3")
+    let status = Command::new(&python.path)
         .arg("-I")
         .arg("-c")
         .arg(IMPORT_CHECKER)
@@ -54,7 +118,10 @@ fn verify_import_archive(archive: &Artifact, raw_sha256: &str, raw_bytes: u64) -
     // The artifact hash is checked before and after the decoder. A changed
     // upload is also rejected by the provider's streaming media hash check.
     archive.verify()?;
-    cache.insert(archive.sha256.clone(), (raw_sha256.to_owned(), raw_bytes));
+    if super::provider::file_sha256(&python.path)? != python.sha256 {
+        return Err(Error("operator Python changed during archive verification"));
+    }
+    cache.insert(key, (raw_sha256.to_owned(), raw_bytes));
     Ok(())
 }
 
@@ -110,6 +177,11 @@ pub struct DeploymentSpec {
     /// SHA-256 of logical disk.raw bytes after GNU sparse expansion.
     pub raw_disk_sha256: String,
     pub raw_disk_bytes: u64,
+    /// Hash-bound candidate record emitted by the offline archive packer.
+    pub import_receipt: Artifact,
+    /// Exact operator-host interpreter for the embedded offline validator.
+    /// This identity is separate from the producer's Python in the receipt.
+    pub import_verifier_python: Artifact,
     pub release_manifest: Artifact,
     pub boot_policy: Artifact,
     pub memory_measurement: Artifact,
@@ -167,7 +239,7 @@ pub(crate) fn name(value: &str) -> bool {
 }
 impl DeploymentSpec {
     pub fn validate(&self, at: u64) -> Result<()> {
-        if self.schema_version != 3
+        if self.schema_version != 4
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -256,16 +328,20 @@ impl DeploymentSpec {
         for artifact in self.artifacts() {
             artifact.verify()?;
         }
+        verify_import_receipt(self)?;
         verify_import_archive(
             &self.raw_image_tar_gz,
             &self.raw_disk_sha256,
             self.raw_disk_bytes,
+            &self.import_verifier_python,
         )?;
         Ok(())
     }
-    pub fn artifacts(&self) -> [&Artifact; 10] {
+    pub fn artifacts(&self) -> [&Artifact; 12] {
         [
             &self.raw_image_tar_gz,
+            &self.import_receipt,
+            &self.import_verifier_python,
             &self.release_manifest,
             &self.boot_policy,
             &self.memory_measurement,
@@ -355,14 +431,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 3,
+            schema_version: 4,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
         let expected = Self::prepare(self.spec.clone(), at)?;
-        if self.schema_version != 3 || self.resources != expected.resources {
+        if self.schema_version != 4 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));
