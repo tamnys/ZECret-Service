@@ -471,7 +471,7 @@ class CandidateTests(unittest.TestCase):
                 prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
             self.lock["snapshot"] = "https://snapshot.debian.org/archive/debian/20200101T000000Z/"
             index.write_bytes(index.read_bytes() + b"TAMPER")
-            with self.assertRaisesRegex(ValueError, "index differs"):
+            with self.assertRaisesRegex(ValueError, "index exceeds reviewed size"):
                 prepare.debian_snapshot.verify_snapshot(self.lock, paths, self.inputs, manifest)
 
     def test_reviewed_debian_keyring_hash(self):

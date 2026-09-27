@@ -82,7 +82,7 @@ class SourceMembershipTests(unittest.TestCase):
 
     def test_changed_index_or_source_file_is_rejected(self):
         self.sources.write_bytes(self.sources.read_bytes() + b"TAMPER")
-        with self.assertRaisesRegex(ValueError, "Sources index differs"):
+        with self.assertRaisesRegex(ValueError, "Sources index exceeds reviewed size"):
             self.verify_synthetic()
         self.sources.write_bytes(lzma.compress(self.stanza.encode()))
         self.files["mkosi_25.3.orig.tar.gz"].write_bytes(b"TAMPER")

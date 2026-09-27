@@ -16,6 +16,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import subprocess
 
 TRUST = Path(__file__).with_name("trust")
@@ -28,6 +29,11 @@ TRIXIE_ARCHIVE_FINGERPRINT = "04B54C3CDCA79751B16BC6B5225629DF75B188BD"
 INDEX_PATH = "main/binary-amd64/Packages.xz"
 SOURCE_INDEX_PATH = "main/source/Sources.xz"
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# Measured from the reviewed 20260918 InRelease and the larger of its two
+# index sizes pinned in deploy/gcp/guest/input-identities.json. A new snapshot
+# requires explicit review of these limits before it can be consumed.
+MAX_INRELEASE_BYTES = 140421
+MAX_SIGNED_INDEX_BYTES = 10540436
 # Match the managed APT snapshot hold in SUPPLY_CHAIN_HARDENING.md. An
 # authenticated archive snapshot is not yet eligible for package consumption.
 MIN_SNAPSHOT_AGE = timedelta(days=7)
@@ -41,6 +47,24 @@ def require_snapshot_age(snapshot_time, now):
 def sha256(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def bounded_regular_bytes(path, maximum, label):
+    """Read at most maximum+1 bytes from one no-follow file descriptor."""
+    if path.is_symlink():
+        raise ValueError(f"{label} redirected")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+            raise ValueError(f"{label} exceeds reviewed size")
+        data = stream.read(maximum + 1)
+        after = os.fstat(stream.fileno())
+        if (len(data) > maximum or len(data) != before.st_size
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ValueError(f"{label} changed or exceeds reviewed size")
+    return data
 
 
 def verify_signature(inrelease, *, pass_fds=()):
@@ -85,15 +109,17 @@ def authenticated_index_bytes(inrelease, index, expected_inrelease_sha256, index
     """Authenticate one immutable input snapshot; never reread source paths."""
     if inrelease.is_symlink() or not inrelease.is_file() or index.is_symlink() or not index.is_file():
         raise ValueError("Debian signed metadata missing or redirected")
-    inrelease_bytes = inrelease.read_bytes()
+    inrelease_bytes = bounded_regular_bytes(inrelease, MAX_INRELEASE_BYTES, "Debian InRelease")
     if hashlib.sha256(inrelease_bytes).hexdigest() != expected_inrelease_sha256:
         raise ValueError("Debian InRelease differs from reviewed snapshot")
     with sealed_inrelease(inrelease_bytes) as (sealed_path, descriptor):
         verify_signature(sealed_path, pass_fds=(descriptor,))
         epoch, (index_hash, index_size) = release_fields(sealed_path, index_path)
-    index_bytes = index.read_bytes()
+    label = "Debian Sources index" if index_path == SOURCE_INDEX_PATH else "Debian package index"
+    if index_size <= 0 or index_size > MAX_SIGNED_INDEX_BYTES:
+        raise ValueError(f"{label} exceeds reviewed size")
+    index_bytes = bounded_regular_bytes(index, index_size, label)
     if len(index_bytes) != index_size or hashlib.sha256(index_bytes).hexdigest() != index_hash:
-        label = "Debian Sources index" if index_path == SOURCE_INDEX_PATH else "Debian package index"
         raise ValueError(f"{label} differs from signed Release")
     return epoch, (index_hash, index_size), index_bytes
 

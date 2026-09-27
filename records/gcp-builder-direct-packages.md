@@ -16,7 +16,10 @@ the archives without installing them. It seals the exact InRelease bytes in a
 Linux memfd for both `gpgv` and Release-field parsing, then parses the exact
 Packages.xz bytes whose signed digest matched. The existing guest-package and
 mkosi-source snapshot checkers now share that same byte-snapshot rule. The
-snapshot has passed the existing seven-day hold.
+index is read from one no-follow file descriptor with a bound from its signed
+Release size; the current reviewed InRelease and index sizes also bound memory
+use (140,421 and 10,540,436 bytes respectively). The snapshot has passed the
+existing seven-day hold.
 
 The managed untrusted `linux/amd64` container fetched those exact snapshot
 URLs and checked each response against the signed-index hash before saving it
@@ -28,8 +31,9 @@ those local files exited 0 and reported
 `0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675`;
 the signed Packages.xz SHA-256 was
 `7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498`.
-Eight synthetic negative/positive tests passed, including source replacement
-between signature/hash checks and parsing. Their signature check was mocked;
+Nine synthetic negative/positive tests passed, including source replacement
+between signature/hash checks and parsing and oversized local metadata. Their
+signature check was mocked;
 the separate local-input invocation above used the pinned `gpgv` executable.
 
 Read-only `dpkg-deb --contents` inspection found the selected package-to-file

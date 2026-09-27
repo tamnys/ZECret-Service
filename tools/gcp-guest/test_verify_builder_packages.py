@@ -102,13 +102,23 @@ class DirectBuilderPackageTests(unittest.TestCase):
 
     def test_signed_index_and_reviewed_hash_must_both_match(self):
         self.index.write_bytes(self.index.read_bytes() + b"x")
-        with self.assertRaisesRegex(ValueError, "package index differs"):
+        with self.assertRaisesRegex(ValueError, "package index exceeds reviewed size"):
             self.verify()
         self.index.write_bytes(lzma.compress(b"Package: substituted\n\n"))
         self.identities["downloaded_metadata"]["trixie_snapshot_candidate"]["main_binary_amd64_packages_xz_sha256"] = sha256(self.index.read_bytes())
         self.identities["downloaded_metadata"]["trixie_snapshot_candidate"]["main_binary_amd64_packages_xz_size"] = self.index.stat().st_size
         self.write_metadata()
         with self.assertRaisesRegex(ValueError, "package index differs"):
+            self.verify()
+
+    def test_oversized_inputs_fail_before_unbounded_read(self):
+        with self.index.open("r+b") as stream:
+            stream.truncate(builder.debian_snapshot.MAX_SIGNED_INDEX_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "package index exceeds reviewed size"):
+            self.verify()
+        with self.inrelease.open("r+b") as stream:
+            stream.truncate(builder.debian_snapshot.MAX_INRELEASE_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "InRelease exceeds reviewed size"):
             self.verify()
 
     def test_wrong_package_choice_or_missing_direct_package_rejected(self):
