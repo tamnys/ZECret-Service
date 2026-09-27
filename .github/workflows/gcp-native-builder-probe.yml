@@ -47,6 +47,9 @@ jobs:
           parent_mount_ns="$(readlink /proc/self/ns/mnt)"
           parent_net_ns="$(readlink /proc/self/ns/net)"
           parent_pid_ns="$(readlink /proc/self/ns/pid)"
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
           mkdir "$scratch/mount"
           if sudo -n unshare --mount --net --pid --fork --mount-proc --propagation private bash -c '
             set -euo pipefail
@@ -64,6 +67,35 @@ jobs:
             echo 'Rootful mount/network/PID namespace smoke check: passed'
           else
             echo 'Rootful mount/network/PID namespace smoke check: unavailable'
+          fi
+
+          if sudo -n unshare --user \
+            --map-users="0:${runner_uid}:1" --map-groups="0:${runner_gid}:1" \
+            --setuid=0 --setgid=0 --mount --net --pid --fork --mount-proc \
+            --propagation private bash -c '
+            set -euo pipefail
+            test "$(readlink /proc/self/ns/user)" != "$2"
+            test "$(readlink /proc/self/ns/mnt)" != "$3"
+            test "$(readlink /proc/self/ns/net)" != "$4"
+            test "$(readlink /proc/self/ns/pid)" != "$5"
+            test "$(id -u)" -eq 0
+            test "$(id -g)" -eq 0
+            read -r inner outer count < /proc/self/uid_map
+            test "$inner:$outer:$count" = "0:$6:1"
+            read -r inner outer count < /proc/self/gid_map
+            test "$inner:$outer:$count" = "0:$7:1"
+            test "$(ip -o link show | wc -l)" -eq 1
+            ip link show lo > /dev/null
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            mount -t tmpfs tmpfs "$1"
+            test "$(stat -f -c %T "$1")" = tmpfs
+            umount "$1"
+          ' _ "$scratch/mount" "$parent_user_ns" "$parent_mount_ns" \
+            "$parent_net_ns" "$parent_pid_ns" "$runner_uid" "$runner_gid"; then
+            echo 'Rootful runner-UID-mapped user namespace smoke check: passed'
+          else
+            echo 'Rootful runner-UID-mapped user namespace smoke check: unavailable'
           fi
 
           if [ "$failed" -ne 0 ]; then
