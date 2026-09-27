@@ -28,6 +28,38 @@ mean a project-level policy snapshot or newly installed deny rule is not by
 itself a race-free admission proof. This contract has not been implemented or
 accepted. No local receipt or Boolean should unblock live deletion.
 
+The primary [IAM deny-permission catalog](https://docs.cloud.google.com/iam/docs/deny-permissions-support)
+currently lists the six relevant `compute.googleapis.com/{instances,disks,
+images,firewalls,networks,subnetworks}.create` permissions and their `delete`
+counterparts. Google [supports denying all principals with a named exception](https://docs.cloud.google.com/iam/docs/deny-overview),
+so an exclusive project is a plausible provider control, not yet an established
+one. The exact admission proof still needs:
+
+1. A dedicated project ID **and numeric project identity** with no shared
+   experiment resource names, plus a complete initial inventory in every
+   global, regional, and zonal collection used by the package.
+2. The [applicable allow and deny policies](https://docs.cloud.google.com/iam/docs/troubleshoot-policies)
+   at project, folder, and organization levels, including deny-policy UID and
+   etag, custom roles, conditional grants, group membership, service agents,
+   policy editors, and impersonation/token-minting authority. The future
+   controller identity must be the only effective principal able to replace a
+   planned Compute name. Alternate create, rename, bulk, and restore paths
+   also require method-level permission review; `instances.setName` is listed
+   in the deny-permission catalog.
+3. A pre-existing, effective deny/allow configuration and authorized negative
+   tests for another principal's create/rename attempts. Google states that
+   [IAM changes are eventually consistent](https://docs.cloud.google.com/iam/docs/access-change-propagation),
+   so a newly submitted policy and a timed wait are insufficient evidence.
+4. Continuous external authority over policy changes and controller credentials
+   for the evaluation and teardown window, with audit evidence of any IAM or
+   project-hierarchy change. An actor able to use the excepted identity or
+   modify the deny policy can still create a same-name replacement. A local
+   `GET` or signed operator receipt cannot close that gap.
+
+No offline package or journal field can prove these live authority facts. The
+implementation therefore retains both the creation block and Compute DELETE
+refusal until this contract is independently reviewed and exercised.
+
 ## Billing
 
 The [detailed billing export](https://docs.cloud.google.com/billing/docs/how-to/export-data-bigquery-tables/detailed-usage)
