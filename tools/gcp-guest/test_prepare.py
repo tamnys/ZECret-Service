@@ -380,12 +380,63 @@ class CandidateTests(unittest.TestCase):
             prepare.platform, "machine", return_value="x86_64"
         ), mock.patch.object(prepare.shutil, "which", return_value="/usr/bin/unshare"), mock.patch.object(
             prepare.subprocess, "run", side_effect=[
-                mock.Mock(returncode=0), mock.Mock(returncode=0, stdout=parent_net + "\n")
+                mock.Mock(returncode=0), mock.Mock(returncode=0, stdout=parent_net + "\n"),
+                mock.Mock(returncode=1, stdout="")
             ]
         ):
             report = prepare.preflight()
         self.assertEqual(report["status"], "blocked")
         self.assertIn("outer build network namespace isolation unavailable", report["blockers"])
+
+    def test_preflight_rejects_denied_or_unobserved_mount_probe(self):
+        parent_net = Path("/proc/self/ns/net").readlink().as_posix()
+        child_net = "net:[999999999]" if parent_net != "net:[999999999]" else "net:[999999998]"
+        for mount_result in (mock.Mock(returncode=1, stdout=""),
+                             mock.Mock(returncode=0, stdout="unobserved\n")):
+            with self.subTest(mount_result=mount_result.stdout), mock.patch.object(
+                prepare.platform, "system", return_value="Linux"
+            ), mock.patch.object(prepare.platform, "machine", return_value="x86_64"), mock.patch.object(
+                prepare.shutil, "which", return_value="/usr/bin/tool"
+            ), mock.patch.object(prepare.subprocess, "run", side_effect=[
+                mock.Mock(returncode=0), mock.Mock(returncode=0, stdout=child_net + "\n"),
+                mount_result,
+            ]) as run:
+                report = prepare.preflight()
+            self.assertEqual(report["status"], "blocked")
+            self.assertIn("isolated tmpfs mount/unmount unavailable", report["blockers"])
+            self.assertIn("--mount", run.call_args.args[0])
+            self.assertIn("--propagation", run.call_args.args[0])
+
+    def test_preflight_can_report_only_capabilities_after_mount_probe(self):
+        parent_net = Path("/proc/self/ns/net").readlink().as_posix()
+        child_net = "net:[999999999]" if parent_net != "net:[999999999]" else "net:[999999998]"
+        with mock.patch.object(prepare.platform, "system", return_value="Linux"), mock.patch.object(
+            prepare.platform, "machine", return_value="x86_64"
+        ), mock.patch.object(prepare.shutil, "which", return_value="/usr/bin/tool"), mock.patch.object(
+            prepare.subprocess, "run", side_effect=[
+                mock.Mock(returncode=0), mock.Mock(returncode=0, stdout=child_net + "\n"),
+                mock.Mock(returncode=0, stdout="zrpc-isolated-tmpfs-ok\n"),
+            ]
+        ):
+            report = prepare.preflight()
+        self.assertEqual(report["status"], "capabilities-present-input-review-required")
+        self.assertIs(report["image_built"], False)
+        self.assertIs(report["private_mode_approved"], False)
+
+    def test_mount_probe_refuses_parent_namespaces_before_mount_call(self):
+        marker = self.root / "mount-was-invoked"
+        mount_tool = self.root / "synthetic-mount-tool"
+        mount_tool.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+        mount_tool.chmod(0o700)
+        result = subprocess.run(
+            [sys.executable, "-c", prepare.MOUNT_PROBE_SCRIPT,
+             Path("/proc/self/ns/user").readlink().as_posix(),
+             Path("/proc/self/ns/mnt").readlink().as_posix(),
+             str(mount_tool), str(mount_tool)],
+            capture_output=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(marker.exists())
 
     def test_manifest_version_cannot_inject_mkosi_settings(self):
         path = self.inputs / "package_manifest"
