@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 
 import debian_snapshot
 
@@ -26,6 +27,7 @@ KERNEL_PACKAGE_VERSION = "6.12.107-1"
 BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
 ROLES = set(BINARIES) | {"secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
+REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-seed/v1/"
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
 
@@ -99,6 +101,11 @@ def unique_object(pairs):
 
 def read_json(path):
     return json.loads(path.read_text(), object_pairs_hook=unique_object)
+
+def repart_seed(lock_bytes):
+    """Use the standard UUIDv5 name construction for reproducible GPT IDs."""
+    lock_sha256 = hashlib.sha256(lock_bytes).hexdigest()
+    return uuid.uuid5(uuid.NAMESPACE_URL, REPART_SEED_NAME_PREFIX + lock_sha256)
 
 def preflight():
     blockers = []
@@ -180,9 +187,15 @@ def validate_lock(lock, source):
     return paths, manifest, snapshot, packages
 
 def stage(lock_path, source, destination):
-    lock = read_json(lock_path)
+    # Snapshot the exact lock used for validation and staged build inputs.
+    # Rereading a mutable path after validation could change the repart seed or
+    # the copied policy without changing the package closure used below.
+    lock_bytes = lock_path.read_bytes()
+    lock = json.loads(lock_bytes, object_pairs_hook=unique_object)
     paths, package_manifest, snapshot, packages = validate_lock(lock, source)
     validate_boot_profile()
+    lock_sha256 = hashlib.sha256(lock_bytes).hexdigest()
+    seed = repart_seed(lock_bytes)
     destination = destination.resolve()
     if not destination.is_relative_to(ROOT.resolve()) or destination.exists():
         raise ValueError("fresh output directory on the managed workspace volume required")
@@ -237,12 +250,12 @@ def stage(lock_path, source, destination):
     (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
     with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
         versions = {package["name"]: package["version"] for package in package_manifest}
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))
         stream.write(f"\nPackages={initrd_packages}\n")
-    shutil.copyfile(lock_path, destination / "inputs.lock.json")
+    (destination / "inputs.lock.json").write_bytes(lock_bytes)
     entries = {}
     for path in sorted(destination.rglob("*")):
         if path.is_symlink():
@@ -252,7 +265,7 @@ def stage(lock_path, source, destination):
         else:
             entry = {"type": "directory", "mode": path.stat().st_mode & 0o777}
         entries[str(path.relative_to(destination))] = entry
-    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": digest(destination / "inputs.lock.json"), "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual initrd contents and test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
+    report = {"schema_version": 1, "status": "staged-unbuilt-unapproved", "input_lock_sha256": lock_sha256, "repart_seed": str(seed), "repart_seed_derivation": {"algorithm": "UUIDv5", "namespace": str(uuid.NAMESPACE_URL), "name": REPART_SEED_NAME_PREFIX + lock_sha256}, "debian_snapshot": snapshot, "entries": entries, "remaining_gates": ["verified outer no-network builder namespace and complete installed package closure comparison after build", "verify installed kernel and appended dm-verity module closure came from exact Debian cloud package", "exact mkosi and tools-tree verification", "Zebra release age and provenance review", "inspect actual initrd contents and test verity root boot with rescue paths disabled", "guest rootfs and initramfs surface audit", "boot companion exclusion audit", "extract final UKI .cmdline and compare exact fixed flags plus repart roothash", "UKI signing and verity reconstruction", "reproducible image build", "synthetic boot and namespace tests", "real TDX acceptance"], "image_built": False, "private_mode_approved": False}
     (destination / "candidate-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 

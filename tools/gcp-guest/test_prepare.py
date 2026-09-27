@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 
 spec = importlib.util.spec_from_file_location("prepare", Path(__file__).with_name("prepare.py"))
@@ -87,6 +88,11 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "rootfs/usr/lib/modules").exists())
         self.assertIn("Packages=dmsetup=1.0~synthetic,e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
         self.assertIn("Initrds=output/initrd.cpio.zst", config)
+        self.assertIn(f'Seed={report["repart_seed"]}', config)
+        self.assertEqual((output / "inputs.lock.json").read_bytes(), lock_path.read_bytes())
+        self.assertEqual(report["input_lock_sha256"], hashlib.sha256(lock_path.read_bytes()).hexdigest())
+        self.assertEqual(uuid.UUID(report["repart_seed"]).version, 5)
+        self.assertEqual(report["repart_seed_derivation"]["algorithm"], "UUIDv5")
         self.assertIn("Dependencies=initrd", config)
         self.assertIn("KernelModulesInitrdInclude=^drivers/md/dm-verity[.]ko[.]xz$", config)
         self.assertIn("rd.modules_load=dm-verity", config)
@@ -103,6 +109,21 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("zrpc-wrapper.service", (units / "zrpc.target").read_text())
         with self.assertRaises(ValueError):
             prepare.stage(lock_path, self.inputs, output)
+
+    def test_repart_seed_is_stable_for_exact_lock_bytes_and_changes_with_lock(self):
+        lock_path = self.root / "synthetic.lock.json"
+        lock_path.write_text(json.dumps(self.lock))
+        package_manifest = json.loads((self.inputs / "package_manifest").read_text())
+        archives = {(item["name"], item["version"], item["architecture"]): self.inputs / item["path"] for item in package_manifest}
+        with mock.patch.object(prepare.debian_snapshot, "verify_snapshot", return_value=({"synthetic": True}, archives)):
+            first = prepare.stage(lock_path, self.inputs, self.root / "candidate-one")
+            second = prepare.stage(lock_path, self.inputs, self.root / "candidate-two")
+            lock_path.write_text(json.dumps(self.lock, indent=2))
+            changed = prepare.stage(lock_path, self.inputs, self.root / "candidate-three")
+        self.assertEqual(first["repart_seed"], second["repart_seed"])
+        self.assertNotEqual(first["repart_seed"], changed["repart_seed"])
+        self.assertEqual(first["input_lock_sha256"], second["input_lock_sha256"])
+        self.assertNotEqual(first["input_lock_sha256"], changed["input_lock_sha256"])
 
     def test_boot_recipe_rejects_missing_uki_or_verity_commitment(self):
         profile = self.root / "profile"
