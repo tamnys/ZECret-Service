@@ -177,6 +177,31 @@ impl Drop for Abort {
     }
 }
 
+fn token_command(gcloud: &Path, config_directory: &Path, project: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(gcloud);
+    // Google CLI properties can be overridden through CLOUDSDK_* variables.
+    // Do not let the caller's shell select different credentials, Python code,
+    // proxy settings, or a different active configuration.
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("CLOUDSDK_CONFIG", config_directory)
+        .env("PYTHONNOUSERSITE", "1")
+        .args([
+            "--quiet",
+            "--verbosity=none",
+            "--project",
+            project,
+            "auth",
+            "print-access-token",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
 impl GoogleClient {
     /// Only call after operator admission. This may mint a token via Google CLI.
     pub async fn authenticate(runtime: &Runtime, project: &str) -> Result<Self> {
@@ -184,21 +209,11 @@ impl GoogleClient {
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(runtime.invocation_budget_ms))
             .ok_or(Error("invalid invocation deadline"))?;
-        let mut command = tokio::process::Command::new(&runtime.gcloud.path);
-        command
-            .args([
-                "--quiet",
-                "--verbosity=none",
-                "--project",
-                project,
-                "auth",
-                "print-access-token",
-            ])
-            .env("CLOUDSDK_CONFIG", &runtime.gcloud_config_directory)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .stdout(Stdio::piped())
-            .kill_on_drop(true);
+        let mut command = token_command(
+            &runtime.gcloud.path,
+            &runtime.gcloud_config_directory,
+            project,
+        );
         let mut child = command
             .spawn()
             .map_err(|_| Error("Google CLI could not start"))?;
@@ -764,6 +779,72 @@ impl Body for FileBody {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn gcloud_token_command_clears_inherited_overrides() {
+        const TEST_NAME: &str =
+            "gcp::provider::tests::gcloud_token_command_clears_inherited_overrides";
+        if std::env::var_os("ZRPC_GCLOUD_ENV_TEST_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME])
+                .env("ZRPC_GCLOUD_ENV_TEST_CHILD", "1")
+                .env(
+                    "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+                    "/untrusted/credentials",
+                )
+                .env(
+                    "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+                    "unexpected@example.com",
+                )
+                .env("CLOUDSDK_ACTIVE_CONFIG_NAME", "untrusted")
+                .env("CLOUDSDK_PYTHON", "/untrusted/python")
+                .env("PYTHONPATH", "/untrusted/modules")
+                .env("HTTPS_PROXY", "http://untrusted.proxy")
+                .env("PATH", "/untrusted/bin")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "isolated child failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // The managed container mounts /tmp noexec; use the workspace volume.
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("target")
+            .join(format!("zrpc-gcloud-env-{}", super::super::uuid().unwrap()));
+        fs::create_dir(&directory).unwrap();
+        let script = directory.join("gcloud");
+        fs::write(
+            &script,
+            b"#!/bin/sh\nprintf '%s\\n' \"${CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE-unset}\" \"${CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT-unset}\" \"${CLOUDSDK_ACTIVE_CONFIG_NAME-unset}\" \"${CLOUDSDK_PYTHON-unset}\" \"${PYTHONPATH-unset}\" \"${HTTPS_PROXY-unset}\" \"${PATH-unset}\" \"${CLOUDSDK_CONFIG-unset}\" \"${PYTHONNOUSERSITE-unset}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = token_command(&script, &directory, "synthetic-project")
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "unset\nunset\nunset\nunset\nunset\nunset\n/usr/bin:/bin\n{}\n1\n",
+                directory.display()
+            )
+        );
+        fs::remove_file(&script).unwrap();
+        fs::remove_dir(&directory).unwrap();
+    }
 
     fn synthetic_body(file: std::fs::File) -> (FileBody, Arc<Mutex<Option<String>>>) {
         let length = file.metadata().unwrap().len();
