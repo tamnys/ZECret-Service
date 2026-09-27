@@ -698,6 +698,135 @@ async fn compute_operation_recovery_preserves_request_identity() {
     assert_eq!(provider.calls.iter().filter(|r| **r == id).count(), 1);
 }
 #[tokio::test]
+async fn recovered_compute_creation_without_target_id_cannot_adopt_a_name_match() {
+    let f = Fixture::new();
+    let mut provider = f.mock();
+    let mut store = Store::open(&f.state).unwrap();
+    deploy_once(&mut store, &mut provider, 1000).await.unwrap();
+    provider.fail_after_create = true;
+    assert!(deploy_once(&mut store, &mut provider, 1000).await.is_err());
+    let resource = &f.package.resources[1];
+    let request = store.journal().resources[1]
+        .create
+        .as_ref()
+        .unwrap()
+        .request_id
+        .clone();
+    let created_id = provider.objects[&resource.path]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    provider.operations.get_mut(&request).unwrap().target_id = None;
+    assert!(deploy_once(&mut store, &mut provider, 1001).await.is_err());
+    assert!(store.journal().resources[1].identity.is_none());
+    assert!(
+        store.journal().resources[1]
+            .create
+            .as_ref()
+            .unwrap()
+            .operation
+            .is_none()
+    );
+    assert_eq!(provider.calls.iter().filter(|r| **r == request).count(), 1);
+
+    provider.operations.get_mut(&request).unwrap().target_id = Some(created_id.clone());
+    assert_eq!(
+        deploy_once(&mut store, &mut provider, 1001).await.unwrap(),
+        Progress::Pending
+    );
+    assert_eq!(
+        store.journal().resources[1].identity.as_deref(),
+        Some(created_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn unresolved_compute_creation_cannot_delete_a_name_match() {
+    let f = Fixture::new();
+    let mut provider = f.mock();
+    let mut store = Store::open(&f.state).unwrap();
+    deploy_once(&mut store, &mut provider, 1000).await.unwrap();
+    provider.fail_after_create = true;
+    assert!(deploy_once(&mut store, &mut provider, 1000).await.is_err());
+    let resource = &f.package.resources[1];
+    let request = store.journal().resources[1]
+        .create
+        .as_ref()
+        .unwrap()
+        .request_id
+        .clone();
+    provider.operations.remove(&request);
+    assert!(
+        teardown_once(&mut store, &mut provider, 1001)
+            .await
+            .is_err()
+    );
+    assert!(store.journal().teardown_started);
+    assert!(store.journal().resources[1].identity.is_some());
+    assert!(!store.journal().resources[1].create.as_ref().unwrap().done);
+    assert!(provider.objects.contains_key(&resource.path));
+    assert!(provider.deletes.is_empty());
+}
+
+#[tokio::test]
+async fn completed_compute_deletion_requires_the_journaled_target_id() {
+    let f = Fixture::new();
+    let mut provider = f.mock();
+    let mut store = Store::open(&f.state).unwrap();
+    deploy_all(&mut store, &mut provider, &f.package).await;
+    let index = f.package.resources.len() - 1;
+    let resource = &f.package.resources[index];
+    let id = store.journal().resources[index].identity.clone().unwrap();
+    let mut next = store.journal().clone();
+    next.teardown_started = true;
+    next.resources[index].delete = Some(intent(1001).unwrap());
+    store.commit(next).unwrap();
+    let request = store.journal().resources[index]
+        .delete
+        .as_ref()
+        .unwrap()
+        .request_id
+        .clone();
+    let generation = store.journal().generation;
+    for (target_id, error) in [
+        (None, None),
+        (None, Some(json!({"errors": [{"code": "synthetic"}]}))),
+        (Some("999".into()), None),
+    ] {
+        let mut operation = provider.op(resource, &request, &id);
+        operation.target_id = target_id;
+        operation.error = error;
+        assert!(accept_operation(&mut store, index, resource, operation, true).is_err());
+        assert_eq!(store.journal().generation, generation);
+        assert_eq!(
+            store.journal().resources[index].identity.as_deref(),
+            Some(id.as_str())
+        );
+        assert!(
+            !store.journal().resources[index]
+                .delete
+                .as_ref()
+                .unwrap()
+                .done
+        );
+    }
+    accept_operation(
+        &mut store,
+        index,
+        resource,
+        provider.op(resource, &request, &id),
+        true,
+    )
+    .unwrap();
+    assert!(
+        store.journal().resources[index]
+            .delete
+            .as_ref()
+            .unwrap()
+            .done
+    );
+}
+#[tokio::test]
 async fn rejects_early_late_and_tampered_deploy_without_provider_mutations() {
     let f = Fixture::new();
     let mut p = f.mock();
