@@ -1,0 +1,64 @@
+name: GCP native x86 builder probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  probe:
+    name: Diagnostic host capability check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check architecture, workspace, and namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Architecture: $(uname -m)"
+          echo "Kernel: $(uname -sr)"
+          df -h "$GITHUB_WORKSPACE"
+          stat -f -c 'Workspace filesystem: %T' "$GITHUB_WORKSPACE"
+          test "$(uname -m)" = x86_64
+
+          scratch="$(mktemp -d "$GITHUB_WORKSPACE/zrpc-builder-probe.XXXXXX")"
+          trap 'rm -f -- "$scratch/PAM.7.gz" "$scratch/pam.7.gz"; rmdir -- "$scratch/mount" "$scratch"' EXIT
+          printf 'upper' > "$scratch/PAM.7.gz"
+          printf 'lower' > "$scratch/pam.7.gz"
+          test "$(cat "$scratch/PAM.7.gz")" = upper
+          test "$(cat "$scratch/pam.7.gz")" = lower
+          echo 'Workspace case sensitivity: passed'
+
+          failed=0
+          for namespace in user mount net; do
+            case "$namespace" in
+              user) args=(--user --map-root-user) ;;
+              mount) args=(--user --map-root-user --mount) ;;
+              net) args=(--user --map-root-user --net) ;;
+            esac
+            if unshare "${args[@]}" true; then
+              echo "Unprivileged $namespace namespace: passed"
+            else
+              echo "Unprivileged $namespace namespace: unavailable"
+              failed=1
+            fi
+          done
+
+          mkdir "$scratch/mount"
+          if sudo -n unshare --mount --propagation private bash -c '
+            set -euo pipefail
+            mount -t tmpfs tmpfs "$1"
+            test "$(stat -f -c %T "$1")" = tmpfs
+            umount "$1"
+          ' _ "$scratch/mount"; then
+            echo 'Rootful isolated tmpfs mount: passed'
+          else
+            echo 'Rootful isolated tmpfs mount: unavailable'
+            failed=1
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            echo 'This runner has not passed the guest-builder capability probe.'
+            exit 1
+          fi
+          echo 'Host capability probe passed; no guest image was built or approved.'
