@@ -165,6 +165,11 @@ jobs:
           print(json.dumps(report, sort_keys=True))
           PY
 
+          echo "Runner free space after locked archive fetch (bytes):"
+          df -B1 "$GITHUB_WORKSPACE"
+          echo "Runner scratch use before guest payload staging (bytes):"
+          du -B1 -s "$scratch"
+
           # Only the commands below execute staged code. The outer namespace
           # has no network route. Signature and APT-plan checks execute using
           # the hash-checked staged gpgv, Python, apt-get, and shared libraries
@@ -195,11 +200,12 @@ jobs:
             echo "Isolated mount namespace: $(readlink /proc/self/ns/mnt)"
             echo "Isolated network namespace: $(readlink /proc/self/ns/net)"
 
-            for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch proc dev; do
+            for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch zrpc-guest-payload-parent proc dev; do
               test ! -L "$staged/$directory"
               mkdir -p "$staged/$directory"
             done
             chown "$run_uid:$run_gid" "$staged/zrpc-apt-scratch"
+            chown "$run_uid:$run_gid" "$staged/zrpc-guest-payload-parent"
             mount --bind "$source" "$staged/zrpc-source"
             mount -o remount,bind,ro "$staged/zrpc-source"
             mount --bind "$archives" "$staged/zrpc-archives"
@@ -262,6 +268,33 @@ jobs:
                   or report["image_built"] is not False
                   or report["private_mode_approved"] is not False):
               raise ValueError("guest archive diagnostic changed acceptance status")
+          print(json.dumps(report, sort_keys=True))
+          PY
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import stage_guest_payload
+
+          report = stage_guest_payload.stage(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+              Path("/zrpc-guest-payload-parent/tree"),
+              Path("/zrpc-guest-payload-parent"),
+          )
+          if (report["status"] !=
+                  "diagnostic-signed-guest-payloads-staged-data-only"
+                  or report["package_count"] != 104
+                  or report["signed_snapshot_rechecked"] is not True
+                  or report["archive_bytes_checked"] is not True
+                  or report["payload_tree_staged"] is not True
+                  or report["installed_closure_checked"] is not False
+                  or report["package_scripts_executed"] is not False
+                  or report["runtime_execution_verified"] is not False
+                  or report["image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("guest payload staging changed acceptance status")
           print(json.dumps(report, sort_keys=True))
           PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
