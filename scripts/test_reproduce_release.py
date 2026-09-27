@@ -26,6 +26,7 @@ class GuestArtifactTests(unittest.TestCase):
             "zrpc-gcp-quote-broker",
             "zrpc-gcp-guard",
             "zrpc-gcp-cookie",
+            "zrpc-gcp-early-init",
         ):
             with self.subTest(name=name):
                 artifacts = tuple(

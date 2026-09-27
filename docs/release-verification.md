@@ -2,11 +2,12 @@
 
 `scripts/reproduce-release.py` builds the CLI (`zrpc`), public attestation
 wrapper (`zrpc-wrapper`), typed node wrapper (`zrpc-node-wrapper`), Phala quote
-bridge (`zrpc-quote-proxy`), and GCP quote broker, startup guard, and cookie
-handoff executables (`zrpc-gcp-quote-broker`, `zrpc-gcp-guard`, and
-`zrpc-gcp-cookie`) from an exact committed source revision. It builds twice in
-separate source and target directories and compares the resulting bytes. The
-outputs are unsigned scaffold binaries. Their checksums do not approve a
+bridge (`zrpc-quote-proxy`), and GCP quote broker, startup guard, cookie
+handoff, and early-init executables (`zrpc-gcp-quote-broker`, `zrpc-gcp-guard`,
+`zrpc-gcp-cookie`, and `zrpc-gcp-early-init`) from an exact committed source
+revision. It builds twice in separate source and target directories and
+compares the resulting bytes. The outputs are unsigned scaffold binaries.
+Their checksums do not approve a
 release, identify an accepted attestation measurement, or enable private mode.
 
 Use a reviewed Linux build environment with the Rust version in
@@ -43,7 +44,7 @@ After success, check the delivered files from the output directory:
 sha256sum --check SHA256SUMS
 ```
 
-`artifacts/` contains all seven compared binaries, named above. The
+`artifacts/` contains all eight compared binaries, named above. The
 `selected_binaries` and `artifact_sha256` entries identify the complete set.
 `manifest.json` records the source revision, build inputs, toolchain identities,
 settings and hashes. The invoking script must match the copy in that revision;
