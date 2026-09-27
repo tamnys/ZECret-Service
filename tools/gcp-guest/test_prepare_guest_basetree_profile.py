@@ -58,13 +58,25 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         self.assertIn("Distribution=custom\n", config)
         self.assertIn("Format=directory\n", config)
         self.assertIn("BaseTrees=" + str(self.output / profile.INPUT) + "\n", config)
+        self.assertIn("ExtraTrees=" + str(self.output / profile.ACCOUNT_TREE) + "\n",
+                      config)
         self.assertIn("Packages=\n", config)
         self.assertIn("WithNetwork=no\nCacheOnly=always\nIncremental=no\n", config)
         self.assertNotIn("FinalizeScripts=", config)
         self.assertNotIn("Initrds=", config)
         self.assertEqual({item.name for item in self.output.iterdir()},
-                         {"input", profile.CONFIG, profile.MANIFEST})
+                         {"input", profile.ACCOUNT_TREE,
+                          profile.CONFIG, profile.MANIFEST})
         self.assertEqual((self.output / profile.INPUT).stat().st_mode & 0o777, 0o400)
+        account_input = (self.output / profile.ACCOUNT_TREE /
+                         "usr/lib/sysusers.d/zrpc.conf")
+        self.assertEqual(account_input.read_bytes(), profile.PROJECT_SYSUSERS.read_bytes())
+        self.assertEqual(account_input.stat().st_mode & 0o777, 0o444)
+        self.assertEqual((self.output / profile.ACCOUNT_TREE).stat().st_mode & 0o777,
+                         0o555)
+        manifest = json.loads((self.output / profile.MANIFEST).read_bytes())
+        self.assertEqual(manifest["project_sysusers_sha256"],
+                         hashlib.sha256(account_input.read_bytes()).hexdigest())
 
     def test_source_authentication_and_snapshot_hash_fail_closed(self):
         with mock.patch.object(profile.base_tree, "verify",
@@ -95,7 +107,33 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     self.verify()
                 self.rewrite(path, original)
+        project = self.output / profile.ACCOUNT_TREE / "usr/lib/sysusers.d/zrpc.conf"
+        original = project.read_bytes()
+        project.chmod(0o600)
+        project.write_bytes(b"X" + original[1:])
+        project.chmod(0o444)
+        with self.assertRaisesRegex(ValueError, "project sysusers bytes differ"):
+            self.verify()
+        project.chmod(0o600)
+        project.write_bytes(original)
+        project.chmod(0o444)
         self.verify()
+
+    def test_project_sysusers_source_is_rechecked_and_not_redirected(self):
+        project = self.workspace / "project.conf"
+        project.write_bytes(profile.PROJECT_SYSUSERS.read_bytes())
+        project.chmod(0o644)
+        with mock.patch.object(profile, "PROJECT_SYSUSERS", project):
+            self.prepare()
+            self.verify()
+            project.write_bytes(b"X" + project.read_bytes()[1:])
+            with self.assertRaisesRegex(ValueError, "project sysusers bytes differ"):
+                self.verify()
+        project.unlink()
+        project.symlink_to(profile.PROJECT_SYSUSERS)
+        with mock.patch.object(profile, "PROJECT_SYSUSERS", project):
+            with self.assertRaises(OSError):
+                self.verify()
 
     def test_symlink_or_extra_input_is_rejected(self):
         self.prepare()
@@ -113,6 +151,14 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         archive.parent.chmod(0o500)
         (self.output / "mkosi.prepare").write_text("#!/bin/sh\nexit 0\n")
         with self.assertRaisesRegex(ValueError, "unreviewed inputs"):
+            self.verify()
+        (self.output / "mkosi.prepare").unlink()
+        project = self.output / profile.ACCOUNT_TREE / "usr/lib/sysusers.d/zrpc.conf"
+        project.parent.chmod(0o700)
+        project.unlink()
+        project.symlink_to(profile.PROJECT_SYSUSERS)
+        project.parent.chmod(0o555)
+        with self.assertRaises(OSError):
             self.verify()
 
     def test_existing_output_and_unsafe_paths_are_rejected(self):
