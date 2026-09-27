@@ -107,11 +107,22 @@ impl GcpWorkloadPolicy {
             .expected_events
             .get(self.uki_event_index)
             .ok_or(GcpWorkloadIssue::InvalidPolicy)?;
+        // Google's TDX profile measures TDVF/Secure Boot configuration in
+        // RTMR0 and the kernel/command line in RTMR2. An empty register or a
+        // log containing only unextended EV_NO_ACTION records there cannot
+        // bind either part of this appliance's boot policy.
+        let has_extended_event = |index| {
+            self.expected_events
+                .iter()
+                .any(|event| event.mr_index == index && event.event_type != ccel::EV_NO_ACTION)
+        };
         if self.schema_version != 1
             || self
                 .expected_events
                 .iter()
                 .any(|e| !(1..=4).contains(&e.mr_index))
+            || !has_extended_event(1)
+            || !has_extended_event(3)
             || uki.mr_index != 2
             || uki.event_type != ccel::EV_EFI_BOOT_SERVICES_APPLICATION
             || uki.digest_sha384 != self.artifacts.uki_pe_coff_sha384
@@ -135,6 +146,9 @@ impl GcpWorkloadPolicy {
         .contains(&[0; 32])
             || a.uki_pe_coff_sha384 == [0; 48]
             || self.mrtd == [0; 48]
+            || self.rtmr0 == [0; 48]
+            || self.rtmr1 == [0; 48]
+            || self.rtmr2 == [0; 48]
         {
             return Err(GcpWorkloadIssue::InvalidPolicy);
         }
