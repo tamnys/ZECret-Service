@@ -292,3 +292,49 @@ async fn proposed_exporter_agrees_only_for_same_session_label_and_context() {
         assert_no_application_bytes(server).await;
     }
 }
+
+/// Run through `experiments/tls-exporter/check.py`. The test uses an OpenSSL
+/// server on loopback to check Rustls's exact application label and nonempty
+/// context on one TLS 1.3 connection. It does not exercise Tor or attestation.
+#[tokio::test]
+#[ignore = "requires the separately compiled OpenSSL loopback fixture"]
+async fn openssl_exporter_matches_independent_server() {
+    let port: u16 = std::env::var("ZRPC_OPENSSL_EXPORTER_PORT")
+        .expect("explicit OpenSSL fixture port")
+        .parse()
+        .expect("numeric OpenSSL fixture port");
+    let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut stream = TlsConnector::from(bootstrap_config().unwrap())
+        .connect(
+            ServerName::try_from("unresolved-fixture.invalid").unwrap(),
+            socket,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.get_ref().1.protocol_version(),
+        Some(rustls::ProtocolVersion::TLSv1_3)
+    );
+    assert_eq!(
+        stream.get_ref().1.handshake_kind(),
+        Some(HandshakeKind::Full)
+    );
+    assert_eq!(stream.get_ref().1.alpn_protocol(), Some(ALPN));
+    let rustls_export = stream
+        .get_ref()
+        .1
+        .export_keying_material([0; 64], EXPORTER_LABEL, Some(&VECTOR_NONCE))
+        .unwrap();
+    let mut other_nonce = VECTOR_NONCE;
+    other_nonce[0] ^= 1;
+    let rustls_other = stream
+        .get_ref()
+        .1
+        .export_keying_material([0; 64], EXPORTER_LABEL, Some(&other_nonce))
+        .unwrap();
+    let mut openssl_exports = [0; 128];
+    stream.read_exact(&mut openssl_exports).await.unwrap();
+    assert!(openssl_exports[..64] == rustls_export, "exporter mismatch");
+    assert!(openssl_exports[64..] == rustls_other, "context mismatch");
+    assert!(rustls_export != rustls_other, "nonce context was ignored");
+}

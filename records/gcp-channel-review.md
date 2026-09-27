@@ -64,8 +64,17 @@ untrusted browser container on 2026-09-26, including these transport,
 dashboard, and guest-source checks. The documentation-boundary scanner and
 `git diff --check` also passed. These are local tests, not hardware evidence.
 
-The tests use Rustls at both ends. A maintained second implementation known
-answer for the 32-byte-context exporter, plus an independent protocol review
-of the final release artifact and its boot/key-ownership assumptions, remains
-a release gate. No local result can substitute for a genuine quote from the
-exact production image or for the empty client approval catalog.
+The original tests use Rustls at both ends. The separate
+`experiments/tls-exporter/check.py` harness compiled a local OpenSSL 3.5.7
+server in the managed browser-profile container and passed its ignored Rustls
+test. OpenSSL's maintained `SSL_export_keying_material` API and Rustls produced
+the same 64 bytes on one TLS 1.3 connection for the exact label and 32-byte
+nonce context. They also agreed when one nonce byte changed, and that result
+differed from the first. The test used the pinned public test certificate and
+sent only fixture exporter bytes over loopback TLS; it did not use Tor, quote
+hardware, or exercise the production wrapper. No exporter bytes were logged.
+
+An independent protocol review of the final release artifact and its
+boot/key-ownership assumptions remains a release gate. Local interoperability
+cannot substitute for a genuine quote from the exact production image or for
+the empty client approval catalog.
