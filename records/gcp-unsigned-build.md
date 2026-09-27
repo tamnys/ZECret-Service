@@ -134,3 +134,29 @@ image, but `hdiutil attach` still returned `Permission denied` at the
 project-local mountpoint. `hdiutil info` and the mount table showed no attached
 image; the image and empty mountpoint were removed. The case-sensitive staging
 problem remains open independently of the x86 namespace problem.
+
+## 2026-09-27 native x86 builder-payload staging
+
+The manually dispatched [standard public runner
+job](https://github.com/tamnys/ZECret-service/actions/runs/36335225880) completed
+successfully on merged commit `ab5883fae577d742076c5a875a1102bef4127aa3`.
+It used Ubuntu 24.04.5 on x86-64, fetched that exact repository commit, checked
+the source-reviewed builder-closure lock at SHA-256
+`0b5c02fabc0279c8e8e8712a62de8249089039c0e0af419a86cbcf8da72d1a4e`,
+and fetched all 194 Debian archives with their locked size and SHA-256 checks.
+The selected archives total 65,078,068 compressed bytes. The workflow did
+not recheck the Debian InRelease signature on this runner; the signed snapshot
+membership was established in the earlier local receipt, and the run's own
+`signed_snapshot_rechecked` field is `false`.
+
+The existing script-free stager completed on the runner's case-sensitive
+workspace with `package_count: 194` and `entry_count: 8240`. Its generated
+`.zrpc-builder-toolchain.json` SHA-256 was
+`58d6b6121b4fb455d1ae613c4b5eb2a9d26bfdf036c639b911fe6c5ae63fd830`.
+The job's final diagnostic reported `runtime_execution_verified: false`,
+`complete_builder_toolchain: false`, `image_built: false`, and
+`private_mode_approved: false`. The GitHub run lists zero uploaded artifacts.
+No package maintainer script, staged executable, mkosi image build, signing
+operation, or cloud API ran. This resolves the case-sensitive payload-staging
+feasibility question on the free runner; it does not authenticate a runnable
+builder closure or a production build environment.
