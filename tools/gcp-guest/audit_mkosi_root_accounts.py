@@ -120,8 +120,9 @@ def compare_files(root_path, artifact_path, receipt):
 def audit(metadata, archives, base_tree, profile, workspace, account_artifact):
     profile = profile_builder.checked_profile_path(profile, workspace)
     profile_report = profile_builder.verify_profile(
-        metadata, archives, base_tree, profile, workspace)
+        metadata, archives, base_tree, account_artifact, profile, workspace)
     if (profile_report["status"] != profile_builder.STATUS
+            or profile_report["account_files_preseeded_from_signed_source"] is not True
             or profile_report["package_install_configured"] is not False
             or profile_report["package_scripts_executed"] is not False
             or profile_report["root_directory_built"] is not False):
@@ -142,6 +143,7 @@ def audit(metadata, archives, base_tree, profile, workspace, account_artifact):
         "account_output_sha256": {row["path"]: row["sha256"] for row in receipt["outputs"]},
         "signed_snapshot_rechecked": True,
         "account_artifact_regenerated_and_verified": True,
+        "account_files_preseeded_from_signed_source": True,
         "produced_root_account_bytes_modes_owners_compared": True,
         "package_install_configured": False,
         "package_scripts_executed": False,

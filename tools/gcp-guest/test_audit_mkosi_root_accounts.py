@@ -52,6 +52,7 @@ class ProducedRootAccountTests(unittest.TestCase):
         self.profile_report = {
             "status": audit.profile_builder.STATUS,
             "base_tree_sha256": "a" * 64,
+            "account_files_preseeded_from_signed_source": True,
             "package_install_configured": False,
             "package_scripts_executed": False,
             "root_directory_built": False,
@@ -72,6 +73,7 @@ class ProducedRootAccountTests(unittest.TestCase):
         report = self.run_audit()
         self.assertEqual(report["status"], audit.STATUS)
         self.assertTrue(report["account_artifact_regenerated_and_verified"])
+        self.assertTrue(report["account_files_preseeded_from_signed_source"])
         self.assertTrue(report["produced_root_account_bytes_modes_owners_compared"])
         for field in ("post_mkosi_tree_audited", "disk_image_built",
                       "boot_verified", "private_mode_approved"):

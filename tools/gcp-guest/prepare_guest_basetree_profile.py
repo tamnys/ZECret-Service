@@ -2,14 +2,16 @@
 """Prepare and exercise a non-bootable mkosi BaseTrees root diagnostic.
 
 The input tar is reconstructed from the signed Debian guest closure. The only
-additional tree input is the source-bound project sysusers file. This profile
-never configures a package manager or a guest disk/UKI build. Pinned
-mkosi 25.3 still runs its own sysusers, tmpfiles, preset, depmod, firstboot,
-hwdb, and output steps; those effects require a separate final-tree audit.
+additional tree input is a deterministic tar of signed-source account files
+and the source-bound project sysusers file. This profile never configures a
+package manager or a guest disk/UKI build. Pinned mkosi 25.3 still runs its
+own sysusers, tmpfiles, preset, depmod, firstboot, hwdb, and output steps;
+those effects require a separate final-tree audit.
 """
 
 import argparse
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ import re
 import stat
 import subprocess
 import sys
+import tarfile
 
 import assemble_guest_base_tree as base_tree
 import build_guest_accounts as accounts
@@ -29,9 +32,9 @@ STATUS = "diagnostic-no-package-install-root-basetree-profile-unbuilt"
 MANIFEST = "profile-manifest.json"
 CONFIG = "mkosi.conf"
 INPUT = "input/guest-root.tar"
-ACCOUNT_TREE = "account-tree"
-ACCOUNT_TREE_DIRS = (ACCOUNT_TREE, "usr", "lib", "sysusers.d")
+ACCOUNT_TREE = "account-tree.tar"
 ACCOUNT_FILE = "zrpc.conf"
+INSTALLED_ACCOUNT_MODES = {"passwd": 0o644, "group": 0o644, "shadow": 0o000}
 PROJECT_SYSUSERS = accounts.PROJECT_SYSUSERS
 OUTPUT_NAME = "zrpc-guest-root"
 ALLOWED_PATH = re.compile(r"/[A-Za-z0-9_./-]+\Z")
@@ -60,13 +63,13 @@ def config_bytes(profile):
             f"\n[Content]\nBootable=no\nSsh=no\nAutologin=no\n"
             f"BaseTrees={profile / INPUT}\n"
             f"ExtraTrees={profile / ACCOUNT_TREE}\nPackages=\n"
-            f"CleanPackageMetadata=no\nSourceDateEpoch={guest.SIGNED_RELEASE_EPOCH}\n"
+            f"CleanPackageMetadata=no\nSourceDateEpoch=0\n"
             f"\n[Build]\nWithNetwork=no\nCacheOnly=always\n"
             f"Incremental=no\n"
             f"WorkspaceDirectory={profile.parent / (profile.name + '-work')}\n").encode()
 
 
-def expected_manifest(source, archive_size, config, project):
+def expected_manifest(source, archive_size, config, project, account_tree):
     return {
         "schema_version": 2,
         "status": STATUS,
@@ -77,7 +80,10 @@ def expected_manifest(source, archive_size, config, project):
         "base_tree_size": archive_size,
         "project_sysusers_sha256": hashlib.sha256(project).hexdigest(),
         "project_sysusers_size": len(project),
-        "source_date_epoch": guest.SIGNED_RELEASE_EPOCH,
+        "account_tree_sha256": hashlib.sha256(account_tree).hexdigest(),
+        "account_tree_size": len(account_tree),
+        "account_artifact_regenerated_and_verified": True,
+        "account_files_preseeded_from_signed_source": True,
         "mkosi_config_sha256": hashlib.sha256(config).hexdigest(),
         "signed_snapshot_rechecked": True,
         "archive_bytes_checked": True,
@@ -127,25 +133,69 @@ def project_sysusers_bytes():
         os.close(descriptor)
 
 
-def stage_account_tree(root, project):
-    opened = []
-    parent = root
+def verified_account_files(metadata, archives, account_artifact, workspace):
+    """Regenerate signed expectations before reading the stored artifact."""
+    receipt = accounts.verify(metadata, archives, workspace, account_artifact)
+    if (receipt["status"] != "diagnostic-verified-guest-account-artifact-unbuilt"
+            or receipt["independent_generation_runs_matched"] is not True
+            or receipt["package_scripts_executed"] is not False
+            or receipt["installed_rootfs_accounts_compared"] is not False
+            or receipt["image_built"] is not False
+            or receipt["private_mode_approved"] is not False):
+        raise ValueError("signed-source account artifact changed acceptance status")
+    rows = receipt["outputs"]
+    if (len(rows) != len(accounts.OUTPUT_FILES)
+            or {row["path"] for row in rows} !=
+            {"etc/" + name for name in accounts.OUTPUT_FILES}):
+        raise ValueError("signed-source account output inventory differs")
+    root = guest.open_directory(account_artifact, "signed-source account artifact")
     try:
-        for part in ACCOUNT_TREE_DIRS:
-            os.mkdir(part, mode=0o700, dir_fd=parent)
-            child = os.open(part, builder.DIRECTORY_FLAGS, dir_fd=parent)
-            opened.append(child)
-            parent = child
-        write_file(parent, ACCOUNT_FILE, project, mode=0o444)
-        for child in reversed(opened):
-            os.fchmod(child, 0o555)
-            os.fsync(child)
+        etc = os.open("etc", builder.DIRECTORY_FLAGS, dir_fd=root)
+        try:
+            files = {}
+            for row in rows:
+                name = row["path"].removeprefix("etc/")
+                mode = row["sysusers_generated_mode"]
+                if (mode != INSTALLED_ACCOUNT_MODES[name]
+                        or row["expected_root_uid"] != 0
+                        or row["expected_root_gid"] != 0):
+                    raise ValueError("signed-source account install metadata differs")
+                data = verified_file(etc, name, row["size"], mode=row["mode"])
+                if (len(data) != row["size"]
+                        or hashlib.sha256(data).hexdigest() != row["sha256"]):
+                    raise ValueError("signed-source account artifact bytes differ: " + name)
+                files[name] = (data, mode)
+        finally:
+            os.close(etc)
     finally:
-        for child in reversed(opened):
-            os.close(child)
+        os.close(root)
+    return files
 
 
-def prepare_profile(metadata, archives, artifact, profile, workspace):
+def account_tree_bytes(project, files):
+    """Create one exact root-owned ExtraTrees tar without executable hooks."""
+    stream = io.BytesIO()
+    entries = [("etc/" + name, *files[name]) for name in accounts.OUTPUT_FILES]
+    entries.append(("usr/lib/sysusers.d/" + ACCOUNT_FILE, project, 0o644))
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name in ("etc/", "usr/", "usr/lib/", "usr/lib/sysusers.d/"):
+            member = tarfile.TarInfo(name)
+            member.type = tarfile.DIRTYPE
+            member.mode = 0o755
+            member.uid = member.gid = 0
+            member.mtime = 0
+            archive.addfile(member)
+        for name, data, mode in entries:
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            member.mode = mode
+            member.uid = member.gid = 0
+            member.mtime = 0
+            archive.addfile(member, io.BytesIO(data))
+    return stream.getvalue()
+
+
+def prepare_profile(metadata, archives, artifact, account_artifact, profile, workspace):
     profile = checked_profile_path(profile, workspace)
     artifact = Path(artifact)
     if (not artifact.is_absolute() or artifact.resolve(strict=True) != artifact
@@ -153,6 +203,8 @@ def prepare_profile(metadata, archives, artifact, profile, workspace):
         raise ValueError("guest BaseTrees artifact path is not workspace-owned")
     source = base_tree.verify(metadata, archives, artifact)
     project = project_sysusers_bytes()
+    account_tree = account_tree_bytes(
+        project, verified_account_files(metadata, archives, account_artifact, workspace))
     config = config_bytes(profile)
     parent = builder.output_parent(Path(workspace), profile)
     try:
@@ -200,8 +252,8 @@ def prepare_profile(metadata, archives, artifact, profile, workspace):
         finally:
             os.close(artifact_fd)
             os.close(input_fd)
-        stage_account_tree(root, project)
-        manifest = expected_manifest(source, copied, config, project)
+        write_file(root, ACCOUNT_TREE, account_tree)
+        manifest = expected_manifest(source, copied, config, project, account_tree)
         write_file(root, CONFIG, config)
         encoded = canonical_bytes(manifest)
         write_file(root, MANIFEST, encoded)
@@ -210,6 +262,7 @@ def prepare_profile(metadata, archives, artifact, profile, workspace):
         os.close(root)
     return {"status": STATUS, "profile_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
             "base_tree_sha256": source["archive_sha256"],
+            "account_files_preseeded_from_signed_source": True,
             "package_install_configured": False, "package_scripts_executed": False,
             "root_directory_built": False, "disk_image_built": False,
             "boot_verified": False, "private_mode_approved": False}
@@ -264,30 +317,12 @@ def verified_archive(parent):
         os.close(fd)
 
 
-def verified_account_tree(root, project):
-    opened = []
-    parent = root
-    try:
-        for index, part in enumerate(ACCOUNT_TREE_DIRS):
-            child = os.open(part, builder.DIRECTORY_FLAGS, dir_fd=parent)
-            opened.append(child)
-            parent = child
-            expected = (ACCOUNT_TREE_DIRS[index + 1]
-                        if index + 1 < len(ACCOUNT_TREE_DIRS) else ACCOUNT_FILE)
-            if (stat.S_IMODE(os.fstat(child).st_mode) != 0o555
-                    or set(os.listdir(child)) != {expected}):
-                raise ValueError("mkosi diagnostic project sysusers tree differs")
-        if verified_file(parent, ACCOUNT_FILE, len(project), mode=0o444) != project:
-            raise ValueError("mkosi diagnostic project sysusers bytes differ from source")
-    finally:
-        for child in reversed(opened):
-            os.close(child)
-
-
-def verify_profile(metadata, archives, artifact, profile, workspace):
+def verify_profile(metadata, archives, artifact, account_artifact, profile, workspace):
     profile = checked_profile_path(profile, workspace)
     source = base_tree.verify(metadata, archives, artifact)
     project = project_sysusers_bytes()
+    account_tree = account_tree_bytes(
+        project, verified_account_files(metadata, archives, account_artifact, workspace))
     root = guest.open_directory(profile, "mkosi diagnostic profile")
     try:
         if stat.S_IMODE(os.fstat(root).st_mode) != 0o700:
@@ -308,8 +343,9 @@ def verify_profile(metadata, archives, artifact, profile, workspace):
             os.close(input_fd)
         if archive_sha256 != source["archive_sha256"]:
             raise ValueError("mkosi diagnostic BaseTrees archive differs from signed source")
-        verified_account_tree(root, project)
-        manifest = expected_manifest(source, archive_size, config, project)
+        if verified_file(root, ACCOUNT_TREE, len(account_tree)) != account_tree:
+            raise ValueError("mkosi diagnostic account tree differs from signed source")
+        manifest = expected_manifest(source, archive_size, config, project, account_tree)
         encoded = canonical_bytes(manifest)
         if verified_file(root, MANIFEST, len(encoded)) != encoded:
             raise ValueError("mkosi diagnostic profile manifest differs from signed source")
@@ -317,20 +353,24 @@ def verify_profile(metadata, archives, artifact, profile, workspace):
         os.close(root)
     return {"status": STATUS, "profile_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
             "base_tree_sha256": archive_sha256,
+            "account_files_preseeded_from_signed_source": True,
             "package_install_configured": False, "package_scripts_executed": False,
             "root_directory_built": False, "disk_image_built": False,
             "boot_verified": False, "private_mode_approved": False}
 
 
-def build_root_directory(metadata, archives, artifact, profile, workspace):
+def build_root_directory(metadata, archives, artifact, account_artifact,
+                         profile, workspace):
     """Run the pinned CI tool after source checks; never create a boot image."""
     profile = checked_profile_path(profile, workspace)
-    before = verify_profile(metadata, archives, artifact, profile, workspace)
+    before = verify_profile(metadata, archives, artifact, account_artifact,
+                            profile, workspace)
     output = profile.parent / (profile.name + "-output") / OUTPUT_NAME
     if output.exists() or output.is_symlink():
         raise ValueError("mkosi diagnostic output already exists")
     subprocess.run(["/usr/bin/mkosi", f"--directory={profile}", "build"], check=True)
-    after = verify_profile(metadata, archives, artifact, profile, workspace)
+    after = verify_profile(metadata, archives, artifact, account_artifact,
+                           profile, workspace)
     if after != before or output.is_symlink() or not output.is_dir():
         raise ValueError("mkosi diagnostic build did not preserve verified inputs or output a directory")
     return {**before, "status": "diagnostic-root-directory-built-unapproved",
@@ -343,6 +383,7 @@ def main(argv=None):
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--archives", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--account-artifact", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--workspace", type=Path)
     args = parser.parse_args(argv)
@@ -351,9 +392,9 @@ def main(argv=None):
         action = {"prepare": prepare_profile, "verify": verify_profile,
                   "build": build_root_directory}[args.command]
         report = action(args.metadata, args.archives, args.artifact,
-                        args.profile, workspace)
+                        args.account_artifact, args.profile, workspace)
     except (OSError, ValueError, KeyError, TypeError,
-            subprocess.CalledProcessError) as error:
+            subprocess.CalledProcessError, tarfile.TarError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error),
                           "disk_image_built": False, "private_mode_approved": False}))
         return 1

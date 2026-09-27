@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -22,6 +23,36 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         self.archive = self.artifact / "guest-root.tar"
         self.archive.write_bytes(b"synthetic authenticated tar bytes")
         self.output = self.workspace / "profile"
+        self.account_artifact = self.workspace / "accounts"
+        account_etc = self.account_artifact / "etc"
+        account_etc.mkdir(parents=True)
+        contents = {"passwd": b"root:x:0:0:root:/root:/bin/sh\n",
+                    "group": b"root:x:0:\n", "shadow": b"root:!:20708::::::\n"}
+        self.account_receipt = {
+            "status": "diagnostic-verified-guest-account-artifact-unbuilt",
+            "independent_generation_runs_matched": True,
+            "package_scripts_executed": False,
+            "installed_rootfs_accounts_compared": False,
+            "image_built": False,
+            "private_mode_approved": False,
+            "outputs": [],
+        }
+        for name, data in contents.items():
+            path = account_etc / name
+            path.write_bytes(data)
+            storage_mode = 0o400 if name == "shadow" else 0o444
+            path.chmod(storage_mode)
+            self.account_receipt["outputs"].append({
+                "path": "etc/" + name, "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "mode": storage_mode,
+                "sysusers_generated_mode": 0o000 if name == "shadow" else 0o644,
+                "expected_root_uid": 0, "expected_root_gid": 0,
+            })
+        account_verify = mock.patch.object(profile.accounts, "verify",
+                                           return_value=self.account_receipt)
+        account_verify.start()
+        self.addCleanup(account_verify.stop)
         self.source = {
             "archive_sha256": hashlib.sha256(self.archive.read_bytes()).hexdigest(),
             "manifest_sha256": "a" * 64,
@@ -30,13 +61,13 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
     def prepare(self):
         with mock.patch.object(profile.base_tree, "verify", return_value=self.source):
             return profile.prepare_profile(self.workspace, self.workspace,
-                                           self.artifact, self.output,
+                                           self.artifact, self.account_artifact, self.output,
                                            self.workspace)
 
     def verify(self):
         with mock.patch.object(profile.base_tree, "verify", return_value=self.source):
             return profile.verify_profile(self.workspace, self.workspace,
-                                          self.artifact, self.output,
+                                          self.artifact, self.account_artifact, self.output,
                                           self.workspace)
 
     @staticmethod
@@ -61,7 +92,7 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         self.assertIn("ExtraTrees=" + str(self.output / profile.ACCOUNT_TREE) + "\n",
                       config)
         self.assertIn("Packages=\n", config)
-        self.assertIn(f"SourceDateEpoch={profile.guest.SIGNED_RELEASE_EPOCH}\n", config)
+        self.assertIn("SourceDateEpoch=0\n", config)
         self.assertIn("WithNetwork=no\nCacheOnly=always\nIncremental=no\n", config)
         self.assertNotIn("FinalizeScripts=", config)
         self.assertNotIn("Initrds=", config)
@@ -69,24 +100,38 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                          {"input", profile.ACCOUNT_TREE,
                           profile.CONFIG, profile.MANIFEST})
         self.assertEqual((self.output / profile.INPUT).stat().st_mode & 0o777, 0o400)
-        account_input = (self.output / profile.ACCOUNT_TREE /
-                         "usr/lib/sysusers.d/zrpc.conf")
-        self.assertEqual(account_input.read_bytes(), profile.PROJECT_SYSUSERS.read_bytes())
-        self.assertEqual(account_input.stat().st_mode & 0o777, 0o444)
-        self.assertEqual((self.output / profile.ACCOUNT_TREE).stat().st_mode & 0o777,
-                         0o555)
+        account_input = self.output / profile.ACCOUNT_TREE
+        self.assertEqual(account_input.stat().st_mode & 0o777, 0o400)
+        with tarfile.open(account_input) as archive:
+            self.assertEqual({member.name for member in archive},
+                             {"etc", "usr", "usr/lib", "usr/lib/sysusers.d",
+                              "etc/passwd", "etc/group", "etc/shadow",
+                              "usr/lib/sysusers.d/zrpc.conf"})
+            for name in profile.accounts.OUTPUT_FILES:
+                member = archive.getmember("etc/" + name)
+                self.assertEqual((member.mode, member.uid, member.gid),
+                                 (0o000 if name == "shadow" else 0o644, 0, 0))
+                self.assertEqual(archive.extractfile(member).read(),
+                                 (self.account_artifact / "etc" / name).read_bytes())
+            project = archive.getmember("usr/lib/sysusers.d/zrpc.conf")
+            self.assertEqual((project.mode, project.uid, project.gid), (0o644, 0, 0))
+            self.assertEqual(archive.extractfile(project).read(),
+                             profile.PROJECT_SYSUSERS.read_bytes())
         manifest = json.loads((self.output / profile.MANIFEST).read_bytes())
         self.assertEqual(manifest["project_sysusers_sha256"],
+                         hashlib.sha256(profile.PROJECT_SYSUSERS.read_bytes()).hexdigest())
+        self.assertEqual(manifest["account_tree_sha256"],
                          hashlib.sha256(account_input.read_bytes()).hexdigest())
-        self.assertEqual(manifest["source_date_epoch"],
-                         profile.guest.SIGNED_RELEASE_EPOCH)
+        self.assertTrue(manifest["account_artifact_regenerated_and_verified"])
+        self.assertTrue(manifest["account_files_preseeded_from_signed_source"])
 
     def test_source_authentication_and_snapshot_hash_fail_closed(self):
         with mock.patch.object(profile.base_tree, "verify",
                                side_effect=ValueError("signed guest closure invalid")):
             with self.assertRaisesRegex(ValueError, "signed guest closure invalid"):
                 profile.prepare_profile(self.workspace, self.workspace,
-                                        self.artifact, self.output,
+                                        self.artifact, self.account_artifact,
+                                        self.output,
                                         self.workspace)
         self.assertFalse(self.output.exists())
         self.source["archive_sha256"] = "0" * 64
@@ -102,8 +147,7 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                 (archive, b"modified tar bytes", "archive differs"),
                 (config, config.read_bytes() + b"Packages=unreviewed\n", "exceeds bound"),
                 (config, config.read_bytes().replace(
-                    f"SourceDateEpoch={profile.guest.SIGNED_RELEASE_EPOCH}".encode(),
-                    b"SourceDateEpoch=0"), "config differs"),
+                    b"SourceDateEpoch=0", b"SourceDateEpoch=1"), "config differs"),
                 (manifest, profile.canonical_bytes({**json.loads(manifest.read_bytes()),
                                                    "private_mode_approved": True}),
                  "(manifest differs|exceeds bound)")):
@@ -113,17 +157,40 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, expected):
                     self.verify()
                 self.rewrite(path, original)
-        project = self.output / profile.ACCOUNT_TREE / "usr/lib/sysusers.d/zrpc.conf"
-        original = project.read_bytes()
-        project.chmod(0o600)
-        project.write_bytes(b"X" + original[1:])
-        project.chmod(0o444)
-        with self.assertRaisesRegex(ValueError, "project sysusers bytes differ"):
+        tree = self.output / profile.ACCOUNT_TREE
+        original = tree.read_bytes()
+        self.rewrite(tree, b"X" + original[1:])
+        with self.assertRaisesRegex(ValueError, "account tree differs"):
             self.verify()
-        project.chmod(0o600)
-        project.write_bytes(original)
-        project.chmod(0o444)
+        self.rewrite(tree, original)
         self.verify()
+
+    def test_account_artifact_bytes_and_regeneration_are_rechecked(self):
+        self.prepare()
+        passwd = self.account_artifact / "etc/passwd"
+        passwd.chmod(0o600)
+        passwd.write_bytes(b"X" + passwd.read_bytes()[1:])
+        passwd.chmod(0o444)
+        with self.assertRaisesRegex(ValueError, "account artifact bytes differ"):
+            self.verify()
+        with mock.patch.object(profile.accounts, "verify",
+                               side_effect=ValueError("signed account source invalid")):
+            with self.assertRaisesRegex(ValueError, "signed account source invalid"):
+                self.verify()
+
+    def test_unsafe_installed_account_modes_and_owner_are_rejected(self):
+        for name, field, changed in (("passwd", "sysusers_generated_mode", 0o666),
+                                     ("group", "sysusers_generated_mode", 0o600),
+                                     ("shadow", "sysusers_generated_mode", 0o400),
+                                     ("shadow", "expected_root_uid", 1)):
+            row = next(row for row in self.account_receipt["outputs"]
+                       if row["path"] == "etc/" + name)
+            original = row[field]
+            with self.subTest(name=name, field=field):
+                row[field] = changed
+                with self.assertRaisesRegex(ValueError, "install metadata differs"):
+                    self.prepare()
+            row[field] = original
 
     def test_project_sysusers_source_is_rechecked_and_not_redirected(self):
         project = self.workspace / "project.conf"
@@ -133,7 +200,7 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
             self.prepare()
             self.verify()
             project.write_bytes(b"X" + project.read_bytes()[1:])
-            with self.assertRaisesRegex(ValueError, "project sysusers bytes differ"):
+            with self.assertRaisesRegex(ValueError, "account tree differs"):
                 self.verify()
         project.unlink()
         project.symlink_to(profile.PROJECT_SYSUSERS)
@@ -159,11 +226,9 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unreviewed inputs"):
             self.verify()
         (self.output / "mkosi.prepare").unlink()
-        project = self.output / profile.ACCOUNT_TREE / "usr/lib/sysusers.d/zrpc.conf"
-        project.parent.chmod(0o700)
-        project.unlink()
-        project.symlink_to(profile.PROJECT_SYSUSERS)
-        project.parent.chmod(0o555)
+        tree = self.output / profile.ACCOUNT_TREE
+        tree.unlink()
+        tree.symlink_to(profile.PROJECT_SYSUSERS)
         with self.assertRaises(OSError):
             self.verify()
 
@@ -191,7 +256,8 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         with mock.patch.object(profile.base_tree, "verify", return_value=self.source), \
                 mock.patch.object(profile.subprocess, "run", side_effect=synthetic_mkosi):
             report = profile.build_root_directory(self.workspace, self.workspace,
-                                                  self.artifact, self.output,
+                                                  self.artifact, self.account_artifact,
+                                                  self.output,
                                                   self.workspace)
         self.assertEqual(len(seen), 1)
         self.assertTrue(report["root_directory_built"])
@@ -207,7 +273,8 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                 mock.patch.object(profile.subprocess, "run") as mkosi:
             with self.assertRaisesRegex(ValueError, "archive differs"):
                 profile.build_root_directory(self.workspace, self.workspace,
-                                             self.artifact, self.output,
+                                             self.artifact, self.account_artifact,
+                                             self.output,
                                              self.workspace)
             mkosi.assert_not_called()
 
@@ -222,7 +289,8 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                 mock.patch.object(profile.subprocess, "run", side_effect=mutate_during_build):
             with self.assertRaisesRegex(ValueError, "archive differs"):
                 profile.build_root_directory(self.workspace, self.workspace,
-                                             self.artifact, self.output,
+                                             self.artifact, self.account_artifact,
+                                             self.output,
                                              self.workspace)
 
 
