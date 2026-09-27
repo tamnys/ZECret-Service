@@ -48,6 +48,46 @@ INITRD_REMOVE_FILES = (
     "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh",
     "/usr/sbin/sulogin", "/usr/bin/login", "/usr/bin/su",
 )
+# The parent never mounts anything. This runs only after unshare has created
+# both namespaces, and checks their identities before invoking mount(8).
+# The temporary mount disappears with the child namespace even if cleanup
+# fails; a successful probe also requires an explicit unmount.
+MOUNT_PROBE_SCRIPT = r'''
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+parent_user, parent_mount, mount_tool, umount_tool = sys.argv[1:]
+if (os.readlink("/proc/self/ns/user") == parent_user
+        or os.readlink("/proc/self/ns/mnt") == parent_mount):
+    raise SystemExit(1)
+
+with tempfile.TemporaryDirectory(prefix="zrpc-builder-mount-probe-") as target:
+    mounted = subprocess.run(
+        [mount_tool, "-t", "tmpfs", "-o", "nodev,nosuid,noexec", "tmpfs", target],
+        capture_output=True, check=False,
+    )
+    if mounted.returncode:
+        raise SystemExit(1)
+    try:
+        # Do not trust a zero exit from mount(8) without observing the mount.
+        found = any(
+            line.split(" - ", 1)[1].split()[0] == "tmpfs"
+            and line.split(" - ", 1)[0].split()[4] == target
+            for line in Path("/proc/self/mountinfo").read_text().splitlines()
+            if " - " in line
+        )
+    finally:
+        unmounted = subprocess.run(
+            [umount_tool, "--", target], capture_output=True, check=False,
+        )
+    if not found or unmounted.returncode:
+        raise SystemExit(1)
+
+print("zrpc-isolated-tmpfs-ok")
+'''
 REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-seed/v1/"
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
@@ -271,7 +311,7 @@ def preflight():
     blockers = []
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         blockers.append("managed x86_64 Linux builder required")
-    tools = {name: shutil.which(name) for name in ("mkosi", "systemd-repart", "ukify", "gpgv", "unshare", "sbsign", "veritysetup")}
+    tools = {name: shutil.which(name) for name in ("mkosi", "systemd-repart", "ukify", "gpgv", "unshare", "mount", "umount", "sbsign", "veritysetup")}
     blockers.extend(f"missing build tool: {name}" for name, path in tools.items() if not path)
     if tools["unshare"]:
         result = subprocess.run([tools["unshare"], "--user", "--map-root-user", "true"], capture_output=True, check=False)
@@ -294,6 +334,22 @@ def preflight():
             child_net = result.stdout.strip()
             if result.returncode or not re.fullmatch(r"net:\[[0-9]+\]", child_net) or child_net == parent_net:
                 blockers.append("outer build network namespace isolation unavailable")
+        if tools["mount"] and tools["umount"]:
+            try:
+                parent_user = Path("/proc/self/ns/user").readlink().as_posix()
+                parent_mount = Path("/proc/self/ns/mnt").readlink().as_posix()
+            except OSError:
+                blockers.append("builder user/mount namespace identity unavailable")
+            else:
+                result = subprocess.run(
+                    [tools["unshare"], "--user", "--map-root-user", "--mount",
+                     "--fork", "--propagation", "private", sys.executable,
+                     "-c", MOUNT_PROBE_SCRIPT, parent_user, parent_mount,
+                     tools["mount"], tools["umount"]],
+                    capture_output=True, text=True, check=False,
+                )
+                if result.returncode or result.stdout.strip() != "zrpc-isolated-tmpfs-ok":
+                    blockers.append("isolated tmpfs mount/unmount unavailable")
     return {"schema_version": 1, "status": "blocked" if blockers else "capabilities-present-input-review-required", "architecture": platform.machine(), "tools": tools, "blockers": blockers, "image_built": False, "private_mode_approved": False}
 
 def validate_lock(lock, source):
