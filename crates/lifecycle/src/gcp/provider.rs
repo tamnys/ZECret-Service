@@ -410,6 +410,36 @@ fn parse_operation(v: Value) -> Result<Operation> {
     serde_json::from_value(v).map_err(|_| Error("invalid Google operation response"))
 }
 
+fn validate_staging_bucket(bucket: &Value) -> Result<()> {
+    // A missing policy is not evidence that soft delete is disabled. Require
+    // the explicit zero returned by the Storage JSON API for a disabled policy.
+    if bucket.get("retentionPolicy").is_some()
+        || bucket.get("defaultEventBasedHold").and_then(Value::as_bool) == Some(true)
+        || bucket
+            .pointer("/versioning/enabled")
+            .and_then(Value::as_bool)
+            == Some(true)
+        || bucket
+            .pointer("/softDeletePolicy/retentionDurationSeconds")
+            .and_then(Value::as_str)
+            != Some("0")
+    {
+        return Err(Error(
+            "staging bucket retention, versioning, or soft delete prevents bounded cleanup",
+        ));
+    }
+    if bucket
+        .pointer("/iamConfiguration/publicAccessPrevention")
+        .and_then(Value::as_str)
+        != Some("enforced")
+    {
+        return Err(Error(
+            "staging bucket must enforce public access prevention",
+        ));
+    }
+    Ok(())
+}
+
 impl Provider for GoogleClient {
     async fn preflight(&mut self, package: &Package) -> Result<()> {
         super::ensure_live_creation_ready()?;
@@ -423,31 +453,7 @@ impl Provider for GoogleClient {
             )
             .await?
             .ok_or(Error("staging bucket missing"))?;
-        if bucket.get("retentionPolicy").is_some()
-            || bucket.get("defaultEventBasedHold").and_then(Value::as_bool) == Some(true)
-            || bucket
-                .pointer("/versioning/enabled")
-                .and_then(Value::as_bool)
-                == Some(true)
-            || bucket
-                .pointer("/softDeletePolicy/retentionDurationSeconds")
-                .and_then(Value::as_str)
-                .is_some_and(|s| s != "0")
-        {
-            return Err(Error(
-                "staging bucket retention, versioning, or soft delete prevents bounded cleanup",
-            ));
-        }
-        if bucket
-            .pointer("/iamConfiguration/publicAccessPrevention")
-            .and_then(Value::as_str)
-            != Some("enforced")
-        {
-            return Err(Error(
-                "staging bucket must enforce public access prevention",
-            ));
-        }
-        Ok(())
+        validate_staging_bucket(&bucket)
     }
     async fn get(&mut self, resource: &ResourcePlan) -> Result<Option<Value>> {
         let (h, p) = path(resource);
@@ -691,5 +697,24 @@ impl Body for FileBody {
             }
         }
         Poll::Ready(self.suffix.take().map(|b| Ok(Frame::data(Bytes::from(b)))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staging_bucket_requires_explicitly_disabled_soft_delete() {
+        let mut bucket = json!({
+            "iamConfiguration": {"publicAccessPrevention": "enforced"}
+        });
+        assert!(validate_staging_bucket(&bucket).is_err());
+
+        bucket["softDeletePolicy"] = json!({"retentionDurationSeconds": "604800"});
+        assert!(validate_staging_bucket(&bucket).is_err());
+
+        bucket["softDeletePolicy"] = json!({"retentionDurationSeconds": "0"});
+        assert!(validate_staging_bucket(&bucket).is_ok());
     }
 }
