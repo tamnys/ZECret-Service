@@ -20,6 +20,8 @@ import debian_snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "deploy/gcp/guest"
+PACKAGE_CLOSURE_LOCK = PROFILE / "package-closure.lock.json"
+PACKAGE_CLOSURE_SHA256 = "a6994a27c6bcfbed584751ed6eb10cb393c21808c58b628b3ff1584a570b0ca5"
 SOURCE_COMMIT = "54c625c380ef5500f17460981a3c67b109b6a847"
 KERNEL_VERSION = "6.12.107+deb13-cloud-amd64"
 KERNEL_PACKAGE = f"linux-image-{KERNEL_VERSION}"
@@ -52,7 +54,7 @@ def validate_boot_profile(profile=PROFILE):
     """Reject source drift that would omit the direct UKI or unbind the root."""
     # mkosi discovers settings and executable hooks by filename. The staged
     # directory is created fresh from these reviewed source entries only.
-    if {path.name for path in profile.iterdir()} != {"input-identities.json", "mkosi.conf", "mkosi.images", "repart", "rootfs"} or any(path.is_symlink() for path in profile.iterdir()):
+    if {path.name for path in profile.iterdir()} != {"input-identities.json", "package-closure.lock.json", "mkosi.conf", "mkosi.images", "repart", "rootfs"} or any(path.is_symlink() for path in profile.iterdir()):
         raise ValueError("unexpected mkosi source override or redirected input")
     parser = configparser.ConfigParser(interpolation=None, strict=True)
     parser.optionxform = str
@@ -181,7 +183,8 @@ def validate_lock(lock, source):
             if header[:6] != b"\x7fELF\x02\x01" or header[18:20] != b"\x3e\x00":
                 raise ValueError("guest binaries must be x86_64 ELF")
         paths[role] = path
-    manifest = read_json(paths["package_manifest"])
+    manifest_bytes = paths["package_manifest"].read_bytes()
+    manifest = json.loads(manifest_bytes, object_pairs_hook=unique_object)
     if not isinstance(manifest, list) or not manifest:
         raise ValueError("complete Debian package manifest required")
     names = set()
@@ -197,6 +200,14 @@ def validate_lock(lock, source):
     # need these binaries.
     if names & FORBIDDEN_PACKAGES or not ({"systemd-boot-efi", "systemd-resolved", "e2fsprogs"} | INITRD_PACKAGES) <= names:
         raise ValueError("guest package surface does not match appliance policy")
+    # Signed archive membership authenticates individual packages, but does
+    # not authorize a caller to select a different executable/dependency set.
+    # This source-reviewed candidate closure remains unbuilt and unapproved.
+    if PACKAGE_CLOSURE_LOCK.is_symlink() or not PACKAGE_CLOSURE_LOCK.is_file():
+        raise ValueError("package manifest differs from source-reviewed candidate closure")
+    closure_bytes = PACKAGE_CLOSURE_LOCK.read_bytes()
+    if hashlib.sha256(closure_bytes).hexdigest() != PACKAGE_CLOSURE_SHA256 or manifest_bytes != closure_bytes:
+        raise ValueError("package manifest differs from source-reviewed candidate closure")
     runtime = lock["runtime"]
     if set(runtime) != {"listen_port", "max_connections", "max_quotes", "quote_spacing_ms", "node_startup_timeout_secs", "node_poll_interval_ms"} or any(type(value) is not int or value <= 0 for value in runtime.values()) or runtime["listen_port"] > 65535:
         raise ValueError("explicit measured runtime limits required")
