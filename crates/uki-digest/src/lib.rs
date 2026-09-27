@@ -1,4 +1,9 @@
-//! Offline UKI digest diagnostic. This crate does not verify a signature or approve a release.
+//! Offline UKI diagnostics. Neither digest nor signature inspection approves a release.
+
+#[cfg(target_os = "linux")]
+mod signature;
+#[cfg(target_os = "linux")]
+pub use signature::{SBVERIFY_SHA256, SBVERIFY_SIZE, SignatureDiagnostic, inspect_signed_uki};
 
 use authenticode::authenticode_digest;
 use object::read::pe::PeFile64;
