@@ -6,15 +6,21 @@ mkosi's later appended kernel-modules initrd or the final signed UKI.
 """
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 
 
 # The required files are supplied by the locked Debian systemd,
 # systemd-cryptsetup, udev, dmsetup and kmod package seeds. Pinned mkosi 25.3
-# creates /init and /etc/initrd-release before running finalize scripts.
+# creates /init only if ExtraTrees did not supply it; it also creates
+# /etc/initrd-release before running finalize scripts.
+# prepare.py replaces this marker with the hash of the separately pinned
+# x86_64 Rust PID1 artifact. Running an unstaged audit fails closed.
+EXPECTED_INIT_SHA256 = "__STAGED_INIT_SHA256__"
 REQUIRED_EXECUTABLES = (
     "usr/lib/systemd/systemd",
     "usr/lib/systemd/systemd-modules-load",
@@ -77,14 +83,19 @@ def exact_symlink(root, relative, target):
         raise ValueError(f"initrd entry missing or redirected: {relative}")
 
 
-def audit(root):
+def audit(root, expected_init_sha256=EXPECTED_INIT_SHA256):
     if root.is_symlink() or not root.is_dir() or root.resolve() == Path("/"):
         raise ValueError("explicit initrd build root required")
-    for relative in ("etc", "usr", "usr/bin", "usr/lib", "usr/lib/systemd",
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_init_sha256):
+        raise ValueError("early init artifact identity absent")
+    for relative in ("proc", "etc", "usr", "usr/bin", "usr/lib", "usr/lib/systemd",
                      "usr/lib/systemd/system", "usr/lib/systemd/system-generators",
                      "usr/sbin"):
         directory(root, relative)
-    exact_symlink(root, "init", "/usr/lib/systemd/systemd")
+    regular(root, "init", executable=True)
+    with (root / "init").open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != expected_init_sha256:
+            raise ValueError("early init differs from pinned artifact")
     exact_symlink(root, "etc/initrd-release", "/etc/os-release")
     # The locked Debian base-files archive owns this relative link and target.
     # Resolving an absolute guest link with Path.is_file() could inspect the
@@ -115,6 +126,10 @@ def audit(root):
         path = root / relative
         if path.is_symlink() or (path.is_dir() and any(path.iterdir())) or (present(path) and not path.is_dir()):
             raise ValueError(f"initrd credential store is not empty: {relative}")
+    # sd-stub adds only its signed .osrel file after this initrd is unpacked.
+    # No companion tree belongs in the base initrd itself.
+    if present(root / ".extra"):
+        raise ValueError("base initrd contains a stub companion tree")
     for path in root.rglob("*"):
         mode = path.lstat().st_mode
         if stat.S_ISREG(mode) and mode & (stat.S_ISUID | stat.S_ISGID):
