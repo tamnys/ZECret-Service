@@ -36,6 +36,7 @@ ARTIFACTS = (
     ("zrpc-server", "zrpc-gcp-quote-broker"),
     ("zrpc-server", "zrpc-gcp-guard"),
     ("zrpc-server", "zrpc-gcp-cookie"),
+    ("zrpc-server", "zrpc-gcp-early-init"),
 )
 
 
@@ -43,27 +44,32 @@ def check_guest_artifacts(source):
     """The exported image profile must not require an unbuilt project binary."""
     profile = source / "tools/gcp-guest/prepare.py"
     tree = ast.parse(profile.read_text())
-    assignments = [statement.value for statement in tree.body
-                   if isinstance(statement, ast.Assign)
-                   and len(statement.targets) == 1
-                   and isinstance(statement.targets[0], ast.Name)
-                   and statement.targets[0].id == "BINARIES"]
-    if len(assignments) != 1:
+    assignments = {name: [statement.value for statement in tree.body
+                          if isinstance(statement, ast.Assign)
+                          and len(statement.targets) == 1
+                          and isinstance(statement.targets[0], ast.Name)
+                          and statement.targets[0].id == name]
+                   for name in ("BINARIES", "EARLY_INIT_ROLE")}
+    if any(len(values) != 1 for values in assignments.values()):
         raise Refusal("GCP guest executable inventory is unavailable")
     try:
-        binaries = ast.literal_eval(assignments[0])
+        binaries = ast.literal_eval(assignments["BINARIES"][0])
+        early_init_role = ast.literal_eval(assignments["EARLY_INIT_ROLE"][0])
     except (ValueError, TypeError, SyntaxError, MemoryError) as error:
         raise Refusal("GCP guest executable inventory requires review") from error
     if (not isinstance(binaries, dict) or not binaries
             or any(not isinstance(role, str) or not isinstance(name, str) or not name
                    for role, name in binaries.items())
             or len(set(binaries.values())) != len(binaries.values())
-            or binaries.get("zebra") != "zebrad"):
+            or binaries.get("zebra") != "zebrad"
+            or early_init_role != "early_init"):
         raise Refusal("GCP guest executable inventory requires review")
     # Zebra is a separately authenticated upstream release. Every project
     # executable that the image stages must be compared in both native builds.
-    missing = sorted(name for name in binaries.values()
-                     if name != "zebrad" and ("zrpc-server", name) not in ARTIFACTS)
+    project_binaries = [name for name in binaries.values() if name != "zebrad"]
+    project_binaries.append("zrpc-gcp-early-init")
+    missing = sorted(name for name in project_binaries
+                     if ("zrpc-server", name) not in ARTIFACTS)
     if missing:
         raise Refusal("GCP guest executable missing from double build: " + ", ".join(missing))
 
