@@ -25,6 +25,7 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX
 ProtectSystem=strict
+NoExecPaths=/run /tmp /var /dev
 ReadWritePaths=/run/zrpc-gcp-quote /sys/kernel/config/tsm/report
 InaccessiblePaths=/run/zrpc-node /run/zrpc-wrapper /var/lib/zebra
 ProtectHome=yes

@@ -26,6 +26,7 @@ StandardError=null
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
+NoExecPaths=/run /tmp /var /dev
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

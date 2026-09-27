@@ -21,6 +21,7 @@ UMask=0077
 StandardOutput=null
 StandardError=null
 ProtectSystem=strict
+NoExecPaths=/run /tmp /var /dev
 ReadWritePaths=/run/zrpc-wrapper
 InaccessiblePaths=/run/zrpc-gcp-quote /var/lib/zebra /sys/kernel/config /sys/firmware
 ProtectHome=yes
