@@ -22,6 +22,7 @@ KEYRING_SHA256 = "c042cf3ba41a234f709a6f50053ce3c23031d2d4f109a563ffc1193403b268
 GPGV_SHA256 = "3f29dddc10e4089aeac5b2675313f4e5fe822abe5ab3bf7898d238c32d758304"
 TRIXIE_ARCHIVE_FINGERPRINT = "04B54C3CDCA79751B16BC6B5225629DF75B188BD"
 INDEX_PATH = "main/binary-amd64/Packages.xz"
+SOURCE_INDEX_PATH = "main/source/Sources.xz"
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -52,7 +53,7 @@ def verify_signature(inrelease):
         raise ValueError("Debian InRelease signature or reviewed signer rejected")
 
 
-def release_fields(inrelease):
+def release_fields(inrelease, index_path=INDEX_PATH):
     data = inrelease.read_text(encoding="utf-8")
     if not data.startswith("-----BEGIN PGP SIGNED MESSAGE-----\n"):
         raise ValueError("not a clear-signed Debian InRelease")
@@ -98,9 +99,9 @@ def release_fields(inrelease):
         if parts[2] in indexes:
             raise ValueError("duplicate Debian index entry")
         indexes[parts[2]] = (parts[0], int(parts[1]))
-    if INDEX_PATH not in indexes:
-        raise ValueError("Debian amd64 package index not signed")
-    return epoch, indexes[INDEX_PATH]
+    if index_path not in (INDEX_PATH, SOURCE_INDEX_PATH) or index_path not in indexes:
+        raise ValueError("required Debian index not signed")
+    return epoch, indexes[index_path]
 
 
 def package_records(index):
