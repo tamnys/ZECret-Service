@@ -430,7 +430,7 @@ jobs:
               raise ValueError("root BaseTrees candidate changed diagnostic status")
           print(json.dumps(report, sort_keys=True))
           PY
-            # GNU tar's numeric-owner extraction is exercised with effective
+            # GNU tar numeric-owner extraction is exercised with effective
             # root in this already no-route mount/network namespace. The
             # extracted tree is data only; no file from it is executed.
             extracted="$staged/zrpc-guest-payload-parent/extracted-root"

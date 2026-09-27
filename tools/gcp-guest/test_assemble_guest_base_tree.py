@@ -6,6 +6,7 @@ import json
 import lzma
 import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -225,6 +226,18 @@ class BaseTreeAssemblyTests(unittest.TestCase):
             candidate.require_hardlinks({"usr/bin/tool": (2, 7),
                                          "usr/bin/alias": (2, 8)},
                                         [("usr/bin/alias", "usr/bin/tool")])
+
+    def test_native_probe_shell_block_parses(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows"
+                    / "gcp-builder-closure-probe.yml").read_text()
+        beginning = workflow.index("      - name: Fetch exact source commit and locked Debian payloads\n")
+        start = workflow.index("        run: |\n", beginning) + len("        run: |\n")
+        end = workflow.index("      - name: Diagnostic packaged mkosi sandbox", start)
+        script = "\n".join(line[10:] if line.startswith("          ") else line
+                           for line in workflow[start:end].splitlines()) + "\n"
+        checked = subprocess.run(["bash", "-n"], input=script, text=True,
+                                 capture_output=True, check=False)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
 
     def test_authentication_failure_and_existing_output_fail_closed(self):
         with mock.patch.object(candidate.preflight, "authenticated_archives",
