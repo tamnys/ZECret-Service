@@ -7,7 +7,7 @@ permissions: {}
 
 jobs:
   stage:
-    name: Diagnostic signed-snapshot lock payload staging
+    name: Diagnostic locked payload staging and chroot tool startup
     runs-on: ubuntu-24.04
     steps:
       - name: Fetch exact source commit and locked Debian payloads
@@ -115,3 +115,44 @@ jobs:
               "private_mode_approved": False,
           }, sort_keys=True))
           PY
+
+          # Only the commands below execute staged code. The outer
+          # namespace has no network route; chroot resolves all executable,
+          # interpreter, Python module, and shared-library paths in the
+          # hash-checked staged tree. Drop to the tree owner's unprivileged UID
+          # before any staged command starts.
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          chroot_command="$(command -v chroot)"
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          sudo -n unshare --mount --net --propagation private bash -c '
+            set -euo pipefail
+            staged=$1
+            run_uid=$2
+            run_gid=$3
+            chroot_command=$7
+            test "$(readlink /proc/self/ns/user)" = "$4"
+            test "$(readlink /proc/self/ns/mnt)" != "$5"
+            test "$(readlink /proc/self/ns/net)" != "$6"
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            echo "Isolated mount namespace: $(readlink /proc/self/ns/mnt)"
+            echo "Isolated network namespace: $(readlink /proc/self/ns/net)"
+
+            run_staged() {
+              /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+                LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                "$chroot_command" --userspec="$run_uid:$run_gid" "$staged" "$@"
+            }
+            test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
+            echo "Staged command UID: $run_uid"
+            run_staged /lib64/ld-linux-x86-64.so.2 --list /usr/bin/systemd-repart
+            run_staged /usr/bin/mkosi --version
+            run_staged /usr/bin/systemd-repart --version
+            run_staged /usr/bin/ukify --version
+            echo "Diagnostic staged tool startup passed; no image built or approved."
+          ' _ "$scratch/staged" "$runner_uid" "$runner_gid" \
+            "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" "$chroot_command"
