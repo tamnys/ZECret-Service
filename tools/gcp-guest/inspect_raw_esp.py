@@ -17,6 +17,7 @@ from pathlib import Path
 import platform
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -52,6 +53,15 @@ EXPECTED_ESP_ENTRIES = (
 # ukify inspect --all --json reports each PE section's size and SHA-256:
 # https://manpages.debian.org/trixie/systemd-ukify/ukify.1.en.html
 REQUIRED_SECTIONS = frozenset({".cmdline", ".linux", ".initrd"})
+# Pinned systemd-stub 257.13 interprets these optional UKI sections as boot
+# inputs. The direct-UKI image profile has not reviewed any of them. In
+# particular, .profile can select replacement .cmdline/.initrd sections by an
+# EFI invocation argument, even when ukify's JSON map shows a safe base entry.
+# https://manpages.debian.org/trixie/systemd-boot/sd-stub.7.en.html
+UNREVIEWED_STUB_SECTIONS = frozenset({
+    ".profile", ".ucode", ".dtb", ".dtbauto", ".hwids",
+    ".splash", ".pcrsig", ".pcrpkey",
+})
 
 
 def regular_member_from_deb(data, member_path):
@@ -182,7 +192,68 @@ def run_mtools(binary, command, image, root, *, destination=None):
     return result.stdout
 
 
+def pe_section_names(image):
+    """Read the actual PE section table; a JSON object cannot show duplicates."""
+    descriptor = os.open(image, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("UKI is not a regular PE file")
+
+        def read(offset, count):
+            if offset < 0 or count < 0 or offset + count > info.st_size:
+                raise ValueError("UKI PE section table is truncated")
+            data = os.pread(descriptor, count, offset)
+            if len(data) != count:
+                raise ValueError("UKI PE section table changed during inspection")
+            return data
+
+        dos = read(0, 64)
+        if dos[:2] != b"MZ":
+            raise ValueError("UKI lacks DOS PE header")
+        pe_offset = struct.unpack_from("<I", dos, 0x3c)[0]
+        coff = read(pe_offset, 24)
+        if coff[:4] != b"PE\0\0":
+            raise ValueError("UKI lacks PE signature")
+        machine, count = struct.unpack_from("<HH", coff, 4)
+        optional_size = struct.unpack_from("<H", coff, 20)[0]
+        if machine != 0x8664 or count == 0 or optional_size < 2:
+            raise ValueError("UKI is not an x86_64 PE32+ image")
+        optional_start = pe_offset + len(coff)
+        if struct.unpack("<H", read(optional_start, 2))[0] != 0x20b:
+            raise ValueError("UKI is not an x86_64 PE32+ image")
+        section_start = optional_start + optional_size
+        if section_start + count * 40 > info.st_size:
+            raise ValueError("UKI PE section table is truncated")
+        names = []
+        seen = set()
+        for index in range(count):
+            section = read(section_start + index * 40, 40)
+            raw_name = section[:8]
+            name_bytes = raw_name.partition(b"\0")[0]
+            if (not name_bytes or any(raw_name[len(name_bytes):])
+                    or not name_bytes.startswith(b".")):
+                raise ValueError("UKI PE section has an invalid name")
+            try:
+                name = name_bytes.decode("ascii")
+            except UnicodeDecodeError as error:
+                raise ValueError("UKI PE section has an invalid name") from error
+            if name in seen:
+                raise ValueError(f"duplicate UKI PE section: {name}")
+            if name in UNREVIEWED_STUB_SECTIONS:
+                raise ValueError(f"unreviewed UKI boot section: {name}")
+            raw_size, raw_offset = struct.unpack_from("<II", section, 16)
+            if raw_size and (raw_offset == 0 or raw_offset + raw_size > info.st_size):
+                raise ValueError("UKI PE section data is outside the image")
+            seen.add(name)
+            names.append(name)
+        return names
+    finally:
+        os.close(descriptor)
+
+
 def section_report(ukify, pefile, ordlookup, image, root):
+    section_names = pe_section_names(image)
     script = root / "ukify"
     module = root / "pefile.py"
     script.write_bytes(ukify)
@@ -205,7 +276,9 @@ def section_report(ukify, pefile, ordlookup, image, root):
     if result.returncode != 0:
         raise ValueError("signed ukify inspect failed")
     sections = json.loads(result.stdout, object_pairs_hook=direct.unique_object)
-    if not isinstance(sections, dict) or not REQUIRED_SECTIONS <= sections.keys():
+    if not isinstance(sections, dict) or set(sections) != set(section_names):
+        raise ValueError("ukify section map differs from PE section table")
+    if not REQUIRED_SECTIONS <= sections.keys():
         raise ValueError("UKI required sections absent")
     for name, details in sections.items():
         if (not isinstance(name, str) or not name.startswith(".")

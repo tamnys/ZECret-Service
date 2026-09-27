@@ -67,6 +67,43 @@ def run(command, *, env=None):
         raise AssertionError(f"synthetic fixture command failed: {command[0]}: {result.stderr}")
 
 
+def rename_pe_section(path, old, new):
+    """Mutate only a synthetic UKI's PE section name before copying it to FAT."""
+    data = bytearray(path.read_bytes())
+    pe_offset = struct.unpack_from("<I", data, 0x3c)[0]
+    count = struct.unpack_from("<H", data, pe_offset + 6)[0]
+    optional_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+    section_start = pe_offset + 24 + optional_size
+    old_name = old.encode("ascii").ljust(8, b"\0")
+    matches = [section_start + index * 40 for index in range(count)
+               if data[section_start + index * 40:section_start + index * 40 + 8]
+               == old_name]
+    assert len(matches) == 1
+    data[matches[0]:matches[0] + 8] = new.encode("ascii").ljust(8, b"\0")
+    path.write_bytes(data)
+
+
+def synthetic_pe_section_table(names):
+    """Small x86_64 PE32+ envelope for parser rejection tests, not bootable."""
+    pe_offset = 0x80
+    optional_size = 0xf0
+    section_start = pe_offset + 24 + optional_size
+    payload_start = section_start + len(names) * 40
+    data = bytearray(payload_start + len(names))
+    data[:2] = b"MZ"
+    struct.pack_into("<I", data, 0x3c, pe_offset)
+    data[pe_offset:pe_offset + 4] = b"PE\0\0"
+    struct.pack_into("<HHIIIHH", data, pe_offset + 4,
+                     0x8664, len(names), 0, 0, 0, optional_size, 0)
+    struct.pack_into("<H", data, pe_offset + 24, 0x20b)
+    for index, name in enumerate(names):
+        start = section_start + index * 40
+        data[start:start + 8] = name.encode("ascii").ljust(8, b"\0")
+        struct.pack_into("<II", data, start + 16, 1, payload_start + index)
+        data[payload_start + index] = index + 1
+    return data
+
+
 class EspInspectorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(
@@ -94,6 +131,34 @@ class EspInspectorTests(unittest.TestCase):
                       "image_built", "private_mode_approved"):
             self.assertIs(report[field], False)
 
+    def test_pe_table_rejects_profile_duplicate_and_unreviewed_boot_sections(self):
+        base = [".linux", ".initrd", ".cmdline"]
+        for extra, reason in ((".profile", "unreviewed UKI boot section"),
+                              (".cmdline", "duplicate UKI PE section"),
+                              (".initrd", "duplicate UKI PE section"),
+                              (".ucode", "unreviewed UKI boot section"),
+                              (".dtb", "unreviewed UKI boot section"),
+                              (".pcrsig", "unreviewed UKI boot section")):
+            with self.subTest(extra=extra):
+                image = self.root / "synthetic.efi"
+                image.write_bytes(synthetic_pe_section_table(base + [extra]))
+                with self.assertRaisesRegex(ValueError, reason):
+                    esp.section_report(b"", b"", {}, image, self.root)
+
+    def test_pe_table_accepts_single_reviewed_boot_sections(self):
+        image = self.root / "synthetic.efi"
+        sections = [".text", ".osrel", ".cmdline", ".initrd", ".linux"]
+        image.write_bytes(synthetic_pe_section_table(sections))
+        self.assertEqual(esp.pe_section_names(image), sections)
+
+    def test_pe_table_rejects_truncated_section_data(self):
+        image = self.root / "synthetic.efi"
+        data = synthetic_pe_section_table([".linux", ".initrd", ".cmdline"])
+        data.pop()
+        image.write_bytes(data)
+        with self.assertRaisesRegex(ValueError, "section data is outside"):
+            esp.pe_section_names(image)
+
     def signed_inputs(self):
         fixture = os.environ.get("GCP_SIGNED_BUILDER_FIXTURE_ROOT")
         if not fixture or not os.environ.get("CODEX_TMP_DIR"):
@@ -101,7 +166,7 @@ class EspInspectorTests(unittest.TestCase):
         base = Path(fixture)
         return base / "InRelease", base / "Packages.xz", base / "debs"
 
-    def build_fixture(self, *, extra_entry=False):
+    def build_fixture(self, *, extra_entry=False, renamed_section=None):
         inrelease, index, archives = self.signed_inputs()
         tools, _ = esp.authenticated_tools(inrelease, index, archives)
         lock = json.loads(esp.LOCK.read_bytes())
@@ -146,6 +211,8 @@ class EspInspectorTests(unittest.TestCase):
              "--uname", "synthetic", "--output", str(uki)],
             env={"PYTHONPATH": str(tool_dir), "HOME": str(self.root),
                  "PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        if renamed_section:
+            rename_pe_section(uki, *renamed_section)
         fat = self.root / "esp.fat"
         with fat.open("wb") as stream:
             stream.truncate(ESP_SECTORS * SECTOR)
@@ -175,6 +242,16 @@ class EspInspectorTests(unittest.TestCase):
                       "cmdline_approved", "dm_verity_checked", "image_built",
                       "private_mode_approved"):
             self.assertIs(report[field], False)
+
+    def test_signed_tools_reject_profile_hidden_by_section_map(self):
+        args = self.build_fixture(renamed_section=(".uname", ".profile"))
+        with self.assertRaisesRegex(ValueError, "unreviewed UKI boot section: .profile"):
+            esp.inspect(*args[:3], SECTOR, *args[3:], self.root)
+
+    def test_signed_tools_reject_duplicate_cmdline_hidden_by_section_map(self):
+        args = self.build_fixture(renamed_section=(".uname", ".cmdline"))
+        with self.assertRaisesRegex(ValueError, "duplicate UKI PE section: .cmdline"):
+            esp.inspect(*args[:3], SECTOR, *args[3:], self.root)
 
     def test_extra_esp_companion_and_changed_archive_fail_closed(self):
         args = self.build_fixture(extra_entry=True)
