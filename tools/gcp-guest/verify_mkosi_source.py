@@ -7,6 +7,7 @@ nor builds, signs, or approves a guest image.
 
 import argparse
 import hashlib
+import io
 import json
 import lzma
 from pathlib import Path
@@ -86,19 +87,14 @@ def verify(inrelease, sources_index, source_files, identities_path=IDENTITIES):
     snapshot = metadata["trixie_snapshot_candidate"]
     if identities["mkosi_source"]["distribution_package_version"] != SOURCE_VERSION:
         raise ValueError("mkosi package version differs from reviewed identity")
-    if digest(inrelease) != snapshot["inrelease_sha256"]:
-        raise ValueError("Debian InRelease differs from reviewed snapshot")
-    debian_snapshot.verify_signature(inrelease)
-    epoch, (signed_hash, signed_size) = debian_snapshot.release_fields(
-        inrelease, debian_snapshot.SOURCE_INDEX_PATH
+    epoch, (signed_hash, signed_size), index_bytes = debian_snapshot.authenticated_index_bytes(
+        inrelease, sources_index, snapshot["inrelease_sha256"], debian_snapshot.SOURCE_INDEX_PATH,
     )
     if epoch != snapshot["signed_release_date_epoch"]:
         raise ValueError("source index Release date differs from reviewed snapshot")
     if signed_hash != snapshot["main_source_sources_xz_sha256"] or signed_size != snapshot["main_source_sources_xz_size"]:
         raise ValueError("source index identity differs from reviewed snapshot")
-    if sources_index.is_symlink() or not sources_index.is_file() or sources_index.stat().st_size != signed_size or digest(sources_index) != signed_hash:
-        raise ValueError("Debian Sources index differs from signed Release")
-    record = source_record(sources_index)
+    record = source_record(io.BytesIO(index_bytes))
     if record.get("Directory") != [SOURCE_DIRECTORY]:
         raise ValueError("mkosi source directory differs")
     lines = record.get("Checksums-Sha256", [])

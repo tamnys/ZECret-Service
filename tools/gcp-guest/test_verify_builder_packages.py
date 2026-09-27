@@ -146,6 +146,48 @@ class DirectBuilderPackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
             self.verify()
 
+    def test_replaced_inrelease_after_signature_cannot_change_release_fields(self):
+        original = self.inrelease.read_text()
+        replacement = original.replace("main/binary-amd64/Packages.xz", "main/source/Sources.xz")
+
+        def replace_source(_sealed_path, **_kwargs):
+            self.inrelease.write_text(replacement)
+
+        with patch.object(builder.debian_snapshot, "verify_signature", side_effect=replace_source):
+            report = builder.verify(self.inrelease, self.index, self.archives,
+                                    lock_path=self.lock_path, identities_path=self.identities_path)
+        self.assertEqual(report["package_count"], len(builder.DIRECT_PACKAGES))
+        self.assertNotEqual(self.inrelease.read_text(), original)
+
+    def test_replaced_index_before_parse_cannot_add_unsigned_package(self):
+        full_index = self.index.read_bytes()
+        paragraphs = lzma.decompress(full_index).decode().strip().split("\n\n")
+        self.index.write_bytes(lzma.compress(("\n\n".join(paragraphs[1:]) + "\n\n").encode()))
+        old_hash = self.identities["downloaded_metadata"]["trixie_snapshot_candidate"]["main_binary_amd64_packages_xz_sha256"]
+        old_size = self.identities["downloaded_metadata"]["trixie_snapshot_candidate"]["main_binary_amd64_packages_xz_size"]
+        new_hash = sha256(self.index.read_bytes())
+        new_size = self.index.stat().st_size
+        self.inrelease.write_text(self.inrelease.read_text().replace(
+            f"{old_hash} {old_size} main/binary-amd64/Packages.xz",
+            f"{new_hash} {new_size} main/binary-amd64/Packages.xz",
+        ))
+        snapshot = self.identities["downloaded_metadata"]["trixie_snapshot_candidate"]
+        snapshot["inrelease_sha256"] = sha256(self.inrelease.read_bytes())
+        snapshot["main_binary_amd64_packages_xz_sha256"] = new_hash
+        snapshot["main_binary_amd64_packages_xz_size"] = new_size
+        self.write_metadata()
+        parse = builder.debian_snapshot.package_records
+
+        def replace_source(source):
+            self.index.write_bytes(full_index)
+            return parse(source)
+
+        with patch.object(builder.debian_snapshot, "verify_signature"), patch.object(
+                builder.debian_snapshot, "package_records", side_effect=replace_source):
+            with self.assertRaisesRegex(ValueError, "differs from signed index"):
+                builder.verify(self.inrelease, self.index, self.archives,
+                               lock_path=self.lock_path, identities_path=self.identities_path)
+
 
 if __name__ == "__main__":
     unittest.main()

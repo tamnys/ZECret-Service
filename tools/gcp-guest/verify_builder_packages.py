@@ -9,6 +9,7 @@ It cannot authorize an image build, deployment, or private queries.
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import io
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -20,7 +21,7 @@ import debian_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LOCK = ROOT / "deploy/gcp/guest/builder-direct-packages.lock.json"
+LOCK = ROOT / "deploy/gcp/builder-direct-packages.lock.json"
 IDENTITIES = ROOT / "deploy/gcp/guest/input-identities.json"
 # These packages supply the principal mkosi, archive, partition, UKI, signing,
 # verity, and import tools in the reviewed build path. Their transitive runtime
@@ -65,18 +66,14 @@ def verify(inrelease, packages_index, archive_dir, *, lock_path=LOCK,
     entries = lock["packages"]
     if not isinstance(entries, list) or len(entries) != len(DIRECT_PACKAGES):
         raise ValueError("direct builder package set incomplete")
-    if inrelease.is_symlink() or not inrelease.is_file() or packages_index.is_symlink() or not packages_index.is_file():
-        raise ValueError("signed Debian metadata missing or redirected")
-    if debian_snapshot.sha256(inrelease) != snapshot["inrelease_sha256"]:
-        raise ValueError("Debian InRelease differs from reviewed snapshot")
-    debian_snapshot.verify_signature(inrelease)
-    epoch, (index_hash, index_size) = debian_snapshot.release_fields(inrelease)
+    epoch, (index_hash, index_size), index_bytes = debian_snapshot.authenticated_index_bytes(
+        inrelease, packages_index, snapshot["inrelease_sha256"],
+    )
     if epoch != snapshot["signed_release_date_epoch"]:
         raise ValueError("signed Debian Release date differs from reviewed snapshot")
     if (index_hash != snapshot["main_binary_amd64_packages_xz_sha256"]
             or index_size != snapshot["main_binary_amd64_packages_xz_size"]
-            or packages_index.stat().st_size != index_size
-            or debian_snapshot.sha256(packages_index) != index_hash):
+            or len(index_bytes) != index_size):
         raise ValueError("Debian package index differs from signed Release")
     snapshot_time = datetime.strptime(
         lock["snapshot"].rstrip("/").rsplit("/", 1)[-1], "%Y%m%dT%H%M%SZ"
@@ -86,7 +83,7 @@ def verify(inrelease, packages_index, archive_dir, *, lock_path=LOCK,
     debian_snapshot.require_snapshot_age(snapshot_time, datetime.now(timezone.utc))
     if archive_dir.is_symlink() or not archive_dir.is_dir():
         raise ValueError("local builder archive directory missing or redirected")
-    records = debian_snapshot.package_records(packages_index)
+    records = debian_snapshot.package_records(io.BytesIO(index_bytes))
     found = set()
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != PACKAGE_FIELDS:
