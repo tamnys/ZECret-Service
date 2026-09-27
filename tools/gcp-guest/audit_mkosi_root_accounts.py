@@ -35,7 +35,12 @@ def checked_bytes(directory, name, size, mode, uid, gid, label):
                 or stat.S_IMODE(before.st_mode) != mode
                 or (uid is not None and before.st_uid != uid)
                 or (gid is not None and before.st_gid != gid)):
-            raise ValueError(f"{label} metadata differs: {name}")
+            raise ValueError(
+                f"{label} metadata differs: {name}; "
+                f"expected size={size} mode={mode:#o} uid={uid} gid={gid}; "
+                f"observed regular={stat.S_ISREG(before.st_mode)} "
+                f"size={before.st_size} mode={stat.S_IMODE(before.st_mode):#o} "
+                f"uid={before.st_uid} gid={before.st_gid}")
         observed = bytearray()
         while len(observed) <= size:
             chunk = os.read(descriptor, min(65536, size + 1 - len(observed)))
