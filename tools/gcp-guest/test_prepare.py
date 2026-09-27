@@ -102,6 +102,10 @@ class CandidateTests(unittest.TestCase):
         initrd = (output / "mkosi.images/initrd/mkosi.conf").read_text()
         self.assertIn("MakeInitrd=yes", initrd)
         self.assertIn("Packages=dmsetup=1.0~synthetic,kmod=1.0~synthetic,systemd=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,udev=1.0~synthetic", initrd)
+        self.assertIn("FinalizeScripts=audit-initrd.py", initrd)
+        audit = output / "mkosi.images/initrd/audit-initrd.py"
+        self.assertEqual(audit.read_bytes(), (Path(__file__).with_name("audit-initrd.py")).read_bytes())
+        self.assertEqual(audit.stat().st_mode & 0o777, 0o555)
         self.assertNotIn("Include=mkosi-initrd", initrd)
         self.assertNotIn("linux-image", initrd)
         esp = (output / "repart/30-esp.conf").read_text()
@@ -150,6 +154,8 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.conf", "ExtraTrees=rootfs", "ExtraTrees=rootfs\nPostOutputScripts=unreviewed.sh"),
             ("mkosi.images/initrd/mkosi.conf", "MakeInitrd=yes", "MakeInitrd=no"),
             ("mkosi.images/initrd/mkosi.conf", "Ssh=no", "Ssh=yes"),
+            ("mkosi.images/initrd/mkosi.conf", "rescue.target,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "multi-user.target.wants/getty.target,", ""),
             ("mkosi.images/initrd/mkosi.conf", "RemoveFiles=/usr/lib/systemd/system/rescue.service", "RemoveFiles=/usr/lib/systemd/system/other.service"),
         )
         for name, original, altered in changes:

@@ -27,6 +27,23 @@ KERNEL_PACKAGE_VERSION = "6.12.107-1"
 BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
 ROLES = set(BINARIES) | {"secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
+INITRD_REMOVE_FILES = (
+    "/usr/lib/systemd/system/rescue.service",
+    "/usr/lib/systemd/system/rescue.target",
+    "/usr/lib/systemd/system/emergency.service",
+    "/usr/lib/systemd/system/emergency.target",
+    "/usr/lib/systemd/system/debug-shell.service",
+    "/usr/lib/systemd/system/getty.target",
+    "/usr/lib/systemd/system/getty@.service",
+    "/usr/lib/systemd/system/serial-getty@.service",
+    "/usr/lib/systemd/system/console-getty.service",
+    "/usr/lib/systemd/system/container-getty@.service",
+    "/usr/lib/systemd/system/multi-user.target.wants/getty.target",
+    "/usr/lib/systemd/system/runlevel1.target",
+    "/usr/lib/systemd/systemd-sulogin-shell",
+    "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh",
+    "/usr/sbin/sulogin", "/usr/bin/login", "/usr/bin/su",
+)
 REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-seed/v1/"
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
@@ -64,7 +81,7 @@ def validate_boot_profile(profile=PROFILE):
         parser.read_file(stream)
     expected_initrd = {
         "Output": {"Format": "cpio", "Output": "initrd", "ManifestFormat": "json", "CompressOutput": "zstd"},
-        "Content": {"Bootable": "no", "MakeInitrd": "yes", "Autologin": "no", "Ssh": "no", "CleanPackageMetadata": "yes", "WithDocs": "no", "RemoveFiles": "/usr/lib/systemd/system/rescue.service,/usr/lib/systemd/system/emergency.service,/usr/lib/systemd/system/debug-shell.service,/usr/lib/systemd/system/getty@.service,/usr/lib/systemd/system/serial-getty@.service,/usr/lib/systemd/system/console-getty.service,/usr/lib/systemd/system/container-getty@.service,/usr/lib/systemd/systemd-sulogin-shell,/usr/bin/bash,/usr/bin/dash,/usr/bin/sh,/usr/sbin/sulogin,/usr/bin/login,/usr/bin/su"},
+        "Content": {"Bootable": "no", "MakeInitrd": "yes", "Autologin": "no", "Ssh": "no", "CleanPackageMetadata": "yes", "WithDocs": "no", "RemoveFiles": ",".join(INITRD_REMOVE_FILES)},
     }
     if {section: dict(parser.items(section)) for section in parser.sections()} != expected_initrd:
         raise ValueError("systemd initrd subimage recipe differs")
@@ -206,6 +223,9 @@ def stage(lock_path, source, destination):
     shutil.copy2(PROFILE / "mkosi.conf", destination / "mkosi.conf")
     shutil.copyfile(Path(__file__).with_name("audit-rootfs.py"), destination / "audit-rootfs.py")
     (destination / "audit-rootfs.py").chmod(0o555)
+    initrd_audit = destination / "mkosi.images/initrd/audit-initrd.py"
+    shutil.copyfile(Path(__file__).with_name("audit-initrd.py"), initrd_audit)
+    initrd_audit.chmod(0o555)
     artifacts = destination / "artifacts"
     artifacts.mkdir()
     for role, path in paths.items():
@@ -254,7 +274,7 @@ def stage(lock_path, source, destination):
     with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
         versions = {package["name"]: package["version"] for package in package_manifest}
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))
-        stream.write(f"\nPackages={initrd_packages}\n")
+        stream.write(f"\nPackages={initrd_packages}\nFinalizeScripts=audit-initrd.py\n")
     (destination / "inputs.lock.json").write_bytes(lock_bytes)
     entries = {}
     for path in sorted(destination.rglob("*")):
