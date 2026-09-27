@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 import uuid
 from unittest import mock
@@ -82,6 +83,9 @@ class CandidateTests(unittest.TestCase):
 
     def test_verify_stage_matches_only_pinned_source_inputs(self):
         output, report = self.stage_synthetic_candidate()
+        zebra_config = tomllib.loads((output / "rootfs/etc/zrpc/zebra.toml").read_text())
+        self.assertIs(zebra_config["network"]["cache_dir"], False)
+        self.assertEqual(zebra_config["state"]["cache_dir"], "/var/lib/zebra")
         recorded_sha = report["manifest_sha256"]
         recorded_bytes = report["manifest_bytes"]
         manifest = output / "candidate-manifest.json"
@@ -138,6 +142,8 @@ class CandidateTests(unittest.TestCase):
             ("output", lambda candidate: add_build_output(candidate, "output")),
             ("work", lambda candidate: add_build_output(candidate, "work")),
             ("cache", lambda candidate: add_build_output(candidate, "package-cache")),
+            ("peer-cache", lambda candidate: (candidate / "rootfs/etc/zrpc/zebra.toml").write_text(
+                (candidate / "rootfs/etc/zrpc/zebra.toml").read_text().replace("cache_dir = false", "cache_dir = true"))),
         ]
         for name, change in cases:
             with self.subTest(change=name):
