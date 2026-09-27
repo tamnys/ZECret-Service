@@ -319,7 +319,7 @@ fn truncated_lengths_unknown_banks_indices_and_hidden_suffixes_fail_closed() {
 }
 
 #[test]
-fn all_signed_registers_and_artifact_binding_are_required() {
+fn all_signed_registers_and_uki_measurement_are_required() {
     let p = synthetic_policy();
     let td = synthetic_report(&p);
     for index in 0..5 {
@@ -340,6 +340,36 @@ fn all_signed_registers_and_artifact_binding_are_required() {
     changed = p;
     changed.artifacts.rootfs_verity_sha256 = [0; 32];
     assert_eq!(changed.validate(), Err(GcpWorkloadIssue::InvalidPolicy));
+}
+
+#[test]
+fn substituted_nonzero_artifact_hashes_never_verify_provenance() {
+    let mut policy = synthetic_policy();
+    let td = synthetic_report(&policy);
+    let log = synthetic_log();
+    // Only the UKI PE/COFF measurement is compared with a CCEL event. These
+    // other commitments need independent artifact reconstruction at release.
+    policy.artifacts.firmware_endorsement_sha256 = [0xa5; 32];
+    policy.artifacts.uki_sha256 = [0xa5; 32];
+    policy.artifacts.rootfs_verity_sha256 = [0xa5; 32];
+    policy.artifacts.kernel_command_line_sha256 = [0xa5; 32];
+    policy.artifacts.boot_policy_sha256 = [0xa5; 32];
+    policy.artifacts.wrapper_sha256 = [0xa5; 32];
+    policy.artifacts.zebra_sha256 = [0xa5; 32];
+    policy.artifacts.quote_broker_sha256 = [0xa5; 32];
+    policy.artifacts.measurement_recipe_sha256 = [0xa5; 32];
+
+    let mut checks = Checks::default();
+    assert_eq!(check(&td, &log, &policy, &mut checks), Ok(()));
+    assert_eq!(checks.firmware_measurement, InspectionStatus::Verified);
+    assert_eq!(checks.boot_measurements, InspectionStatus::Verified);
+
+    let report = inspect_gcp_workload(QUOTE, COLLATERAL, &log, &policy);
+    let output = serde_json::to_value(report).unwrap();
+    assert_eq!(output["artifact_provenance"], "not_checked");
+    assert_eq!(output["firmware_endorsement_provenance"], "not_checked");
+    assert!(output.get("boot_artifact_policy").is_none());
+    assert!(output.get("firmware_policy").is_none());
 }
 
 #[test]

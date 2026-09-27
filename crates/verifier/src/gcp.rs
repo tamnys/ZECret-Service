@@ -177,8 +177,14 @@ pub struct GcpWorkloadInspection {
     pub quote: OfflineInspection,
     pub policy_source: &'static str,
     pub ccel_integrity: InspectionStatus,
-    pub firmware_policy: InspectionStatus,
-    pub boot_artifact_policy: InspectionStatus,
+    /// Signed MRTD compared with the supplied local reference only.
+    pub firmware_measurement_reference_match: InspectionStatus,
+    /// Signed RTMRs and ordered CCEL compared with supplied local references.
+    pub boot_measurement_reference_match: InspectionStatus,
+    /// The quote and CCEL do not authenticate the endorsement file's digest.
+    pub firmware_endorsement_provenance: InspectionStatus,
+    /// Component hashes require independent reconstruction from build artifacts.
+    pub artifact_provenance: InspectionStatus,
     pub workload_issue: Option<GcpWorkloadIssue>,
 }
 
@@ -200,8 +206,8 @@ impl BoundGcpWorkloadInspection {
             q.security_policy,
             q.workload_policy,
             self.workload.ccel_integrity,
-            self.workload.firmware_policy,
-            self.workload.boot_artifact_policy,
+            self.workload.firmware_measurement_reference_match,
+            self.workload.boot_measurement_reference_match,
             self.authenticated_report_data_match,
         ]
         .iter()
@@ -262,7 +268,7 @@ fn inspect_using(
     quote.operation = "offline_gcp_workload_inspection";
     if issue.is_some() {
         quote.workload_policy = InspectionStatus::Rejected;
-    } else if checks.artifacts == InspectionStatus::Verified {
+    } else if checks.boot_measurements == InspectionStatus::Verified {
         quote.workload_policy = InspectionStatus::Verified;
     }
     BoundGcpWorkloadInspection {
@@ -270,8 +276,10 @@ fn inspect_using(
             quote,
             policy_source: "explicit_local_input_not_release_approval",
             ccel_integrity: checks.replay,
-            firmware_policy: checks.firmware,
-            boot_artifact_policy: checks.artifacts,
+            firmware_measurement_reference_match: checks.firmware_measurement,
+            boot_measurement_reference_match: checks.boot_measurements,
+            firmware_endorsement_provenance: InspectionStatus::NotChecked,
+            artifact_provenance: InspectionStatus::NotChecked,
             workload_issue: issue,
         },
         authenticated_report_data_match: report_data,
@@ -282,15 +290,15 @@ fn inspect_using(
 
 struct Checks {
     replay: InspectionStatus,
-    firmware: InspectionStatus,
-    artifacts: InspectionStatus,
+    firmware_measurement: InspectionStatus,
+    boot_measurements: InspectionStatus,
 }
 impl Default for Checks {
     fn default() -> Self {
         Self {
             replay: InspectionStatus::NotChecked,
-            firmware: InspectionStatus::NotChecked,
-            artifacts: InspectionStatus::NotChecked,
+            firmware_measurement: InspectionStatus::NotChecked,
+            boot_measurements: InspectionStatus::NotChecked,
         }
     }
 }
@@ -309,12 +317,12 @@ fn check(
         return Err(GcpWorkloadIssue::RuntimeMeasurementMismatch);
     }
     checks.replay = InspectionStatus::Verified;
-    checks.firmware = InspectionStatus::Rejected;
+    checks.firmware_measurement = InspectionStatus::Rejected;
     if td.mr_td != policy.mrtd {
         return Err(GcpWorkloadIssue::FirmwareMeasurementMismatch);
     }
-    checks.firmware = InspectionStatus::Verified;
-    checks.artifacts = InspectionStatus::Rejected;
+    checks.firmware_measurement = InspectionStatus::Verified;
+    checks.boot_measurements = InspectionStatus::Rejected;
     if registers != [policy.rtmr0, policy.rtmr1, policy.rtmr2, policy.rtmr3] {
         return Err(GcpWorkloadIssue::BootMeasurementMismatch);
     }
@@ -343,7 +351,7 @@ fn check(
             return Err(GcpWorkloadIssue::EventContentDigestMismatch);
         }
     }
-    checks.artifacts = InspectionStatus::Verified;
+    checks.boot_measurements = InspectionStatus::Verified;
     Ok(())
 }
 
