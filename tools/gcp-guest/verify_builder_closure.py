@@ -34,9 +34,9 @@ DIRECT_LOCK = ROOT / "deploy/gcp/builder-direct-packages.lock.json"
 IDENTITIES = ROOT / "deploy/gcp/guest/input-identities.json"
 PACKAGE_FIELDS = {"name", "version", "architecture", "filename", "size", "sha256"}
 # Updating the candidate package set requires source review and a new digest.
-LOCK_BYTES = 56403
-LOCK_SHA256 = "0b5c02fabc0279c8e8e8712a62de8249089039c0e0af419a86cbcf8da72d1a4e"
-DIRECT_LOCK_BYTES = 3792
+LOCK_BYTES = 56675
+LOCK_SHA256 = "d663fd006afa141c8e7686bd13a94dafe33cd055ee4e09ad1409ed311e1f6714"
+DIRECT_LOCK_BYTES = 4022
 # Exact decoded size of the hash-pinned 20260918 Packages.xz, measured before
 # using it as APT input. The filename is the one APT derives for that source.
 INDEX_BYTES = 56620099
