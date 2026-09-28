@@ -182,6 +182,7 @@ jobs:
           import json
           from pathlib import Path
           import sys
+          import tarfile
 
           sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
           import assemble_guest_base_tree as base
@@ -213,6 +214,40 @@ jobs:
           if (source["runtime_binaries_included"] is not False
                   or source["private_mode_approved"] is not False):
               raise ValueError("source overlay profile changed status")
+          if root.verify_profile(metadata, archives, artifact,
+                                 account_artifact, source_profile, workspace,
+                                 include_overlay=True) != source:
+              raise ValueError("source overlay profile changed after preparation")
+          # The one-ID namespace cannot extract files owned by other guest
+          # users/groups. Inventory exact source tar headers before mkosi so
+          # any expanded map is derived from verified inputs, not guessed.
+          owner_sets = {"uid": set(), "gid": set()}
+          for path in (source_profile / "input" / base.ARCHIVE,
+                       source_profile / root.ACCOUNT_TREE,
+                       source_profile / root.SOURCE_OVERLAY):
+              with tarfile.open(path, mode="r:") as archive:
+                  for member in archive:
+                      owner_sets["uid"].add(member.uid)
+                      owner_sets["gid"].add(member.gid)
+
+          def absent_owner_ids(kind):
+              mapping = []
+              for row in Path(f"/proc/self/{kind}_map").read_text().splitlines():
+                  inner, _outer, count = (int(value) for value in row.split())
+                  mapping.append((inner, inner + count))
+              return sorted(value for value in owner_sets[kind]
+                            if not any(start <= value < end
+                                       for start, end in mapping))
+
+          missing = {kind: absent_owner_ids(kind) for kind in ("uid", "gid")}
+          print(json.dumps({"status": "diagnostic-verified-guest-tar-owners",
+                            "required_uids": sorted(owner_sets["uid"]),
+                            "required_gids": sorted(owner_sets["gid"]),
+                            "unmapped": missing,
+                            "disk_image_built": False,
+                            "private_mode_approved": False}, sort_keys=True))
+          if any(missing.values()):
+              raise ValueError("guest tar owners absent from builder UID/GID map")
           root.build_root_directory(metadata, archives, artifact,
                                     account_artifact, source_profile,
                                     workspace, include_overlay=True)
