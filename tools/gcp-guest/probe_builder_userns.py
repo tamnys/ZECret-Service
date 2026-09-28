@@ -82,7 +82,7 @@ def child(arguments):
         "status": "diagnostic-child-userns-capabilities-present-unbuilt",
         "native_x86_64_linux": True,
         "user_mount_network_pid_namespaces_separated": True,
-        "host_root_only_uid_gid_mapping": True,
+        "host_root_only_uid_gid_mapping": arguments.parent_uid == 0,
         "pid_specific_proc_mounted": True,
         "only_loopback_interface_and_routes_observed": True,
         "parent_network_setns_denied_eperm": True,
