@@ -43,6 +43,7 @@ ADDITIONAL_SCRIPTS = (
     "tools/gcp-guest/stage_sbverify_runtime.py",
     "tools/gcp-guest/verify_zebra_release.py",
     "tools/gcp-guest/gcp_import_archive.py",
+    "tools/gcp-guest/inspect_final_initrd.py",
 )
 STATIC_SOURCE_FILES = (
     "tools/gcp-guest/audit-rootfs.py",
@@ -240,6 +241,8 @@ def source_context(revision, rust_bundle):
                                 selected, revision),
         importer=bind_file_module("outer_gcp_import_archive", ADDITIONAL_SCRIPTS[7],
                                   selected, revision),
+        final_initrd=bind_file_module("outer_final_initrd", ADDITIONAL_SCRIPTS[8],
+                                      selected, revision),
     )
 
 
@@ -451,6 +454,20 @@ def checked_split_initrd(cpio, split):
         os.close(fd)
 
 
+def selected_initrd_packages(manifest_path, kernel_name):
+    """Select the already-verified closure's exact kernel and depmod archives."""
+    manifest = json.loads(regular_bytes(manifest_path), object_pairs_hook=unique_object)
+    if type(manifest) is not list:
+        raise ValueError("reviewed package manifest is not a list")
+    selected = {}
+    for name in (kernel_name, "kmod", "libkmod2"):
+        entries = [item for item in manifest if type(item) is dict and item.get("name") == name]
+        if len(entries) != 1:
+            raise ValueError("final initrd lacks exact kernel or depmod package")
+        selected[name] = entries[0]
+    return selected
+
+
 def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
                     workspace, lock, files):
     output = stage / "output"
@@ -483,11 +500,29 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
             or cpio_report["cpio_size"] != files["initrd.cpio.zst"][0]):
         raise ValueError("audited initrd CPIO differs from mkosi output")
     checked_split_initrd(cpio, output / "zrpc-gcp.initrd")
+    package_entries = selected_initrd_packages(
+        stage / "artifacts/package_manifest", context.source.guest.prepare.KERNEL_PACKAGE)
+    kernel_entry = package_entries[context.source.guest.prepare.KERNEL_PACKAGE]
+    kmod_entry = package_entries["kmod"]
+    libkmod_entry = package_entries["libkmod2"]
     with tempfile.TemporaryDirectory(prefix="zrpc-outer-sbverify-", dir=workspace) as temporary:
         runtime = Path(temporary) / "runtime"
         staged = context.sbverify.stage(builder_archives, runtime)
         if staged["status"] != "diagnostic-sbverify-objects-staged-unapproved":
             raise ValueError("signed sbverify runtime staging differs")
+        final_initrd = context.final_initrd.inspect(
+            files["initrd.cpio.zst"][1], files["initrd.cpio.zst"][0],
+            output / "zrpc-gcp.initrd", files["zrpc-gcp.initrd"][1],
+            files["zrpc-gcp.initrd"][0],
+            stage / "packages" / (kernel_entry["sha256"] + ".deb"), kernel_entry,
+            stage / "packages" / (kmod_entry["sha256"] + ".deb"), kmod_entry,
+            stage / "packages" / (libkmod_entry["sha256"] + ".deb"), libkmod_entry,
+            runtime / "libzstd.so.1", workspace, context.source)
+        if (final_initrd.get("status") != context.final_initrd.STATUS
+                or final_initrd.get("final_initrd_sha256") != files["zrpc-gcp.initrd"][1]
+                or final_initrd.get("final_initrd_bytes") != files["zrpc-gcp.initrd"][0]
+                or final_initrd.get("private_mode_approved") is not False):
+            raise ValueError("complete final initrd inspection did not bind output")
         binary = rust_bundle / "artifacts/zrpc-uki-digest"
         manifest = json.loads(regular_bytes(rust_bundle / "manifest.json"),
                               object_pairs_hook=context.source.guest.prepare.unique_object)
@@ -525,6 +560,7 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
             "root_manifest_sha256": packages["root_manifest_sha256"],
             "initrd_manifest_sha256": packages["initrd_manifest_sha256"],
             "cpio_sha256": cpio_report["cpio_sha256"],
+            "final_initrd_audit": final_initrd,
             "signed_uki_checked": True, "verity_userspace_verified": True,
             "gpt_roothash_matched": True,
             "gcp_import_package_size_eligible": eligible}

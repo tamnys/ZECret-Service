@@ -18,6 +18,19 @@ SPEC.loader.exec_module(runner)
 
 
 class OuterImageRunnerTest(unittest.TestCase):
+    def test_final_initrd_requires_unique_kernel_and_depmod_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / "package_manifest"
+            entries = [{"name": name} for name in ("linux-image-reviewed", "kmod", "libkmod2")]
+            manifest.write_text(json.dumps(entries))
+            self.assertEqual(set(runner.selected_initrd_packages(
+                manifest, "linux-image-reviewed")),
+                {"linux-image-reviewed", "kmod", "libkmod2"})
+            for changed in (entries[:-1], entries + [entries[1]], []):
+                manifest.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(ValueError, "lacks exact kernel or depmod"):
+                    runner.selected_initrd_packages(manifest, "linux-image-reviewed")
+
     def test_package_runner_source_is_checked_before_any_execution(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -222,7 +235,12 @@ class OuterImageRunnerTest(unittest.TestCase):
 
             rewrite_sums()
             (stage / "artifacts").mkdir()
-            (stage / "artifacts/package_manifest").write_text("[]")
+            kernel_name = "linux-image-reviewed-kernel"
+            (stage / "artifacts/package_manifest").write_text(json.dumps([
+                {"name": kernel_name, "sha256": "a" * 64},
+                {"name": "kmod", "sha256": "b" * 64},
+                {"name": "libkmod2", "sha256": "c" * 64},
+            ]))
             certificate = b"test certificate"
             (stage / "artifacts/secure_boot_certificate").write_bytes(certificate)
             audit = stage / "mkosi.images/initrd/audit-initrd.py"
@@ -245,13 +263,27 @@ class OuterImageRunnerTest(unittest.TestCase):
                 ".linux": {"sha256": files["zrpc-gcp.vmlinuz"][1]},
                 ".initrd": {"sha256": files["zrpc-gcp.initrd"][1]}}}
             source = types.SimpleNamespace(
-                guest=types.SimpleNamespace(prepare=types.SimpleNamespace(unique_object=dict)),
+                guest=types.SimpleNamespace(prepare=types.SimpleNamespace(
+                    unique_object=dict, KERNEL_PACKAGE=kernel_name)),
                 audit_cpio=lambda *_: {"cpio_sha256": files["initrd.cpio.zst"][1],
                                        "cpio_size": files["initrd.cpio.zst"][0]})
 
             def stage_sbverify(_archives, destination):
                 destination.mkdir()
                 return {"status": "diagnostic-sbverify-objects-staged-unapproved"}
+
+            def inspect_final(base_digest, base_length, _final, digest, length, kernel_archive,
+                              _kernel_entry, kmod_archive, _kmod_entry,
+                              libkmod_archive, _libkmod_entry, _libzstd,
+                              _workspace, _source):
+                self.assertEqual(kernel_archive.name, "a" * 64 + ".deb")
+                self.assertEqual(kmod_archive.name, "b" * 64 + ".deb")
+                self.assertEqual(libkmod_archive.name, "c" * 64 + ".deb")
+                self.assertEqual(base_digest, files["initrd.cpio.zst"][1])
+                self.assertEqual(base_length, files["initrd.cpio.zst"][0])
+                return {"status": "diagnostic-final-initrd-unapproved",
+                        "final_initrd_sha256": digest, "final_initrd_bytes": length,
+                        "private_mode_approved": False}
 
             context = types.SimpleNamespace(
                 source=source,
@@ -261,6 +293,8 @@ class OuterImageRunnerTest(unittest.TestCase):
                 verity=types.SimpleNamespace(inspect=lambda *_: {"status": "verity"}),
                 roothash=types.SimpleNamespace(inspect=lambda *_: {"roothash": "a" * 64}),
                 sbverify=types.SimpleNamespace(stage=stage_sbverify),
+                final_initrd=types.SimpleNamespace(
+                    STATUS="diagnostic-final-initrd-unapproved", inspect=inspect_final),
                 importer=types.SimpleNamespace(GIB=1024 ** 3, MAX_IMPORT_GIB=2048),
             )
             signature = {"status": "diagnostic-supplied-signer-signature-verified-unapproved",
@@ -275,6 +309,8 @@ class OuterImageRunnerTest(unittest.TestCase):
             self.assertEqual(call.call_args.args[0][1], "verify-signature")
             self.assertEqual(result["uki_sha256"], esp["uki_sha256"])
             self.assertTrue(result["signed_uki_checked"])
+            self.assertEqual(result["final_initrd_audit"]["final_initrd_sha256"],
+                             files["zrpc-gcp.initrd"][1])
             self.assertFalse(result["gcp_import_package_size_eligible"])
             (output / "zrpc-gcp.initrd").write_bytes(b"unreviewed-prefix" + cpio)
             rewrite_sums()
