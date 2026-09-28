@@ -180,7 +180,7 @@ class DiskProfileTests(unittest.TestCase):
 
         def loopback_routes(path, *args, **kwargs):
             if str(path) == "/proc/net/route":
-                return "Iface Destination\nlo 00000000\n"
+                return ""  # Native no-route namespace can expose no IPv4 header.
             if str(path) == "/proc/net/ipv6_route":
                 return "00000000 lo\n"
             return original_read_text(path, *args, **kwargs)

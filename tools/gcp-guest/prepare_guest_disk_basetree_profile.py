@@ -325,9 +325,11 @@ def verify_execution_context(metadata, builder_archives, parent_net_ns,
         raise ValueError("outer no-route network namespace not established")
     ipv4 = Path("/proc/net/route").read_text().splitlines()
     ipv6 = Path("/proc/net/ipv6_route").read_text().splitlines()
+    if ipv4 and ipv4[0].split()[:1] != ["Iface"]:
+        raise ValueError("outer namespace IPv4 route table is malformed")
     ipv4_rows = [line.split() for line in ipv4[1:]]
     ipv6_rows = [line.split() for line in ipv6]
-    if (not ipv4 or any(not row or row[0] != "lo" for row in ipv4_rows)
+    if (any(not row or row[0] != "lo" for row in ipv4_rows)
             or any(not row or row[-1] != "lo" for row in ipv6_rows)):
         # Report interface names and row counts only; no route destinations.
         raise ValueError(
