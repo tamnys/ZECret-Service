@@ -192,7 +192,7 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
     definitions = {
         "10-root.conf": ("[Partition]", "Type=root-x86-64", "Format=ext4", "CopyFiles=/", "Minimize=guess", "ReadOnly=yes", "Verity=data", "VerityMatchKey=root"),
         "20-root-verity.conf": ("[Partition]", "Type=root-x86-64-verity", "Verity=hash", "VerityMatchKey=root", "Minimize=best"),
-        "30-esp.conf": ("[Partition]", "Type=esp", "Format=vfat", "CopyFiles=/efi:/"),
+        "30-esp.conf": ("[Partition]", "Type=esp", "Format=vfat", "CopyFiles=/efi:/", "Minimize=guess"),
     }
     for name, expected_lines in definitions.items():
         path = repart / name

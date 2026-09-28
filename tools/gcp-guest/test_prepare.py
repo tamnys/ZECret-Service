@@ -354,6 +354,7 @@ class CandidateTests(unittest.TestCase):
         self.assertNotIn("linux-image", initrd)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
+        self.assertIn("Minimize=guess", esp)
         self.assertNotIn("CopyFiles=/boot:/", esp)
         self.assertEqual((output / "rootfs/etc/systemd/system/ssh.service").readlink(), Path("/dev/null"))
         self.assertEqual((output / "rootfs/etc/systemd/system/systemd-sysusers.service").readlink(), Path("/dev/null"))
@@ -388,6 +389,7 @@ class CandidateTests(unittest.TestCase):
         prepare.validate_boot_profile(profile)
         changes = (
             ("repart/30-esp.conf", "CopyFiles=/efi:/", "CopyFiles=/boot:/"),
+            ("repart/30-esp.conf", "Minimize=guess", "Minimize=off"),
             ("repart/10-root.conf", "Verity=data", "Verity=off"),
             ("repart/10-root.conf", "Minimize=guess", "Minimize=best"),
             ("repart/20-root-verity.conf", "Verity=hash", "Verity=off"),
