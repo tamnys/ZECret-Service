@@ -152,13 +152,14 @@ def advisory_snapshot(advisories):
         vulnerabilities = []
         for vulnerability in advisory["vulnerabilities"]:
             package = vulnerability.get("package") if isinstance(vulnerability, dict) else None
-            patched = vulnerability.get("first_patched_version") if isinstance(vulnerability, dict) else None
-            if not isinstance(package, dict) or (patched is not None and not isinstance(patched, dict)):
+            if (not isinstance(package, dict)
+                    or not isinstance(vulnerability.get("vulnerable_version_range"), str)
+                    or not isinstance(vulnerability.get("patched_versions"), str)):
                 raise ValueError("published vulnerability malformed")
             vulnerabilities.append({
                 "ecosystem": package.get("ecosystem"), "package": package.get("name"),
                 "range": vulnerability.get("vulnerable_version_range"),
-                "first_patched": patched.get("identifier") if patched else None,
+                "patched_versions": vulnerability["patched_versions"],
             })
         if (not isinstance(advisory.get("ghsa_id"), str)
                 or not isinstance(advisory.get("updated_at"), str)
