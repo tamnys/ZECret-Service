@@ -352,7 +352,9 @@ class CandidateTests(unittest.TestCase):
         changes = (
             ("repart/30-esp.conf", "CopyFiles=/efi:/", "CopyFiles=/boot:/"),
             ("repart/10-root.conf", "Verity=data", "Verity=off"),
+            ("repart/10-root.conf", "Minimize=guess", "Minimize=best"),
             ("repart/20-root-verity.conf", "Verity=hash", "Verity=off"),
+            ("repart/20-root-verity.conf", "Minimize=best", "Minimize=off"),
             ("mkosi.conf", "SecureBoot=yes", "SecureBoot=no"),
             ("mkosi.conf", "KernelModulesInitrd=yes", "KernelModulesInitrd=no"),
             ("mkosi.conf", "KernelModulesInitrdInclude=^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdInclude=.*"),
