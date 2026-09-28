@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build and inspect one unsigned, unbootable-by-design synthetic GCP disk.
 
-This rehearses the production mkosi/repart source with the single explicit
-``--secure-boot=no`` command-line override. All application executables are
+This rehearses the production mkosi/repart source with explicit builder-only
+overrides for unsigned output and an out-of-source temporary workspace. All
+application executables are
 the same deliberately invalid ELF fixture. The output is diagnostic evidence
 only: it has no Secure Boot signature, real Zebra, live TDX evidence, or path
 into the approved-release catalog. Never import or boot this disk as a service.
@@ -132,7 +133,8 @@ def checked_override(stage, manifest_sha256, manifest_bytes):
                             prepare.EXTERNAL_SECURE_BOOT_KEY.encode() + b"\n") != 1
             or config.count(b"SecureBootCertificate=artifacts/secure_boot_certificate\n") != 1
             or config.count(b"Bootloader=uki\n") != 1
-            or config.count(b"RepartDirectories=repart\n") != 1):
+            or config.count(b"RepartDirectories=repart\n") != 1
+            or config.count(b"WorkspaceDirectory=work\n") != 1):
         raise ValueError("unsigned override does not derive from the production image recipe")
     return SECURE_BOOT_OVERRIDE
 
@@ -195,13 +197,24 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
         raise ValueError("guest package signature was not rechecked")
     staged = prepare.stage(lock_path, inputs, stage)
     override = checked_override(stage, staged["manifest_sha256"], staged["manifest_bytes"])
+    # mkosi 25.3 refuses a workspace beneath any BuildSources= tree. The
+    # source-bound profile has WorkspaceDirectory=work, relative to stage;
+    # only the diagnostic invocation relocates its disposable build scratch.
+    work = workspace / "mkosi-work"
+    if (not workspace.is_absolute() or workspace.is_symlink()
+            or not workspace.resolve(strict=True).is_relative_to("/workspace")
+            or work.exists() or work.is_symlink()
+            or work.resolve().is_relative_to(prepare.ROOT.resolve())):
+        raise ValueError("fresh out-of-source workspace-volume mkosi scratch required")
+    work_override = f"--workspace-directory={work}"
     manifest = json.loads(outer.regular_bytes(stage / "candidate-manifest.json"),
                           object_pairs_hook=prepare.unique_object)
     initial = outer.immutable_stage_inventory(stage, manifest)
     environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C",
                    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
                    "TMPDIR": str(apt_scratch / "tmp")}
-    command = ["/usr/bin/mkosi", f"--directory={stage}", override, "build"]
+    command = ["/usr/bin/mkosi", f"--directory={stage}", override,
+               work_override, "build"]
     result = subprocess.run(command, env=environment, check=False)
     if result.returncode:
         raise ValueError("unsigned synthetic mkosi full-disk rehearsal failed")
@@ -213,7 +226,9 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
             "production_image": False, "synthetic_workload": True,
             "source_profile_sha256": prepare.digest(prepare.PROFILE / "mkosi.conf"),
             "stage_manifest_sha256": staged["manifest_sha256"],
-            "secure_boot_override": override, "secure_boot_signature_checked": False,
+            "secure_boot_override": override,
+            "mkosi_workspace_override": work_override,
+            "secure_boot_signature_checked": False,
             "mkosi_executed": True, "diagnostic_disk_built": True,
             **observed, "boot_verified": False, "hardware_verified": False,
             "private_mode_approved": False}
