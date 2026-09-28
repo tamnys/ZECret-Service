@@ -1,0 +1,41 @@
+name: GCP builder child-user-namespace feasibility probe
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/gcp-builder-userns-probe.yml
+      - tools/gcp-guest/probe_builder_userns.py
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  userns-probe:
+    name: Native x86 child user/PID/network namespace feasibility
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Fetch the exact public source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Exercise child namespaces without building an artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/source"
+          sudo -n /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/source/tools/gcp-guest/probe_builder_userns.py" \
+            parent --parent-mode root \
+            --scratch "/var/tmp/zrpc-userns-probe-$GITHUB_RUN_ID"
