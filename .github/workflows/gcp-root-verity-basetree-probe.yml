@@ -313,7 +313,12 @@ jobs:
           if (deltas["generated_effects_approved"] is not False
                   or deltas["private_mode_approved"] is not False):
               raise ValueError("root delta audit changed status")
-          for difference in deltas["differences"]:
+          if (len(deltas["difference_evidence"]) != len(deltas["differences"])
+                  or any({key: item[key] for key in ("path", "difference")} != raw
+                         for item, raw in zip(deltas["difference_evidence"],
+                                              deltas["differences"]))):
+              raise ValueError("root delta evidence does not match differences")
+          for difference in deltas["difference_evidence"]:
               print(json.dumps({"unreviewed_root_delta": difference}, sort_keys=True))
           print(json.dumps({"status": deltas["status"],
                             "generated_delta_count": len(deltas["differences"]),
