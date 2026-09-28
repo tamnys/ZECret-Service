@@ -4,10 +4,31 @@ on:
   workflow_dispatch:
     inputs:
       prepare_boot_diagnostic:
-        description: Prepare unsigned boot-test disk and QEMU tools; no VM launch
+        description: Prepare unsigned boot-test disk and QEMU tools
         required: true
         default: false
         type: boolean
+      observe_boot:
+        description: Launch the unsigned synthetic disk in isolated QEMU; diagnostic only
+        required: true
+        default: false
+        type: boolean
+      qemu_memory_mib:
+        description: Explicit guest RAM for optional QEMU observation, in MiB
+        required: false
+        type: string
+      qemu_vcpus:
+        description: Explicit vCPU count for optional QEMU observation
+        required: false
+        type: string
+      qemu_deadline_seconds:
+        description: Explicit observation deadline for optional QEMU, in seconds
+        required: false
+        type: string
+      qemu_capture_seconds:
+        description: Optional comma-separated VGA capture offsets before the deadline
+        required: false
+        type: string
       native_rust_run_id:
         description: Successful exact-HEAD native Rust workflow run ID for boot-test preparation
         required: false
@@ -38,6 +59,11 @@ jobs:
     env:
       ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ZRPC_PREPARE_BOOT_DIAGNOSTIC: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_boot_diagnostic || false }}
+      ZRPC_OBSERVE_BOOT: ${{ github.event_name == 'workflow_dispatch' && inputs.observe_boot || false }}
+      ZRPC_QEMU_MEMORY_MIB: ${{ inputs.qemu_memory_mib }}
+      ZRPC_QEMU_VCPUS: ${{ inputs.qemu_vcpus }}
+      ZRPC_QEMU_DEADLINE_SECONDS: ${{ inputs.qemu_deadline_seconds }}
+      ZRPC_QEMU_CAPTURE_SECONDS: ${{ inputs.qemu_capture_seconds }}
       ZRPC_RUST_RUN_ID: ${{ inputs.native_rust_run_id }}
       ZRPC_RUST_RUN_ATTEMPT: ${{ inputs.native_rust_run_attempt }}
       ZRPC_RUST_ARTIFACT_DIGEST: ${{ inputs.native_rust_artifact_digest }}
@@ -56,6 +82,45 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
           test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" checkout -q --detach FETCH_HEAD
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Validate optional QEMU observation selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B - <<'PY'
+          import os
+          import re
+
+          prepare = os.environ["ZRPC_PREPARE_BOOT_DIAGNOSTIC"]
+          observe = os.environ["ZRPC_OBSERVE_BOOT"]
+          values = (os.environ["ZRPC_QEMU_MEMORY_MIB"],
+                    os.environ["ZRPC_QEMU_VCPUS"],
+                    os.environ["ZRPC_QEMU_DEADLINE_SECONDS"])
+          captures = os.environ["ZRPC_QEMU_CAPTURE_SECONDS"]
+          if prepare not in ("true", "false") or observe not in ("true", "false"):
+              raise ValueError("diagnostic selection is malformed")
+          if observe == "true":
+              if prepare != "true" or any(re.fullmatch(r"[1-9][0-9]*", value) is None
+                                          for value in values):
+                  raise ValueError("QEMU observation requires boot preparation and explicit positive resources/deadline")
+              if captures:
+                  if re.fullmatch(r"[1-9][0-9]*(,[1-9][0-9]*)*", captures) is None:
+                      raise ValueError("QEMU capture offsets are malformed")
+                  offsets = [int(value) for value in captures.split(",")]
+                  if offsets != sorted(set(offsets)) or offsets[-1] >= int(values[2]):
+                      raise ValueError("QEMU capture offsets must increase before the deadline")
+          elif any(values) or captures:
+              raise ValueError("QEMU resource inputs require observation selection")
+          PY
+
+      - name: Test optional QEMU observation guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          python3 -B "$source/tools/gcp-guest/test_boot_observe_qemu.py"
+          python3 -B "$source/tools/gcp-guest/test_qemu_isolation.py"
           test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
 
       - name: Fetch selected exact-commit native Rust receipt for boot-test preparation
@@ -266,12 +331,19 @@ jobs:
             fi
             run_staged /usr/bin/python3 -I -B "$tool" "$create_mode" \
               "${prefix[@]}" "${receipt[@]}"
-            run_staged /usr/bin/python3 -I -B "$tool" "$build_mode" \
-              "${prefix[@]}" "${receipt[@]}" \
-              --stage /workspace/source/.codex-tmp/stage \
-              --builder-archives /zrpc-archives --workspace /workspace \
-              --apt-scratch /zrpc-apt-scratch \
-              --parent-net-ns "$4" --parent-user-ns "$2" --parent-pid-ns "$5"
+            build=(/usr/bin/python3 -I -B "$tool" "$build_mode" \
+                   "${prefix[@]}" "${receipt[@]}" \
+                   --stage /workspace/source/.codex-tmp/stage \
+                   --builder-archives /zrpc-archives --workspace /workspace \
+                   --apt-scratch /zrpc-apt-scratch \
+                   --parent-net-ns "$4" --parent-user-ns "$2" --parent-pid-ns "$5")
+            if test "$boot_diagnostic" = true; then
+              run_staged "${build[@]}" | tee "$scratch/diagnostic-build.log"
+              tail -n 1 "$scratch/diagnostic-build.log" \
+                > "$scratch/guest-payload/boot-disk-report.json"
+            else
+              run_staged "${build[@]}"
+            fi
             if test "$boot_diagnostic" = true; then
               mkdir -m 0700 "$staged/workspace/boot-apt-scratch"
               run_staged /usr/bin/python3 -I -B \
@@ -279,7 +351,10 @@ jobs:
                 --metadata /zrpc-metadata \
                 --archives /zrpc-archives \
                 --output /workspace/boot-toolchain \
-                --scratch /workspace/boot-apt-scratch --workspace /workspace
+                --scratch /workspace/boot-apt-scratch --workspace /workspace \
+                | tee "$scratch/qemu-stage.log"
+              tail -n 1 "$scratch/qemu-stage.log" \
+                > "$scratch/guest-payload/boot-toolchain-stage.json"
             fi
             echo "::warning::Unsigned synthetic-service disk is diagnostic only; not signed or approved for private mode."
           ' _ "$staged" "$parent_user_ns" "$parent_mount_ns" \
@@ -287,4 +362,76 @@ jobs:
             "$root_stage" "$source" "$scratch" \
             "$ZRPC_SOURCE_SHA" "$chroot_command" "$ZRPC_PREPARE_BOOT_DIAGNOSTIC"
           echo "Exact source: $ZRPC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
-          echo 'Result: unsigned synthetic-service full-disk diagnostic only; QEMU tools staged only when selected; no boot or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Result: unsigned synthetic-service full-disk diagnostic; optional QEMU observation is a separate step; no TDX or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Observe optional unsigned boot in isolated QEMU
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.observe_boot }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$ZRPC_OBSERVE_BOOT" = true
+          test "$ZRPC_PREPARE_BOOT_DIAGNOSTIC" = true
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          test "$runner_uid" -gt 0
+          test "$runner_gid" -gt 0
+          root_stage="/var/tmp/zrpc-full-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          source="$root_stage/source"
+          scratch="$root_stage/full-disk"
+          toolchain="$scratch/guest-payload/boot-toolchain"
+          output="$toolchain/observe"
+          observer="$source/tools/gcp-guest/qemu_isolation.py"
+          test "$(sudo -n git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          sudo -n git -C "$source" diff --exit-code HEAD -- \
+            tools/gcp-guest/qemu_isolation.py tools/gcp-guest/boot_observe_qemu.py
+          sudo -n git -C "$source" ls-files --error-unmatch -- \
+            tools/gcp-guest/qemu_isolation.py tools/gcp-guest/boot_observe_qemu.py
+          evidence="$GITHUB_WORKSPACE/boot-observation"
+          install -d -m 0700 "$evidence"
+          capture_args=()
+          if test -n "$ZRPC_QEMU_CAPTURE_SECONDS"; then
+            IFS=, read -r -a offsets <<< "$ZRPC_QEMU_CAPTURE_SECONDS"
+            for offset in "${offsets[@]}"; do
+              capture_args+=(--capture-at-seconds "$offset")
+            done
+          fi
+          set +e
+          sudo -n /usr/bin/python3 -I -B "$observer" run \
+            --toolchain-root "$toolchain" \
+            --toolchain-report "$scratch/guest-payload/boot-toolchain-stage.json" \
+            --disk "$scratch/diagnostic-work/stage/output/zrpc-gcp.raw" \
+            --disk-report "$scratch/guest-payload/boot-disk-report.json" \
+            --output "$output" \
+            --memory-mib "$ZRPC_QEMU_MEMORY_MIB" \
+            --vcpus "$ZRPC_QEMU_VCPUS" \
+            --deadline-seconds "$ZRPC_QEMU_DEADLINE_SECONDS" \
+            --qemu-uid "$runner_uid" --qemu-gid "$runner_gid" \
+            "${capture_args[@]}" \
+            | tee "$evidence/observer.stdout.jsonl"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          if sudo -n test -d "$output"; then
+            for name in observation.json qemu.log; do
+              if sudo -n test -f "$output/$name" && sudo -n test ! -L "$output/$name"; then
+                sudo -n install -m 0644 "$output/$name" "$evidence/$name"
+              fi
+            done
+            sudo -n find "$output" -maxdepth 1 -type f -name 'vga-*.ppm' -print0 \
+              > "$GITHUB_WORKSPACE/full-disk/qemu-frame-paths"
+            while IFS= read -r -d '' frame; do
+              if sudo -n test -f "$frame" && sudo -n test ! -L "$frame"; then
+                sudo -n install -m 0644 "$frame" "$evidence/$(basename "$frame")"
+              fi
+            done < "$GITHUB_WORKSPACE/full-disk/qemu-frame-paths"
+          fi
+          test "${statuses[0]}" -eq 0
+          test "${statuses[1]}" -eq 0
+          echo 'QEMU generated diagnostic evidence only; boot, TDX and private-mode approval remain false.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload synthetic boot observation
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.observe_boot }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gcp-unsigned-qemu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: boot-observation/
+          if-no-files-found: warn
