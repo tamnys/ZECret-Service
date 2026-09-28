@@ -45,6 +45,7 @@ ADDITIONAL_SCRIPTS = (
     "tools/gcp-guest/gcp_import_archive.py",
     "tools/gcp-guest/inspect_final_initrd.py",
     "tools/gcp-guest/inspect_raw_rootfs.py",
+    "tools/gcp-guest/prepare_import_disk.py",
 )
 STATIC_SOURCE_FILES = (
     "tools/gcp-guest/audit-rootfs.py",
@@ -247,6 +248,8 @@ def source_context(revision, rust_bundle):
                                       selected, revision),
         rootfs=bind_file_module("outer_raw_rootfs", ADDITIONAL_SCRIPTS[9],
                                 selected, revision),
+        import_disk=bind_file_module("outer_prepare_import_disk", ADDITIONAL_SCRIPTS[10],
+                                     selected, revision),
     )
 
 
@@ -597,6 +600,200 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
             "gcp_import_package_size_eligible": eligible}
 
 
+def write_diagnostic(path, report):
+    if type(report) is not dict or report.get("private_mode_approved") is not False:
+        raise ValueError("import diagnostic cannot approve private mode")
+    data = (json.dumps(report, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(data)
+        output.flush()
+        os.fsync(output.fileno())
+    if regular_bytes(path) != data:
+        raise ValueError("written import diagnostic changed")
+    return {"path": str(path), "sha256": sha256(data)}
+
+
+def inspected_uki_digest(context, rust_bundle, output, boot):
+    binary = rust_bundle / "artifacts/zrpc-uki-digest"
+    manifest = json.loads(regular_bytes(rust_bundle / "manifest.json"),
+                          object_pairs_hook=context.source.guest.prepare.unique_object)
+    if hash_regular(binary)[1] != manifest["artifact_sha256"]["zrpc-uki-digest"]:
+        raise ValueError("UKI digest executable differs from native Rust receipt")
+    uki = output / "zrpc-gcp.efi"
+    if hash_regular(uki) != (boot["uki_bytes"], boot["uki_sha256"]):
+        raise ValueError("import ESP UKI differs from signed mkosi output")
+    result = subprocess.run(
+        [str(binary), str(uki), boot["uki_sha256"], str(boot["uki_bytes"])],
+        capture_output=True, check=False, stdin=subprocess.DEVNULL,
+        env={"HOME": "/nonexistent", "LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+    if result.returncode:
+        raise ValueError("reviewed UKI digest executable rejected import UKI")
+    report = json.loads(result.stdout,
+                        object_pairs_hook=context.source.guest.prepare.unique_object)
+    if (report.get("schema_version") != 1
+            or report.get("status") != "diagnostic-uki-pe-coff-sha384-unapproved"
+            or report.get("uki_sha256") != boot["uki_sha256"]
+            or report.get("uki_bytes") != boot["uki_bytes"]
+            or report.get("signed_uki_checked") is not False
+            or report.get("boot_measurement_checked") is not False
+            or report.get("release_approved") is not False
+            or report.get("private_mode_approved") is not False):
+        raise ValueError("UKI digest report differs from inspected import disk")
+    return report
+
+
+def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_archives,
+                     workspace, import_directory, sfdisk, source_sha256,
+                     source_bytes, expected_rust_manifest_sha256, zebra_receipt,
+                     parent_network_namespace,
+                     parent_mount_namespace):
+    """Convert one verified mkosi output, then inspect the new disk identity."""
+    if sys.platform != "linux" or os.uname().machine != "x86_64":
+        raise ValueError("native x86_64 Linux import inspection required")
+    workspace = Path(workspace).resolve(strict=True)
+    import_directory = Path(import_directory)
+    stage = Path(stage)
+    if (not workspace.is_dir() or not workspace.is_relative_to(ROOT)
+            or not stage.is_absolute() or stage.is_symlink()
+            or stage.resolve(strict=True) != stage
+            or not stage.is_relative_to(ROOT / ".codex-tmp")
+            or not import_directory.is_absolute() or import_directory.exists()
+            or import_directory.is_symlink()
+            or import_directory.parent.resolve(strict=True) != import_directory.parent
+            or not import_directory.parent.is_relative_to(workspace)
+            or import_directory.is_relative_to(stage)
+            or not stage.is_relative_to(ROOT)):
+        raise ValueError("fresh import output and source stage must stay on workspace")
+    for path in (inputs, rust_bundle, metadata, builder_archives, zebra_receipt):
+        if (not path.is_absolute() or path.resolve(strict=True) != path
+                or not path.is_relative_to(ROOT)
+                or import_directory.is_relative_to(path)):
+            raise ValueError("import source inputs must be real disjoint workspace paths")
+    if (type(expected_rust_manifest_sha256) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_rust_manifest_sha256)
+            or sha256(regular_bytes(rust_bundle / "manifest.json")) !=
+               expected_rust_manifest_sha256):
+        raise ValueError("import Rust bundle differs from original mkosi build")
+    context = source_context(revision, rust_bundle)
+    prepare = context.source.guest.prepare
+    checked_source_tree(context.selected, revision, context.source)
+    manifest_bytes = regular_bytes(stage / "candidate-manifest.json")
+    manifest_sha256 = sha256(manifest_bytes)
+    prepare.verify_stage(stage, manifest_sha256, len(manifest_bytes))
+    manifest = json.loads(manifest_bytes, object_pairs_hook=prepare.unique_object)
+    count = immutable_stage_inventory(stage, manifest)
+    lock = json.loads(regular_bytes(stage / "inputs.lock.json"),
+                      object_pairs_hook=prepare.unique_object)
+    prepare.validate_lock(lock, inputs)
+    rust = context.source.rust_inputs.inspect(
+        rust_bundle, revision, selected_output=context.selected.output)
+    for role in ("wrapper", "broker", "guard", "cookie", "early_init"):
+        if lock["artifacts"][role]["sha256"] != rust["artifacts"][role]["sha256"]:
+            raise ValueError("import source guest role differs from native Rust receipt")
+    checked_zebra(context, lock, inputs, zebra_receipt)
+    namespace = context.package.check_loopback_only_ip_state(
+        parent_network_namespace, parent_mount_namespace)
+    output = stage / "output"
+    files = checked_outputs(output)
+    if files["zrpc-gcp.raw"] != (source_bytes, source_sha256):
+        raise ValueError("mkosi source disk differs from recorded exact identity")
+    original = inspect_outputs(context, stage, rust_bundle, metadata,
+                               builder_archives, workspace, lock, files, manifest)
+    import_directory.mkdir(mode=0o700)
+    raw = import_directory / "disk.raw"
+    sizing = context.import_disk._prepare(
+        output / "zrpc-gcp.raw", source_sha256, source_bytes, raw, sfdisk,
+        gpt_module=context.gpt)
+    if (sizing.get("status") != "diagnostic-import-sized-gpt-unapproved"
+            or sizing.get("mkosi_disk_sha256") != source_sha256
+            or sizing.get("mkosi_disk_bytes") != source_bytes
+            or sizing.get("sfdisk_sha256") != context.import_disk.SFDISK_SHA256
+            or sizing.get("sfdisk_package_archive_sha256") !=
+               context.import_disk.SFDISK_PACKAGE_SHA256
+            or sizing.get("sfdisk_archive_membership_rechecked") is not False
+            or sizing.get("sfdisk_dynamic_runtime_authenticated") is not False
+            or sizing.get("import_package_ready") is not False
+            or sizing.get("private_mode_approved") is not False):
+        raise ValueError("import sizing report differs from verified mkosi output")
+    final_sha256 = sizing["raw_disk_sha256"]
+    final_bytes = sizing["raw_disk_bytes"]
+    args = (raw, final_sha256, final_bytes, SECTOR_SIZE)
+    inrelease = metadata / "InRelease"
+    index = metadata / "Packages.xz"
+    layout = context.gpt.inspect(*args)
+    boot = context.esp.inspect(*args, inrelease, index, builder_archives, workspace)
+    hashes = context.verity.inspect(*args, inrelease, index, builder_archives, workspace)
+    binding = context.roothash.inspect(layout, boot, hashes, final_sha256, final_bytes)
+    workload = context.rootfs.inspect(*args, layout, hashes, inrelease, index,
+                                      builder_archives, stage, manifest, workspace)
+    uki_digest = inspected_uki_digest(context, rust_bundle, output, boot)
+    if (layout.get("raw_disk_sha256") != final_sha256
+            or layout.get("raw_disk_bytes") != final_bytes
+            or boot.get("raw_disk_sha256") != final_sha256
+            or boot.get("raw_disk_bytes") != final_bytes
+            or hashes.get("raw_disk_sha256") != final_sha256
+            or hashes.get("raw_disk_bytes") != final_bytes
+            or hashes.get("verity_userspace_verified") is not True
+            or workload.get("status") != context.rootfs.STATUS
+            or workload.get("raw_disk_sha256") != final_sha256
+            or workload.get("raw_disk_bytes") != final_bytes
+            or workload.get("root_partition_sha256") !=
+               original["raw_rootfs_audit"]["root_partition_sha256"]
+            or workload.get("reader_executable_matches_signed_package") is not True
+            or workload.get("private_mode_approved") is not False
+            or boot.get("uki_sha256") != original["uki_sha256"]
+            or binding.get("roothash") != original["roothash"]
+            or hash_regular(raw) != (final_bytes, final_sha256)):
+        raise ValueError("final import disk inspection differs from signed mkosi output")
+    checked_source_tree(context.selected, revision, context.source)
+    if (immutable_stage_inventory(stage, manifest) != count
+            or sha256(regular_bytes(stage / "candidate-manifest.json")) != manifest_sha256
+            or context.package.check_loopback_only_ip_state(
+                parent_network_namespace, parent_mount_namespace) != namespace):
+        raise ValueError("source-bound import inputs or namespace changed")
+    require_unchanged_outputs(output, files)
+    if sha256(regular_bytes(rust_bundle / "manifest.json")) != expected_rust_manifest_sha256:
+        raise ValueError("import Rust bundle changed during reinspection")
+    reports = {}
+    for name, report in (("sizing", sizing), ("gpt", layout), ("esp", boot),
+                         ("verity", hashes), ("roothash", binding),
+                         ("rootfs", workload), ("uki-digest", uki_digest)):
+        reports[name] = write_diagnostic(import_directory / (name + ".json"), report)
+    receipt = {
+        "schema_version": 1,
+        "status": "diagnostic-import-disk-reinspected-unapproved",
+        "source_commit": revision,
+        "stage_manifest_sha256": manifest_sha256,
+        "input_lock_sha256": manifest["input_lock_sha256"],
+        "native_rust_manifest_sha256": expected_rust_manifest_sha256,
+        "mkosi_disk_sha256": source_sha256,
+        "mkosi_disk_bytes": source_bytes,
+        "raw_disk_sha256": final_sha256,
+        "raw_disk_bytes": final_bytes,
+        "sfdisk_sha256": sizing["sfdisk_sha256"],
+        "sfdisk_package_archive_sha256": sizing["sfdisk_package_archive_sha256"],
+        "sfdisk_archive_membership_rechecked": False,
+        "sfdisk_dynamic_runtime_authenticated": False,
+        "disk_raw": str(raw),
+        "reports": reports,
+        "package_diagnostics": {
+            "esp_diagnostic": reports["esp"],
+            "uki_digest_diagnostic": reports["uki-digest"],
+            "verity_diagnostic": reports["verity"],
+        },
+        "import_archive_created": False,
+        "import_package_ready": False,
+        "boot_verified": False,
+        "private_mode_approved": False,
+    }
+    receipt_artifact = write_diagnostic(import_directory / "reinspection.json", receipt)
+    if hash_regular(raw) != (final_bytes, final_sha256):
+        raise ValueError("import disk changed after diagnostic publication")
+    return {**receipt, "receipt_artifact": receipt_artifact}
+
+
 def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
           metadata, builder_archives, workspace,
           parent_network_namespace, parent_mount_namespace):
@@ -618,6 +815,7 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
             raise ValueError("outer build inputs must be real workspace paths")
         if stage.is_relative_to(path) or path.is_relative_to(stage):
             raise ValueError("fresh stage must be disjoint from every reviewed input")
+    rust_manifest_sha256 = sha256(regular_bytes(rust_bundle / "manifest.json"))
     context = source_context(revision, rust_bundle)
     prepare = context.source.guest.prepare
     lock = json.loads(regular_bytes(lock_path), object_pairs_hook=prepare.unique_object)
@@ -674,8 +872,11 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
                 parent_network_namespace, parent_mount_namespace) != namespace:
         raise ValueError("source-bound inputs or outer namespace changed during inspection")
     require_unchanged_outputs(stage / "output", files)
+    if sha256(regular_bytes(rust_bundle / "manifest.json")) != rust_manifest_sha256:
+        raise ValueError("Rust bundle changed during mkosi build or inspection")
     return {"schema_version": 1, "status": "candidate-outer-image-built-unapproved",
             "source_commit": revision,
+            "native_rust_manifest_sha256": rust_manifest_sha256,
             "input_lock_sha256": staged["input_lock_sha256"],
             "candidate_manifest_sha256": staged["manifest_sha256"],
             "immutable_stage_entries_checked": count,
@@ -692,19 +893,40 @@ def main(argv=None):
                           "image_built": False, "private_mode_approved": False}))
         return 1
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("build",))
+    commands = parser.add_subparsers(dest="command", required=True)
+    builder = commands.add_parser("build")
     for name in ("lock", "inputs", "zebra-receipt", "rust-bundle", "stage",
                  "metadata", "builder-archives", "workspace"):
-        parser.add_argument("--" + name, type=Path, required=True)
-    parser.add_argument("--revision", required=True)
-    parser.add_argument("--parent-network-namespace", required=True)
-    parser.add_argument("--parent-mount-namespace", required=True)
+        builder.add_argument("--" + name, type=Path, required=True)
+    builder.add_argument("--report-path", type=Path)
+    importer = commands.add_parser("reinspect-import")
+    for name in ("inputs", "zebra-receipt", "rust-bundle", "stage", "metadata",
+                 "builder-archives", "workspace", "import-directory", "sfdisk"):
+        importer.add_argument("--" + name, type=Path, required=True)
+    importer.add_argument("--mkosi-disk-sha256", required=True)
+    importer.add_argument("--mkosi-disk-bytes", type=int, required=True)
+    importer.add_argument("--native-rust-manifest-sha256", required=True)
+    for command in (builder, importer):
+        command.add_argument("--revision", required=True)
+        command.add_argument("--parent-network-namespace", required=True)
+        command.add_argument("--parent-mount-namespace", required=True)
     args = parser.parse_args(argv)
     try:
-        report = build(args.lock, args.inputs, args.zebra_receipt, args.rust_bundle,
-                       args.revision, args.stage, args.metadata, args.builder_archives,
-                       args.workspace,
-                       args.parent_network_namespace, args.parent_mount_namespace)
+        if args.command == "build":
+            report = build(args.lock, args.inputs, args.zebra_receipt, args.rust_bundle,
+                           args.revision, args.stage, args.metadata, args.builder_archives,
+                           args.workspace,
+                           args.parent_network_namespace, args.parent_mount_namespace)
+            if args.report_path is not None:
+                write_diagnostic(args.report_path, report)
+        else:
+            report = reinspect_import(
+                args.stage, args.inputs, args.rust_bundle, args.revision, args.metadata,
+                args.builder_archives, args.workspace, args.import_directory,
+                args.sfdisk, args.mkosi_disk_sha256, args.mkosi_disk_bytes,
+                args.native_rust_manifest_sha256,
+                args.zebra_receipt, args.parent_network_namespace,
+                args.parent_mount_namespace)
     except (OSError, ValueError, KeyError, TypeError, IndexError, UnicodeError,
             tarfile.TarError, subprocess.SubprocessError) as error:
         report = {"status": "blocked", "reason": str(error),
