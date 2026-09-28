@@ -51,5 +51,6 @@
     "firmware_endorsements_and_boot_policy"
   ],
   "artifact_hashes": null,
+  "reviewed_zebra_provenance_receipt_sha256": null,
   "measurement_values": null
 }
