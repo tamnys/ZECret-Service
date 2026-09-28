@@ -1,0 +1,263 @@
+name: GCP native package-backed initrd diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      native_rust_run_id:
+        description: Successful exact-HEAD GCP native x86 Cargo gate run ID
+        required: true
+        type: string
+      native_rust_run_attempt:
+        description: Successful run attempt number
+        required: true
+        type: string
+      native_rust_artifact_digest:
+        description: Independently recorded SHA-256 of its uploaded ZIP artifact
+        required: true
+        type: string
+
+permissions:
+  actions: read
+
+jobs:
+  initrd:
+    name: Unsigned package-installed CPIO, no boot or private approval
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.sha }}
+      ZRPC_RUST_RUN_ID: ${{ inputs.native_rust_run_id }}
+      ZRPC_RUST_RUN_ATTEMPT: ${{ inputs.native_rust_run_attempt }}
+      ZRPC_RUST_ARTIFACT_DIGEST: ${{ inputs.native_rust_artifact_digest }}
+    steps:
+      - name: Fetch exact selected public source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Fetch only the preselected native Rust run and digest-pinned receipt
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/package-initrd"
+          mkdir "$scratch"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          python3 -I -B "$source/tools/gcp-guest/fetch_native_rust_receipt.py" \
+            --repository "$GITHUB_REPOSITORY" \
+            --revision "$ZRPC_SOURCE_SHA" \
+            --run-id "$ZRPC_RUST_RUN_ID" \
+            --run-attempt "$ZRPC_RUST_RUN_ATTEMPT" \
+            --artifact-digest "$ZRPC_RUST_ARTIFACT_DIGEST" \
+            --output "$scratch/native-rust"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Fetch locked signed Debian snapshot and stage reviewed builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/package-initrd"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          mkdir "$scratch/builder-archives" "$scratch/guest-archives" \
+            "$scratch/metadata" "$scratch/guest-payload"
+          cd "$source"
+          ZRPC_SCRATCH="$scratch" python3 -I -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import fetch_builder_closure as builder
+          import fetch_guest_closure as guest
+
+          scratch = Path(os.environ["ZRPC_SCRATCH"])
+          lock, _, _ = builder.reviewed_lock(builder.closure.LOCK)
+          directory = os.open(scratch / "builder-archives", os.O_RDONLY |
+                              os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              for entry in lock["packages"]:
+                  builder.download_one(directory, entry, lock["snapshot"])
+                  if not builder.verify_cached(directory, entry):
+                      raise ValueError("reviewed builder archive missing after download")
+          finally:
+              os.close(directory)
+          builder.fetch_reviewed_metadata(scratch / "metadata")
+          guest.prefetch_archives(scratch / "guest-archives")
+          print(json.dumps({"status": "diagnostic-locked-archive-bytes-fetched",
+                            "builder_archives": len(lock["packages"]),
+                            "initrd_built": False,
+                            "private_mode_approved": False}, sort_keys=True))
+          PY
+          CODEX_WORKSPACE_DIR="$GITHUB_WORKSPACE" \
+            python3 -B tools/gcp-guest/stage_builder_toolchain.py \
+              --archives "$scratch/builder-archives" --output "$scratch/staged"
+          cp -a -- "$scratch/native-rust/verified/rust-bundle" \
+            "$scratch/guest-payload/rust-bundle"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Prepare, build, and audit only the native diagnostic CPIO
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/package-initrd"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+          # The public runner's nonroot UID cannot enter the required mapped
+          # user namespace. The established owner-map probe maps guest uid 0
+          # and gids 0/42 under host root, then proves parent-network reentry
+          # is denied before handing off to the isolated builder.
+          root_stage="/var/tmp/zrpc-initrd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$root_stage"
+          sudo -n install -d -m 0700 "$root_stage"
+          sudo -n cp -a -- "$source" "$scratch" "$root_stage/"
+          sudo -n chown -hR 0:0 -- "$root_stage"
+          source="$root_stage/source"
+          scratch="$root_stage/package-initrd"
+          staged="$scratch/staged"
+          test "$(sudo -n git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(sudo -n git -C "$source" status --porcelain --untracked-files=all --ignored)"
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          parent_pid_ns="$(readlink /proc/self/ns/pid)"
+          chroot_command="$(command -v chroot)"
+          sudo -n /usr/bin/python3 -I -B \
+            "$source/tools/gcp-guest/probe_builder_owner_map.py" \
+            --scratch "/var/tmp/zrpc-owner-map-initrd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -- /usr/bin/bash -c '
+            set -euo pipefail
+            staged=$1
+            test "$staged" = "$6/staged"
+            test "$(readlink /proc/self/ns/user)" != "$2"
+            test "$(readlink /proc/self/ns/mnt)" != "$3"
+            test "$(readlink /proc/self/ns/net)" != "$4"
+            test "$(readlink /proc/self/ns/pid)" != "$5"
+            test "$(readlink /proc/1/ns/pid)" = "$(readlink /proc/self/ns/pid)"
+            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/uid_map)" = "0 0 1"
+            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/gid_map | sort -n)" = "$(printf "0 0 1\\n42 42 1")"
+            test "$(cat /proc/self/setgroups)" = deny
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            for fd in /proc/$$/fd/*; do
+              target=$(readlink "$fd") || exit 1
+              case "$target" in socket:*) exit 1;; esac
+            done
+            source=$7
+            archives=$8
+            metadata=$9
+            guest_archives=${10}
+            revision=${11}
+            chroot_command=${12}
+            test ! -L "$staged"
+            mount --bind "$staged" "$staged"
+            mountpoint -q "$staged"
+            mkdir -m 0700 "$6/apt-scratch"
+            for directory in workspace zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch proc dev; do
+              test ! -L "$staged/$directory"
+              mkdir -p "$staged/$directory"
+            done
+            mount --bind "$6/apt-scratch" "$staged/zrpc-apt-scratch"
+            mount --bind "$6/guest-payload" "$staged/workspace"
+            receipt="$staged/workspace/rust-bundle"
+            test -d "$receipt" && test ! -L "$receipt"
+            mount --bind "$receipt" "$receipt"
+            mount -o remount,bind,ro "$receipt"
+            mkdir -m 0700 "$staged/zrpc-apt-scratch/tmp"
+            for pair in "$source:zrpc-source" "$archives:zrpc-archives" \
+                        "$metadata:zrpc-metadata" "$guest_archives:zrpc-guest-archives"; do
+              origin=${pair%%:*}
+              target=${pair#*:}
+              mount --bind "$origin" "$staged/$target"
+              mount -o remount,bind,ro "$staged/$target"
+            done
+            mount -t proc proc "$staged/proc"
+            for device in null zero full random urandom tty; do
+              test -c "/dev/$device"
+              test ! -e "$staged/dev/$device"
+              touch "$staged/dev/$device"
+              mount --bind "/dev/$device" "$staged/dev/$device"
+            done
+            mount -o remount,bind,ro "$staged"
+            case ",$(findmnt -n -o OPTIONS --target "$staged")," in *,ro,*) ;; *) exit 1;; esac
+            case ",$(findmnt -n -o OPTIONS --target "$receipt")," in *,ro,*) ;; *) exit 1;; esac
+            for writable in zrpc-apt-scratch workspace; do
+              case ",$(findmnt -n -o OPTIONS --target "$staged/$writable")," in
+                *,rw,*) ;;
+                *) exit 1 ;;
+              esac
+            done
+            run_staged() {
+              /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent LC_ALL=C \
+                PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                TMPDIR=/zrpc-apt-scratch/tmp \
+                "$chroot_command" "$staged" "$@"
+            }
+            run_staged /usr/bin/python3 -I -B - "$4" "$2" "$5" <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import prepare_guest_disk_basetree_profile as disk
+          import fetch_guest_closure as guest
+
+          metadata = Path("/zrpc-metadata")
+          builder = disk.verify_execution_context(
+              metadata, Path("/zrpc-archives"), sys.argv[1],
+              Path("/zrpc-apt-scratch"), sys.argv[2], sys.argv[3])
+          signed = guest.verify_cached_archives(
+              metadata, Path("/zrpc-guest-archives"))
+          if (builder["status"] != "diagnostic-signed-staged-builder-no-route"
+                  or signed["status"] !=
+                  "diagnostic-guest-archives-matched-signed-snapshot-unbuilt"
+                  or builder["private_mode_approved"] is not False
+                  or signed["private_mode_approved"] is not False):
+              raise ValueError("signed no-route builder inputs changed diagnostic state")
+          print(json.dumps({"builder": builder, "signed_guest": signed,
+                            "private_mode_approved": False}, sort_keys=True))
+          PY
+            args=(--metadata /zrpc-metadata --archives /zrpc-guest-archives
+                  --rust-bundle /workspace/rust-bundle --revision "$revision"
+                  --profile /workspace/package-initrd-profile
+                  --workspace /workspace)
+            run_staged /usr/bin/python3 -I -B \
+              /zrpc-source/tools/gcp-guest/package_initrd_runner.py \
+              prepare "${args[@]}"
+            run_staged /usr/bin/python3 -I -B \
+              /zrpc-source/tools/gcp-guest/package_initrd_runner.py \
+              verify "${args[@]}"
+            profile="$staged/workspace/package-initrd-profile"
+            mount --bind "$profile" "$profile"
+            mount -o remount,bind,ro "$profile"
+            case ",$(findmnt -n -o OPTIONS --target "$profile")," in *,ro,*) ;; *) exit 1;; esac
+            run_staged /usr/bin/python3 -I -B \
+              /zrpc-source/tools/gcp-guest/package_initrd_runner.py \
+              build "${args[@]}" \
+              --builder-archives /zrpc-archives \
+              --parent-network-namespace "$4" \
+              --parent-mount-namespace "$3"
+            echo "::warning::Package-installed initrd is an unsigned diagnostic CPIO. Generated effects, boot, and private mode remain unapproved."
+          ' _ "$staged" "$parent_user_ns" "$parent_mount_ns" \
+            "$parent_net_ns" "$parent_pid_ns" \
+            "$scratch" "$source" "$scratch/builder-archives" \
+            "$scratch/metadata" "$scratch/guest-archives" \
+            "$ZRPC_SOURCE_SHA" "$chroot_command"
+          echo "Exact source: $ZRPC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Native Rust run: $ZRPC_RUST_RUN_ID attempt $ZRPC_RUST_RUN_ATTEMPT" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pinned artifact ZIP SHA-256: $ZRPC_RUST_ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Result: unsigned package-installed initrd CPIO diagnostic only; no boot or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"

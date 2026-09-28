@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import stat
 import subprocess
@@ -380,6 +381,37 @@ def verified_mkosi(source, metadata, builder_archives):
             "mkosi_code_files_checked": len(seen)}
 
 
+def checked_mkosi_tmpdir(path=Path("/zrpc-apt-scratch/tmp"), *, expected_uid=0):
+    """Use only the outer builder's verified, writable scratch directory."""
+    if not path.is_absolute() or path.name != "tmp":
+        raise ValueError("mkosi scratch path differs from prepared layout")
+    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY |
+                     os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY |
+                             os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    finally:
+        os.close(parent)
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != expected_uid
+                or stat.S_IMODE(info.st_mode) != 0o700
+                or os.fstatvfs(descriptor).f_flag & os.ST_RDONLY):
+            raise ValueError("mkosi scratch is not root-owned writable private storage")
+        marker = ".zrpc-mkosi-write-probe-" + secrets.token_hex(16)
+        file_descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT |
+                                  os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                  0o600, dir_fd=descriptor)
+        try:
+            os.fsync(file_descriptor)
+        finally:
+            os.close(file_descriptor)
+            os.unlink(marker, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    return str(path)
+
+
 def build_profile(source, metadata, archives, rust_bundle, revision,
                   profile, workspace, parent_network_namespace,
                   parent_mount_namespace, mkosi, builder_archives):
@@ -390,6 +422,7 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
     if Path(mkosi) != Path("/usr/bin/mkosi") or Path(mkosi).is_symlink():
         raise ValueError("reviewed Debian mkosi executable required")
     builder_identity = verified_mkosi(source, metadata, builder_archives)
+    temporary_directory = checked_mkosi_tmpdir()
     profile = Path(profile)
     output = profile.parent / (profile.name + "-output")
     if output.exists() or output.is_symlink():
@@ -397,7 +430,8 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
     fresh_sibling(profile, "-work")
     fresh_sibling(profile, "-package-cache")
     environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C",
-                   "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+                   "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+                   "TMPDIR": temporary_directory}
     result = subprocess.run([mkosi, f"--directory={profile}", "build"],
                             env=environment, check=False)
     if result.returncode:
