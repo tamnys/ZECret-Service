@@ -45,6 +45,8 @@ FORBIDDEN_UNITS = (
     "systemd-sysext@.service", "systemd-confext.service",
     "systemd-udev-load-credentials.service",
 )
+FORBIDDEN_DIAGNOSTIC_UNITS = ("systemd-pstore.service",)
+FORBIDDEN_CONFIG_UNITS = ("systemd-network-generator.service",)
 FORBIDDEN_EXECUTABLES = (
     "usr/lib/systemd/systemd-sulogin-shell", "usr/sbin/sulogin",
     "usr/bin/bash", "usr/bin/dash", "usr/bin/sh", "usr/bin/perl",
@@ -121,6 +123,14 @@ def audit(root, expected_init_sha256=EXPECTED_INIT_SHA256):
     for unit_dir in ("etc/systemd/system", "usr/lib/systemd/system"):
         directory(root, unit_dir)
         for path in (root / unit_dir).rglob("*"):
+            if path.name in FORBIDDEN_CONFIG_UNITS or (
+                path.is_symlink() and path.readlink().name in FORBIDDEN_CONFIG_UNITS
+            ):
+                raise ValueError(f"initrd mutable configuration unit remains: {path.relative_to(root)}")
+            if path.name in FORBIDDEN_DIAGNOSTIC_UNITS or (
+                path.is_symlink() and path.readlink().name in FORBIDDEN_DIAGNOSTIC_UNITS
+            ):
+                raise ValueError(f"initrd diagnostic unit remains: {path.relative_to(root)}")
             if path.name in FORBIDDEN_UNITS or (
                 path.is_symlink() and path.readlink().name in FORBIDDEN_UNITS
             ):

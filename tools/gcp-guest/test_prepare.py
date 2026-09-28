@@ -362,7 +362,11 @@ class CandidateTests(unittest.TestCase):
                          "/etc/systemd/system/sysinit.target.wants/systemd-sysext.service",
                          "/etc/systemd/system/sockets.target.wants/systemd-sysext.socket",
                          "/etc/systemd/system/sysinit.target.wants/systemd-confext.service",
-                         "/etc/systemd/system/sysinit.target.wants/systemd-udev-load-credentials.service"):
+                         "/etc/systemd/system/sysinit.target.wants/systemd-udev-load-credentials.service",
+                         "/usr/lib/systemd/system/systemd-pstore.service",
+                         "/etc/systemd/system/sysinit.target.wants/systemd-pstore.service",
+                         "/usr/lib/systemd/system/systemd-network-generator.service",
+                         "/etc/systemd/system/sysinit.target.wants/systemd-network-generator.service"):
             self.assertIn(relative, prepare.INITRD_REMOVE_FILES)
             self.assertIn(relative, initrd)
         audit = output / "mkosi.images/initrd/audit-initrd.py"

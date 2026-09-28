@@ -55,6 +55,48 @@ class InitrdAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "administrative unit remains"):
             audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_pstore_service_and_generated_startup_alias_rejected(self):
+        service = self.root / "usr/lib/systemd/system/systemd-pstore.service"
+        service.write_text("[Service]\nExecStart=/usr/lib/systemd/systemd-pstore\n")
+        with self.assertRaisesRegex(ValueError, "diagnostic unit remains: usr/lib/systemd/system/systemd-pstore.service"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        service.unlink()
+
+        wants = self.root / "etc/systemd/system/sysinit.target.wants/systemd-pstore.service"
+        wants.parent.mkdir(parents=True)
+        wants.symlink_to("/usr/lib/systemd/system/systemd-pstore.service")
+        with self.assertRaisesRegex(ValueError, "diagnostic unit remains: etc/systemd/system/sysinit.target.wants/systemd-pstore.service"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        wants.unlink()
+
+        alias = wants.with_name("unreviewed.service")
+        alias.symlink_to("/usr/lib/systemd/system/systemd-pstore.service")
+        with self.assertRaisesRegex(ValueError, "diagnostic unit remains: etc/systemd/system/sysinit.target.wants/unreviewed.service"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        alias.unlink()
+        audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_network_generator_and_generated_startup_alias_rejected(self):
+        service = self.root / "usr/lib/systemd/system/systemd-network-generator.service"
+        service.write_text("[Service]\nImportCredential=network.network.*\n")
+        with self.assertRaisesRegex(ValueError, "mutable configuration unit remains: usr/lib/systemd/system/systemd-network-generator.service"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        service.unlink()
+
+        wants = self.root / "etc/systemd/system/sysinit.target.wants/systemd-network-generator.service"
+        wants.parent.mkdir(parents=True)
+        wants.symlink_to("/usr/lib/systemd/system/systemd-network-generator.service")
+        with self.assertRaisesRegex(ValueError, "mutable configuration unit remains: etc/systemd/system/sysinit.target.wants/systemd-network-generator.service"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        wants.unlink()
+
+        alias = wants.with_name("unreviewed.service")
+        alias.symlink_to("/usr/lib/systemd/system/systemd-network-generator.service")
+        with self.assertRaisesRegex(ValueError, "mutable configuration unit remains: etc/systemd/system/sysinit.target.wants/unreviewed.service"):
+            audit_initrd.audit(self.root, self.init_sha256)
+        alias.unlink()
+        audit_initrd.audit(self.root, self.init_sha256)
+
     def test_extension_and_credential_startup_units_rejected(self):
         for relative in (
             "usr/lib/systemd/system/systemd-sysext.service",
