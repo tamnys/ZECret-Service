@@ -378,6 +378,7 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.images/initrd/mkosi.conf", "getty.target.wants/getty@tty1.service,", ""),
             ("mkosi.images/initrd/mkosi.conf", "autovt@.service,", ""),
             ("mkosi.images/initrd/mkosi.conf", "multi-user.target.wants/getty.target,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "boot/loader,", ""),
             ("mkosi.images/initrd/mkosi.conf", "etc/ssh,", ""),
             ("mkosi.images/initrd/mkosi.conf", "20-systemd-ssh-generator.conf,", ""),
             ("mkosi.images/initrd/mkosi.conf", "RemoveFiles=/usr/lib/systemd/system/rescue.service", "RemoveFiles=/usr/lib/systemd/system/other.service"),

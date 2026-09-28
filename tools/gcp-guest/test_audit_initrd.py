@@ -70,6 +70,13 @@ class InitrdAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "forbidden file remains: usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"):
             audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_mkosi_boot_loader_placeholder_rejected(self):
+        marker = self.root / "boot/loader/entries.srel"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("type1\n")
+        with self.assertRaisesRegex(ValueError, "unexpected content remains: boot"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
     def test_required_boot_components_and_ownership_fail_closed(self):
         for relative in audit_initrd.REQUIRED_EXECUTABLES:
             with self.subTest(relative=relative):
