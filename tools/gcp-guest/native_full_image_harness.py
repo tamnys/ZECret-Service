@@ -375,7 +375,32 @@ def bind(source, target, *, readonly):
     mount("--bind", source, target)
     if readonly:
         mount("-o", "remount,bind,ro", target)
-    if not os.path.ismount(target) or bool(os.statvfs(target).f_flag & os.ST_RDONLY) != readonly:
+    checked_bind_mount(target, readonly)
+
+
+def checked_bind_mount(target, readonly, mountinfo=None):
+    """Check the exact mount and its per-mount policy, including same-FS binds."""
+    contents = (Path("/proc/self/mountinfo").read_text()
+                if mountinfo is None else mountinfo)
+    matches = []
+    for line in contents.splitlines():
+        if line.count(" - ") != 1:
+            raise ValueError("malformed builder mountinfo record")
+        left, right = line.split(" - ")
+        fields = left.split(" ")
+        trailer = right.split(" ")
+        if (len(fields) < 6 or len(trailer) < 3
+                or any(not field for field in fields + trailer)
+                or not fields[0].isdigit() or not fields[1].isdigit()
+                or not re.fullmatch(r"[0-9]+:[0-9]+", fields[2])):
+            raise ValueError("malformed builder mountinfo record")
+        mountinfo_path(fields[3])
+        if mountinfo_path(fields[4]) == target:
+            matches.append(set(fields[5].split(",")))
+    expected, unexpected = ("ro", "rw") if readonly else ("rw", "ro")
+    if (len(matches) != 1 or expected not in matches[0]
+            or unexpected in matches[0]
+            or bool(os.statvfs(target).f_flag & os.ST_RDONLY) != readonly):
         raise ValueError("builder bind mount has unexpected write policy")
 
 

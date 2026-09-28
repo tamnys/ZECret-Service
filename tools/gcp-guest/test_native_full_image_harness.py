@@ -14,9 +14,9 @@ import native_full_image_harness as harness
 import prepare_guest_disk_basetree_profile as disk
 
 
-def mount_record(target):
+def mount_record(target, options="rw"):
     escaped = str(target).replace("\\", "\\134").replace(" ", "\\040")
-    return f"2 1 0:2 / {escaped} rw - tmpfs tmpfs rw\n"
+    return f"2 1 0:2 / {escaped} {options} - tmpfs tmpfs rw\n"
 
 
 class LayoutTests(unittest.TestCase):
@@ -164,6 +164,44 @@ class BoundTreeTests(unittest.TestCase):
                 source.assert_not_called()
                 builder.assert_not_called()
                 mounted.assert_not_called()
+
+
+class BindMountTests(unittest.TestCase):
+    def test_mountinfo_policy_does_not_require_ismount(self):
+        target = Path("/workspace/staged")
+        with (mock.patch("os.path.ismount", side_effect=AssertionError("ismount used")),
+              mock.patch("os.statvfs", return_value=types.SimpleNamespace(f_flag=0))):
+            harness.checked_bind_mount(target, False, mountinfo=mount_record(target))
+        with (mock.patch("os.path.ismount", side_effect=AssertionError("ismount used")),
+              mock.patch("os.statvfs", return_value=types.SimpleNamespace(
+                  f_flag=harness.os.ST_RDONLY))):
+            harness.checked_bind_mount(target, True,
+                                       mountinfo=mount_record(target, "ro"))
+
+    def test_missing_stacked_or_wrong_policy_mount_is_rejected(self):
+        target = Path("/workspace/staged")
+        baseline = mount_record(Path("/"))
+        cases = (
+            baseline,
+            baseline + mount_record(target / "nested"),
+            baseline + mount_record(target) + mount_record(target),
+            baseline + mount_record(target, "ro"),
+            baseline + mount_record(target, "ro,rw"),
+            baseline + mount_record(target, "rw") + "malformed\n",
+        )
+        with mock.patch("os.statvfs", return_value=types.SimpleNamespace(f_flag=0)):
+            for contents in cases:
+                with self.subTest(contents=contents):
+                    with self.assertRaises(ValueError):
+                        harness.checked_bind_mount(target, False, mountinfo=contents)
+
+    def test_statvfs_disagreement_is_rejected(self):
+        target = Path("/workspace/staged")
+        with mock.patch("os.statvfs", return_value=types.SimpleNamespace(
+                f_flag=harness.os.ST_RDONLY)):
+            with self.assertRaisesRegex(ValueError, "write policy"):
+                harness.checked_bind_mount(target, False,
+                                           mountinfo=mount_record(target))
 
 
 class StagedMountTargetTests(unittest.TestCase):
