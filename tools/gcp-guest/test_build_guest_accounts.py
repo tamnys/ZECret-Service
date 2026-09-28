@@ -95,6 +95,36 @@ class AccountInputTests(unittest.TestCase):
             with self.subTest(data=data), self.assertRaises(ValueError):
                 accounts.master_ids(data, 7, (2, 3))
 
+    def test_raw_accounts_only_audit_after_exact_reviewed_transform(self):
+        reviewed = accounts.guest.prepare.PROFILE / "rootfs/etc"
+        raw = self.root / "raw"
+        etc = raw / "etc"
+        etc.mkdir(parents=True)
+        for name in accounts.OUTPUT_FILES:
+            data = (reviewed / name).read_bytes()
+            if name == "passwd":
+                data = data.replace(b"root:x:0:0::/root:/usr/sbin/nologin\n",
+                                    b"root:x:0:0::/root:/bin/bash\n", 1)
+            elif name == "shadow":
+                data = data.replace(b"root:!*:", b"root:!unprovisioned:", 1)
+            (etc / name).write_bytes(data)
+        original = {name: (etc / name).read_bytes() for name in accounts.OUTPUT_FILES}
+        self.assertEqual(accounts.audited_reviewed_transform(raw), original)
+        self.assertEqual({name: (etc / name).read_bytes() for name in accounts.OUTPUT_FILES},
+                         original)
+        for name, before, after in (
+            ("passwd", b"/bin/bash\n", b"/bin/sh\n"),
+            ("shadow", b"root:!unprovisioned:", b"root:!other:"),
+            ("group", b"disk:x:6:\n", b"disk:x:7:\n"),
+        ):
+            with self.subTest(name=name, after=after):
+                path = etc / name
+                self.assertIn(before, original[name])
+                path.write_bytes(original[name].replace(before, after, 1))
+                with self.assertRaises(ValueError):
+                    accounts.audited_reviewed_transform(raw)
+                path.write_bytes(original[name])
+
 
 class SignedCacheAccountTests(unittest.TestCase):
     def test_x86_64_signed_inputs_and_negative_account_mutations(self):
@@ -118,7 +148,7 @@ class SignedCacheAccountTests(unittest.TestCase):
                 self.assertIs(type(row["sysusers_generated_mode"]), int)
                 self.assertEqual(row["expected_root_uid"], 0)
                 self.assertEqual(row["expected_root_gid"], 0)
-            accounts.audit_rootfs.audit_accounts(output)
+            accounts.audited_reviewed_transform(output)
             verified = accounts.verify(Path(metadata), Path(archives), workspace, output)
             self.assertEqual(verified["status"],
                              "diagnostic-verified-guest-account-artifact-unbuilt")
@@ -154,7 +184,7 @@ class SignedCacheAccountTests(unittest.TestCase):
                     path.chmod(0o600)
                     path.write_bytes(contents.replace(old, new, 1))
                     with self.assertRaises(ValueError):
-                        accounts.audit_rootfs.audit_accounts(altered)
+                        accounts.audited_reviewed_transform(altered)
 
 
 if __name__ == "__main__":

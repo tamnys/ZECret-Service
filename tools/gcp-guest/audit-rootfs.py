@@ -288,7 +288,7 @@ def audit(root):
         relative = path.relative_to(root)
         mode = path.lstat().st_mode
         if stat.S_ISREG(mode) and mode & (stat.S_ISUID | stat.S_ISGID):
-            raise ValueError("setuid/setgid executable remains")
+            raise ValueError("setuid/setgid executable remains: " + repr(relative.as_posix()))
         if path.name.endswith((".addon.efi", ".cred", ".raw")) and ("boot" in relative.parts or "credstore" in relative.parts):
             raise ValueError("unapproved boot companion or credential")
         if path.name.endswith(".extra.d") or relative.parts[:2] == ("etc", "extensions") or relative.parts[:3] == ("usr", "lib", "extensions"):

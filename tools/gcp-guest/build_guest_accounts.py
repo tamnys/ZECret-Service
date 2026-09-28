@@ -159,6 +159,42 @@ def check_master_ids(root, selected):
             raise ValueError("generated group differs from signed base-passwd master")
 
 
+def audited_reviewed_transform(root):
+    """Audit the reviewed source-bound transform without changing raw evidence."""
+    raw = {name: (root / "etc" / name).read_bytes() for name in OUTPUT_FILES}
+
+    def replace_root_field(data, field, before, after):
+        lines = data.splitlines(keepends=True)
+        roots = [index for index, line in enumerate(lines) if line.startswith(b"root:")]
+        if len(roots) != 1:
+            raise ValueError("generated root account differs")
+        index = roots[0]
+        parts = lines[index].removesuffix(b"\n").split(b":")
+        if (len(parts) != (7 if field == 6 else 9) or parts[field] != before
+                or not lines[index].endswith(b"\n")):
+            raise ValueError("generated root login state differs")
+        parts[field] = after
+        lines[index] = b":".join(parts) + b"\n"
+        return b"".join(lines)
+
+    reviewed = dict(raw)
+    reviewed["passwd"] = replace_root_field(
+        raw["passwd"], 6, b"/bin/bash", b"/usr/sbin/nologin")
+    reviewed["shadow"] = replace_root_field(
+        raw["shadow"], 1, b"!unprovisioned", b"!*")
+    for name, data in reviewed.items():
+        size, digest, _, _ = guest.prepare.ACCOUNT_OUTPUTS[name]
+        if len(data) != size or sha256(data) != digest:
+            raise ValueError("generated account transform differs from reviewed source: " + name)
+    with tempfile.TemporaryDirectory(prefix="zrpc-reviewed-accounts-", dir=root.parent) as temporary:
+        candidate = Path(temporary)
+        (candidate / "etc").mkdir()
+        for name, data in reviewed.items():
+            write_input(candidate / "etc" / name, data, 0o400 if name == "shadow" else 0o444)
+        audit_rootfs.audit_accounts(candidate)
+    return raw
+
+
 def run_once(directory, selected, binary, library, crypto):
     root = directory / "root"
     sysusers_dir = root / "usr/lib/sysusers.d"
@@ -199,9 +235,9 @@ def run_once(directory, selected, binary, library, crypto):
     # systemd creates shadow with mode 000. Read it as the local owner for the
     # diagnostic comparison; the published account artifact remains 0400.
     shadow.chmod(0o400)
-    audit_rootfs.audit_accounts(root)
     check_master_ids(root, selected)
-    return {name: {"bytes": (root / "etc" / name).read_bytes(),
+    raw = audited_reviewed_transform(root)
+    return {name: {"bytes": raw[name],
                    "generated_mode": generated_modes[name]} for name in OUTPUT_FILES}
 
 
