@@ -205,7 +205,7 @@ mod tests {
     #[cfg(unix)]
     use crate::{ManagedTor, TransportOrigin};
     use std::time::Duration;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn fixture(
         body: impl FnOnce([u8; 32]) -> Vec<u8> + Send + 'static,
@@ -267,6 +267,109 @@ mod tests {
             ErrorCode::TorUnavailable
         );
         peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn synthetic_gcp_retained_sender_uses_one_tls_stream_for_typed_rpc() {
+        for oversized_result in [false, true] {
+            let (client, server) = connect_pair(server_config(false, Some(ALPN))).await;
+            let pending = client.unwrap().prepare_challenge().unwrap();
+            let mut server = server.unwrap();
+            let (test_promotion, mut wait_for_test_promotion) = tokio::sync::oneshot::channel();
+            let (ready, server_ready) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let nonce = read_public_request(&mut server).await.nonce;
+                server
+                    .write_all(&response("200 OK", "", &body(nonce)))
+                    .await
+                    .unwrap();
+                server.flush().await.unwrap();
+                // The unverified evidence has no RPC sender. Do not let the
+                // fixture start reading an RPC until the test-only constructor
+                // has made a session; any earlier application byte is a bug.
+                tokio::select! {
+                    biased;
+                    received = server.read_u8() => panic!("private byte before test promotion: {received:?}"),
+                    promoted = &mut wait_for_test_promotion => promoted.unwrap(),
+                }
+                ready.send(()).unwrap();
+
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(server.read_u8().await.unwrap());
+                    assert!(headers.len() <= zrpc_protocol::MAX_REQUEST_BYTES);
+                }
+                let headers = std::str::from_utf8(&headers).unwrap();
+                assert!(headers.starts_with("POST /rpc HTTP/1.1\r\n"));
+                let lengths: Vec<usize> = headers
+                    .split("\r\n")
+                    .filter_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse().ok())
+                    })
+                    .collect();
+                let [length] = lengths.as_slice() else {
+                    panic!("one RPC content length required");
+                };
+                assert!(*length <= zrpc_protocol::MAX_REQUEST_BYTES);
+                let mut private_body = vec![0; *length];
+                server.read_exact(&mut private_body).await.unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&private_body).unwrap();
+                assert_eq!(
+                    request,
+                    serde_json::json!({"jsonrpc":"2.0","id":"synthetic-id","method":"getblockcount","params":[]})
+                );
+                let response = if oversized_result {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        zrpc_protocol::MAX_RESPONSE_BYTES + 1
+                    )
+                    .into_bytes()
+                } else {
+                    response(
+                        "200 OK",
+                        "",
+                        br#"{"jsonrpc":"2.0","id":"synthetic-id","result":42}"#,
+                    )
+                };
+                server.write_all(&response).await.unwrap();
+                server.flush().await.unwrap();
+                assert_no_application_bytes(server).await;
+            });
+
+            let mut evidence = pending.request_gcp_attestation().await.unwrap();
+            assert!(!evidence.private_rpc_allowed());
+            let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+            // The real GCP authorization path remains unreachable. This
+            // test-only constructor exercises the retained sender with a fake
+            // quote and fake Tor lease; it grants no release approval.
+            evidence.connection.session.origin = TransportOrigin::Managed(tor);
+            let session = VerifiedRpcSession::from_authenticated_inspection(
+                evidence.connection.session,
+                evidence.connection.deadline,
+                evidence.connection.authority,
+                PrivateDeadline {
+                    monotonic: Instant::now() + MAX_CONNECTION_LIFETIME,
+                    collateral_expiration_unix_seconds: u64::MAX,
+                },
+            )
+            .unwrap();
+            test_promotion.send(()).unwrap();
+            server_ready.await.unwrap();
+            let result = session
+                .query_from_body(|| {
+                    Ok(br#"{"jsonrpc":"2.0","id":"synthetic-id","method":"getblockcount","params":[]}"#.to_vec())
+                })
+                .await;
+            if oversized_result {
+                assert_eq!(result.unwrap_err().code, ErrorCode::InvalidBackendResponse);
+            } else {
+                assert_eq!(result.unwrap(), serde_json::json!(42));
+            }
+            peer.await.unwrap();
+        }
     }
 
     #[cfg(unix)]
