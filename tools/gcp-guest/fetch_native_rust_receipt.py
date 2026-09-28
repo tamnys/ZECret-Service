@@ -76,6 +76,9 @@ def select_artifact(run, listing, *, repository, revision, run_id, attempt, dige
 
 
 def safe_name(name):
+    # GNU tar -C <bundle> -cf <receipt> . records the root as ".".
+    if name in (".", "./"):
+        return None
     if not name.startswith("./") or "\\" in name:
         raise ValueError("receipt TAR member has an unsafe name")
     relative = name[2:].rstrip("/")

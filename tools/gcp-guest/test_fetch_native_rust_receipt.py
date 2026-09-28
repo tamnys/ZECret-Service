@@ -77,6 +77,14 @@ class NativeRustReceiptTest(unittest.TestCase):
             receipt.SafeRedirect().redirect_request(
                 request, None, 302, "Found", {}, "http://example.test/file")
 
+    def test_gnu_tar_root_is_accepted_without_relaxing_member_paths(self):
+        self.assertIsNone(receipt.safe_name("."))
+        self.assertIsNone(receipt.safe_name("./"))
+        with self.assertRaisesRegex(ValueError, "unsafe name"):
+            receipt.safe_name("manifest.json")
+        with self.assertRaisesRegex(ValueError, "escapes bundle"):
+            receipt.safe_name("./../manifest.json")
+
     def test_reject_digest_change_and_tar_escape_before_exporter(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
