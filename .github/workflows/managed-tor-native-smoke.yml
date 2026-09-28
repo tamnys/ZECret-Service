@@ -66,13 +66,13 @@ jobs:
           scratch="$GITHUB_WORKSPACE/tor-smoke"
           mkdir -m 0700 "$scratch" "$scratch/archives" "$scratch/metadata"
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 -I "$source/tools/gcp-guest/tor_runtime_diagnostic.py" stage-gpgv \
+          python3 "$source/tools/gcp-guest/tor_runtime_diagnostic.py" stage-gpgv \
             --archives "$scratch/archives" --output "$scratch/gpgv"
           PATH="$scratch/gpgv:$PATH" \
-            python3 -I "$source/tools/gcp-guest/fetch_guest_closure.py" metadata \
+            python3 "$source/tools/gcp-guest/fetch_guest_closure.py" metadata \
               --directory "$scratch/metadata"
           PATH="$scratch/gpgv:$PATH" \
-            python3 -I "$source/tools/gcp-guest/tor_runtime_diagnostic.py" stage-tor \
+            python3 "$source/tools/gcp-guest/tor_runtime_diagnostic.py" stage-tor \
               --metadata "$scratch/metadata" --archives "$scratch/archives" \
               --output "$scratch/staged"
           test "$(sha256sum "$scratch/staged/tor" | cut -d' ' -f1)" = \
