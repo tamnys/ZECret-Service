@@ -264,6 +264,8 @@ class DiagnosticDiskTests(unittest.TestCase):
         (archives / (package_sha256 + ".deb")).write_bytes(package_bytes)
         manifest = [{"path": "debs/package.deb", "size": len(package_bytes),
                      "sha256": package_sha256}]
+        disk_packages = {role: {"size": len(package_bytes), "sha256": package_sha256}
+                         for role in diagnostic.prepare.DISK_TOOL_PACKAGES}
         inputs = self.root / "inputs"
         lock_path = self.root / "inputs.lock.json"
         with (mock.patch.object(diagnostic, "selected_boot_source",
@@ -275,10 +277,14 @@ class DiagnosticDiskTests(unittest.TestCase):
                   "private_mode_approved": False}),
               mock.patch.object(diagnostic.guest, "reviewed_manifest",
                                 return_value=(b"[]", manifest)),
+              mock.patch.object(diagnostic.prepare, "DISK_TOOL_PACKAGES", disk_packages),
               mock.patch.object(diagnostic.prepare, "validate_lock")):
             staged = diagnostic.create_boot_inputs(metadata, archives, inputs,
                                                    lock_path, bundle, revision)
         lock = json.loads(lock_path.read_text())
+        for role in disk_packages:
+            self.assertEqual((inputs / role).read_bytes(), package_bytes)
+            self.assertEqual(lock["artifacts"][role]["sha256"], package_sha256)
         self.assertEqual((inputs / "early_init").read_bytes(), binary)
         self.assertEqual((inputs / "wrapper").read_bytes(), diagnostic.SYNTHETIC_ELF)
         self.assertEqual((inputs / "zebra").read_bytes(), diagnostic.SYNTHETIC_ELF)

@@ -44,12 +44,14 @@ ACCOUNT_FILES = {
 REQUIRED_FILES = frozenset({
     "etc/fstab", "etc/zrpc/zebra.toml", *ACCOUNT_FILES,
     "usr/lib/zrpc/zrpc-node-wrapper", "usr/lib/zrpc/zrpc-gcp-quote-broker",
-    "usr/lib/zrpc/zrpc-gcp-guard", "usr/lib/zrpc/zrpc-gcp-cookie",
+    "usr/lib/zrpc/zrpc-gcp-guard", "usr/lib/zrpc/zrpc-gcp-disk-id", "usr/lib/zrpc/zrpc-gcp-cookie",
     "usr/lib/zrpc/zebrad",
     "usr/lib/systemd/system/zrpc-node.service",
     "usr/lib/systemd/system/zrpc-gcp-quote.service",
     "usr/lib/systemd/system/zrpc-cookie.service",
     "usr/lib/systemd/system/zrpc-wrapper.service",
+    "usr/lib/systemd/system/zrpc-gcp-disk-trigger.service",
+    "usr/lib/udev/rules.d/65-gce-disk-naming.rules",
     "usr/lib/systemd/system/zrpc.target",
 })
 ENV = {"HOME": "/nonexistent", "LC_ALL": "C", "PATH": "/usr/bin:/bin",

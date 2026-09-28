@@ -162,6 +162,13 @@ def _create_inputs(metadata, guest_archives, inputs, lock_path, early_init):
         shutil.copyfile(source, target)
         if target.stat().st_size != package["size"] or prepare.digest(target) != package["sha256"]:
             raise ValueError("copied signed package changed")
+    for role, package in prepare.DISK_TOOL_PACKAGES.items():
+        source = guest_archives / (package["sha256"] + ".deb")
+        target = inputs / role
+        shutil.copyfile(source, target)
+        if target.stat().st_size != package["size"] or prepare.digest(target) != package["sha256"]:
+            raise ValueError("copied signed public-disk tool archive changed: " + role)
+        artifacts[role] = {"path": role, "sha256": package["sha256"]}
     # These are the schema's minimum positive values, solely to render dead
     # service units in a disk that has no executable application payload.
     runtime = {name: 1 for name in ("listen_port", "max_connections", "max_quotes",

@@ -1,0 +1,4 @@
+# Narrow adaptation of Google guest-configs 65-gce-disk-naming.rules at
+# ba80fe774c17e41c15d92f5c0b1901dd14d35212 (Apache-2.0).
+# Only the source-reviewed public data disk receives a persistent alias.
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="nvme*n*", ATTRS{model}=="nvme_card-pd", PROGRAM="/usr/lib/zrpc/zrpc-gcp-disk-id $devnode", RESULT=="zrpc-public-data", ENV{ID_SERIAL_SHORT}="zrpc-public-data", ENV{ID_SERIAL}="Google_PersistentDisk_zrpc-public-data", SYMLINK+="disk/by-id/google-zrpc-public-data"

@@ -137,7 +137,7 @@ def authenticated_packages(metadata, *, manifest_path=prepare.PACKAGE_CLOSURE_LO
             or index_hash != PACKAGES_SHA256 or index_size != PACKAGES_SIZE):
         raise ValueError("signed guest snapshot differs from source-reviewed candidate")
     records = debian_snapshot.package_records(io.BytesIO(index_bytes))
-    for package in manifest:
+    for package in (*manifest, *prepare.DISK_TOOL_PACKAGES.values()):
         record = records.get((package["name"], package["version"],
                               package["architecture"]))
         if record is None or any(str(package[field]) != record.get(index_field)
@@ -174,7 +174,7 @@ def prefetch_archives(archives, *, open_url=None,
     fd = open_directory(archives, "guest archive")
     downloaded = reused = 0
     try:
-        for package in packages:
+        for package in (*packages, *prepare.DISK_TOOL_PACKAGES.values()):
             if snapshot_fetch.verify_cached(fd, package):
                 reused += 1
                 continue
@@ -204,7 +204,7 @@ def verify_cached_archives(metadata, archives, *,
     )
     fd = open_directory(archives, "guest archive")
     try:
-        for package in packages:
+        for package in (*packages, *prepare.DISK_TOOL_PACKAGES.values()):
             if not snapshot_fetch.verify_cached(fd, package):
                 raise ValueError("guest archive absent from offline cache")
     finally:

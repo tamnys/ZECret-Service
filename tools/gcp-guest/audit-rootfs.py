@@ -1,12 +1,37 @@
 #!/usr/bin/env python3
 """Fail the local image build on unapproved guest surfaces; no release approval."""
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import stat
 import sys
 
 FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/unix_chkpwd", "usr/bin/mount", "usr/bin/umount", "usr/bin/su", "usr/lib/dbus-1.0/dbus-daemon-launch-helper")
+FORBIDDEN_NVME_SURFACE = (
+    "etc/nvme/discovery.conf", "usr/sbin/uuidd", "usr/bin/adduser", "usr/bin/passwd",
+    "usr/lib/systemd/system/nvmefc-boot-connections.service",
+    "usr/lib/systemd/system/nvmf-autoconnect.service",
+    "usr/lib/systemd/system/nvmf-connect-nbft.service",
+    "usr/lib/systemd/system/nvmf-connect.target",
+    "usr/lib/systemd/system/nvmf-connect@.service",
+    "usr/lib/systemd/system/uuidd.service", "usr/lib/systemd/system/uuidd.socket",
+    "usr/lib/udev/rules.d/65-persistent-net-nbft.rules",
+    "usr/lib/udev/rules.d/70-nvmf-autoconnect.rules",
+    "usr/lib/udev/rules.d/70-nvmf-keys.rules",
+    "usr/lib/udev/rules.d/71-nvmf-netapp.rules",
+)
+PINNED_DISK_FILES = {
+    "etc/fstab": "9ea5dfdcd0381e01357a1fabaf36a7b612151c9f2e6e49b627718453d4267169",
+    "usr/lib/udev/rules.d/65-gce-disk-naming.rules": "b06b83104359437859d4f497973eede0da1d8b3958afc4aab073d9f94e9d7b19",
+    "usr/lib/systemd/system/zrpc-gcp-disk-trigger.service": "60da51b2fb02e6591a42bdce024594c3f891a314d5622ab88237049ae3ac9737",
+}
+SIGNED_DISK_ELFS = {
+    "usr/sbin/nvme": (1477760, "2ecb01494cd51dc4793f14ce30bdd18133f0caad48316e7d7c8093c687957140", 0o555),
+    "usr/lib/x86_64-linux-gnu/libnvme.so.1": (209096, "49eb38e4e8952b4f38946562d35419354209116082bce9172bd969faa3293c85", 0o444),
+    "usr/lib/x86_64-linux-gnu/libnvme-mi.so.1": (35392, "c9066ca1ab54637064ccd4f0b2c8dce13563ac3591d53f3417e2e1db935feac0", 0o444),
+    "usr/lib/x86_64-linux-gnu/libkeyutils.so.1": (22448, "e5d5a7450d08eff7d4bbcaac75ef2b94d3447c81a1b2ddf3ab85d2de4709a9a8", 0o444),
+}
 MASKED_UNITS = (
     "ssh.service", "sshd.service", "ssh.socket",
     "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service",
@@ -21,9 +46,9 @@ MASKED_UNITS = (
 )
 APPLIANCE_UNITS = (
     "zrpc-node.service", "zrpc-gcp-quote.service", "zrpc-cookie.service",
-    "zrpc-wrapper.service", "zrpc.target",
+    "zrpc-wrapper.service", "zrpc-gcp-disk-trigger.service", "zrpc.target",
 )
-PROTECTED_UNITS = (*APPLIANCE_UNITS, "multi-user.target", "systemd-resolved.service")
+PROTECTED_UNITS = (*APPLIANCE_UNITS, "var-lib-zebra.mount", "multi-user.target", "systemd-resolved.service")
 RESOLVED_CREDENTIAL_DROPIN = "10-no-credentials.conf"
 RESOLVED_CREDENTIAL_DROPIN_BYTES = b"[Service]\nImportCredential=\n"
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
@@ -291,9 +316,27 @@ def audit(root):
         path = root / name
         if path.exists() or path.is_symlink():
             raise ValueError("unreviewed kernel command line source")
-    for name in FORBIDDEN_BINARIES:
+    for name in (*FORBIDDEN_BINARIES, *FORBIDDEN_NVME_SURFACE):
         if (root / name).exists() or (root / name).is_symlink():
             raise ValueError("administrative binary present")
+    admin_rules = root / "etc/udev/rules.d"
+    if present(admin_rules) and (admin_rules.is_symlink() or not admin_rules.is_dir()
+                                 or any(admin_rules.iterdir())):
+        raise ValueError("mutable udev override present")
+    for relative, expected_sha256 in PINNED_DISK_FILES.items():
+        path = root / relative
+        if (path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1
+                or stat.S_IMODE(path.stat().st_mode) != 0o644):
+            raise ValueError("public-disk rule, fstab, or trigger differs: " + relative)
+        with path.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != expected_sha256:
+                raise ValueError("public-disk rule, fstab, or trigger differs: " + relative)
+    for relative, (size, expected_sha256, mode) in SIGNED_DISK_ELFS.items():
+        path = root / relative
+        if (path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1
+                or path.stat().st_size != size or stat.S_IMODE(path.stat().st_mode) != mode
+                or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256):
+            raise ValueError("public-disk tool ELF differs: " + relative)
     for unit in MASKED_UNITS:
         path = root / "etc/systemd/system" / unit
         if not path.is_symlink() or path.readlink() != Path("/dev/null"):
@@ -314,7 +357,7 @@ def audit(root):
             raise ValueError("guest credential store must be empty")
     if privileged:
         raise ValueError("setuid/setgid executable remains: " + repr(sorted(privileged)))
-    for name in ("zrpc-node-wrapper", "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-cookie", "zebrad"):
+    for name in ("zrpc-node-wrapper", "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-disk-id", "zrpc-gcp-cookie", "zebrad"):
         path = root / "usr/lib/zrpc" / name
         if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o022:
             raise ValueError("guest executable missing or mutable")

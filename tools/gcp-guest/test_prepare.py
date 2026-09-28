@@ -46,7 +46,7 @@ class CandidateTests(unittest.TestCase):
                 (self.inputs / "debs" / (self.synthetic_deb_sha + ".deb")).write_bytes(self.synthetic_deb)
                 # The reviewed kernel identity has deliberately synthetic archive bytes.
                 packages = []
-                for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "dmsetup", "kmod", prepare.KERNEL_PACKAGE):
+                for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "dmsetup", "kmod", "libc6", "libjson-c5", "libssl3t64", prepare.KERNEL_PACKAGE):
                     version = prepare.KERNEL_PACKAGE_VERSION if name == prepare.KERNEL_PACKAGE else "1.0~synthetic"
                     packages.append({"name": name, "version": version, "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_{version}_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"})
                 data = json.dumps(packages).encode()
@@ -65,8 +65,32 @@ class CandidateTests(unittest.TestCase):
         self.closure_patch.start()
         self.closure_hash_patch = mock.patch.object(prepare, "PACKAGE_CLOSURE_SHA256", prepare.digest(self.closure))
         self.closure_hash_patch.start()
+        # These candidate fixtures are intentionally not signed Debian .debs.
+        # The archive parser and signed membership are tested separately.
+        self.disk_verify_patch = mock.patch.object(prepare, "verify_disk_tool_archives")
+        self.disk_verify_patch.start()
+        self.disk_stage_patch = mock.patch.object(prepare, "stage_disk_tool",
+                                            side_effect=self.synthetic_disk_tool)
+        self.disk_stage_patch.start()
+        self.audit_disk_elf_patch = mock.patch.dict(
+            audit_rootfs.SIGNED_DISK_ELFS,
+            {name: (len(b"SYNTHETIC"), hashlib.sha256(b"SYNTHETIC").hexdigest(), mode)
+             for name, (_, _, mode) in audit_rootfs.SIGNED_DISK_ELFS.items()},
+            clear=True,
+        )
+        self.audit_disk_elf_patch.start()
+
+    def synthetic_disk_tool(self, rootfs, artifacts):
+        for relative, (_, _, mode) in audit_rootfs.SIGNED_DISK_ELFS.items():
+            path = rootfs / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"SYNTHETIC")
+            path.chmod(mode)
 
     def tearDown(self):
+        self.audit_disk_elf_patch.stop()
+        self.disk_stage_patch.stop()
+        self.disk_verify_patch.stop()
         self.closure_hash_patch.stop()
         self.closure_patch.stop()
         self.temporary.cleanup()
@@ -269,6 +293,28 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact complete input role set required"):
             prepare.validate_lock(lock, self.inputs)
 
+    def test_missing_or_changed_disk_helper_artifact_rejected(self):
+        lock = copy.deepcopy(self.lock)
+        lock["artifacts"].pop("disk_id")
+        with self.assertRaisesRegex(ValueError, "exact complete input role set required"):
+            prepare.validate_lock(lock, self.inputs)
+        helper = self.inputs / "disk_id"
+        helper.write_bytes(helper.read_bytes() + b"changed")
+        with self.assertRaisesRegex(ValueError, "input digest or path mismatch"):
+            prepare.validate_lock(self.lock, self.inputs)
+
+    def test_missing_or_changed_public_disk_rule_rejected(self):
+        profile = self.root / "changed-profile"
+        shutil.copytree(prepare.PROFILE, profile, symlinks=True)
+        rule = profile / "rootfs/usr/lib/udev/rules.d/65-gce-disk-naming.rules"
+        rule.write_bytes(rule.read_bytes() + b"# changed\n")
+        with self.assertRaisesRegex(ValueError, "measured public-disk boot input differs"):
+            prepare.validate_boot_profile(profile)
+        shutil.copyfile(prepare.PROFILE / "rootfs/usr/lib/udev/rules.d/65-gce-disk-naming.rules", rule)
+        rule.unlink()
+        with self.assertRaisesRegex(ValueError, "measured public-disk boot input differs"):
+            prepare.validate_boot_profile(profile)
+
     def test_staging_is_explicitly_unbuilt_and_masks_administration(self):
         lock_path = self.root / "synthetic.lock.json"
         lock_path.write_text(json.dumps(self.lock))
@@ -335,7 +381,7 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "artifacts/kernel").exists())
         self.assertFalse((output / "artifacts/initrd").exists())
         self.assertFalse((output / "rootfs/usr/lib/modules").exists())
-        self.assertIn("Packages=dmsetup=1.0~synthetic,e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
+        self.assertIn("Packages=dmsetup=1.0~synthetic,e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,libc6=1.0~synthetic,libjson-c5=1.0~synthetic,libssl3t64=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
         self.assertIn("Initrds=output/initrd.cpio.zst", config)
         self.assertIn(f'Seed={report["repart_seed"]}', config)
         self.assertEqual((output / "inputs.lock.json").read_bytes(), lock_path.read_bytes())
@@ -782,6 +828,12 @@ class CandidateTests(unittest.TestCase):
         for name in prepare.BINARIES.values():
             (root / "usr/lib/zrpc" / name).write_text("SYNTHETIC")
             (root / "usr/lib/zrpc" / name).chmod(0o555)
+        for relative in ("etc/fstab", "usr/lib/udev/rules.d/65-gce-disk-naming.rules"):
+            source = prepare.PROFILE / "rootfs" / relative
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        self.synthetic_disk_tool(root, None)
         return root
 
     def test_rootfs_audit_rejects_appliance_unit_overrides(self):
@@ -861,6 +913,27 @@ class CandidateTests(unittest.TestCase):
                 audit_rootfs.audit(root)
             path.unlink()
         audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_disk_rule_and_helper_loss(self):
+        for relative in ("usr/lib/udev/rules.d/65-gce-disk-naming.rules",
+                         "usr/lib/systemd/system/zrpc-gcp-disk-trigger.service",
+                         "etc/fstab"):
+            root = self.synthetic_guest_root("-disk-" + relative.replace("/", "-"))
+            path = root / relative
+            path.write_bytes(path.read_bytes() + b"# changed\n")
+            with self.assertRaisesRegex(ValueError, "public-disk rule, fstab, or trigger differs"):
+                audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-disk-helper")
+        (root / "usr/lib/zrpc/zrpc-gcp-disk-id").unlink()
+        with self.assertRaisesRegex(ValueError, "guest executable missing or mutable"):
+            audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-disk-elf")
+        nvme = root / "usr/sbin/nvme"
+        nvme.chmod(0o755)
+        nvme.write_bytes(b"TAMPERED")
+        nvme.chmod(0o555)
+        with self.assertRaisesRegex(ValueError, "public-disk tool ELF differs"):
+            audit_rootfs.audit(root)
 
     def test_rootfs_audit_requires_privileged_package_files_absent(self):
         root = self.synthetic_guest_root("-privileged-package-files")

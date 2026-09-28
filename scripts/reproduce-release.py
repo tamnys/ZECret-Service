@@ -35,6 +35,7 @@ ARTIFACTS = (
     ("zrpc-server", "zrpc-quote-proxy"),
     ("zrpc-server", "zrpc-gcp-quote-broker"),
     ("zrpc-server", "zrpc-gcp-guard"),
+    ("zrpc-server", "zrpc-gcp-disk-id"),
     ("zrpc-server", "zrpc-gcp-cookie"),
     ("zrpc-server", "zrpc-gcp-early-init"),
     ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),

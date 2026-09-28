@@ -1,0 +1,14 @@
+[Unit]
+Description=Reprocess GCP public disk after measured rootfs rule is available
+Requires=systemd-udevd.service
+After=systemd-udevd.service
+Before=var-lib-zebra.mount
+OnFailure=poweroff.target
+OnFailureJobMode=replace-irreversibly
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/udevadm control --reload
+ExecStart=/usr/bin/udevadm trigger --type=devices --action=change --subsystem-match=block
+ExecStart=/usr/bin/udevadm settle
+RemainAfterExit=yes

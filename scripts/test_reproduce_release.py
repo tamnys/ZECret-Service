@@ -36,6 +36,7 @@ class GuestArtifactTests(unittest.TestCase):
             "zrpc-node-wrapper",
             "zrpc-gcp-quote-broker",
             "zrpc-gcp-guard",
+            "zrpc-gcp-disk-id",
             "zrpc-gcp-cookie",
             "zrpc-gcp-early-init",
         ):
