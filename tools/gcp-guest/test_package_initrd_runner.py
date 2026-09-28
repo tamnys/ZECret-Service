@@ -25,14 +25,18 @@ class PackageInitrdRunnerTest(unittest.TestCase):
             INITRD_PACKAGES={"systemd", "udev"},
         )
         source = types.SimpleNamespace(
-            guest=types.SimpleNamespace(prepare=prepare, SNAPSHOT="https://snapshot.debian.org/archive/debian/20260918T000000Z/"),
+            guest=types.SimpleNamespace(
+                prepare=prepare,
+                SNAPSHOT="https://snapshot.debian.org/archive/debian/20260918T000000Z/",
+                SIGNED_RELEASE_EPOCH=1789199741,
+            ),
             rust_inputs=types.SimpleNamespace(regular_bytes=lambda path: static),
             source_git_output=lambda args: static,
             _BOUND_REVISION="a" * 40,
         )
         with tempfile.TemporaryDirectory() as scratch:
             profile = Path(scratch) / "profile"
-            data, static_hash = runner.config_bytes(source, profile, 1789199741, [
+            data, static_hash = runner.config_bytes(source, profile, [
                 {"name": "systemd", "version": "257.9-1"},
                 {"name": "udev", "version": "257.9-1"},
             ])
@@ -40,10 +44,11 @@ class PackageInitrdRunnerTest(unittest.TestCase):
         self.assertTrue(data.startswith(static))
         self.assertIn(b"Distribution=debian\nRelease=trixie\nArchitecture=x86-64", data)
         self.assertIn(b"Packages=systemd=257.9-1,udev=257.9-1", data)
+        self.assertIn(b"SourceDateEpoch=1789199741", data)
         self.assertIn(b"CacheOnly=always\nIncremental=no", data)
         self.assertNotIn(b"BaseTrees=", data)
         with self.assertRaisesRegex(ValueError, "misses production initrd package"):
-            runner.config_bytes(source, profile, 1789199741,
+            runner.config_bytes(source, profile,
                                 [{"name": "systemd", "version": "257.9-1"}])
 
     def test_installed_manifest_rejects_package_outside_signed_closure(self):

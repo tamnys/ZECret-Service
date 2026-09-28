@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build only the production Debian initrd subimage as an unsigned diagnostic.
 
-The selected HEAD, signed Debian guest closure, production input lock, and
-double-built x86_64 /init receipt are inputs. The build needs an independently
+The selected HEAD, signed Debian guest closure, and double-built x86_64 /init
+receipt are inputs. The build needs an independently
 reviewed mkosi 25.3 builder and externally enforced isolation. This runner
 observes loopback-only IP state but cannot prove outer namespace creation,
 mount isolation, or the absence of UNIX-socket egress. It does not build a
@@ -61,34 +61,7 @@ def source_module(revision):
     return module
 
 
-def production_lock(path, source, revision):
-    """Use only initrd-relevant fields; absent signing/Zebra files are allowed."""
-    raw = source.rust_inputs.regular_bytes(path)
-    lock = json.loads(raw, object_pairs_hook=source.guest.prepare.unique_object)
-    prepare = source.guest.prepare
-    if (not isinstance(lock, dict)
-            or set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch",
-                                "kernel_version", "snapshot", "artifacts", "runtime"}
-            or lock["schema_version"] != 6
-            or lock["mkosi_source_commit"] != prepare.SOURCE_COMMIT
-            or lock["kernel_version"] != prepare.KERNEL_VERSION
-            or lock["snapshot"] != source.guest.SNAPSHOT
-            or type(lock["source_date_epoch"]) is not int
-            or lock["source_date_epoch"] <= 0):
-        raise ValueError("production input lock differs from reviewed initrd policy")
-    artifacts = lock["artifacts"]
-    if not isinstance(artifacts, dict) or set(artifacts) != prepare.ROLES:
-        raise ValueError("production input lock role set differs")
-    early = artifacts[prepare.EARLY_INIT_ROLE]
-    package = artifacts["package_manifest"]
-    if (not isinstance(early, dict) or not isinstance(package, dict)
-            or not HEX.fullmatch(early.get("sha256", ""))
-            or package.get("sha256") != prepare.PACKAGE_CLOSURE_SHA256):
-        raise ValueError("production lock initrd artifact identities differ")
-    return lock, sha256(raw)
-
-
-def config_bytes(source, profile, epoch, packages):
+def config_bytes(source, profile, packages):
     """Materialize the production subimage and its universal parent settings."""
     prepare = source.guest.prepare
     prepare.validate_boot_profile()
@@ -99,6 +72,9 @@ def config_bytes(source, profile, epoch, packages):
     versions = {entry["name"]: entry["version"] for entry in packages}
     if not prepare.INITRD_PACKAGES <= set(versions):
         raise ValueError("signed guest closure misses production initrd package seeds")
+    epoch = source.guest.SIGNED_RELEASE_EPOCH
+    if type(epoch) is not int or epoch <= 0:
+        raise ValueError("signed Debian release epoch differs")
     selected = ",".join(f"{name}={versions[name]}" for name in sorted(prepare.INITRD_PACKAGES))
     # Pinned mkosi 25.3 marks these parent settings universal for subimages.
     # Local paths are absolute so direct --directory=profile has the same inputs.
@@ -117,7 +93,7 @@ def config_bytes(source, profile, epoch, packages):
     return static + extension, sha256(static)
 
 
-def inputs(source, metadata, archives, rust_bundle, revision, lock_path, workspace):
+def inputs(source, metadata, archives, rust_bundle, revision, workspace):
     workspace = Path(workspace).resolve(strict=True)
     rust_bundle = Path(rust_bundle).resolve(strict=True)
     if not rust_bundle.is_relative_to(workspace):
@@ -145,27 +121,24 @@ def inputs(source, metadata, archives, rust_bundle, revision, lock_path, workspa
                  "mkosi_source_commit": source.guest.prepare.SOURCE_COMMIT,
                  "rust_receipt_sha256": receipt["reproduction_manifest_sha256"],
                  "early_init_sha256": early["sha256"]}
-    lock, lock_sha256 = production_lock(lock_path, source, revision)
-    if lock["artifacts"][source.guest.prepare.EARLY_INIT_ROLE]["sha256"] != sha256(binary):
-        raise ValueError("production lock /init differs from reproducible Rust receipt")
     signed = source.guest.verify_cached_archives(metadata, archives)
     if (signed["signed_snapshot_rechecked"] is not True
             or signed["archive_bytes_checked"] is not True):
         raise ValueError("signed Debian guest archive verification incomplete")
     packages = source.guest.authenticated_packages(metadata)
-    return preflight, binary, audit, packages, lock, lock_sha256
+    return preflight, binary, audit, packages
 
 
 def checked_profile(profile, workspace, source):
     return source.checked_profile_path(Path(profile), Path(workspace))
 
 
-def manifest_for(source, preflight, packages, lock_sha256, config, static_sha256, audit):
+def manifest_for(source, preflight, packages, config, static_sha256, audit):
     return {
         "schema_version": 1, "status": PROFILE_STATUS,
         "source_commit": preflight["rust_source_commit"],
         "mkosi_source_commit": preflight["mkosi_source_commit"],
-        "production_lock_sha256": lock_sha256,
+        "signed_release_epoch": source.guest.SIGNED_RELEASE_EPOCH,
         "signed_guest_closure_sha256": source.guest.prepare.PACKAGE_CLOSURE_SHA256,
         "signed_inrelease_sha256": source.guest.INRELEASE_SHA256,
         "signed_packages_index_sha256": source.guest.PACKAGES_SHA256,
@@ -195,12 +168,12 @@ def regular(path, *, mode=None):
 
 
 def prepare_profile(source, metadata, archives, rust_bundle, revision,
-                    lock_path, profile, workspace):
-    preflight, binary, audit, packages, lock, lock_sha256 = inputs(
-        source, metadata, archives, rust_bundle, revision, lock_path, workspace)
+                    profile, workspace):
+    preflight, binary, audit, packages = inputs(
+        source, metadata, archives, rust_bundle, revision, workspace)
     profile = checked_profile(profile, workspace, source)
-    config, static_sha256 = config_bytes(source, profile, lock["source_date_epoch"], packages)
-    expected = manifest_for(source, preflight, packages, lock_sha256, config, static_sha256, audit)
+    config, static_sha256 = config_bytes(source, profile, packages)
+    expected = manifest_for(source, preflight, packages, config, static_sha256, audit)
     parent_fd = source.builder.output_parent(Path(workspace), profile)
     try:
         os.mkdir(profile.name, mode=0o700, dir_fd=parent_fd)
@@ -235,12 +208,12 @@ def prepare_profile(source, metadata, archives, rust_bundle, revision,
 
 
 def verify_profile(source, metadata, archives, rust_bundle, revision,
-                   lock_path, profile, workspace):
-    preflight, binary, audit, packages, lock, lock_sha256 = inputs(
-        source, metadata, archives, rust_bundle, revision, lock_path, workspace)
+                   profile, workspace):
+    preflight, binary, audit, packages = inputs(
+        source, metadata, archives, rust_bundle, revision, workspace)
     profile = checked_profile(profile, workspace, source)
-    config, static_sha256 = config_bytes(source, profile, lock["source_date_epoch"], packages)
-    expected = manifest_for(source, preflight, packages, lock_sha256, config, static_sha256, audit)
+    config, static_sha256 = config_bytes(source, profile, packages)
+    expected = manifest_for(source, preflight, packages, config, static_sha256, audit)
     if profile.is_symlink() or stat.S_IMODE(profile.stat().st_mode) != 0o700 or set(os.listdir(profile)) != PROFILE_FILES:
         raise ValueError("package initrd profile contains unreviewed inputs")
     if regular(profile / "mkosi.conf", mode=0o400) != config:
@@ -408,10 +381,10 @@ def verified_mkosi(source, metadata, builder_archives):
 
 
 def build_profile(source, metadata, archives, rust_bundle, revision,
-                  lock_path, profile, workspace, parent_network_namespace,
+                  profile, workspace, parent_network_namespace,
                   parent_mount_namespace, mkosi, builder_archives):
     before = verify_profile(source, metadata, archives, rust_bundle,
-                            revision, lock_path, profile, workspace)
+                            revision, profile, workspace)
     namespace = check_loopback_only_ip_state(parent_network_namespace,
                                               parent_mount_namespace)
     if Path(mkosi) != Path("/usr/bin/mkosi") or Path(mkosi).is_symlink():
@@ -430,7 +403,7 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
     if result.returncode:
         raise ValueError("pinned mkosi initrd build failed")
     after = verify_profile(source, metadata, archives, rust_bundle,
-                           revision, lock_path, profile, workspace)
+                           revision, profile, workspace)
     if after != before:
         raise ValueError("source-bound initrd inputs changed during mkosi build")
     if output.is_symlink() or set(os.listdir(output)) != {"initrd.cpio.zst", "initrd.manifest"}:
@@ -466,7 +439,7 @@ def main(argv=None):
         return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "verify", "build"))
-    for name in ("metadata", "archives", "rust-bundle", "input-lock",
+    for name in ("metadata", "archives", "rust-bundle",
                  "profile", "workspace"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--revision", required=True)
@@ -478,8 +451,7 @@ def main(argv=None):
     try:
         source = source_module(args.revision)
         common = (source, args.metadata, args.archives, args.rust_bundle,
-                  args.revision, args.input_lock,
-                  args.profile, args.workspace)
+                  args.revision, args.profile, args.workspace)
         if args.command == "prepare":
             report = prepare_profile(*common)
         elif args.command == "verify":
