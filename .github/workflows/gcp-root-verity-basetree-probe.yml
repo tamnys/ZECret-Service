@@ -10,10 +10,41 @@ on:
       - tools/gcp-guest/test_prepare_guest_disk_basetree_profile.py
       - tools/gcp-guest/inspect_basetree_disk.py
       - tools/gcp-guest/test_inspect_basetree_disk.py
+      - tools/gcp-guest/probe_builder_owner_map.py
 
 permissions: {}
 
 jobs:
+  owner-map:
+    name: Native parent-written guest-owner mapping feasibility
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Fetch exact public source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/owner-map-source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+      - name: Exercise parent-written UID/GID map without building an image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/owner-map-source"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+          sudo -n /usr/bin/python3 -I -B \
+            "$source/tools/gcp-guest/probe_builder_owner_map.py" \
+            --scratch "/var/tmp/zrpc-owner-map-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
   disk:
     name: Non-bootable no-package raw disk diagnostic
     runs-on: ubuntu-24.04
