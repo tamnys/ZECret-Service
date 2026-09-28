@@ -686,8 +686,15 @@ jobs:
               workspace, include_overlay=True,
           )
           deltas = tree["differences"]
+          source_effects = tree["source_consistent_unapproved_effects"]
           if (tree["status"] not in {tree_audit.STATUS, tree_audit.DELTA_STATUS}
                   or (tree["status"] == tree_audit.DELTA_STATUS) != bool(deltas)
+                  or {item["path"] for item in source_effects}
+                     != {"init", "usr/lib/clock-epoch"}
+                  or any(item["security_review_required"] is not True
+                         or item["source_commit"] != tree_audit.MKOSI_EFFECTS_SOURCE_COMMIT
+                         or {"path": item["path"], "difference": "added"} not in deltas
+                         for item in source_effects)
                   or tree["committed_rootfs_overlay_included"] is not True
                   or tree["boot_overrides_match_source"] is not True
                   or tree["runtime_binaries_included"] is not False
