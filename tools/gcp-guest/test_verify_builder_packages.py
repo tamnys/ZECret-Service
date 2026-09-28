@@ -131,6 +131,15 @@ class DirectBuilderPackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "package set incomplete"):
             self.verify()
 
+    def test_missing_apt_hook_shell_package_rejected(self):
+        self.lock["packages"] = [
+            package for package in self.lock["packages"]
+            if package["name"] != "dash"
+        ]
+        self.write_metadata()
+        with self.assertRaisesRegex(ValueError, "direct builder package set incomplete"):
+            self.verify()
+
     def test_wrong_snapshot_and_bad_signature_rejected(self):
         self.lock["snapshot"] = "https://snapshot.debian.org/archive/debian/20260927T000000Z/"
         self.write_metadata()

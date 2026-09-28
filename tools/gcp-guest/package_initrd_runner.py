@@ -426,6 +426,16 @@ def installed_manifest(path, packages, source):
     return sha256(raw), len(observed)
 
 
+def checked_output_layout(output):
+    """Accept only the compressed CPIO, manifest, and mkosi's exact output alias."""
+    if (output.is_symlink() or not output.is_dir()
+            or set(os.listdir(output)) != {"initrd", "initrd.cpio.zst", "initrd.manifest"}):
+        raise ValueError("mkosi initrd output set differs")
+    alias = output / "initrd"
+    if not alias.is_symlink() or os.readlink(alias) != "initrd.cpio.zst":
+        raise ValueError("mkosi initrd output alias differs")
+
+
 def verified_mkosi(source, metadata, builder_archives):
     """Match installed mkosi code to a package in the signed Debian snapshot."""
     direct = source.builder.closure.direct
@@ -540,8 +550,7 @@ def build_profile(source, selected, metadata, archives, rust_bundle, revision,
                            revision, profile, workspace)
     if after != before:
         raise ValueError("source-bound initrd inputs changed during mkosi build")
-    if output.is_symlink() or set(os.listdir(output)) != {"initrd.cpio.zst", "initrd.manifest"}:
-        raise ValueError("mkosi initrd output set differs")
+    checked_output_layout(output)
     packages = source.guest.authenticated_packages(metadata)
     manifest_hash, package_count = installed_manifest(output / "initrd.manifest", packages, source)
     audit_hash = json.loads((profile / "profile-manifest.json").read_bytes())["initrd_audit_sha256"]
