@@ -32,12 +32,17 @@ READER_BANNER = b"debugfs 1.47.2 (1-Jan-2025)\n"
 STAT_HEADER = re.compile(
     r"Inode: ([1-9][0-9]*) +Type: (regular|directory|symlink) +Mode: +([0-7]{4}) +Flags: 0x[0-9a-f]+"
 )
-STAT_SIZE = re.compile(r"(?m)^User: +[0-9]+ +Group: +[0-9]+ +Project: +[0-9]+ +Size: ([0-9]+)$")
+STAT_OWNER_SIZE = re.compile(r"(?m)^User: +([0-9]+) +Group: +([0-9]+) +Project: +[0-9]+ +Size: ([0-9]+)$")
 FAST_LINK = re.compile(r'(?m)^Fast link dest: "([^"\n]*)"$')
 SAFE_PATH = re.compile(r"[A-Za-z0-9_./@+-]+\Z")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+ACCOUNT_FILES = {
+    "etc/passwd": (1100, "f42d295b4a2ad2a9d9a82865bc4ba6043fafe03e77e5b57e7081a8d67450c2ff", 0o644, 0o644),
+    "etc/group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00", 0o644, 0o644),
+    "etc/shadow": (509, "92ec1ef612eb9c38cbe22403a595d268bf38546cadded7d8e0471bf271f15d13", 0o400, 0o000),
+}
 REQUIRED_FILES = frozenset({
-    "etc/fstab", "etc/zrpc/zebra.toml",
+    "etc/fstab", "etc/zrpc/zebra.toml", *ACCOUNT_FILES,
     "usr/lib/zrpc/zrpc-node-wrapper", "usr/lib/zrpc/zrpc-gcp-quote-broker",
     "usr/lib/zrpc/zrpc-gcp-guard", "usr/lib/zrpc/zrpc-gcp-cookie",
     "usr/lib/zrpc/zebrad",
@@ -142,6 +147,10 @@ def checked_overlay(manifest, stage):
                 raise ValueError("staged rootfs symlink differs: " + relative)
         else:
             selected[relative] = {**expected, "size": _staged_file(stage, relative, expected)}
+    for name, (size, digest, staged_mode, _) in ACCOUNT_FILES.items():
+        if selected.get(name) != {"type": "file", "mode": staged_mode,
+                                   "sha256": digest, "size": size}:
+            raise ValueError("staged account differs from reviewed source: " + name)
     return selected
 
 
@@ -205,14 +214,15 @@ def run_stat(reader, image, relative, *, env=ENV, pass_fds=()):
         raise ValueError("signed debugfs inode report is malformed") from error
     lines = output.splitlines()
     header = STAT_HEADER.fullmatch(lines[0]) if lines else None
-    size = STAT_SIZE.findall(output)
-    if header is None or len(size) != 1:
+    owner_size = STAT_OWNER_SIZE.findall(output)
+    if header is None or len(owner_size) != 1:
         raise ValueError("signed debugfs inode report is malformed: " + relative)
     link = FAST_LINK.findall(output)
     if len(link) > 1:
         raise ValueError("signed debugfs symlink report is ambiguous")
     return {"type": header[2], "mode": int(header[3], 8),
-            "size": int(size[0]), "link": link[0] if link else None}
+            "uid": int(owner_size[0][0]), "gid": int(owner_size[0][1]),
+            "size": int(owner_size[0][2]), "link": link[0] if link else None}
 
 
 def run_cat(reader, image, relative, expected_size, scratch, *, env=ENV, pass_fds=()):
@@ -247,7 +257,11 @@ def inspect_entries(reader, image, selected, scratch, *, env=ENV, pass_fds=()):
                              "symlink": "symlink"}[expected["type"]]:
             raise ValueError("raw rootfs entry type differs: " + relative)
         if expected["type"] == "file":
-            if inode["mode"] != expected["mode"] or inode["size"] != expected["size"]:
+            final_mode = (ACCOUNT_FILES[relative][3] if relative in ACCOUNT_FILES
+                          else expected["mode"])
+            if (inode["mode"] != final_mode or inode["size"] != expected["size"]
+                    or (relative in ACCOUNT_FILES
+                        and (inode["uid"], inode["gid"]) != (0, 0))):
                 raise ValueError("raw rootfs file metadata differs: " + relative)
             if run_cat(reader, image, relative, expected["size"], scratch,
                        env=env, pass_fds=pass_fds) != expected["sha256"]:

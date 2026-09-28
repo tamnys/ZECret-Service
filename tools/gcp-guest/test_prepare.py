@@ -147,6 +147,8 @@ class CandidateTests(unittest.TestCase):
             ("mask", replace_mask),
             ("mode", change_mode),
             ("missing", lambda candidate: (candidate / "audit-rootfs.py").unlink()),
+            ("seal", lambda candidate: (candidate / "seal-shadow.py").unlink()),
+            ("shadow", lambda candidate: (candidate / "rootfs/etc/shadow").chmod(0o600)),
             ("lock", lambda candidate: (candidate / "inputs.lock.json").write_bytes(b"{}")),
             ("output", lambda candidate: add_build_output(candidate, "output")),
             ("work", lambda candidate: add_build_output(candidate, "work")),
@@ -292,11 +294,23 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "rootfs/run/zrpc-build-signing").exists())
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)
+        self.assertEqual(config.count("FinalizeScripts=seal-shadow.py,audit-rootfs.py\n"), 1)
         self.assertIn("\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n", config)
         self.assertEqual(config.count("\nBuildSources=\n"), 1)
-        for script in (output / "audit-rootfs.py", output / "mkosi.images/initrd/audit-initrd.py"):
+        for script in (output / "seal-shadow.py", output / "audit-rootfs.py",
+                       output / "mkosi.images/initrd/audit-initrd.py"):
             self.assertNotIn("SRCDIR", script.read_text())
             self.assertNotIn("/work/src", script.read_text())
+        self.assertEqual((output / "seal-shadow.py").stat().st_mode & 0o777, 0o555)
+        for name, (size, expected_sha, source_mode, staged_mode) in prepare.ACCOUNT_OUTPUTS.items():
+            source = prepare.PROFILE / "rootfs/etc" / name
+            staged = output / "rootfs/etc" / name
+            self.assertEqual((source.stat().st_size, prepare.digest(source), source.stat().st_mode & 0o777),
+                             (size, expected_sha, source_mode))
+            self.assertEqual((staged.stat().st_size, prepare.digest(staged), staged.stat().st_mode & 0o777),
+                             (size, expected_sha, staged_mode))
+            self.assertEqual(report["entries"]["rootfs/etc/" + name],
+                             {"type": "file", "sha256": expected_sha, "mode": staged_mode})
         self.assertTrue((output / "package-cache").is_dir())
         self.assertNotIn("BaseTrees=", config)
         self.assertFalse((output / "artifacts/base_tree.tar").exists())
@@ -364,7 +378,7 @@ class CandidateTests(unittest.TestCase):
         shutil.copy2(prepare.PROFILE / "mkosi.conf", profile / "mkosi.conf")
         shutil.copytree(prepare.PROFILE / "mkosi.images", profile / "mkosi.images")
         shutil.copytree(prepare.PROFILE / "repart", profile / "repart")
-        (profile / "rootfs").mkdir()
+        shutil.copytree(prepare.PROFILE / "rootfs", profile / "rootfs")
         (profile / "input-identities.json").write_text("{}")
         shutil.copy2(prepare.PROFILE / "package-closure.lock.json", profile / "package-closure.lock.json")
         prepare.validate_boot_profile(profile)
@@ -430,6 +444,18 @@ class CandidateTests(unittest.TestCase):
             with self.subTest(source=source), self.assertRaisesRegex(ValueError, "ExtraTrees must not supply"):
                 prepare.validate_boot_profile(profile)
             path.rmdir()
+        for name in prepare.ACCOUNT_OUTPUTS:
+            path = profile / "rootfs/etc" / name
+            good = path.read_bytes()
+            path.write_bytes(b"X" + good[1:])
+            with self.subTest(account=name), self.assertRaisesRegex(ValueError, "reviewed guest account source differs"):
+                prepare.validate_boot_profile(profile)
+            path.write_bytes(good)
+        sysusers = profile / "rootfs/usr/lib/sysusers.d/zrpc.conf"
+        original = sysusers.read_bytes()
+        sysusers.write_bytes(original + b"# changed\n")
+        with self.assertRaisesRegex(ValueError, "project sysusers source differs"):
+            prepare.validate_boot_profile(profile)
 
     def test_unverified_snapshot_cannot_stage(self):
         lock_path = self.root / "synthetic.lock.json"

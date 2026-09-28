@@ -138,6 +138,71 @@ jobs:
                 --metadata "$4/guest-metadata" --archives "$4/guest-archives" \
                 --workspace "$4" --output "$4/account-artifact"
           ' _ "$runner_uid" "$runner_gid" "$parent_net_ns" "$scratch" "$source"
+          # Compare signed-input output and its reviewed root-lock transform
+          # with the immutable overlay. Do not publish shadow contents.
+          python3 - "$scratch/account-artifact/etc" "$source/deploy/gcp/guest/rootfs/etc" <<'PY'
+          import hashlib
+          from pathlib import Path
+          import re
+          import stat
+          import sys
+
+          directory = Path(sys.argv[1])
+          committed = Path(sys.argv[2])
+          expected = {
+              "passwd": (1092, "f652ac1e113c0fad438ad2309b747e1cbadb531c178f9942df80da4f0f0637ac", 0o444),
+              "group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00", 0o444),
+              "shadow": (521, "f535220fcf1646b3a15f767de5af22f2ebdde250b3ab4868371cc0bf0ff0203c", 0o400),
+          }
+          checked = {}
+          for name, (size, digest, mode) in expected.items():
+              path = directory / name
+              if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != mode:
+                  raise ValueError("account review file metadata differs")
+              data = path.read_bytes()
+              if (len(data) != size or hashlib.sha256(data).hexdigest() != digest
+                      or not data.endswith(b"\n")
+                      or any(byte != 10 and not 32 <= byte <= 126 for byte in data)):
+                  raise ValueError("account review bytes differ from prior native diagnostics")
+              checked[name] = data
+          for line_index, line in enumerate(checked["shadow"].splitlines()):
+              fields = line.split(b":")
+              if len(fields) != 9:
+                  raise ValueError(f"shadow line {line_index} has {len(fields)} fields")
+              if not re.fullmatch(rb"[a-z_][a-z0-9_-]*", fields[0]):
+                  raise ValueError(f"shadow line {line_index} username shape differs; length {len(fields[0])}")
+              # systemd v257.13 defines these two fixed sysusers markers.
+              # Neither can contain a previous password hash suffix.
+              if fields[1] not in {b"!unprovisioned", b"!*"}:
+                  raise ValueError(f"shadow line {line_index} password is not a lock sentinel; length {len(fields[1])}")
+              for field_index, field in enumerate(fields[2:], start=2):
+                  if field and not field.isdigit():
+                      raise ValueError(f"shadow line {line_index} aging field {field_index} shape differs; length {len(field)}")
+          original_passwd = b"root:x:0:0::/root:/bin/bash\n"
+          original_shadow = b"root:!unprovisioned:20708::::::\n"
+          if (checked["passwd"].count(original_passwd) != 1
+                  or checked["shadow"].count(original_shadow) != 1):
+              raise ValueError("signed root account differs from reviewed transform input")
+          transformed = dict(checked)
+          transformed["passwd"] = checked["passwd"].replace(
+              original_passwd, b"root:x:0:0::/root:/usr/sbin/nologin\n")
+          transformed["shadow"] = checked["shadow"].replace(
+              original_shadow, b"root:!*:20708::::::\n")
+          normalized = {
+              "passwd": (1100, "f42d295b4a2ad2a9d9a82865bc4ba6043fafe03e77e5b57e7081a8d67450c2ff"),
+              "group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00"),
+              "shadow": (509, "92ec1ef612eb9c38cbe22403a595d268bf38546cadded7d8e0471bf271f15d13"),
+          }
+          for name, (size, digest) in normalized.items():
+              source_file = committed / name
+              data = transformed[name]
+              if (source_file.is_symlink() or not source_file.is_file()
+                      or stat.S_IMODE(source_file.stat().st_mode) != 0o644
+                      or (len(data), hashlib.sha256(data).hexdigest()) != (size, digest)
+                      or source_file.read_bytes() != data):
+                  raise ValueError("reviewed account overlay differs from signed-source transform")
+          print("Signed-source account transform matches pinned, all-locked overlay; image remains unbuilt")
+          PY
           python3 - "$scratch/account-artifact/receipt.json" <<'PY'
           import json
           from pathlib import Path
