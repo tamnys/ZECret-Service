@@ -44,6 +44,7 @@ INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/debug-shell.service",
     "/usr/lib/systemd/system/getty.target",
     "/usr/lib/systemd/system/getty@.service",
+    "/usr/lib/systemd/system/autovt@.service",
     "/usr/lib/systemd/system/serial-getty@.service",
     "/usr/lib/systemd/system/console-getty.service",
     "/usr/lib/systemd/system/container-getty@.service",

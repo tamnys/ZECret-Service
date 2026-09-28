@@ -375,6 +375,7 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.images/initrd/mkosi.conf", "MakeInitrd=yes", "MakeInitrd=no"),
             ("mkosi.images/initrd/mkosi.conf", "Ssh=no", "Ssh=yes"),
             ("mkosi.images/initrd/mkosi.conf", "rescue.target,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "autovt@.service,", ""),
             ("mkosi.images/initrd/mkosi.conf", "multi-user.target.wants/getty.target,", ""),
             ("mkosi.images/initrd/mkosi.conf", "RemoveFiles=/usr/lib/systemd/system/rescue.service", "RemoveFiles=/usr/lib/systemd/system/other.service"),
         )
