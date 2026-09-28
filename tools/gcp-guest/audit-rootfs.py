@@ -190,6 +190,8 @@ def audit_accounts(root):
             or not password[1].startswith(("!", "*"))
         ):
             raise ValueError("guest account missing or unlocked")
+        if name == "root" and (entry[6] != "/usr/sbin/nologin" or password[1] != "!*"):
+            raise ValueError("guest root login policy differs")
         try:
             uid, gid = int(entry[2]), int(entry[3])
         except ValueError as error:

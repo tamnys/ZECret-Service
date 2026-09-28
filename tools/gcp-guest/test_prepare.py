@@ -720,7 +720,7 @@ class CandidateTests(unittest.TestCase):
             "zrpc-node:x:101:101::/nonexistent:/usr/sbin/nologin\n"
             "zrpc-wrapper:x:102:102::/nonexistent:/usr/sbin/nologin\n")
         (root / "etc/shadow").write_text(
-            "root:!:0:0:0:0:0:0:\n"
+            "root:!*:0:0:0:0:0:0:\n"
             "systemd-network:!:0:0:0:0:0:0:\n"
             "systemd-resolve:!:0:0:0:0:0:0:\n"
             "zrpc-node:!:0:0:0:0:0:0:\n"
