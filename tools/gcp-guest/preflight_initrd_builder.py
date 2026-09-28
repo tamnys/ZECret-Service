@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Probe staged CPIO builder inputs inside an already isolated native runner.
+"""Probe staged CPIO builder inputs in a native diagnostic runner.
 
 This checks selected executable bytes against the staged Debian payload receipt
-and observes the current network namespace. The caller must authenticate the
+and observes the current network namespace. This observation does not prove
+network confinement against a privileged runner that can re-enter host namespaces.
+The caller must authenticate the
 signed snapshot, lock, and staged tree separately. This does not run mkosi,
 establish a complete builder closure, build an initrd, or approve a release.
 """
@@ -187,6 +189,7 @@ def probe(root, parent_network_namespace):
         "selected_executable_bytes_match_staged_receipt": True,
         "observed_network_namespace": current,
         "observed_only_loopback_interface_and_routes": True,
+        "network_confinement_verified": False,
         "signed_snapshot_rechecked_by_this_probe": False,
         "complete_builder_toolchain": False,
         "mkosi_executed_by_this_probe": False,
@@ -204,6 +207,7 @@ def main(argv=None):
         report = probe(Path("/"), args.parent_network_namespace)
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         report = {"status": "blocked", "reason": str(error),
+                  "network_confinement_verified": False,
                   "complete_builder_toolchain": False,
                   "initrd_built": False, "image_built": False,
                   "private_mode_approved": False}

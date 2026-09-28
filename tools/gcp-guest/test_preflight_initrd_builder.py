@@ -58,6 +58,7 @@ class InitrdBuilderProbeTests(unittest.TestCase):
                          sorted(set(candidate.TOOLS) | {candidate.INTERPRETER_LINK}))
         self.assertTrue(report["selected_executable_bytes_match_staged_receipt"])
         for field in ("signed_snapshot_rechecked_by_this_probe",
+                      "network_confinement_verified",
                       "complete_builder_toolchain", "mkosi_executed_by_this_probe",
                       "initrd_built", "image_built", "private_mode_approved"):
             self.assertIs(report[field], False)

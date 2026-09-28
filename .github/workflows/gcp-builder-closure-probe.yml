@@ -561,7 +561,7 @@ jobs:
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
                 "$chroot_command" "$staged" "$@"
             }
-            # Recheck the selected CPIO producer tools and this process's
+            # Recheck the selected CPIO producer tools and the current
             # network namespace immediately before any mkosi invocation. The
             # signed APT plan and payload staging above remain separate proofs;
             # this probe does not build an initrd or approve a toolchain.
