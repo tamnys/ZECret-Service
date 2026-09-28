@@ -36,7 +36,6 @@ AT_RECURSIVE = 0x8000
 MOUNT_ATTR_RDONLY = 1
 SYS_MOUNT_SETATTR_X86_64 = 442
 PR_SET_PDEATHSIG = 1
-IFF_UP = 1
 DEVICE_NAMES = ("null", "zero", "urandom")
 MOUNT_ESCAPED = re.compile(r"\\([0-7]{3})")
 
@@ -104,9 +103,6 @@ def no_inherited_descriptors():
 def no_network():
     if [name for _, name in socket.if_nameindex()] != ["lo"]:
         raise ValueError("network namespace has an unexpected interface")
-    flags = int(Path("/sys/class/net/lo/flags").read_text().strip(), 16)
-    if flags & IFF_UP:
-        raise ValueError("network namespace loopback is up")
     routes = Path("/proc/net/route").read_text().splitlines()
     if not routes or routes[1:]:
         raise ValueError("network namespace has IPv4 routes")

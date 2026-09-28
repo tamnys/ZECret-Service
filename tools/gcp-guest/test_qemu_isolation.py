@@ -129,9 +129,8 @@ class QemuIsolationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "output is read-only"):
                 isolation.check_mounts(root, output, require_proc=True)
 
-    def test_new_network_requires_only_down_loopback_and_no_routes(self):
-        content = {"/sys/class/net/lo/flags": "0x8\n",
-                   "/proc/net/route": "Iface\tDestination\n",
+    def test_new_network_requires_only_loopback_and_no_routes(self):
+        content = {"/proc/net/route": "Iface\tDestination\n",
                    "/proc/net/ipv6_route": ""}
         with (mock.patch.object(isolation.socket, "if_nameindex",
                                 return_value=[(1, "lo")]),
@@ -146,9 +145,10 @@ class QemuIsolationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "IPv6 routes"):
                 isolation.no_network()
             content["/proc/net/ipv6_route"] = ""
-            content["/sys/class/net/lo/flags"] = "0x9\n"
-            with self.assertRaisesRegex(ValueError, "loopback is up"):
-                isolation.no_network()
+            with mock.patch.object(isolation.socket, "if_nameindex",
+                                   return_value=[(1, "lo"), (2, "eth0")]):
+                with self.assertRaisesRegex(ValueError, "unexpected interface"):
+                    isolation.no_network()
 
     def test_mountinfo_mode_and_path_escapes_are_parsed(self):
         line = "1 0 0:1 / /stage\\040space ro - tmpfs tmpfs ro\n"
