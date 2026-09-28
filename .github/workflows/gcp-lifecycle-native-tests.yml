@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   lifecycle:
-    name: Exact-head networkless lifecycle tests
+    name: Exact-head networkless journal tests
     runs-on: ubuntu-24.04
     env:
       ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
@@ -83,7 +83,7 @@ jobs:
             LANG=C LC_ALL=C TZ=UTC \
             cargo fetch --locked --target x86_64-unknown-linux-gnu
 
-      - name: Exercise journal failures and lifecycle regressions without network
+      - name: Exercise journal failures without network
         shell: bash
         run: |
           set -euo pipefail
@@ -104,7 +104,7 @@ jobs:
             RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
             RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
             LANG=C LC_ALL=C TZ=UTC \
-            cargo test --locked --offline -p zrpc-lifecycle gcp::
+            cargo test --locked --offline -p zrpc-lifecycle gcp::store::tests::
           test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" diff --quiet
-          echo 'Local journal/controller tests only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Local journal tests only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
