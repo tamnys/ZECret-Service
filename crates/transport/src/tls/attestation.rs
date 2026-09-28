@@ -471,6 +471,15 @@ impl VerifiedRpcSession {
         Ok(())
     }
 
+    fn private_operation_deadline(&self) -> Result<Instant, SafeError> {
+        let collateral_deadline = self
+            .session
+            .private_deadline
+            .get()
+            .ok_or_else(unavailable)?;
+        Ok(self.deadline.min(collateral_deadline.monotonic))
+    }
+
     /// Read a caller-supplied body only while the verified connection remains
     /// live, then parse the typed allowlist and recheck before sending it.
     pub async fn query_from_body(
@@ -489,7 +498,12 @@ impl VerifiedRpcSession {
         Fut: Future<Output = Result<Vec<u8>, SafeError>>,
     {
         self.ensure_private_ready()?;
-        let request = parse_request(&body().await?)?;
+        let deadline = self.private_operation_deadline()?;
+        let bytes = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), body())
+            .await
+            .map_err(|_| self.ensure_lifetimes().err().unwrap_or_else(expired))??;
+        self.ensure_private_ready()?;
+        let request = parse_request(&bytes)?;
         self.query(&request).await
     }
 
@@ -503,12 +517,7 @@ impl VerifiedRpcSession {
             .header(header::ACCEPT_ENCODING, "identity")
             .body(Full::new(Bytes::from(body)))
             .map_err(|_| unavailable())?;
-        let private_deadline = self
-            .session
-            .private_deadline
-            .get()
-            .ok_or_else(unavailable)?;
-        let operation_deadline = self.deadline.min(private_deadline.monotonic);
+        let operation_deadline = self.private_operation_deadline()?;
         // The only sender here is the one retained from POST /attestation.
         let operation = async {
             let response = self
