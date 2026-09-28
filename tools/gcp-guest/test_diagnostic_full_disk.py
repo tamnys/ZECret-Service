@@ -108,6 +108,7 @@ class DiagnosticDiskTests(unittest.TestCase):
         for old, new in ((b"SecureBoot=yes\n", b"SecureBoot=no\n"),
                          (b"Bootloader=uki\n", b"Bootloader=none\n"),
                          (b"RepartDirectories=repart\n", b"RepartDirectories=other\n"),
+                         (b"BuildSources=\n", b"BuildSources=.\n"),
                          (b"WorkspaceDirectory=work\n", b"WorkspaceDirectory=other\n"),
                          (diagnostic.prepare.EXTERNAL_SECURE_BOOT_KEY.encode(),
                           b"/tmp/unreviewed.key")):
