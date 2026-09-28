@@ -325,7 +325,9 @@ def verify_execution_context(metadata, builder_archives, parent_net_ns,
         raise ValueError("outer no-route network namespace not established")
     ipv4 = Path("/proc/net/route").read_text().splitlines()
     ipv6 = Path("/proc/net/ipv6_route").read_text().splitlines()
-    if len(ipv4) != 1 or any(line.split()[-1] != "lo" for line in ipv6):
+    if (not ipv4
+            or any(not line.split() or line.split()[0] != "lo" for line in ipv4[1:])
+            or any(not line.split() or line.split()[-1] != "lo" for line in ipv6)):
         raise ValueError("outer namespace has a non-loopback route")
     signed = builder_closure.verify(
         metadata / "InRelease", metadata / "Packages.xz",

@@ -178,6 +178,26 @@ class DiskProfileTests(unittest.TestCase):
                                               "net:[42]", self.workspace)
             verify.assert_not_called()
 
+        def loopback_routes(path, *args, **kwargs):
+            if str(path) == "/proc/net/route":
+                return "Iface Destination\nlo 00000000\n"
+            if str(path) == "/proc/net/ipv6_route":
+                return "00000000 lo\n"
+            return original_read_text(path, *args, **kwargs)
+
+        with (mock.patch.object(disk.platform, "system", return_value="Linux"),
+              mock.patch.object(disk.platform, "machine", return_value="x86_64"),
+              mock.patch.object(disk.os, "readlink", return_value="net:[43]"),
+              mock.patch.object(disk.socket, "if_nameindex", return_value=[(1, "lo")]),
+              mock.patch.object(Path, "read_text", autospec=True,
+                                side_effect=loopback_routes),
+              mock.patch.object(disk.builder_closure, "verify",
+                                side_effect=ValueError("signed closure sentinel")) as verify):
+            with self.assertRaisesRegex(ValueError, "signed closure sentinel"):
+                disk.verify_execution_context(self.workspace, self.workspace,
+                                              "net:[42]", self.workspace)
+            verify.assert_called_once()
+
     def test_staged_builder_rejects_mutated_or_extra_payload(self):
         staged = self.workspace / "staged"
         (staged / "usr" / "bin").mkdir(parents=True)
