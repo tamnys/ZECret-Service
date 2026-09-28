@@ -165,8 +165,12 @@ class DiskProfileTests(unittest.TestCase):
             return namespaces[path]
 
         def routes(path, *args, **kwargs):
-            if str(path) == "/proc/self/uid_map" or str(path) == "/proc/self/gid_map":
+            if str(path) == "/proc/self/uid_map":
                 return "0 0 1\n"
+            if str(path) == "/proc/self/gid_map":
+                return "0 0 1\n42 42 1\n"
+            if str(path) == "/proc/self/setgroups":
+                return "deny\n"
             if str(path) == "/proc/net/route":
                 return "Iface Destination\neth0 route\n"
             if str(path) == "/proc/net/ipv6_route":
@@ -215,9 +219,29 @@ class DiskProfileTests(unittest.TestCase):
                                               "user:[42]", "pid:[42]")
             verify.assert_not_called()
 
-        def loopback_routes(path, *args, **kwargs):
-            if str(path) in {"/proc/self/uid_map", "/proc/self/gid_map"}:
+        def missing_guest_group(path, *args, **kwargs):
+            if str(path) == "/proc/self/gid_map":
                 return "0 0 1\n"
+            return routes(path, *args, **kwargs)
+
+        with (mock.patch.object(disk.platform, "system", return_value="Linux"),
+              mock.patch.object(disk.platform, "machine", return_value="x86_64"),
+              mock.patch.object(disk.os, "readlink", side_effect=namespace_readlink),
+              mock.patch.object(disk.os, "geteuid", return_value=0),
+              mock.patch.object(disk.socket, "if_nameindex", return_value=[(1, "lo")]),
+              mock.patch.object(Path, "read_text", autospec=True,
+                                side_effect=missing_guest_group),
+              mock.patch.object(disk.builder_closure, "verify") as verify):
+            with self.assertRaisesRegex(ValueError, "outer no-route"):
+                disk.verify_execution_context(self.workspace, self.workspace,
+                                              "net:[42]", self.workspace,
+                                              "user:[42]", "pid:[42]")
+            verify.assert_not_called()
+
+        def loopback_routes(path, *args, **kwargs):
+            if str(path) in {"/proc/self/uid_map", "/proc/self/gid_map",
+                             "/proc/self/setgroups"}:
+                return routes(path, *args, **kwargs)
             if str(path) == "/proc/net/route":
                 return ""  # Native no-route namespace can expose no IPv4 header.
             if str(path) == "/proc/net/ipv6_route":

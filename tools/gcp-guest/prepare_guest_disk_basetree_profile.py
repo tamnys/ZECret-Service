@@ -322,7 +322,13 @@ def verify_execution_context(metadata, builder_archives, parent_net_ns,
     current = os.readlink("/proc/self/ns/net")
     current_user = os.readlink("/proc/self/ns/user")
     current_pid = os.readlink("/proc/self/ns/pid")
-    root_only_mapping = ["0", "0", "1"]
+
+    def id_map(kind):
+        return sorted(tuple(int(value) for value in row.split())
+                      for row in Path(f"/proc/self/{kind}_map").read_text().splitlines())
+
+    # The exact-head native inventory found only uid 0 and gids 0/42 in the
+    # verified source tars. A changed owner set is rejected before mkosi.
     if (not isinstance(parent_net_ns, str)
             or not re.fullmatch(r"net:\[[0-9]+\]", parent_net_ns)
             or not re.fullmatch(r"net:\[[0-9]+\]", current)
@@ -336,8 +342,9 @@ def verify_execution_context(metadata, builder_archives, parent_net_ns,
             or not re.fullmatch(r"pid:\[[0-9]+\]", current_pid)
             or current_pid == parent_pid_ns
             or os.geteuid() != 0
-            or Path("/proc/self/uid_map").read_text().split() != root_only_mapping
-            or Path("/proc/self/gid_map").read_text().split() != root_only_mapping
+            or id_map("uid") != [(0, 0, 1)]
+            or id_map("gid") != [(0, 0, 1), (42, 42, 1)]
+            or Path("/proc/self/setgroups").read_text().strip() != "deny"
             or os.readlink("/proc/1/ns/pid") != current_pid
             or {name for _, name in socket.if_nameindex()} != {"lo"}):
         raise ValueError("outer no-route user/network/PID namespaces not established")

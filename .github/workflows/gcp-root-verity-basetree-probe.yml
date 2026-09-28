@@ -97,7 +97,10 @@ jobs:
           parent_net_ns="$(readlink /proc/self/ns/net)"
           parent_pid_ns="$(readlink /proc/self/ns/pid)"
           chroot_command="$(command -v chroot)"
-          sudo -n unshare --user --map-root-user --mount --net --pid \
+          # The exact-head source-tar inventory in run 36372582561 found
+          # uid 0 and gids 0/42 only. Map those owners and no other host IDs.
+          sudo -n unshare --user --map-root-user --map-groups=42:42:1 \
+            --mount --net --pid \
             --fork --mount-proc --kill-child --propagation private bash -c '
             set -euo pipefail
             staged=$1
@@ -107,9 +110,10 @@ jobs:
             test "$(readlink /proc/self/ns/pid)" != "$5"
             test "$(readlink /proc/1/ns/pid)" = "$(readlink /proc/self/ns/pid)"
             test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/uid_map)" = "0 0 1"
-            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/gid_map)" = "0 0 1"
+            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/gid_map | sort -n)" = "$(printf "0 0 1\\n42 42 1")"
             test "$(wc -l < /proc/self/uid_map)" -eq 1
-            test "$(wc -l < /proc/self/gid_map)" -eq 1
+            test "$(wc -l < /proc/self/gid_map)" -eq 2
+            test "$(cat /proc/self/setgroups)" = deny
             chroot_command=$6
             source=$7
             archives=$8
@@ -218,9 +222,8 @@ jobs:
                                  account_artifact, source_profile, workspace,
                                  include_overlay=True) != source:
               raise ValueError("source overlay profile changed after preparation")
-          # The one-ID namespace cannot extract files owned by other guest
-          # users/groups. Inventory exact source tar headers before mkosi so
-          # any expanded map is derived from verified inputs, not guessed.
+          # Inventory exact source tar headers before mkosi and reject any
+          # owner not present in the narrow builder mapping.
           owner_sets = {"uid": set(), "gid": set()}
           for path in (source_profile / "input" / base.ARCHIVE,
                        source_profile / root.ACCOUNT_TREE,
