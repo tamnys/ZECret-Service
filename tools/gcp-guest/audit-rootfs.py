@@ -148,7 +148,10 @@ def audit_accounts(root):
     shadow = account_file(root, "shadow", 9)
     groups = account_file(root, "group", 4)
     if passwd.keys() != shadow.keys():
-        raise ValueError("guest passwd and shadow accounts differ")
+        raise ValueError(
+            "guest passwd and shadow accounts differ: "
+            f"passwd_only={sorted(passwd.keys() - shadow.keys())!r}, "
+            f"shadow_only={sorted(shadow.keys() - passwd.keys())!r}")
     for name, entry in passwd.items():
         if entry[1] != "x" or not shadow[name][1].startswith(("!", "*")):
             raise ValueError("guest account missing or unlocked")
