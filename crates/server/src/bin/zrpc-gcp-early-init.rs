@@ -13,7 +13,7 @@ use std::{
 // mkosi 25.3 prepends its repart-derived roothash to KernelCommandLine.
 // This checks the fixed flags and shape of that hash, not its identity. The
 // signed UKI and reviewed release must bind the exact final .cmdline bytes.
-const FIXED_CMDLINE: &str = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality";
+const FIXED_CMDLINE: &str = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality";
 const ROOT_HASH_PREFIX: &[u8] = b"roothash=";
 const SHA256_HEX_BYTES: usize = 64;
 
@@ -101,9 +101,18 @@ fn check_boot() -> Result<(), &'static str> {
     check_cmdline(&cmdline)
 }
 
+fn clear_boot_environment(command: &mut Command) {
+    // systemd 257 normally skips system credential import when the fixed
+    // command line says no. An inherited credential-directory variable is a
+    // separate import path, so pass no inherited environment to PID1.
+    command.env_clear();
+}
+
 fn main() {
     if check_boot().is_ok() {
-        let error = Command::new("/usr/lib/systemd/systemd").exec();
+        let mut command = Command::new("/usr/lib/systemd/systemd");
+        clear_boot_environment(&mut command);
+        let error = command.exec();
         eprintln!("GCP early init refused systemd exec: {error}");
     } else {
         eprintln!("GCP early init rejected boot");
@@ -142,9 +151,33 @@ mod tests {
             format!("{accepted}init=/bin/sh"),
             format!("{accepted}\n"),
             accepted.replace("lockdown=confidentiality", "lockdown=none"),
+            accepted.replace(
+                "systemd.import_credentials=no",
+                "systemd.import_credentials=yes",
+            ),
+            accepted.replace("systemd.import_credentials=no ", ""),
+            accepted.replace(
+                "systemd.import_credentials=no",
+                "systemd.import_credentials=no systemd.import_credentials=yes",
+            ),
         ] {
             assert!(check_cmdline(rejected.as_bytes()).is_err(), "{rejected:?}");
         }
+    }
+
+    #[test]
+    fn systemd_exec_drops_inherited_credential_directories() {
+        let mut command = Command::new("/usr/bin/env");
+        command.env("CREDENTIALS_DIRECTORY", "/run/credentials/@initrd");
+        command.env(
+            "ENCRYPTED_CREDENTIALS_DIRECTORY",
+            "/run/credentials/@initrd",
+        );
+        command.env("SYSTEMD_UNIT_PATH", "/unreviewed");
+        clear_boot_environment(&mut command);
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
     }
 
     #[test]
