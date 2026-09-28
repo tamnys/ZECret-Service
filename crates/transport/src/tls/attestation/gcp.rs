@@ -407,6 +407,56 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn pending_private_body_stops_at_the_first_existing_deadline_without_rpc() {
+        for session_expires_first in [true, false] {
+            let (result, peer) = fixture(body).await;
+            let mut evidence = result.unwrap();
+            let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+            evidence.connection.session.origin = TransportOrigin::Managed(tor);
+            let short_deadline = Instant::now() + Duration::from_millis(200);
+            if session_expires_first {
+                evidence.connection.deadline = short_deadline;
+            }
+            let session = VerifiedRpcSession::from_authenticated_inspection(
+                evidence.connection.session,
+                evidence.connection.deadline,
+                evidence.connection.authority,
+                PrivateDeadline {
+                    monotonic: if session_expires_first {
+                        Instant::now() + MAX_CONNECTION_LIFETIME
+                    } else {
+                        short_deadline
+                    },
+                    collateral_expiration_unix_seconds: u64::MAX,
+                },
+            )
+            .unwrap();
+            let body_polled = std::cell::Cell::new(false);
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                session.query_from_body_async(|| async {
+                    body_polled.set(true);
+                    std::future::pending::<Result<Vec<u8>, SafeError>>().await
+                }),
+            )
+            .await
+            .expect("pending body must stop at the private-session deadline");
+            assert!(body_polled.get());
+            assert_eq!(
+                result.unwrap_err().code,
+                if session_expires_first {
+                    ErrorCode::StaleNonce
+                } else {
+                    ErrorCode::ExpiredCollateral
+                }
+            );
+            // The fixture peer reads to EOF and fails if any /rpc byte arrived.
+            peer.await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn synthetic_child_death_closes_private_session_before_body_read() {
         let (result, peer) = fixture(body).await;
         let mut evidence = result.unwrap();
