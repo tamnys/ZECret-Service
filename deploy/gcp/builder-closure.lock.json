@@ -5,7 +5,7 @@
   "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
   "packages_index_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
   "signed_release_date_epoch": 1789199741,
-  "direct_lock_sha256": "d52154835df0a3e1558ce10f24137e2862821bcb1962c4c86d55fed3e394b4dc",
+  "direct_lock_sha256": "679ce2083cb067fbdc80fb0d27a4ab78f37ce558f92ee9bcc14670cce3688f25",
   "resolver": {
     "package": "apt",
     "version": "3.0.3",
@@ -89,6 +89,14 @@
       "sha256": "b77b192cf1c35f96da02134300bb227ab92c49eec2444268049fa1ce84fb9bc7"
     },
     {
+      "name": "dash",
+      "version": "0.5.12-12",
+      "architecture": "amd64",
+      "filename": "pool/main/d/dash/dash_0.5.12-12_amd64.deb",
+      "size": 98504,
+      "sha256": "a8902cb6d8650134764a25fb80aec8589d858ef71ece1680a62e84816c37bb04"
+    },
+    {
       "name": "dbus",
       "version": "1.16.2-2",
       "architecture": "amd64",
@@ -143,6 +151,14 @@
       "filename": "pool/main/d/debian-archive-keyring/debian-archive-keyring_2025.1_all.deb",
       "size": 179244,
       "sha256": "9ea7778e443144ca490668737a8ab22dd3e748bb99e805e22ec055abeb3c7fac"
+    },
+    {
+      "name": "debianutils",
+      "version": "5.23.2",
+      "architecture": "amd64",
+      "filename": "pool/main/d/debianutils/debianutils_5.23.2_amd64.deb",
+      "size": 92360,
+      "sha256": "720e43fda316676076498b4224ad3318049deafe60cc7c601011048de03ee97d"
     },
     {
       "name": "dirmngr",
