@@ -1,12 +1,11 @@
 # Unsigned local build reproduction
 
-`scripts/reproduce-release.py` builds the CLI (`zrpc`), public attestation
-wrapper (`zrpc-wrapper`), typed node wrapper (`zrpc-node-wrapper`), Phala quote
-bridge (`zrpc-quote-proxy`), and GCP quote broker, startup guard, cookie
-handoff, and early-init executables (`zrpc-gcp-quote-broker`, `zrpc-gcp-guard`,
-`zrpc-gcp-cookie`, and `zrpc-gcp-early-init`) from an exact committed source
-revision. It builds twice in separate source and target directories and
-compares the resulting bytes. The outputs are unsigned scaffold binaries.
+`scripts/reproduce-release.py` builds all ten project Rust executables,
+including the GCP early init (`zrpc-gcp-early-init`), lifecycle
+(`zrpc-gcp-lifecycle`), and UKI digest (`zrpc-uki-digest`) tools, from the exact
+checkout HEAD on native x86_64 Linux. It builds twice in separate source and
+target directories and compares the resulting bytes. The outputs are unsigned
+scaffold binaries.
 Their checksums do not approve a
 release, identify an accepted attestation measurement, or enable private mode.
 
@@ -44,7 +43,7 @@ After success, check the delivered files from the output directory:
 sha256sum --check SHA256SUMS
 ```
 
-`artifacts/` contains all eight compared binaries, named above. The
+`artifacts/` contains all ten compared binaries. The
 `selected_binaries` and `artifact_sha256` entries identify the complete set.
 `manifest.json` records the source revision, build inputs, toolchain identities,
 settings and hashes. The invoking script must match the copy in that revision;
@@ -59,6 +58,17 @@ lock do not pin the entire C build environment. The operator's managed image is
 not a separately published project build image. Other environments must compare
 their outputs and disclose differences; do not describe an untested target as
 reproducible.
+
+The manual `GCP native x86 Cargo dependency gate` workflow checks the locked
+registry and Git sources against their seven-day release hold before fetching
+dependencies. It then fetches with the pinned Rust image and runs the double
+build without network access. On success, its `native-rust-<commit>` artifact
+contains a tar bundle and SHA-256 file. The bundle holds the source archive,
+manifest, checksums, both copies of every executable, dependency gate reports,
+and the exported diagnostic guest inputs. Verify the tar digest before use,
+then use `tools/gcp-guest/export_rust_inputs.py` against an extracted bundle in
+the same exact-HEAD checkout. The workflow does not approve a release or guest
+image.
 
 The frontend bundle is a committed input with its own source and lockfile; this
 workflow does not prove that rebuilding TypeScript reproduces that bundle.
