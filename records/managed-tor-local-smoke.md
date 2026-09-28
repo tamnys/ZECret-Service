@@ -1,9 +1,9 @@
 # Managed Tor local diagnostic, 2026-09-27
 
-This is partial transport evidence. It does not establish that the Rust
-`ManagedTor` code has run with Tor, that a Tor circuit carried traffic, or
-that private mode is approved. The packaged approved-release catalog remains
-empty.
+This is partial transport evidence. The Rust `ManagedTor` test has now run
+with the authenticated Tor executable on native Linux. It does not establish
+that a Tor circuit carried traffic or that private mode is approved. The
+packaged approved-release catalog remains empty.
 
 ## Authenticated executable
 
@@ -49,15 +49,24 @@ transparent/HTTP-tunnel ports, `ClientOnly 1`, `RunAsDaemon 0`,
 - The local TCP listener accepted zero connections.
 
 This proves the observed Tor configuration and local rejection behavior in
-the managed x86_64 QEMU container. It does not prove that the Rust client
-cannot make a direct fallback; that requires running the ignored
-`managed_child_rejects_loopback_destination_without_direct_fallback` test
-against this authenticated binary. It also does not prove a Tor circuit or
-remote endpoint connectivity.
+the managed x86_64 QEMU container. It does not prove a Tor circuit or remote
+endpoint connectivity.
 
-The opt-in Rust test was added on this branch, and `cargo fmt --all --check`
-passed inside the managed container. `cargo test --locked -p zrpc-transport`
-could not compile under local x86_64 QEMU: the C compiler exited 4 while
-building `ring`'s `curve25519.c`. A native x86_64 GitHub runner must execute
-the test after the currently pinned Cargo lock clears the existing release-age
-gate; no gate exception or production approval is implied here.
+## Native Rust child test
+
+[GitHub Actions run 36435626109](https://github.com/tamnys/ZECret-service/actions/runs/36435626109)
+checked commit `611e44683be100008a161ad78d7733e150537fcf` on native x86_64
+Linux. The job passed both live Cargo source policies, checked the reviewed
+dstack Git object, authenticated the signed Debian snapshot, and staged the
+same exact Tor and libevent ELF hashes listed above. It fetched locked Cargo
+dependencies in the pinned Rust image, then built and ran the opt-in
+`managed_child_rejects_loopback_destination_without_direct_fallback` Rust
+test in that image with networking disabled. Tor reported version 0.4.9.11;
+the test passed (one passed, zero failed, 45 filtered out). It asserted that
+the Rust-managed Tor child rejected a loopback CONNECT without reaching the
+local TCP listener and remained live afterward.
+
+The local ARM managed container separately passed the 44 non-ignored
+`zrpc-transport` unit tests and three Tor-staging source-pin tests; formatting
+passed. The native run proves this one local fail-closed behavior, not a Tor
+circuit, TDX boot, release approval, or a production private query.
