@@ -182,6 +182,9 @@ class EspInspectorTests(unittest.TestCase):
     def test_boot_profile_rejects_extra_options_duplicate_hashes_and_nuls(self):
         raw = REVIEWED_CMDLINE.encode()
         for bad in (raw.replace(b"lockdown=confidentiality", b"lockdown=none"),
+                    raw.replace(b"pstore.backend=none ", b""),
+                    raw.replace(b"pstore.backend=none", b"pstore.backend=efi_pstore"),
+                    raw.replace(b"pstore.backend=none", b"pstore.backend=none pstore.backend=efi_pstore"),
                     raw + b" init=/bin/sh", raw + b"\n", raw + b"\0\0",
                     raw.replace(b"roothash=", b"roothash=" + b"b" * 64 + b" roothash="),
                     raw.replace(b"a" * 64, b"A" * 64),
