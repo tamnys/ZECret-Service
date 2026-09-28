@@ -160,6 +160,30 @@ class PackageInitrdRunnerTest(unittest.TestCase):
                 runner.installed_manifest(path, [
                     {"name": "systemd", "version": "257.9-1", "architecture": "amd64"}], source)
 
+    def test_mkosi_output_requires_exact_compressed_alias(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            output = Path(scratch) / "output"
+            output.mkdir()
+            (output / "initrd.cpio.zst").write_bytes(b"diagnostic")
+            (output / "initrd.manifest").write_bytes(b"{}")
+            alias = output / "initrd"
+            alias.symlink_to("initrd.cpio.zst")
+            runner.checked_output_layout(output)
+
+            alias.unlink()
+            alias.symlink_to("../outside")
+            with self.assertRaisesRegex(ValueError, "alias differs"):
+                runner.checked_output_layout(output)
+            alias.unlink()
+            alias.write_bytes(b"unexpected regular alias")
+            with self.assertRaisesRegex(ValueError, "alias differs"):
+                runner.checked_output_layout(output)
+            alias.unlink()
+            alias.symlink_to("initrd.cpio.zst")
+            (output / "unexpected").write_bytes(b"extra")
+            with self.assertRaisesRegex(ValueError, "output set differs"):
+                runner.checked_output_layout(output)
+
     def test_loopback_check_rejects_parent_namespace_and_non_loopback_route(self):
         with mock.patch.object(runner.sys, "platform", "linux"), mock.patch.object(
                 runner.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")), mock.patch.object(
