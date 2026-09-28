@@ -11,7 +11,21 @@ import tempfile
 import unittest
 from unittest import mock
 
+import assemble_initrd_base_tree as initrd_input
+import export_rust_inputs as rust_inputs
+import fetch_guest_closure as guest
+import preflight_initrd_build as preflight
+import stage_builder_toolchain as builder
 import prepare_initrd_basetree_profile as profile
+
+
+REAL_BIND = profile.bind_selected_modules
+REAL_SOURCE_CHECK = profile.verified_source_closure
+profile.initrd_input = initrd_input
+profile.rust_inputs = rust_inputs
+profile.guest = guest
+profile.preflight = preflight
+profile.builder = builder
 
 
 def synthetic_elf():
@@ -64,10 +78,18 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
                 Path(profile.__file__).with_name("audit-initrd.py").read_bytes())
         patch_source = mock.patch.object(profile.rust_inputs, "git_bytes",
                                          side_effect=committed_source)
+        patch_binding = mock.patch.object(profile, "bind_selected_modules",
+                                          return_value=None)
+        patch_bound_script = mock.patch.object(
+            profile, "_BOUND_SCRIPT", Path(profile.__file__).read_bytes())
         patch_preflight.start()
         patch_source.start()
+        patch_binding.start()
+        patch_bound_script.start()
         self.addCleanup(patch_preflight.stop)
         self.addCleanup(patch_source.stop)
+        self.addCleanup(patch_binding.stop)
+        self.addCleanup(patch_bound_script.stop)
 
     def prepare(self):
         return profile.prepare_profile(self.workspace, self.workspace,
@@ -142,14 +164,35 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.preflight["private_mode_approved"] = False
         with mock.patch.object(profile.rust_inputs, "git_bytes", return_value=b"changed"):
-            with self.assertRaisesRegex(ValueError, "differs from selected source commit"):
+            with self.assertRaisesRegex(ValueError, "audit differs"):
                 self.prepare()
         self.assertFalse(self.output.exists())
-        with mock.patch.object(profile.rust_inputs, "git_bytes",
-                               side_effect=lambda _revision, path: (
-                                   Path(profile.__file__).read_bytes() if path.endswith(
-                                       "prepare_initrd_basetree_profile.py") else b"changed")):
-            with self.assertRaisesRegex(ValueError, "audit differs"):
+
+    def test_changed_preflight_source_rejects_before_local_import(self):
+        source = self.workspace / "source"
+        source.mkdir()
+        committed = {}
+        for relative in profile.SOURCE_FILES:
+            data = (profile.MODULE_DIR / Path(relative).name).read_bytes()
+            (source / Path(relative).name).write_bytes(data)
+            committed[relative] = data
+        tampered = source / "preflight_initrd_build.py"
+        tampered.write_bytes(tampered.read_bytes() + b"\n# forged signed result\n")
+
+        def git_output(arguments):
+            if arguments == ["rev-parse", "HEAD"]:
+                return (self.revision + "\n").encode()
+            if arguments[0] == "show":
+                return committed[arguments[1].split(":", 1)[1]]
+            raise AssertionError("unexpected Git operation")
+
+        with (mock.patch.object(profile, "source_git_output", side_effect=git_output),
+              mock.patch.object(profile, "verified_source_closure",
+                                side_effect=lambda revision: REAL_SOURCE_CHECK(revision, source)),
+              mock.patch.object(profile, "bind_selected_modules", side_effect=REAL_BIND),
+              mock.patch.object(profile.preflight, "preflight",
+                                side_effect=AssertionError("preflight ran before source binding"))):
+            with self.assertRaisesRegex(ValueError, "preflight_initrd_build.py"):
                 self.prepare()
         self.assertFalse(self.output.exists())
 

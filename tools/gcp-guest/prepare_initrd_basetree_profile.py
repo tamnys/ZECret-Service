@@ -9,32 +9,205 @@ Preparation does not build, sign, boot, or approve anything.
 
 import argparse
 import hashlib
+import importlib
+import importlib.abc
+import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 
-import assemble_initrd_base_tree as initrd_input
-import export_rust_inputs as rust_inputs
-import fetch_guest_closure as guest
-import preflight_initrd_build as preflight
-import prepare_guest_basetree_profile as root_profile
-import stage_builder_toolchain as builder
-
-
 STATUS = "diagnostic-no-package-initrd-cpio-profile-unbuilt"
-ARCHIVE = initrd_input.ARCHIVE
+ARCHIVE = "guest-initrd-inputs.tar"
 INPUT = "input/" + ARCHIVE
 INIT_TREE = "init-tree.tar"
 AUDIT = "audit-initrd.py"
 CONFIG = "mkosi.conf"
 MANIFEST = "profile-manifest.json"
 OUTPUT_NAME = "initrd.cpio.zst"
+MODULE_DIR = Path(__file__).resolve(strict=True).parent
+REPOSITORY = MODULE_DIR.parents[1]
+SOURCE_MODULES = (
+    "assemble_guest_base_tree", "assemble_initrd_base_tree", "debian_snapshot",
+    "export_rust_inputs", "fetch_builder_closure", "fetch_guest_closure",
+    "preflight_guest_base_tree", "preflight_initrd_build", "prepare",
+    "stage_builder_toolchain", "stage_guest_payload", "verify_builder_closure",
+    "verify_builder_packages",
+)
+SOURCE_FILES = tuple(f"tools/gcp-guest/{name}.py" for name in SOURCE_MODULES) + (
+    "tools/gcp-guest/prepare_initrd_basetree_profile.py",
+    "tools/gcp-guest/audit-initrd.py",
+)
+FULL_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+ALLOWED_PATH = re.compile(r"/[A-Za-z0-9_./-]+\Z")
+_BOUND_REVISION = None
+_BOUND_SCRIPT = None
+
+
+def source_git_output(arguments):
+    """Read selected Git objects without replacement refs or caller Git state."""
+    environment = {name: value for name, value in os.environ.items()
+                   if not name.startswith("GIT_")}
+    environment.update({"GIT_NO_REPLACE_OBJECTS": "1",
+                        "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_CONFIG_GLOBAL": "/dev/null",
+                        "GIT_OPTIONAL_LOCKS": "0",
+                        "GIT_TERMINAL_PROMPT": "0"})
+    # The managed container may have a different uid from the mounted
+    # worktree. Scope safe.directory to this one canonical repository rather
+    # than relying on caller Git configuration, which was deliberately cleared.
+    result = subprocess.run(["git", "-c", f"safe.directory={REPOSITORY}",
+                             *arguments], cwd=REPOSITORY, env=environment,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            check=False)
+    if result.returncode:
+        raise ValueError("selected source commit lacks a verifier input")
+    return result.stdout
+
+
+def source_file(path):
+    """Read one canonical verifier file without following its final component."""
+    if path.resolve(strict=True) != path.absolute():
+        raise ValueError("verifier source path redirects")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ValueError("verifier source is not one regular file")
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            data = stream.read()
+        if source_identity(os.fstat(fd)) != source_identity(before):
+            raise ValueError("verifier source changed during read")
+        return data
+    finally:
+        os.close(fd)
+
+
+def source_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def verified_source_closure(revision, directory=MODULE_DIR):
+    """Bind every local verifier module to the selected HEAD before import."""
+    if not isinstance(revision, str) or not FULL_COMMIT.fullmatch(revision):
+        raise ValueError("exact full source commit required")
+    if source_git_output(["rev-parse", "HEAD"]).decode().strip() != revision:
+        raise ValueError("initrd verifier source commit differs from selected HEAD")
+    captured = {}
+    for relative in SOURCE_FILES:
+        observed = source_file(directory / Path(relative).name)
+        if observed != source_git_output(["show", f"{revision}:{relative}"]):
+            raise ValueError(f"initrd verifier source differs from selected HEAD: {relative}")
+        captured[relative] = observed
+    return captured
+
+
+class BoundSourceLoader(importlib.abc.Loader):
+    def __init__(self, captured):
+        self.captured = captured
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        relative = f"tools/gcp-guest/{module.__name__}.py"
+        module.__file__ = str(MODULE_DIR / f"{module.__name__}.py")
+        exec(compile(self.captured[relative], module.__file__, "exec"), module.__dict__)
+
+
+class BoundSourceFinder(importlib.abc.MetaPathFinder):
+    def __init__(self, captured):
+        self.loader = BoundSourceLoader(captured)
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in SOURCE_MODULES:
+            return importlib.util.spec_from_loader(
+                fullname, self.loader, origin=str(MODULE_DIR / f"{fullname}.py"))
+        if (MODULE_DIR / f"{fullname}.py").exists():
+            raise ImportError(f"unbound local verifier module: {fullname}")
+        return None
+
+
+def bind_selected_modules(revision):
+    """Execute captured exact-HEAD source bytes, never ambient pycache code."""
+    global _BOUND_REVISION, _BOUND_SCRIPT
+    captured = verified_source_closure(revision)
+    if _BOUND_REVISION is not None:
+        if revision != _BOUND_REVISION:
+            raise ValueError("local verifier already bound to a different commit")
+        return
+    if any(name in sys.modules for name in SOURCE_MODULES):
+        raise ValueError("local verifier module was imported before source binding")
+    finder = BoundSourceFinder(captured)
+    sys.meta_path.insert(0, finder)
+    try:
+        modules = {name: importlib.import_module(name) for name in SOURCE_MODULES}
+        if modules["assemble_initrd_base_tree"].ARCHIVE != ARCHIVE:
+            raise ValueError("selected initrd archive name differs from reviewed profile")
+    except BaseException:
+        sys.meta_path.remove(finder)
+        for name in SOURCE_MODULES:
+            sys.modules.pop(name, None)
+        raise
+    # Keep the finder installed: later function-time local imports are bound
+    # to captured HEAD bytes, and unknown local modules fail closed.
+    globals().update(initrd_input=modules["assemble_initrd_base_tree"],
+                     rust_inputs=modules["export_rust_inputs"],
+                     guest=modules["fetch_guest_closure"],
+                     preflight=modules["preflight_initrd_build"],
+                     builder=modules["stage_builder_toolchain"])
+    _BOUND_REVISION = revision
+    _BOUND_SCRIPT = captured["tools/gcp-guest/prepare_initrd_basetree_profile.py"]
+
+
+def checked_profile_path(profile, workspace):
+    profile = Path(profile)
+    if (not profile.is_absolute() or ".." in profile.parts
+            or not ALLOWED_PATH.fullmatch(str(profile))):
+        raise ValueError("mkosi diagnostic profile path is not canonical")
+    parent = builder.output_parent(Path(workspace), profile)
+    os.close(parent)
+    return profile
+
+
+def write_file(parent, name, data, mode=0o400):
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                 os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=parent)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            stream.write(data)
+            stream.flush()
+        os.fchmod(fd, mode)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def verified_file(parent, name, maximum, mode=0o400):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != mode):
+            raise ValueError("mkosi diagnostic profile file metadata differs")
+        if before.st_size > maximum:
+            raise ValueError("mkosi diagnostic profile file exceeds bound")
+        data = bytearray()
+        while chunk := os.read(fd, 1024 * 1024):
+            data.extend(chunk)
+            if len(data) > maximum:
+                raise ValueError("mkosi diagnostic profile file exceeds bound")
+        if source_identity(os.fstat(fd)) != source_identity(before):
+            raise ValueError("mkosi diagnostic profile file changed during inspection")
+        return bytes(data)
+    finally:
+        os.close(fd)
 
 
 def config_bytes(profile):
@@ -66,6 +239,7 @@ def init_tree_bytes(binary):
 
 
 def checked_inputs(metadata, archives, artifact, rust_bundle, revision, workspace):
+    bind_selected_modules(revision)
     workspace = Path(workspace).resolve(strict=True)
     artifact = Path(artifact)
     rust_bundle = Path(rust_bundle)
@@ -97,9 +271,9 @@ def checked_inputs(metadata, archives, artifact, rust_bundle, revision, workspac
     finally:
         os.close(artifact_fd)
     # This profile's own staging rules must be the selected source commit.
-    script = rust_inputs.regular_bytes(Path(__file__).resolve(strict=True))
-    if rust_inputs.git_bytes(revision, "tools/gcp-guest/prepare_initrd_basetree_profile.py") != script:
-        raise ValueError("initrd profile script differs from selected source commit")
+    script = source_file(Path(__file__).resolve(strict=True))
+    if script != _BOUND_SCRIPT:
+        raise ValueError("initrd profile script changed after source binding")
     binary = rust_inputs.regular_bytes(rust_bundle / "artifacts/zrpc-gcp-early-init")
     if (hashlib.sha256(binary).hexdigest() != source["early_init_sha256"]
             or not rust_inputs.x86_64_elf(binary)):
@@ -194,9 +368,9 @@ def copy_archive(artifact, input_fd, expected_sha256, expected_size):
 
 
 def prepare_profile(metadata, archives, artifact, rust_bundle, revision, profile, workspace):
-    profile = root_profile.checked_profile_path(profile, workspace)
     source, binary, script_sha256, audit = checked_inputs(
         metadata, archives, artifact, rust_bundle, revision, workspace)
+    profile = checked_profile_path(profile, workspace)
     init_tree = init_tree_bytes(binary)
     config = config_bytes(profile)
     parent = builder.output_parent(Path(workspace), profile)
@@ -218,11 +392,11 @@ def prepare_profile(metadata, archives, artifact, rust_bundle, revision, profile
             os.close(input_fd)
         manifest = expected_manifest(source, archive_size, init_tree, config,
                                      script_sha256, audit)
-        root_profile.write_file(root, INIT_TREE, init_tree)
-        root_profile.write_file(root, AUDIT, audit, mode=0o500)
-        root_profile.write_file(root, CONFIG, config)
+        write_file(root, INIT_TREE, init_tree)
+        write_file(root, AUDIT, audit, mode=0o500)
+        write_file(root, CONFIG, config)
         encoded = initrd_input.canonical_bytes(manifest)
-        root_profile.write_file(root, MANIFEST, encoded)
+        write_file(root, MANIFEST, encoded)
         os.fsync(root)
     finally:
         os.close(root)
@@ -230,9 +404,9 @@ def prepare_profile(metadata, archives, artifact, rust_bundle, revision, profile
 
 
 def verify_profile(metadata, archives, artifact, rust_bundle, revision, profile, workspace):
-    profile = root_profile.checked_profile_path(profile, workspace)
     source, binary, script_sha256, audit = checked_inputs(
         metadata, archives, artifact, rust_bundle, revision, workspace)
+    profile = checked_profile_path(profile, workspace)
     init_tree = init_tree_bytes(binary)
     config = config_bytes(profile)
     root = guest.open_directory(profile, "mkosi initrd directory profile")
@@ -246,22 +420,22 @@ def verify_profile(metadata, archives, artifact, rust_bundle, revision, profile,
             if (stat.S_IMODE(os.fstat(input_fd).st_mode) != 0o500
                     or {entry.name for entry in os.scandir(input_fd)} != {ARCHIVE}):
                 raise ValueError("mkosi initrd BaseTrees input differs")
-            archive = root_profile.verified_file(
+            archive = verified_file(
                 input_fd, ARCHIVE, source["source_bound_archive_size"])
         finally:
             os.close(input_fd)
         if hashlib.sha256(archive).hexdigest() != source["source_bound_archive_sha256"]:
             raise ValueError("mkosi initrd BaseTrees archive differs from signed source")
-        if root_profile.verified_file(root, INIT_TREE, len(init_tree)) != init_tree:
+        if verified_file(root, INIT_TREE, len(init_tree)) != init_tree:
             raise ValueError("mkosi initrd /init tree differs from Rust receipt")
-        if root_profile.verified_file(root, AUDIT, len(audit), mode=0o500) != audit:
+        if verified_file(root, AUDIT, len(audit), mode=0o500) != audit:
             raise ValueError("mkosi initrd audit differs from selected source")
-        if root_profile.verified_file(root, CONFIG, len(config)) != config:
+        if verified_file(root, CONFIG, len(config)) != config:
             raise ValueError("mkosi initrd config differs from no-package profile")
         manifest = expected_manifest(source, len(archive), init_tree, config,
                                      script_sha256, audit)
         encoded = initrd_input.canonical_bytes(manifest)
-        if root_profile.verified_file(root, MANIFEST, len(encoded)) != encoded:
+        if verified_file(root, MANIFEST, len(encoded)) != encoded:
             raise ValueError("mkosi initrd profile manifest differs from signed source")
     finally:
         os.close(root)
@@ -455,7 +629,6 @@ def audit_cpio(output, audit, workspace, expected_audit_sha256):
 
 def build_cpio(metadata, archives, artifact, rust_bundle, revision, profile, workspace):
     """Keep execution blocked until a reviewed builder runner is available."""
-    profile = root_profile.checked_profile_path(profile, workspace)
     verify_profile(metadata, archives, artifact, rust_bundle,
                    revision, profile, workspace)
     # The staged BaseTrees/ExtraTrees profile describes the intended CPIO
@@ -468,6 +641,12 @@ def build_cpio(metadata, archives, artifact, rust_bundle, revision, profile, wor
 
 
 def main(argv=None):
+    if not sys.flags.isolated:
+        print(json.dumps({"status": "blocked",
+                          "reason": "run this source-bound diagnostic with Python -I",
+                          "boot_verified": False,
+                          "private_mode_approved": False}, sort_keys=True))
+        return 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("prepare", "verify", "build"))
     parser.add_argument("--metadata", required=True, type=Path)
