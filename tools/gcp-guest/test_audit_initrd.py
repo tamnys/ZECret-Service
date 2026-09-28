@@ -70,6 +70,17 @@ class InitrdAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "forbidden file remains: usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"):
             audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_perl_executables_removed_from_initrd(self):
+        for relative in ("usr/bin/perl", "usr/bin/perl5.40.1"):
+            with self.subTest(relative=relative):
+                executable = self.root / relative
+                executable.write_bytes(b"synthetic Perl executable")
+                executable.chmod(0o755)
+                with self.assertRaisesRegex(ValueError, f"administrative executable remains: {relative}"):
+                    audit_initrd.audit(self.root, self.init_sha256)
+                executable.unlink()
+                audit_initrd.audit(self.root, self.init_sha256)
+
     def test_mkosi_boot_loader_placeholder_rejected(self):
         marker = self.root / "boot/loader/entries.srel"
         marker.parent.mkdir(parents=True)

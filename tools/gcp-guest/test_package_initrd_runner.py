@@ -99,7 +99,7 @@ class PackageInitrdRunnerTest(unittest.TestCase):
             self.assertFalse(selected.report["private_mode_approved"])
 
     def test_production_config_uses_signed_package_versions_and_inherited_settings(self):
-        static = b"[Output]\nFormat=cpio\nOutput=initrd\nManifestFormat=json\nCompressOutput=zstd\n"
+        static = (HERE.parents[1] / runner.SUBIMAGE).read_bytes()
         prepare = types.SimpleNamespace(
             validate_boot_profile=lambda: None,
             PROFILE=Path("/reviewed/deploy/gcp/guest"),
@@ -123,6 +123,10 @@ class PackageInitrdRunnerTest(unittest.TestCase):
             ])
         self.assertEqual(static_hash, runner.sha256(static))
         self.assertTrue(data.startswith(static))
+        self.assertEqual(data.count(b"RemoveFiles="), 1)
+        for relative in (b"/usr/bin/perl,", b"/usr/bin/perl5.40.1,"):
+            self.assertIn(relative, static)
+            self.assertIn(relative, data)
         self.assertIn(b"Distribution=debian\nRelease=trixie\nArchitecture=x86-64", data)
         self.assertIn(b"Packages=systemd=257.9-1,udev=257.9-1", data)
         self.assertIn(b"SourceDateEpoch=1789199741", data)
@@ -131,6 +135,13 @@ class PackageInitrdRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "misses production initrd package"):
             runner.config_bytes(source, selected_source, profile,
                                 [{"name": "systemd", "version": "257.9-1"}])
+        changed_source = types.SimpleNamespace(
+            output=lambda args: static.replace(b"/usr/bin/perl,", b""))
+        with self.assertRaisesRegex(ValueError, "production initrd source differs"):
+            runner.config_bytes(source, changed_source, profile, [
+                {"name": "systemd", "version": "257.9-1"},
+                {"name": "udev", "version": "257.9-1"},
+            ])
 
     def test_installed_manifest_rejects_package_outside_signed_closure(self):
         source = types.SimpleNamespace(guest=types.SimpleNamespace(

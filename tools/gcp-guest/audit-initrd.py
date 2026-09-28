@@ -44,7 +44,8 @@ FORBIDDEN_UNITS = (
 )
 FORBIDDEN_EXECUTABLES = (
     "usr/lib/systemd/systemd-sulogin-shell", "usr/sbin/sulogin",
-    "usr/bin/bash", "usr/bin/dash", "usr/bin/sh", "usr/bin/login",
+    "usr/bin/bash", "usr/bin/dash", "usr/bin/sh", "usr/bin/perl",
+    "usr/bin/perl5.40.1", "usr/bin/login",
     "usr/bin/su", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/sshd",
     "bin/bash", "bin/dash", "bin/sh", "bin/login", "bin/su", "sbin/sulogin",
 )

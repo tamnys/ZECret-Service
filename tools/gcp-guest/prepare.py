@@ -57,6 +57,7 @@ INITRD_REMOVE_FILES = (
     "/usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
     "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",
     "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh",
+    "/usr/bin/perl", "/usr/bin/perl5.40.1",
     "/usr/sbin/sulogin", "/usr/bin/login", "/usr/bin/su",
 )
 # The parent never mounts anything. This runs only after unshare has created
