@@ -311,6 +311,9 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("Packages=dmsetup=1.0~synthetic,kmod=1.0~synthetic,systemd=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,udev=1.0~synthetic", initrd)
         self.assertIn("ExtraTrees=rootfs", initrd)
         self.assertIn("FinalizeScripts=audit-initrd.py", initrd)
+        for relative in ("/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount"):
+            self.assertIn(relative, prepare.INITRD_REMOVE_FILES)
+            self.assertIn(relative, initrd)
         audit = output / "mkosi.images/initrd/audit-initrd.py"
         expected_init_hash = self.lock["artifacts"]["early_init"]["sha256"]
         self.assertIn(expected_init_hash, audit.read_text())
@@ -381,6 +384,9 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.images/initrd/mkosi.conf", "boot/loader,", ""),
             ("mkosi.images/initrd/mkosi.conf", "etc/ssh,", ""),
             ("mkosi.images/initrd/mkosi.conf", "20-systemd-ssh-generator.conf,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "usr/sbin/unix_chkpwd,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "usr/bin/mount,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "usr/bin/umount,", ""),
             ("mkosi.images/initrd/mkosi.conf", "RemoveFiles=/usr/lib/systemd/system/rescue.service", "RemoveFiles=/usr/lib/systemd/system/other.service"),
         )
         for name, original, altered in changes:

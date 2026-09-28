@@ -152,6 +152,29 @@ class InitrdAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "privileged file"):
                 audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_signed_package_privileged_executables_fail_closed(self):
+        # These exact paths and bits occur in the signed Debian initrd inputs.
+        for relative, privilege_bit in (
+            ("usr/sbin/unix_chkpwd", stat.S_ISGID),
+            ("usr/bin/mount", stat.S_ISUID),
+            ("usr/bin/umount", stat.S_ISUID),
+        ):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.write_bytes(b"synthetic package executable")
+                original_lstat = Path.lstat
+
+                def lstat_with_privilege(candidate):
+                    info = original_lstat(candidate)
+                    if candidate == path:
+                        return SimpleNamespace(st_mode=info.st_mode | privilege_bit)
+                    return info
+
+                with mock.patch.object(Path, "lstat", lstat_with_privilege):
+                    with self.assertRaisesRegex(ValueError, f"privileged file remains: {relative}"):
+                        audit_initrd.audit(self.root, self.init_sha256)
+                path.unlink()
+
     def test_early_boot_payloads_and_credentials_fail_closed(self):
         for relative in ("usr/lib/modules/kernel/drivers/md/dm-verity.ko.xz",
                          "boot/vmlinuz-unreviewed",

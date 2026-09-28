@@ -55,6 +55,7 @@ INITRD_REMOVE_FILES = (
     "/boot/loader",
     "/etc/ssh",
     "/usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
+    "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",
     "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh",
     "/usr/sbin/sulogin", "/usr/bin/login", "/usr/bin/su",
 )
