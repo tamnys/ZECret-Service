@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Probe a parent-written guest-owner map on the native public builder.
+"""Probe or run under a parent-written guest-owner map on the native builder.
 
-This is a capability diagnostic only. It does not authenticate build tools,
-run mkosi, build an image, or approve a private-mode release.
+The no-command mode is a capability diagnostic only. Command mode establishes
+the same namespace boundary before handing off to the exact-head disk probe.
+Neither mode authenticates build tools or approves a private-mode release.
 """
 
 import argparse
@@ -42,7 +43,7 @@ def wait_success(pid):
         raise ValueError("child namespace probe failed")
 
 
-def check_child(parent, parent_net_fd, scratch):
+def check_child(parent, parent_net_fd, scratch, command):
     observed = {kind: namespace(kind) for kind in ("user", "mnt", "net", "pid")}
     if any(observed[kind] == parent[kind] for kind in observed):
         raise ValueError("child namespace was not isolated")
@@ -84,6 +85,8 @@ def check_child(parent, parent_net_fd, scratch):
     finally:
         os.close(descriptor)
         target.unlink()
+    if command:
+        os.execve(command[0], command, {"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
     print(json.dumps({
         "status": "diagnostic-parent-written-guest-owner-map-permitted-unbuilt",
         "native_x86_64_linux": True,
@@ -98,7 +101,7 @@ def check_child(parent, parent_net_fd, scratch):
     }, sort_keys=True), flush=True)
 
 
-def child(ready_fd, proceed_fd, parent, parent_net_fd, scratch):
+def child(ready_fd, proceed_fd, parent, parent_net_fd, scratch, command):
     os.unshare(os.CLONE_NEWUSER)
     os.write(ready_fd, b"R")
     if os.read(proceed_fd, 1) != b"G":
@@ -110,10 +113,10 @@ def child(ready_fd, proceed_fd, parent, parent_net_fd, scratch):
         return
     subprocess.run(["/usr/bin/mount", "--make-rprivate", "/"], check=True)
     subprocess.run(["/usr/bin/mount", "-t", "proc", "proc", "/proc"], check=True)
-    check_child(parent, parent_net_fd, scratch)
+    check_child(parent, parent_net_fd, scratch, command)
 
 
-def parent(scratch):
+def parent(scratch, command):
     if (platform.system() != "Linux" or platform.machine() != "x86_64"
             or os.geteuid() != 0 or not hasattr(os, "unshare")
             or not hasattr(os, "setns")):
@@ -133,7 +136,7 @@ def parent(scratch):
         os.close(proceed_write)
         try:
             child(ready_write, proceed_read, parent_namespaces,
-                  parent_net_fd, scratch)
+                  parent_net_fd, scratch, command)
         except (OSError, ValueError, subprocess.CalledProcessError) as error:
             print(json.dumps({"status": "blocked", "reason": str(error),
                               "disk_image_built": False,
@@ -168,9 +171,13 @@ def parent(scratch):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scratch", required=True, type=Path)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
-        parent(args.scratch)
+        command = args.command[1:] if args.command[:1] == ["--"] else args.command
+        if command and command[:2] != ["/usr/bin/bash", "-c"]:
+            raise ValueError("only the diagnostic bash builder handoff is supported")
+        parent(args.scratch, command)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error),
                           "disk_image_built": False,

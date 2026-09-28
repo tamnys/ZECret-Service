@@ -129,10 +129,12 @@ jobs:
           parent_pid_ns="$(readlink /proc/self/ns/pid)"
           chroot_command="$(command -v chroot)"
           # The exact-head source-tar inventory in run 36372582561 found
-          # uid 0 and gids 0/42 only. Map those owners and no other host IDs.
-          sudo -n unshare --user --map-root-user --map-groups=42:42:1 \
-            --mount --net --pid \
-            --fork --mount-proc --kill-child --propagation private bash -c '
+          # uid 0 and gids 0/42 only. Run 36373429340 proved the parent can
+          # write that narrow map directly; util-linux newgidmap rejects it.
+          sudo -n /usr/bin/python3 -I -B \
+            "$source/tools/gcp-guest/probe_builder_owner_map.py" \
+            --scratch "/var/tmp/zrpc-owner-map-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -- /usr/bin/bash -c '
             set -euo pipefail
             staged=$1
             test "$(readlink /proc/self/ns/user)" != "$2"
