@@ -140,6 +140,8 @@ class CandidateTests(unittest.TestCase):
 
         cases = [
             ("config", lambda candidate: (candidate / "mkosi.conf").write_text("SecureBoot=no\n")),
+            ("build-source", lambda candidate: (candidate / "mkosi.conf").write_text(
+                (candidate / "mkosi.conf").read_text().replace("\nBuildSources=\n", "\n"))),
             ("hook", add_hook),
             ("binary", lambda candidate: (candidate / "artifacts/wrapper").write_bytes(b"different guest binary")),
             ("mask", replace_mask),
@@ -290,6 +292,11 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "rootfs/run/zrpc-build-signing").exists())
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)
+        self.assertIn("\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n", config)
+        self.assertEqual(config.count("\nBuildSources=\n"), 1)
+        for script in (output / "audit-rootfs.py", output / "mkosi.images/initrd/audit-initrd.py"):
+            self.assertNotIn("SRCDIR", script.read_text())
+            self.assertNotIn("/work/src", script.read_text())
         self.assertTrue((output / "package-cache").is_dir())
         self.assertNotIn("BaseTrees=", config)
         self.assertFalse((output / "artifacts/base_tree.tar").exists())

@@ -73,6 +73,17 @@ class OuterImageRunnerTest(unittest.TestCase):
         self.assertEqual(runner.SECTOR_SIZE, 512)
         self.assertNotIn("--sector-size", (HERE / "outer_image_runner.py").read_text())
 
+    def test_production_workspace_requires_empty_build_sources(self):
+        config = (b"SectorSize=512\nOutputDirectory=output\n[Build]\n"
+                  b"BuildSources=\nWorkspaceDirectory=work\n"
+                  b"PackageCacheDirectory=package-cache\n")
+        runner.checked_mkosi_recipe(config)
+        for changed in (config.replace(b"BuildSources=\n", b""),
+                        config.replace(b"BuildSources=\n", b"BuildSources=.\n"),
+                        config.replace(b"WorkspaceDirectory=work\n", b"WorkspaceDirectory=other\n")):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "source layout"):
+                runner.checked_mkosi_recipe(changed)
+
     def test_changed_output_inspector_is_rejected_before_loading(self):
         selected = types.SimpleNamespace(output=lambda arguments: b"changed selected bytes")
         with self.assertRaisesRegex(ValueError, "differs from selected HEAD"):

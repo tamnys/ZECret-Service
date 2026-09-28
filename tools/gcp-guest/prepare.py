@@ -526,7 +526,7 @@ def stage(lock_path, source, destination):
     install_boot_overrides(rootfs)
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
     with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
         versions = {package["name"]: package["version"] for package in package_manifest}
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))

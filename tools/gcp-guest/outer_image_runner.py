@@ -348,6 +348,17 @@ def checked_signing_key(certificate, key):
     return sha256(certificate_bytes)
 
 
+def checked_mkosi_recipe(config):
+    # Pinned mkosi 25.3 otherwise mounts --directory as its default build
+    # source and rejects a workspace beneath it. Neither finalize audit needs
+    # /work/src, so the staged recipe must explicitly reset that default.
+    if (config.count(b"SectorSize=512\n") != 1
+            or b"OutputDirectory=output\n" not in config
+            or config.count(b"\nBuildSources=\n") != 1
+            or b"\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n" not in config):
+        raise ValueError("staged production sector, output, or source layout differs")
+
+
 def immutable_stage_inventory(stage, manifest):
     """Recheck source inputs while allowing only mkosi's three mutable dirs."""
     expected = manifest["entries"]
@@ -633,8 +644,7 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
     if checked_signing_key(stage / "artifacts/secure_boot_certificate", key) != certificate_sha256:
         raise ValueError("signing key changed before mkosi execution")
     config = regular_bytes(stage / "mkosi.conf")
-    if config.count(b"SectorSize=512\n") != 1 or b"OutputDirectory=output\n" not in config:
-        raise ValueError("staged production sector or output layout differs")
+    checked_mkosi_recipe(config)
     manifest = json.loads(regular_bytes(stage / "candidate-manifest.json"),
                           object_pairs_hook=prepare.unique_object)
     if (stage / "output").exists() or (stage / "work").exists() or \
