@@ -96,6 +96,7 @@ class PackageInitrdRunnerTest(unittest.TestCase):
                     "Git must not run inside the no-route builder")):
                 bound = runner.source_module(revision, selected)
             self.assertEqual(bound._BOUND_REVISION, revision)
+            self.assertTrue(callable(bound.root_tree.preflight.authenticated_archives))
             self.assertFalse(selected.report["private_mode_approved"])
 
     def test_production_config_uses_signed_package_versions_and_inherited_settings(self):
@@ -188,8 +189,9 @@ class PackageInitrdRunnerTest(unittest.TestCase):
         ]
         source_plan = mock.Mock(return_value=(None, rows))
         source = types.SimpleNamespace(
-            preflight=types.SimpleNamespace(authenticated_archives=lambda *_: archives),
-            root_tree=types.SimpleNamespace(source_plan=source_plan))
+            root_tree=types.SimpleNamespace(
+                preflight=types.SimpleNamespace(authenticated_archives=lambda *_: archives),
+                source_plan=source_plan))
         expected, selected = runner.signed_payload_plan(
             source, "metadata", "archives", ("alpha", "gamma"), b"Rust /init")
         self.assertEqual([row["name"] for row in selected], ["alpha", "gamma"])

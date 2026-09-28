@@ -428,7 +428,8 @@ def installed_manifest(path, packages, source):
 
 def signed_payload_plan(source, metadata, archives, installed_names, init_bytes):
     """Derive expected initrd entries from only the authenticated installed debs."""
-    authenticated = source.preflight.authenticated_archives(Path(metadata), Path(archives))
+    authenticated = source.root_tree.preflight.authenticated_archives(
+        Path(metadata), Path(archives))
     selected = [(identity, archive) for identity, archive in authenticated
                 if identity["name"] in installed_names]
     if tuple(identity["name"] for identity, _ in selected) != installed_names:
