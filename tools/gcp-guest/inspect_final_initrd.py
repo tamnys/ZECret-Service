@@ -48,6 +48,8 @@ BOOT_CONFIG = {
     # the root disk can only be mounted if both NVMe drivers are built in.
     "CONFIG_BLK_DEV_NVME": frozenset({"y"}),
     "CONFIG_NVME_CORE": frozenset({"y"}),
+    # The root partition is ext4 and this initrd carries no ext4 module.
+    "CONFIG_EXT4_FS": frozenset({"y"}),
 }
 BOOT_MODULES = {
     "CONFIG_TDX_GUEST_DRIVER": "kernel/drivers/virt/coco/tdx-guest/tdx-guest.ko.xz",
@@ -206,7 +208,8 @@ def boot_driver_preflight(config, builtins, signed, kernel_version):
             module_hashes[option] = identity[1]
     return {"status": "diagnostic-signed-kernel-boot-drivers-unapproved",
             "kernel_config_sha256": sha256(config),
-            "nvme_builtin": True, "module_sha256": module_hashes,
+            "nvme_builtin": True, "ext4_builtin": True,
+            "module_sha256": module_hashes,
             "private_mode_approved": False}
 
 

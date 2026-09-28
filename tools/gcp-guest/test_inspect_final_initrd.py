@@ -143,6 +143,7 @@ class FinalInitrdTests(unittest.TestCase):
     def test_boot_profile_requires_signed_modules_and_builtin_nvme(self):
         report = final.boot_driver_preflight(BOOT_CONFIG, BUILTINS, BOOT_MODULES, KERNEL)
         self.assertEqual(report["nvme_builtin"], True)
+        self.assertEqual(report["ext4_builtin"], True)
         self.assertEqual(report["private_mode_approved"], False)
         self.assertIn("unapproved", report["status"])
         for missing in BOOT_MODULES:
@@ -154,6 +155,14 @@ class FinalInitrdTests(unittest.TestCase):
             with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "NVMe"):
                 final.boot_driver_preflight(BOOT_CONFIG, BUILTINS.replace(
                     (missing + "\n").encode(), b""), BOOT_MODULES, KERNEL)
+
+    def test_root_ext4_must_be_builtin_before_initrd_mount(self):
+        for replacement in (b"CONFIG_EXT4_FS=m", b"CONFIG_EXT4_FS=n"):
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(
+                    ValueError, "CONFIG_EXT4_FS"):
+                final.boot_driver_preflight(
+                    BOOT_CONFIG.replace(b"CONFIG_EXT4_FS=y", replacement),
+                    BUILTINS, BOOT_MODULES, KERNEL)
 
     def test_boot_profile_rejects_missing_disabled_modular_and_ambiguous_options(self):
         for option, allowed in final.BOOT_CONFIG.items():
@@ -241,6 +250,7 @@ class FinalInitrdTests(unittest.TestCase):
                   mock.patch.object(final, "parse_cpio", return_value={"file_count": 1})):
                 report = final.inspect(*arguments)
                 self.assertEqual(report["boot_driver_preflight"]["nvme_builtin"], True)
+                self.assertEqual(report["boot_driver_preflight"]["ext4_builtin"], True)
                 self.assertEqual(report["private_mode_approved"], False)
                 config.return_value = BOOT_CONFIG.replace(
                     b"CONFIG_BLK_DEV_NVME=y", b"CONFIG_BLK_DEV_NVME=m")
