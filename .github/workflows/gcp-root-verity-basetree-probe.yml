@@ -159,12 +159,16 @@ jobs:
             mount --bind "$staged" "$staged"
             mountpoint -q "$staged"
             mkdir -m 0700 "$scratch/apt-scratch" "$scratch/guest-payload"
-            for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch zrpc-guest-payload-parent proc dev; do
+            for directory in workspace zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch zrpc-guest-payload-parent proc dev; do
               test ! -L "$staged/$directory"
               mkdir -p "$staged/$directory"
             done
             mount --bind "$scratch/apt-scratch" "$staged/zrpc-apt-scratch"
             mount --bind "$scratch/guest-payload" "$staged/zrpc-guest-payload-parent"
+            mount --bind "$scratch/guest-payload" "$staged/workspace"
+            mountpoint -q "$staged/workspace"
+            test "$(stat -c "%d:%i" "$staged/workspace")" = \
+              "$(stat -c "%d:%i" "$staged/zrpc-guest-payload-parent")"
             mkdir -m 0700 "$staged/zrpc-apt-scratch/tmp"
             for pair in "$source:zrpc-source" "$archives:zrpc-archives" \
                         "$metadata:zrpc-metadata" "$guest_archives:zrpc-guest-archives"; do
@@ -185,7 +189,7 @@ jobs:
               *,ro,*) ;;
               *) exit 1 ;;
             esac
-            for writable in zrpc-apt-scratch zrpc-guest-payload-parent; do
+            for writable in zrpc-apt-scratch zrpc-guest-payload-parent workspace; do
               case ",$(findmnt -n -o OPTIONS --target "$staged/$writable")," in
                 *,rw,*) ;;
                 *) exit 1 ;;
@@ -389,7 +393,7 @@ jobs:
           evidence = inspect.inspect(
               raw, built["raw_disk_sha256"], built["raw_disk_bytes"], 512,
               metadata / "InRelease", metadata / "Packages.xz",
-              Path("/zrpc-archives"), workspace)
+              Path("/zrpc-archives"), Path("/workspace"))
           if (evidence["status"] !=
                   "diagnostic-no-boot-root-verity-inspected-unapproved"
                   or evidence["verity_userspace_verified"] is not True

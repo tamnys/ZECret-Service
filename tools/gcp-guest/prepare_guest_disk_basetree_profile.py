@@ -41,7 +41,7 @@ INPUT_NAMES = (base_tree.ARCHIVE, root_profile.ACCOUNT_TREE,
                root_profile.SOURCE_OVERLAY)
 SEED_PREFIX = "https://github.com/tamnys/ZECret-Service/gcp-basetree-disk-diagnostic/v1/"
 # The runner mounts these after staging. None is an executable search path.
-MOUNTED_SCRATCH = frozenset({"proc", "dev", "zrpc-source", "zrpc-archives",
+MOUNTED_SCRATCH = frozenset({"proc", "dev", "workspace", "zrpc-source", "zrpc-archives",
                              "zrpc-metadata", "zrpc-guest-archives",
                              "zrpc-apt-scratch", "zrpc-guest-payload-parent"})
 
