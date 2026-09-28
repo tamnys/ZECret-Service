@@ -164,6 +164,7 @@ def bind_selected_modules(revision, *, selected_output=None):
     # Keep the finder installed: later function-time local imports are bound
     # to captured HEAD bytes, and unknown local modules fail closed.
     globals().update(initrd_input=modules["assemble_initrd_base_tree"],
+                     root_tree=modules["assemble_guest_base_tree"],
                      rust_inputs=modules["export_rust_inputs"],
                      guest=modules["fetch_guest_closure"],
                      preflight=modules["preflight_initrd_build"],
@@ -476,7 +477,7 @@ def parent_directory(root_fd, parts):
         raise
 
 
-def extract_cpio(stream, root):
+def extract_cpio(stream, root, *, inventory=None):
     """Parse mkosi's pinned GNU newc output without following archive links."""
     root_fd = guest.open_directory(root, "CPIO audit scratch")
     seen = set()
@@ -544,14 +545,18 @@ def extract_cpio(stream, root):
                         os.fchmod(child, stat.S_IMODE(mode))
                     finally:
                         os.close(child)
+                    row = {"kind": "directory", "uid": uid, "gid": gid,
+                           "mode": stat.S_IMODE(mode)}
                 elif kind == stat.S_IFREG:
                     fd = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
                                  os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
                                  dir_fd=parent_fd)
                     try:
                         remaining = size
+                        digest = hashlib.sha256()
                         while remaining:
                             chunk = exact(stream, min(remaining, 1024 * 1024))
+                            digest.update(chunk)
                             view = memoryview(chunk)
                             while view:
                                 view = view[os.write(fd, view):]
@@ -559,6 +564,9 @@ def extract_cpio(stream, root):
                         os.fchmod(fd, stat.S_IMODE(mode))
                     finally:
                         os.close(fd)
+                    row = {"kind": "file", "uid": uid, "gid": gid,
+                           "mode": stat.S_IMODE(mode), "size": size,
+                           "sha256": digest.hexdigest()}
                 elif kind == stat.S_IFLNK:
                     if size > os.pathconf(root, "PC_PATH_MAX"):
                         raise ValueError("initrd CPIO symlink exceeds Linux path bound")
@@ -570,11 +578,15 @@ def extract_cpio(stream, root):
                     except UnicodeDecodeError as error:
                         raise ValueError("initrd CPIO symlink target is not UTF-8") from error
                     os.symlink(target, leaf, dir_fd=parent_fd)
+                    row = {"kind": "symlink", "uid": uid, "gid": gid,
+                           "mode": stat.S_IMODE(mode), "target": target}
                 else:
                     raise ValueError("initrd CPIO contains an unsupported file type")
             finally:
                 os.close(parent_fd)
             padded(stream, size)
+            if inventory is not None:
+                inventory[name] = row
         if "init" not in seen:
             raise ValueError("initrd CPIO omits /init")
         return len(seen)
@@ -582,7 +594,7 @@ def extract_cpio(stream, root):
         os.close(root_fd)
 
 
-def audit_cpio(output, audit, workspace, expected_audit_sha256):
+def audit_cpio(output, audit, workspace, expected_audit_sha256, *, capture_entries=False):
     """Run the selected initrd audit; this is not a complete runtime closure."""
     output = Path(output)
     if (output.parent.is_symlink() or output.is_symlink()
@@ -594,6 +606,7 @@ def audit_cpio(output, audit, workspace, expected_audit_sha256):
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise ValueError("mkosi CPIO output is not one regular file")
+        entries = {} if capture_entries else None
         with tempfile.TemporaryDirectory(prefix="zrpc-initrd-cpio-audit-",
                                          dir=workspace) as scratch:
             process = subprocess.Popen(
@@ -602,7 +615,7 @@ def audit_cpio(output, audit, workspace, expected_audit_sha256):
             try:
                 if process.stdout is None:
                     raise ValueError("initrd CPIO decompressor has no output stream")
-                count = extract_cpio(process.stdout, Path(scratch))
+                count = extract_cpio(process.stdout, Path(scratch), inventory=entries)
                 process.stdout.close()
                 if process.wait() != 0:
                     raise ValueError("initrd CPIO zstd decompression failed")
@@ -639,8 +652,11 @@ def audit_cpio(output, audit, workspace, expected_audit_sha256):
             sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
         if initrd_input.artifact_identity(os.fstat(fd)) != initrd_input.artifact_identity(before):
             raise ValueError("mkosi CPIO output changed during hashing")
-        return {"cpio_sha256": sha256, "cpio_size": before.st_size,
-                "cpio_entry_count": count}
+        report = {"cpio_sha256": sha256, "cpio_size": before.st_size,
+                  "cpio_entry_count": count}
+        if entries is not None:
+            report["cpio_entries"] = dict(sorted(entries.items()))
+        return report
     finally:
         os.close(fd)
 

@@ -423,7 +423,79 @@ def installed_manifest(path, packages, source):
         observed[row["name"]] = (row["version"], row["architecture"])
     if not source.guest.prepare.INITRD_PACKAGES <= set(observed):
         raise ValueError("mkosi initrd omitted a required package seed")
-    return sha256(raw), len(observed)
+    return sha256(raw), tuple(sorted(observed))
+
+
+def signed_payload_plan(source, metadata, archives, installed_names, init_bytes):
+    """Derive expected initrd entries from only the authenticated installed debs."""
+    authenticated = source.root_tree.preflight.authenticated_archives(
+        Path(metadata), Path(archives))
+    selected = [(identity, archive) for identity, archive in authenticated
+                if identity["name"] in installed_names]
+    if tuple(identity["name"] for identity, _ in selected) != installed_names:
+        raise ValueError("installed initrd package subset differs from signed closure")
+    _, rows = source.root_tree.source_plan(selected)
+    expected = {}
+    for row in rows:
+        path = row["path"]
+        if path == ".":
+            continue
+        if path == "init":
+            raise ValueError("signed Debian payload conflicts with pinned Rust /init")
+        kind = "file" if row["kind"] == "hardlink" else row["kind"]
+        entry = {"kind": kind, "uid": row["uid"], "gid": row["gid"],
+                 "mode": row["output_mode"]}
+        if kind == "file":
+            entry.update(size=row["size"], sha256=row["sha256"])
+        elif kind == "symlink":
+            entry["target"] = row["target"]
+        if path in expected:
+            raise ValueError("signed initrd payload has a repeated path")
+        expected[path] = entry
+    expected["init"] = {"kind": "file", "uid": 0, "gid": 0, "mode": 0o500,
+                        "size": len(init_bytes), "sha256": sha256(init_bytes)}
+    identities = [{key: identity[key] for key in
+                   ("name", "version", "architecture", "size", "sha256")}
+                  for identity, _ in selected]
+    return expected, identities
+
+
+def signed_payload_delta(expected, observed, identities, cpio_sha256):
+    """Inventory every post-install difference without approving its effect."""
+    if not HEX.fullmatch(cpio_sha256) or not identities or not expected or not observed:
+        raise ValueError("signed payload comparison lacks bound inputs")
+    differences = []
+    for path in sorted(expected.keys() | observed.keys()):
+        signed = expected.get(path)
+        actual = observed.get(path)
+        if signed == actual:
+            continue
+        differences.append({
+            "path": path,
+            "difference": ("added" if signed is None else
+                           "missing" if actual is None else "changed"),
+            "signed_payload": signed, "observed_cpio": actual,
+        })
+    package_digest = sha256(canonical(identities))
+    comparison = {"cpio_sha256": cpio_sha256,
+                  "installed_package_identity_sha256": package_digest,
+                  "differences": differences}
+    summary = {
+        "schema_version": 1,
+        "status": "diagnostic-signed-payload-vs-installed-initrd-delta-unapproved",
+        "cpio_sha256": cpio_sha256,
+        "cpio_entry_inventory_sha256": sha256(canonical(observed)),
+        "signed_payload_entry_inventory_sha256": sha256(canonical(expected)),
+        "installed_package_identity_sha256": package_digest,
+        "installed_package_names": [identity["name"] for identity in identities],
+        "signed_payload_entry_count": len(expected),
+        "observed_cpio_entry_count": len(observed),
+        "difference_count": len(differences),
+        "difference_sha256": sha256(canonical(comparison)),
+        "generated_effects_fully_audited": False,
+        "private_mode_approved": False,
+    }
+    return summary, differences
 
 
 def checked_output_layout(output):
@@ -552,10 +624,18 @@ def build_profile(source, selected, metadata, archives, rust_bundle, revision,
         raise ValueError("source-bound initrd inputs changed during mkosi build")
     checked_output_layout(output)
     packages = source.guest.authenticated_packages(metadata)
-    manifest_hash, package_count = installed_manifest(output / "initrd.manifest", packages, source)
+    manifest_hash, installed_names = installed_manifest(
+        output / "initrd.manifest", packages, source)
+    package_count = len(installed_names)
     audit_hash = json.loads((profile / "profile-manifest.json").read_bytes())["initrd_audit_sha256"]
     cpio = source.audit_cpio(output / "initrd.cpio.zst", profile / "audit-initrd.py",
-                             workspace, audit_hash)
+                             workspace, audit_hash, capture_entries=True)
+    observed = cpio.pop("cpio_entries")
+    init_bytes = regular(profile / "rootfs/init", mode=0o500)
+    expected, identities = signed_payload_plan(
+        source, metadata, archives, installed_names, init_bytes)
+    delta_summary, delta_rows = signed_payload_delta(
+        expected, observed, identities, cpio["cpio_sha256"])
     if check_loopback_only_ip_state(parent_network_namespace,
                                     parent_mount_namespace) != namespace:
         raise ValueError("outer build namespace changed during mkosi execution")
@@ -564,6 +644,8 @@ def build_profile(source, selected, metadata, archives, rust_bundle, revision,
             **builder_identity,
             "mkosi_manifest_sha256": manifest_hash,
             "installed_package_count": package_count,
+            "signed_payload_delta": delta_summary,
+            "_signed_payload_delta_rows": delta_rows,
             **cpio, **namespace,
             "source_commit_tree_proof": "outer-exact-head-git-and-verified-rust-receipt",
             "source_commit_tree_independently_rechecked_in_no_route_builder": False,
@@ -615,6 +697,9 @@ def main(argv=None):
         report = {"status": "blocked", "reason": str(error),
                   "initrd_built": False, "boot_verified": False,
                   "private_mode_approved": False}
+    for index, row in enumerate(report.pop("_signed_payload_delta_rows", ())):
+        print(json.dumps({"signed_payload_delta_index": index,
+                          "signed_payload_delta_row": row}, sort_keys=True))
     print(json.dumps(report, sort_keys=True))
     return 1 if report["status"] == "blocked" else 0
 

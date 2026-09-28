@@ -273,10 +273,20 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
                    + self.newc("TRAILER!!!", 0))
         root = self.workspace / "extract"
         root.mkdir()
-        self.assertEqual(profile.extract_cpio(io.BytesIO(archive), root), 3)
+        inventory = {}
+        self.assertEqual(profile.extract_cpio(io.BytesIO(archive), root,
+                                              inventory=inventory), 3)
         self.assertEqual((root / "init").read_bytes(), self.binary)
         self.assertEqual((root / "etc/os-release").readlink(),
                          Path("../usr/lib/os-release"))
+        self.assertEqual(inventory, {
+            "etc": {"kind": "directory", "uid": 0, "gid": 0, "mode": 0o755},
+            "etc/os-release": {"kind": "symlink", "uid": 0, "gid": 0,
+                               "mode": 0o777, "target": "../usr/lib/os-release"},
+            "init": {"kind": "file", "uid": 0, "gid": 0, "mode": 0o555,
+                     "size": len(self.binary),
+                     "sha256": hashlib.sha256(self.binary).hexdigest()},
+        })
         for changed in (
             self.newc("../escape", stat.S_IFREG | 0o644, b"x") +
             self.newc("TRAILER!!!", 0),
