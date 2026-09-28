@@ -561,6 +561,13 @@ jobs:
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
                 "$chroot_command" "$staged" "$@"
             }
+            # Recheck the selected CPIO producer tools and the current
+            # network namespace immediately before any mkosi invocation. The
+            # signed APT plan and payload staging above remain separate proofs;
+            # this probe does not build an initrd or approve a toolchain.
+            run_staged_root /usr/bin/python3 -I -B \
+              /zrpc-source/tools/gcp-guest/preflight_initrd_builder.py \
+              --parent-network-namespace "$6"
             # Pinned mkosi still runs its sysusers/tmpfiles/preset/depmod/
             # firstboot/hwdb and output stages. The checks below report
             # produced-root differences without approving any generated effect.
