@@ -29,7 +29,7 @@ class ZebraArtifactTests(unittest.TestCase):
             "withdrawn_at": None,
             "vulnerabilities": [{
                 "package": {"ecosystem": "rust", "name": "zebrad"},
-                "vulnerable_version_range": ">= 6.4.0, < 6.4.2",
+                "vulnerable_version_range": "<= 6.2.3",
                 "first_patched_version": None,
             }],
         }]
@@ -66,6 +66,20 @@ class ZebraArtifactTests(unittest.TestCase):
     def metadata(self, now):
         return zebra.check_metadata(self.lock, self.release, self.tag_ref,
                                     self.tag_object, self.advisories, now)
+
+    def test_unreviewed_release_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:
+            lock_path = Path(root) / "candidate.lock.json"
+            for mutate in (
+                    lambda lock: lock.update(tag="v6.4.2"),
+                    lambda lock: lock["asset"].update(
+                        name="zebrad-6.4.2-x86_64-unknown-linux-gnu.tar.gz")):
+                candidate = copy.deepcopy(self.lock)
+                mutate(candidate)
+                lock_path.write_text(json.dumps(candidate))
+                with mock.patch.object(zebra, "LOCK_PATH", lock_path):
+                    with self.assertRaisesRegex(ValueError, "release lock is incomplete|asset identity missing"):
+                        zebra.load_lock()
 
     def test_age_hold_is_based_on_asset_creation(self):
         eligible = zebra.utc(self.lock["asset"]["created_at"]) + timedelta(days=7)

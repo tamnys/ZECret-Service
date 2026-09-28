@@ -1,0 +1,140 @@
+name: GCP native x86 Zebra artifact diagnostic
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/gcp-native-zebra-candidate.yml
+      - deploy/gcp/zebra-release.lock.json
+      - tools/gcp-guest/verify_zebra_release.py
+      - tools/gcp-guest/test_verify_zebra_release.py
+  workflow_dispatch:
+
+permissions:
+  attestations: read
+
+jobs:
+  zebra:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Fetch the exact candidate source on native x86 Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          [[ "$ZRPC_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_HEAD_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_HEAD_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+
+      - name: Check candidate policy and official metadata before artifact download
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_HEAD_SHA"
+          PYTHONDONTWRITEBYTECODE=1 python3 -I -m unittest discover \
+            -s "$source/tools/gcp-guest" -p test_verify_zebra_release.py -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -I \
+            "$source/tools/gcp-guest/verify_zebra_release.py" preflight \
+            | tee "$GITHUB_WORKSPACE/zebra-preflight.json"
+          test "$(jq -r .status "$GITHUB_WORKSPACE/zebra-preflight.json")" = \
+            age-eligible-metadata-only-unapproved
+          test "$(jq -r .private_mode_approved "$GITHUB_WORKSPACE/zebra-preflight.json")" = false
+
+      - name: Verify pinned archive, maintained provenance, and x86 ELF
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_HEAD_SHA"
+          PYTHONDONTWRITEBYTECODE=1 ZRPC_SOURCE="$source" python3 -I - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          import tarfile
+          from urllib.parse import urlsplit
+          from urllib.request import Request, urlopen
+
+          source = Path(os.environ["ZRPC_SOURCE"])
+          sys.path.insert(0, str(source / "tools/gcp-guest"))
+          import verify_zebra_release as zebra
+
+          lock, lock_sha256 = zebra.load_lock()
+          work = source / ".codex-tmp" / "zebra-native-candidate"
+          work.mkdir(parents=True, exist_ok=False)
+
+          def fetch(url, destination, expected_size, expected_sha256):
+              request = Request(url, headers={"User-Agent": "zrpc-native-zebra-diagnostic/1"})
+              digest = hashlib.sha256()
+              size = 0
+              with urlopen(request) as response, destination.open("xb") as output:
+                  if response.status != 200 or urlsplit(response.geturl()).scheme != "https":
+                      raise ValueError("artifact download was not HTTPS 200")
+                  while block := response.read(1024 * 1024):
+                      size += len(block)
+                      if size > expected_size:
+                          raise ValueError("artifact exceeded reviewed size")
+                      digest.update(block)
+                      output.write(block)
+              if (size, digest.hexdigest()) != (expected_size, expected_sha256):
+                  raise ValueError("download differs from reviewed artifact")
+
+          gh = lock["gh_verifier_source"]
+          gh_archive = work / gh["asset_name"]
+          fetch("https://github.com/cli/cli/releases/download/" + gh["tag"] + "/" + gh["asset_name"],
+                gh_archive, gh["asset_size"], gh["asset_sha256"])
+          with tarfile.open(gh_archive, "r:gz") as package:
+              member = package.getmember(gh["archive_member"])
+              if not member.isfile():
+                  raise ValueError("reviewed verifier member is not a file")
+              stream = package.extractfile(member)
+              if stream is None:
+                  raise ValueError("reviewed verifier member missing")
+              verifier = work / "gh"
+              with verifier.open("xb") as output:
+                  digest = hashlib.sha256()
+                  while block := stream.read(1024 * 1024):
+                      digest.update(block)
+                      output.write(block)
+              if digest.hexdigest() != lock["gh_verifier_executable_sha256"]:
+                  raise ValueError("reviewed verifier executable differs")
+              verifier.chmod(0o555)
+
+          asset = lock["asset"]
+          archive = work / asset["name"]
+          fetch("https://github.com/ZcashFoundation/zebra/releases/download/" +
+                lock["tag"] + "/" + asset["name"], archive,
+                asset["size"], asset["sha256"])
+          attestations = zebra.verify_gh(lock, verifier, archive)
+          binary = work / "zebrad-discovery"
+          size, digest = zebra.extract_zebrad(archive, binary)
+          print(json.dumps({"status": "diagnostic-native-zebra-artifact-unapproved",
+                            "source_head": os.environ["ZRPC_HEAD_SHA"],
+                            "archive_sha256": asset["sha256"],
+                            "verified_provenance_count": attestations,
+                            "zebrad_elf_size": size, "zebrad_elf_sha256": digest,
+                            "image_built": False, "private_mode_approved": False},
+                           sort_keys=True))
+          if (lock["zebrad_elf_size"], lock["zebrad_elf_sha256"]) != (size, digest):
+              raise ValueError("reviewed ELF identity is not pinned or differs")
+          receipt = zebra.stage(lock, lock_sha256, archive, verifier, work / "staged")
+          if (receipt["image_built"] is not False or
+                  receipt["private_mode_approved"] is not False or
+                  receipt["verified_attestation_count"] < 1):
+              raise ValueError("Zebra diagnostic changed acceptance status")
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_HEAD_SHA"
+          git -C "$source" diff --quiet
+          echo 'Native artifact verified for review; no image, release, or private-mode approval.'

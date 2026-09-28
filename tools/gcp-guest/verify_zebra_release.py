@@ -85,7 +85,7 @@ def load_lock():
             or lock["schema_version"] != 1
             or lock["status"] != "reviewed-metadata-only-unapproved"
             or lock["repository"] != "ZcashFoundation/zebra"
-            or lock["tag"] != "v6.4.2"
+            or lock["tag"] != "v6.3.0"
             or lock["minimum_age_days"] != 7
             or lock["signer_workflow"] !=
             "ZcashFoundation/zebra/.github/workflows/zfnd-release-binaries.yml"
@@ -101,7 +101,7 @@ def load_lock():
     if (not isinstance(asset, dict)
             or set(asset) != {"id", "name", "size", "sha256", "created_at", "updated_at"}
             or type(asset["id"]) is not int or asset["id"] <= 0
-            or asset["name"] != "zebrad-6.4.2-x86_64-unknown-linux-gnu.tar.gz"
+            or asset["name"] != "zebrad-6.3.0-x86_64-unknown-linux-gnu.tar.gz"
             or type(asset["size"]) is not int or asset["size"] <= 0
             or not SHA256.fullmatch(asset["sha256"])):
         raise ValueError("reviewed x86_64 asset identity missing")
