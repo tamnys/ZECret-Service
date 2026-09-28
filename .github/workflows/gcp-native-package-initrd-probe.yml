@@ -124,7 +124,7 @@ jobs:
           test ! -e "$root_stage"
           sudo -n install -d -m 0700 "$root_stage"
           sudo -n cp -a -- "$source" "$scratch" "$root_stage/"
-          sudo -n chown -R 0:0 "$root_stage"
+          sudo -n chown -hR 0:0 -- "$root_stage"
           source="$root_stage/source"
           scratch="$root_stage/package-initrd"
           staged="$scratch/staged"
