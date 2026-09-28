@@ -152,6 +152,12 @@ class OuterImageRunnerTest(unittest.TestCase):
             (root / "zrpc-gcp.raw").write_bytes(b"changed")
             with self.assertRaisesRegex(ValueError, "checksum list differs"):
                 runner.checked_outputs(root)
+            (root / "zrpc-gcp.SHA256SUMS").write_text("".join(
+                f"{runner.sha256((root / name).read_bytes())} *{name}\n"
+                for name in ("zrpc-gcp.raw", "zrpc-gcp.efi",
+                             "zrpc-gcp.vmlinuz", "zrpc-gcp.initrd")))
+            with self.assertRaisesRegex(ValueError, "outputs changed after inspection"):
+                runner.require_unchanged_outputs(root, files)
             (root / "unreviewed.efi").write_bytes(b"x")
             with self.assertRaisesRegex(ValueError, "output set differs"):
                 runner.checked_outputs(root)
@@ -262,6 +268,14 @@ class OuterImageRunnerTest(unittest.TestCase):
             esp = {"uki_sha256": files["zrpc-gcp.efi"][1], "uki_sections": {
                 ".linux": {"sha256": files["zrpc-gcp.vmlinuz"][1]},
                 ".initrd": {"sha256": files["zrpc-gcp.initrd"][1]}}}
+            verity_report = {"status": "verity", "root_partition_guid": "root-guid"}
+            rootfs_report = {"status": "diagnostic-rootfs-test-only",
+                             "raw_disk_sha256": files["zrpc-gcp.raw"][1],
+                             "raw_disk_bytes": files["zrpc-gcp.raw"][0],
+                             "root_partition_guid": "root-guid",
+                             "reader_executable_matches_signed_package": True,
+                             "private_mode_approved": False}
+            rootfs_inspect = mock.Mock(return_value=rootfs_report)
             source = types.SimpleNamespace(
                 guest=types.SimpleNamespace(prepare=types.SimpleNamespace(
                     unique_object=dict, KERNEL_PACKAGE=kernel_name)),
@@ -290,8 +304,10 @@ class OuterImageRunnerTest(unittest.TestCase):
                 packages=types.SimpleNamespace(verify=lambda *_: package_report),
                 gpt=types.SimpleNamespace(inspect=lambda *_: {"status": "gpt"}),
                 esp=types.SimpleNamespace(inspect=lambda *_: esp),
-                verity=types.SimpleNamespace(inspect=lambda *_: {"status": "verity"}),
+                verity=types.SimpleNamespace(inspect=lambda *_: verity_report),
                 roothash=types.SimpleNamespace(inspect=lambda *_: {"roothash": "a" * 64}),
+                rootfs=types.SimpleNamespace(STATUS="diagnostic-rootfs-test-only",
+                                            inspect=rootfs_inspect),
                 sbverify=types.SimpleNamespace(stage=stage_sbverify),
                 final_initrd=types.SimpleNamespace(
                     STATUS="diagnostic-final-initrd-unapproved", inspect=inspect_final),
@@ -305,13 +321,22 @@ class OuterImageRunnerTest(unittest.TestCase):
             with mock.patch.object(runner.subprocess, "run", return_value=
                     types.SimpleNamespace(returncode=0, stdout=json.dumps(signature).encode())) as call:
                 result = runner.inspect_outputs(context, stage, rust, metadata, archives,
-                                                workspace, {}, files)
+                                                workspace, {}, files, {})
             self.assertEqual(call.call_args.args[0][1], "verify-signature")
             self.assertEqual(result["uki_sha256"], esp["uki_sha256"])
             self.assertTrue(result["signed_uki_checked"])
+            self.assertEqual(result["raw_rootfs_audit"], rootfs_report)
+            self.assertEqual(rootfs_inspect.call_args.args[0], output / "zrpc-gcp.raw")
             self.assertEqual(result["final_initrd_audit"]["final_initrd_sha256"],
                              files["zrpc-gcp.initrd"][1])
             self.assertFalse(result["gcp_import_package_size_eligible"])
+            rootfs_inspect.side_effect = ValueError("raw rootfs file bytes differ")
+            with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
+                    "signature must not run on altered raw rootfs")):
+                with self.assertRaisesRegex(ValueError, "raw rootfs file bytes differ"):
+                    runner.inspect_outputs(context, stage, rust, metadata, archives,
+                                           workspace, {}, files, {})
+            rootfs_inspect.side_effect = None
             (output / "zrpc-gcp.initrd").write_bytes(b"unreviewed-prefix" + cpio)
             rewrite_sums()
             esp["uki_sections"][".initrd"]["sha256"] = runner.sha256(
@@ -320,7 +345,7 @@ class OuterImageRunnerTest(unittest.TestCase):
                     "signature must not run on unreviewed initrd")):
                 with self.assertRaisesRegex(ValueError, "unreviewed prefix"):
                     runner.inspect_outputs(context, stage, rust, metadata, archives,
-                                           workspace, {}, runner.checked_outputs(output))
+                                           workspace, {}, runner.checked_outputs(output), {})
 
     def test_missing_key_blocks_before_mkosi(self):
         with self.assertRaisesRegex(ValueError, "private mount"):

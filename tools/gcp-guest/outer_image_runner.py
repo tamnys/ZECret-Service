@@ -44,6 +44,7 @@ ADDITIONAL_SCRIPTS = (
     "tools/gcp-guest/verify_zebra_release.py",
     "tools/gcp-guest/gcp_import_archive.py",
     "tools/gcp-guest/inspect_final_initrd.py",
+    "tools/gcp-guest/inspect_raw_rootfs.py",
 )
 STATIC_SOURCE_FILES = (
     "tools/gcp-guest/audit-rootfs.py",
@@ -243,6 +244,8 @@ def source_context(revision, rust_bundle):
                                   selected, revision),
         final_initrd=bind_file_module("outer_final_initrd", ADDITIONAL_SCRIPTS[8],
                                       selected, revision),
+        rootfs=bind_file_module("outer_raw_rootfs", ADDITIONAL_SCRIPTS[9],
+                                selected, revision),
     )
 
 
@@ -442,6 +445,11 @@ def checked_outputs(output):
     return files
 
 
+def require_unchanged_outputs(output, expected):
+    if checked_outputs(output) != expected:
+        raise ValueError("mkosi outputs changed after inspection")
+
+
 def checked_split_initrd(cpio, split):
     """Pinned mkosi/ukify joins the supplied CPIO before the module CPIO."""
     fd = os.open(split, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -469,7 +477,7 @@ def selected_initrd_packages(manifest_path, kernel_name):
 
 
 def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
-                    workspace, lock, files):
+                    workspace, lock, files, manifest):
     output = stage / "output"
     raw = output / "zrpc-gcp.raw"
     raw_bytes, raw_sha256 = files["zrpc-gcp.raw"]
@@ -484,6 +492,16 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
     verity = context.verity.inspect(raw, raw_sha256, raw_bytes, SECTOR_SIZE,
                                     inrelease, index, builder_archives, workspace)
     binding = context.roothash.inspect(gpt, esp, verity, raw_sha256, raw_bytes)
+    rootfs = context.rootfs.inspect(raw, raw_sha256, raw_bytes, SECTOR_SIZE,
+                                    gpt, verity, inrelease, index, builder_archives,
+                                    stage, manifest, workspace)
+    if (rootfs.get("status") != context.rootfs.STATUS
+            or rootfs.get("raw_disk_sha256") != raw_sha256
+            or rootfs.get("raw_disk_bytes") != raw_bytes
+            or rootfs.get("root_partition_guid") != verity.get("root_partition_guid")
+            or rootfs.get("reader_executable_matches_signed_package") is not True
+            or rootfs.get("private_mode_approved") is not False):
+        raise ValueError("raw rootfs workload inspection did not bind output")
     if (files["zrpc-gcp.efi"][1] != esp["uki_sha256"]
             or files["zrpc-gcp.vmlinuz"][1] != esp["uki_sections"][".linux"]["sha256"]
             or files["zrpc-gcp.initrd"][1] != esp["uki_sections"][".initrd"]["sha256"]):
@@ -549,8 +567,7 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
                 or signature.get("signer_certificate_sha256") != sha256(certificate_bytes)
                 or signature.get("private_mode_approved") is not False):
             raise ValueError("reviewed UKI signature report differs from image bytes")
-    if checked_outputs(output) != files:
-        raise ValueError("mkosi outputs changed after inspection")
+    require_unchanged_outputs(output, files)
     eligible = (raw_bytes % context.importer.GIB == 0
                 and raw_bytes // context.importer.GIB <= context.importer.MAX_IMPORT_GIB)
     return {"raw_disk_sha256": raw_sha256, "raw_disk_bytes": raw_bytes,
@@ -561,6 +578,7 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
             "initrd_manifest_sha256": packages["initrd_manifest_sha256"],
             "cpio_sha256": cpio_report["cpio_sha256"],
             "final_initrd_audit": final_initrd,
+            "raw_rootfs_audit": rootfs,
             "signed_uki_checked": True, "verity_userspace_verified": True,
             "gpt_roothash_matched": True,
             "gcp_import_package_size_eligible": eligible}
@@ -637,12 +655,13 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
         raise ValueError("signing key changed during mkosi build")
     files = checked_outputs(stage / "output")
     inspected = inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
-                                workspace, lock, files)
+                                workspace, lock, files, manifest)
     if immutable_stage_inventory(stage, manifest) != count or \
             sha256(regular_bytes(stage / "candidate-manifest.json")) != staged["manifest_sha256"] or \
             context.package.check_loopback_only_ip_state(
                 parent_network_namespace, parent_mount_namespace) != namespace:
         raise ValueError("source-bound inputs or outer namespace changed during inspection")
+    require_unchanged_outputs(stage / "output", files)
     return {"schema_version": 1, "status": "candidate-outer-image-built-unapproved",
             "source_commit": revision,
             "input_lock_sha256": staged["input_lock_sha256"],
