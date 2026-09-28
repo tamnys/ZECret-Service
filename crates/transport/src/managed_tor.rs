@@ -318,3 +318,33 @@ fn private_file(path: &Path) -> io::Result<File> {
         .mode(0o600)
         .open(path)
 }
+
+#[cfg(test)]
+mod real_tor_smoke {
+    use super::*;
+    use std::{io::ErrorKind, net::TcpListener};
+
+    /// Opt-in integration check using an independently authenticated Tor
+    /// executable. A loopback destination would be reachable by a direct
+    /// fallback, but Tor must reject it without touching the local listener.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires an authenticated local Tor executable"]
+    async fn managed_child_rejects_loopback_destination_without_direct_fallback() {
+        let executable = std::env::var_os("ZRPC_REAL_TOR_EXECUTABLE")
+            .expect("set ZRPC_REAL_TOR_EXECUTABLE to the authenticated Tor binary");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint =
+            RemoteEndpoint::new("127.0.0.1", listener.local_addr().unwrap().port()).unwrap();
+        let tor = ManagedTor::launch(Path::new(&executable)).unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(zrpc_protocol::MAX_CONNECTION_LIFETIME_SECONDS),
+            tor.connect_bootstrap(&endpoint, IsolationLabel::new("real-tor-smoke").unwrap()),
+        )
+        .await
+        .expect("Tor SOCKS negotiation did not finish within the connection lifetime");
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::TorUnavailable);
+        assert_eq!(listener.accept().unwrap_err().kind(), ErrorKind::WouldBlock);
+        tor.ensure_live().unwrap();
+    }
+}

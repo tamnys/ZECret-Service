@@ -1,0 +1,145 @@
+name: Managed Tor native Linux smoke
+
+on:
+  push:
+    branches:
+      - work/tor-real-smoke
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  managed_tor:
+    name: Authenticated Tor child and zero direct fallback
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact project source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          python3 -I - "$source/rust-toolchain.toml" <<'PY'
+          from pathlib import Path
+          import sys
+          import tomllib
+
+          toolchain = tomllib.loads(Path(sys.argv[1]).read_text())
+          if toolchain.get("toolchain", {}).get("channel") != "1.94.1":
+              raise SystemExit("source lacks the reviewed native Rust toolchain pin")
+          PY
+
+      - name: Check live Cargo source policies before dependency fetch
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          python3 -I "$source/scripts/check-cargo-registry-age.py"
+          python3 -I "$source/scripts/check-cargo-git-source.py"
+
+      - name: Fetch and inspect the reviewed dstack Git object
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          repository="$GITHUB_WORKSPACE/dstack-source"
+          commit=282eeb27d22d8f091ad0fa5a90e638f85cf68751
+          mkdir "$repository"
+          git -C "$repository" init -q
+          git -C "$repository" fetch -q --no-tags --depth=1 \
+            https://github.com/Dstack-TEE/dstack "$commit"
+          test "$(git -C "$repository" rev-parse FETCH_HEAD)" = "$commit"
+          python3 -I "$source/scripts/check-cargo-fetched-git-source.py" \
+            "$source" "$repository"
+
+      - name: Authenticate Debian snapshot and stage only Tor runtime objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/tor-smoke"
+          mkdir -m 0700 "$scratch" "$scratch/archives" "$scratch/metadata"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 "$source/tools/gcp-guest/tor_runtime_diagnostic.py" stage-gpgv \
+            --archives "$scratch/archives" --output "$scratch/gpgv"
+          PATH="$scratch/gpgv:$PATH" \
+            python3 "$source/tools/gcp-guest/fetch_guest_closure.py" metadata \
+              --directory "$scratch/metadata"
+          PATH="$scratch/gpgv:$PATH" \
+            python3 "$source/tools/gcp-guest/tor_runtime_diagnostic.py" stage-tor \
+              --metadata "$scratch/metadata" --archives "$scratch/archives" \
+              --output "$scratch/staged"
+          test "$(sha256sum "$scratch/staged/tor" | cut -d' ' -f1)" = \
+            2e0a57ea04c80865fd38e9bbde7219ed19d1b5c34cc5ed5b3f98cc3a6adf19ef
+          test "$(sha256sum "$scratch/staged/lib/libevent-2.1.so.7" | cut -d' ' -f1)" = \
+            0ddb193589335d52561359545965db42885e9f4ea1f681ec012863f2c6498b10
+          git -C "$source" diff --quiet
+
+      - name: Fetch locked Cargo dependencies in pinned native Rust container
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/tor-smoke"
+          mkdir "$scratch/cargo-home" "$scratch/target"
+          docker pull --platform linux/amd64 "$RUST_IMAGE"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$RUST_IMAGE")" = linux/amd64
+          case "$(docker image inspect --format '{{json .RepoDigests}}' "$RUST_IMAGE")" in
+            *"${RUST_IMAGE##*@}"*) ;;
+            *) echo 'Pinned Rust image digest differs from review' >&2; exit 1 ;;
+          esac
+          docker run --rm --pull=never --platform linux/amd64 --network bridge \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            cargo fetch --locked --target x86_64-unknown-linux-gnu
+          git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
+
+      - name: Run the opt-in Rust ManagedTor test with authenticated Tor and no network
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/tor-smoke"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --mount "type=bind,src=$scratch/staged,dst=/tor,readonly" \
+            --mount "type=bind,src=$scratch/staged/lib/libevent-2.1.so.7,dst=/usr/lib/x86_64-linux-gnu/libevent-2.1.so.7,readonly" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            ZRPC_REAL_TOR_EXECUTABLE=/tor/tor LANG=C LC_ALL=C TZ=UTC \
+            sh -ceu '
+              /tor/tor --version | grep -F "Tor version 0.4.9.11."
+              cargo test --locked --offline -p zrpc-transport \
+                managed_child_rejects_loopback_destination_without_direct_fallback \
+                -- --ignored --nocapture
+            '
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$source" diff --quiet
+          echo 'Diagnostic only: local loopback rejection and zero direct fallback. No Tor circuit, TDX boot, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
