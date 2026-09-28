@@ -143,11 +143,13 @@ class ReinspectImportTests(unittest.TestCase):
                 "sfdisk_dynamic_runtime_authenticated": False,
                 "import_package_ready": False, "private_mode_approved": False}
 
-    def run_import(self, *, source_sha=None):
+    def run_import(self, *, source_sha=None, rust_manifest_sha=None):
         return runner.reinspect_import(
             self.stage, self.inputs, self.rust, "f" * 40, self.metadata, self.archives,
             self.workspace, self.import_directory, self.sfdisk,
             self.old_sha if source_sha is None else source_sha, len(self.old),
+            sha((self.rust / "manifest.json").read_bytes())
+            if rust_manifest_sha is None else rust_manifest_sha,
             self.zebra_receipt, "parent-net", "parent-mount")
 
     def test_final_identity_is_inspected_and_packaging_reports_are_new(self):
@@ -180,6 +182,12 @@ class ReinspectImportTests(unittest.TestCase):
     def test_wrong_source_identity_stops_before_conversion(self):
         with self.assertRaisesRegex(ValueError, "recorded exact identity"):
             self.run_import(source_sha="0" * 64)
+        self.context.import_disk._prepare.assert_not_called()
+        self.assertFalse(self.import_directory.exists())
+
+    def test_second_rust_bundle_manifest_stops_before_conversion(self):
+        with self.assertRaisesRegex(ValueError, "Rust bundle differs"):
+            self.run_import(rust_manifest_sha="0" * 64)
         self.context.import_disk._prepare.assert_not_called()
         self.assertFalse(self.import_directory.exists())
 

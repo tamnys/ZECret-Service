@@ -533,6 +533,7 @@ class ImportHandoffTests(unittest.TestCase):
             "source_commit": self.args.revision,
             "candidate_manifest_sha256": self.stage_manifest_sha,
             "input_lock_sha256": "1" * 64,
+            "native_rust_manifest_sha256": "2" * 64,
             "raw_disk_sha256": self.source_sha,
             "raw_disk_bytes": 852361216,
             "image_built": True, "signed_uki_checked": True,
@@ -629,6 +630,8 @@ class ImportHandoffTests(unittest.TestCase):
                          self.source_sha)
         self.assertEqual(command[command.index("--sfdisk") + 1],
                          "/usr/sbin/sfdisk")
+        self.assertEqual(command[command.index("--native-rust-manifest-sha256") + 1],
+                         self.build_report["native_rust_manifest_sha256"])
         self.assertEqual(command[command.index("--parent-network-namespace") + 1],
                          self.args.net)
         self.assertEqual(command[command.index("--parent-mount-namespace") + 1],
@@ -647,6 +650,17 @@ class ImportHandoffTests(unittest.TestCase):
         def wrong_source(staged, command):
             self.produce_reinspection(staged, command, source_sha="0" * 64)
         with mock.patch.object(harness, "run_in_builder", side_effect=wrong_source):
+            with self.assertRaisesRegex(ValueError, "receipt differs"):
+                harness.postbuild_import(self.args.staged, self.args)
+
+    def test_reinspection_receipt_rejects_second_rust_manifest(self):
+        def second_bundle(staged, command):
+            self.produce_reinspection(staged, command)
+            path = self.args.scratch / "import-disk/reinspection.json"
+            receipt = json.loads(path.read_bytes())
+            receipt["native_rust_manifest_sha256"] = "0" * 64
+            self.write_private(path, receipt)
+        with mock.patch.object(harness, "run_in_builder", side_effect=second_bundle):
             with self.assertRaisesRegex(ValueError, "receipt differs"):
                 harness.postbuild_import(self.args.staged, self.args)
 

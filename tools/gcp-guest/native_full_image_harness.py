@@ -485,6 +485,8 @@ def postbuild_import(staged, args):
             or type(source_sha256) is not str
             or not re.fullmatch(r"[0-9a-f]{64}", source_sha256)
             or type(source_bytes) is not int or source_bytes <= 0
+            or type(report.get("native_rust_manifest_sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", report["native_rust_manifest_sha256"])
             or type(report.get("candidate_manifest_sha256")) is not str
             or not re.fullmatch(r"[0-9a-f]{64}", report["candidate_manifest_sha256"])):
         raise ValueError("verified mkosi report is required before import reinspection")
@@ -506,6 +508,7 @@ def postbuild_import(staged, args):
         "--sfdisk", "/usr/sbin/sfdisk",
         "--mkosi-disk-sha256", source_sha256,
         "--mkosi-disk-bytes", str(source_bytes),
+        "--native-rust-manifest-sha256", report["native_rust_manifest_sha256"],
         "--revision", args.revision,
         "--parent-network-namespace", args.net,
         "--parent-mount-namespace", args.mnt,
@@ -520,8 +523,8 @@ def postbuild_import(staged, args):
             or finished.get("source_commit") != args.revision
             or finished.get("stage_manifest_sha256") != report["candidate_manifest_sha256"]
             or finished.get("input_lock_sha256") != report.get("input_lock_sha256")
-            or type(finished.get("native_rust_manifest_sha256")) is not str
-            or not re.fullmatch(r"[0-9a-f]{64}", finished["native_rust_manifest_sha256"])
+            or finished.get("native_rust_manifest_sha256") !=
+               report["native_rust_manifest_sha256"]
             or finished.get("mkosi_disk_sha256") != source_sha256
             or finished.get("mkosi_disk_bytes") != source_bytes
             or type(raw_sha256) is not str

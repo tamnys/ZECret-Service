@@ -646,7 +646,8 @@ def inspected_uki_digest(context, rust_bundle, output, boot):
 
 def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_archives,
                      workspace, import_directory, sfdisk, source_sha256,
-                     source_bytes, zebra_receipt, parent_network_namespace,
+                     source_bytes, expected_rust_manifest_sha256, zebra_receipt,
+                     parent_network_namespace,
                      parent_mount_namespace):
     """Convert one verified mkosi output, then inspect the new disk identity."""
     if sys.platform != "linux" or os.uname().machine != "x86_64":
@@ -670,6 +671,11 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
                 or not path.is_relative_to(ROOT)
                 or import_directory.is_relative_to(path)):
             raise ValueError("import source inputs must be real disjoint workspace paths")
+    if (type(expected_rust_manifest_sha256) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_rust_manifest_sha256)
+            or sha256(regular_bytes(rust_bundle / "manifest.json")) !=
+               expected_rust_manifest_sha256):
+        raise ValueError("import Rust bundle differs from original mkosi build")
     context = source_context(revision, rust_bundle)
     prepare = context.source.guest.prepare
     checked_source_tree(context.selected, revision, context.source)
@@ -683,7 +689,6 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
     prepare.validate_lock(lock, inputs)
     rust = context.source.rust_inputs.inspect(
         rust_bundle, revision, selected_output=context.selected.output)
-    rust_manifest_sha256 = sha256(regular_bytes(rust_bundle / "manifest.json"))
     for role in ("wrapper", "broker", "guard", "cookie", "early_init"):
         if lock["artifacts"][role]["sha256"] != rust["artifacts"][role]["sha256"]:
             raise ValueError("import source guest role differs from native Rust receipt")
@@ -749,6 +754,8 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
                 parent_network_namespace, parent_mount_namespace) != namespace):
         raise ValueError("source-bound import inputs or namespace changed")
     require_unchanged_outputs(output, files)
+    if sha256(regular_bytes(rust_bundle / "manifest.json")) != expected_rust_manifest_sha256:
+        raise ValueError("import Rust bundle changed during reinspection")
     reports = {}
     for name, report in (("sizing", sizing), ("gpt", layout), ("esp", boot),
                          ("verity", hashes), ("roothash", binding),
@@ -760,7 +767,7 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
         "source_commit": revision,
         "stage_manifest_sha256": manifest_sha256,
         "input_lock_sha256": manifest["input_lock_sha256"],
-        "native_rust_manifest_sha256": rust_manifest_sha256,
+        "native_rust_manifest_sha256": expected_rust_manifest_sha256,
         "mkosi_disk_sha256": source_sha256,
         "mkosi_disk_bytes": source_bytes,
         "raw_disk_sha256": final_sha256,
@@ -808,6 +815,7 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
             raise ValueError("outer build inputs must be real workspace paths")
         if stage.is_relative_to(path) or path.is_relative_to(stage):
             raise ValueError("fresh stage must be disjoint from every reviewed input")
+    rust_manifest_sha256 = sha256(regular_bytes(rust_bundle / "manifest.json"))
     context = source_context(revision, rust_bundle)
     prepare = context.source.guest.prepare
     lock = json.loads(regular_bytes(lock_path), object_pairs_hook=prepare.unique_object)
@@ -864,8 +872,11 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
                 parent_network_namespace, parent_mount_namespace) != namespace:
         raise ValueError("source-bound inputs or outer namespace changed during inspection")
     require_unchanged_outputs(stage / "output", files)
+    if sha256(regular_bytes(rust_bundle / "manifest.json")) != rust_manifest_sha256:
+        raise ValueError("Rust bundle changed during mkosi build or inspection")
     return {"schema_version": 1, "status": "candidate-outer-image-built-unapproved",
             "source_commit": revision,
+            "native_rust_manifest_sha256": rust_manifest_sha256,
             "input_lock_sha256": staged["input_lock_sha256"],
             "candidate_manifest_sha256": staged["manifest_sha256"],
             "immutable_stage_entries_checked": count,
@@ -894,6 +905,7 @@ def main(argv=None):
         importer.add_argument("--" + name, type=Path, required=True)
     importer.add_argument("--mkosi-disk-sha256", required=True)
     importer.add_argument("--mkosi-disk-bytes", type=int, required=True)
+    importer.add_argument("--native-rust-manifest-sha256", required=True)
     for command in (builder, importer):
         command.add_argument("--revision", required=True)
         command.add_argument("--parent-network-namespace", required=True)
@@ -912,6 +924,7 @@ def main(argv=None):
                 args.stage, args.inputs, args.rust_bundle, args.revision, args.metadata,
                 args.builder_archives, args.workspace, args.import_directory,
                 args.sfdisk, args.mkosi_disk_sha256, args.mkosi_disk_bytes,
+                args.native_rust_manifest_sha256,
                 args.zebra_receipt, args.parent_network_namespace,
                 args.parent_mount_namespace)
     except (OSError, ValueError, KeyError, TypeError, IndexError, UnicodeError,
