@@ -28,6 +28,6 @@
     "archive_member": "gh_2.101.0_linux_amd64/bin/gh"
   },
   "gh_verifier_executable_sha256": "ea857a3f0f7d4276cf5848b236542c5048e2eaa7bdd1b6ddec238f8793e74bff",
-  "zebrad_elf_sha256": null,
-  "zebrad_elf_size": null
+  "zebrad_elf_sha256": "5e74b3b0fae286394e9c0ddd70d2014360816fdebf01b39dd3e3a6691d6a6e63",
+  "zebrad_elf_size": 88908416
 }
