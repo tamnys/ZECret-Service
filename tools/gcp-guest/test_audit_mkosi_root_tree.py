@@ -209,6 +209,39 @@ class ProducedRootAuditTests(unittest.TestCase):
                          hashlib.sha256((audit.profile.prepare.PROFILE /
                                          "rootfs/usr/lib/systemd/system/zrpc.target").read_bytes()).hexdigest())
 
+    def test_only_exact_pinned_mkosi_shapes_get_source_consistency_evidence(self):
+        expected = self.entries + [
+            source_row("usr/lib/systemd", "directory", 0o755, 0, 0),
+            source_row("usr/lib/systemd/systemd", "file", 0o755, 0, 0,
+                       b"synthetic signed systemd"),
+        ]
+        observed = {
+            "init": {"kind": "symlink", "uid": 0, "gid": 0, "mode": 0o777,
+                     "mtime_ns": 0, "target": "/usr/lib/systemd/systemd"},
+            "usr/lib/clock-epoch": {
+                "kind": "file", "uid": 0, "gid": 0, "mode": 0o644,
+                "mtime_ns": 0, "size": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(), "nlink": 1,
+            },
+        }
+        changes = [{"path": path, "difference": "added"} for path in observed]
+        effects = audit.source_consistent_unapproved_effects(expected, observed, changes)
+        self.assertEqual({item["path"] for item in effects}, set(observed))
+        self.assertTrue(all(item["security_review_required"] for item in effects))
+        self.assertEqual(len(changes), 2)  # Raw differences are not consumed.
+
+        changed = {path: dict(row) for path, row in observed.items()}
+        changed["init"]["target"] = "/bin/sh"
+        changed["usr/lib/clock-epoch"]["sha256"] = "0" * 64
+        self.assertEqual(audit.source_consistent_unapproved_effects(
+            expected, changed, changes), [])
+        self.assertEqual(audit.source_consistent_unapproved_effects(
+            [row for row in expected if row["path"] != "usr/lib/systemd/systemd"],
+            observed, changes)[0]["path"], "usr/lib/clock-epoch")
+        with mock.patch.object(audit.profile.prepare, "SOURCE_COMMIT", "different"):
+            with self.assertRaisesRegex(ValueError, "source re-review"):
+                audit.source_consistent_unapproved_effects(expected, observed, changes)
+
     def test_source_overlay_rejects_escaping_path(self):
         account_tree = audit.profile.account_tree_bytes(self.project, self.account_files)
         stream = io.BytesIO()

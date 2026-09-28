@@ -32,6 +32,10 @@ SOURCE_MTIME_NS = 0  # assemble_guest_base_tree.tar_header sets mtime=0.
 ACCOUNT_DIRECTORIES = {"etc", "usr", "usr/lib", "usr/lib/sysusers.d"}
 ACCOUNT_FILES = {"etc/" + name for name in profile.accounts.OUTPUT_FILES} | {
     "usr/lib/sysusers.d/" + profile.ACCOUNT_FILE}
+# Reviewed source: mkosi/__init__.py at this exact commit, specifically
+# configure_initrd(), configure_clock(), and normalize_mtime(). A source
+# rebase must not silently inherit these diagnostic interpretations.
+MKOSI_EFFECTS_SOURCE_COMMIT = "54c625c380ef5500f17460981a3c67b109b6a847"
 
 
 def stable_stat(value):
@@ -260,6 +264,50 @@ def differences(expected_rows, observed):
     return changes
 
 
+def source_consistent_unapproved_effects(expected_rows, observed, changes):
+    """Identify exact shapes implied by two pinned mkosi functions.
+
+    This compares output to source-derived shapes; it neither proves mkosi
+    produced the entries nor approves their boot or security implications.
+    All entries remain in the raw differences list.
+    """
+    if profile.prepare.SOURCE_COMMIT != MKOSI_EFFECTS_SOURCE_COMMIT:
+        raise ValueError("mkosi generated-effect semantics need source re-review")
+    expected = {row["path"]: row for row in expected_rows}
+    added = {row["path"] for row in changes if row["difference"] == "added"}
+    effects = []
+
+    def exact_shape(path, fields):
+        actual = observed.get(path)
+        return (path in added and path not in expected and actual is not None
+                and all(actual.get(key) == value for key, value in fields.items()))
+
+    # configure_initrd() creates /init only if the authenticated tree has a
+    # systemd executable and no prior /init. It does this even with Bootable=no.
+    systemd = expected.get("usr/lib/systemd/systemd")
+    if (systemd is not None and systemd["kind"] in {"file", "hardlink"}
+            and exact_shape("init", {"kind": "symlink", "uid": 0, "gid": 0,
+                                     "mode": 0o777, "mtime_ns": SOURCE_MTIME_NS,
+                                     "target": "/usr/lib/systemd/systemd"})):
+        effects.append({"path": "init", "mkosi_function": "configure_initrd",
+                        "source_commit": MKOSI_EFFECTS_SOURCE_COMMIT,
+                        "security_review_required": True})
+
+    # configure_clock() touches an absent clock-epoch under a 0644 umask.
+    # The profile fixes SourceDateEpoch=0 and mkosi normalizes output mtime.
+    if (expected.get("usr/lib", {}).get("kind") == "directory"
+            and exact_shape("usr/lib/clock-epoch",
+                            {"kind": "file", "uid": 0, "gid": 0,
+                             "mode": 0o644, "mtime_ns": SOURCE_MTIME_NS,
+                             "size": 0, "sha256": hashlib.sha256(b"").hexdigest(),
+                             "nlink": 1})):
+        effects.append({"path": "usr/lib/clock-epoch",
+                        "mkosi_function": "configure_clock",
+                        "source_commit": MKOSI_EFFECTS_SOURCE_COMMIT,
+                        "security_review_required": True})
+    return effects
+
+
 def audit(metadata, archives, artifact, account_artifact, profile_path, workspace,
           include_overlay=False):
     source = base_tree.verify(metadata, archives, artifact)
@@ -299,6 +347,8 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
         raise ValueError("mkosi output directory is redirected")
     observed = scan_root(output)
     changes = differences(expected, observed)
+    source_effects = (source_consistent_unapproved_effects(expected, observed, changes)
+                      if include_overlay else [])
     boot_overrides = None
     if include_overlay:
         paths = {"etc/resolv.conf", "etc/systemd/system/default.target"}
@@ -332,6 +382,7 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
         "authenticated_input_entry_count": len(expected),
         "produced_entry_count": len(observed),
         "differences": changes, "authenticated_inputs_exact": not changes,
+        "source_consistent_unapproved_effects": source_effects,
         "mkosi_execution_verified": False,
         "generated_effects_approved": False,
         "post_mkosi_tree_audited": False, "disk_image_built": False,
