@@ -86,7 +86,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("zrpc-gcp-synthetic-{}", uuid().unwrap()));
+        let root = PathBuf::from(
+            std::env::var_os("CODEX_TMP_DIR").expect("managed workspace scratch required"),
+        )
+        .join(format!("zrpc-gcp-synthetic-{}", uuid().unwrap()));
         fs::create_dir(&root).unwrap();
         let artifact_path = root.join("synthetic-artifact");
         fs::write(&artifact_path, b"SYNTHETIC - NOT A BOOTABLE IMAGE").unwrap();
@@ -95,6 +98,11 @@ impl Fixture {
             sha256: digest(b"SYNTHETIC - NOT A BOOTABLE IMAGE"),
         };
         let (image_bytes, raw_disk_sha256, receipt_bytes) = synthetic_import_archive();
+        let disk_raw = root.join("disk.raw");
+        fs::File::create(&disk_raw)
+            .unwrap()
+            .set_len(1024 * 1024 * 1024)
+            .unwrap();
         let uki_sha256 = digest(b"SYNTHETIC UKI BYTES");
         let uki_pe_coff_sha256 = digest(b"SYNTHETIC PE/COFF IMAGE DIGEST");
         let fixed_cmdline = include_str!("../../../../../deploy/gcp/guest/mkosi.conf")
@@ -104,7 +112,7 @@ impl Fixture {
         let uki_cmdline = format!("roothash={} {fixed_cmdline}", "a".repeat(64));
         let esp_diagnostic = diagnostic_artifact(
             &root,
-            "esp-diagnostic.json",
+            "esp.json",
             &json!({
                 "status":"diagnostic-esp-uki-sections-unapproved",
                 "raw_disk_sha256":raw_disk_sha256,
@@ -122,7 +130,7 @@ impl Fixture {
         );
         let verity_diagnostic = diagnostic_artifact(
             &root,
-            "verity-diagnostic.json",
+            "verity.json",
             &json!({
                 "status":"diagnostic-raw-root-verity-unapproved",
                 "raw_disk_sha256":raw_disk_sha256,
@@ -140,7 +148,7 @@ impl Fixture {
         );
         let uki_digest_diagnostic = diagnostic_artifact(
             &root,
-            "uki-digest-diagnostic.json",
+            "uki-digest.json",
             &json!({
                 "schema_version":1,
                 "status":"diagnostic-uki-pe-coff-sha384-unapproved",
@@ -151,6 +159,92 @@ impl Fixture {
                 "boot_measurement_checked":false,
                 "release_approved":false,
                 "private_mode_approved":false
+            }),
+        );
+        let mkosi_sha256 = "c".repeat(64);
+        let sfdisk_sha256 = "3".repeat(64);
+        let sfdisk_archive_sha256 = "4".repeat(64);
+        let sizing = diagnostic_artifact(
+            &root,
+            "sizing.json",
+            &json!({"status":"diagnostic-import-sized-gpt-unapproved",
+                "mkosi_disk_sha256":mkosi_sha256,"mkosi_disk_bytes":1024 * 1024 * 1024,
+                "raw_disk_sha256":raw_disk_sha256,"raw_disk_bytes":1024 * 1024 * 1024,
+                "sfdisk_sha256":sfdisk_sha256,"private_mode_approved":false}),
+        );
+        let extra_report = |name: &str, status: &str| {
+            diagnostic_artifact(
+                &root,
+                &format!("{name}.json"),
+                &json!({"status":status,"raw_disk_sha256":raw_disk_sha256,
+                    "raw_disk_bytes":1024 * 1024 * 1024,"private_mode_approved":false}),
+            )
+        };
+        let gpt = extra_report("gpt", "diagnostic-gpt-only-unapproved");
+        let roothash = extra_report("roothash", "diagnostic-uki-roothash-gpt-match-unapproved");
+        let rootfs = extra_report(
+            "rootfs",
+            "diagnostic-raw-root-overlay-bytes-matched-unapproved",
+        );
+        let host_reports = json!({"sizing":sizing,"gpt":gpt,"esp":esp_diagnostic,
+            "verity":verity_diagnostic,"roothash":roothash,"rootfs":rootfs,
+            "uki-digest":uki_digest_diagnostic});
+        let guest = |name: &str, artifact: &Artifact| Artifact {
+            path: PathBuf::from(format!("/workspace/import-disk/{name}.json")),
+            sha256: artifact.sha256.clone(),
+        };
+        let guest_reports = json!({
+            "sizing":guest("sizing", &sizing), "gpt":guest("gpt", &gpt),
+            "esp":guest("esp", &esp_diagnostic),
+            "verity":guest("verity", &verity_diagnostic),
+            "roothash":guest("roothash", &roothash),
+            "rootfs":guest("rootfs", &rootfs),
+            "uki-digest":guest("uki-digest", &uki_digest_diagnostic),
+        });
+        let reinspection = diagnostic_artifact(
+            &root,
+            "reinspection.json",
+            &json!({
+                "schema_version":1,"status":"diagnostic-import-disk-reinspected-unapproved",
+                "source_commit":"a".repeat(40),"stage_manifest_sha256":"b".repeat(64),
+                "input_lock_sha256":"d".repeat(64),
+                "native_rust_manifest_sha256":"e".repeat(64),
+                "mkosi_disk_sha256":mkosi_sha256,"mkosi_disk_bytes":1024 * 1024 * 1024,
+                "raw_disk_sha256":raw_disk_sha256,"raw_disk_bytes":1024 * 1024 * 1024,
+                "sfdisk_sha256":sfdisk_sha256,
+                "sfdisk_package_archive_sha256":sfdisk_archive_sha256,
+                "sfdisk_archive_membership_rechecked":false,
+                "sfdisk_dynamic_runtime_authenticated":false,
+                "disk_raw":"/workspace/import-disk/disk.raw",
+                "reports":guest_reports,
+                "package_diagnostics":{"esp_diagnostic":guest("esp", &esp_diagnostic),
+                    "uki_digest_diagnostic":guest("uki-digest", &uki_digest_diagnostic),
+                    "verity_diagnostic":guest("verity", &verity_diagnostic)},
+                "import_archive_created":false,"import_package_ready":false,
+                "boot_verified":false,"private_mode_approved":false,
+            }),
+        );
+        let operator_handoff = diagnostic_artifact(
+            &root,
+            "operator-handoff.json",
+            &json!({
+                "schema_version":1,"status":"diagnostic-operator-import-handoff-unapproved",
+                "source_commit":"a".repeat(40),"stage_manifest_sha256":"b".repeat(64),
+                "input_lock_sha256":"d".repeat(64),
+                "native_rust_manifest_sha256":"e".repeat(64),
+                "mkosi_disk_sha256":mkosi_sha256,"mkosi_disk_bytes":1024 * 1024 * 1024,
+                "raw_disk_sha256":raw_disk_sha256,"raw_disk_bytes":1024 * 1024 * 1024,
+                "sfdisk_sha256":sfdisk_sha256,
+                "sfdisk_package_archive_sha256":sfdisk_archive_sha256,
+                "sfdisk_archive_membership_rechecked":false,
+                "sfdisk_dynamic_runtime_authenticated":false,
+                "disk_raw":disk_raw,"reinspection_receipt":reinspection,
+                "review_reports":host_reports,
+                "package_diagnostics":{"esp_diagnostic":esp_diagnostic,
+                    "uki_digest_diagnostic":uki_digest_diagnostic,
+                    "verity_diagnostic":verity_diagnostic},
+                "import_archive_created":false,"import_package_ready":false,
+                "boot_verified":false,"private_mode_approved":false,
             }),
         );
         let db_bytes = exact_sha256_esl(&uki_pe_coff_sha256);
@@ -190,7 +284,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 6,
+            schema_version: 7,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -207,6 +301,7 @@ impl Fixture {
             raw_disk_sha256: raw_disk_sha256.clone(),
             raw_disk_bytes: 1024 * 1024 * 1024,
             import_receipt,
+            operator_handoff,
             import_verifier_python,
             release_manifest: a.clone(),
             boot_policy: a.clone(),
@@ -309,6 +404,18 @@ impl Fixture {
             path,
             sha256: digest(&bytes),
         };
+        spec
+    }
+    fn spec_with_handoff_edit(&self, edit: impl FnOnce(&mut Value)) -> DeploymentSpec {
+        let mut spec = self.package.spec.clone();
+        let mut handoff: Value =
+            serde_json::from_slice(&fs::read(&spec.operator_handoff.path).unwrap()).unwrap();
+        edit(&mut handoff);
+        spec.operator_handoff = diagnostic_artifact(
+            &self.root,
+            &format!("edited-handoff-{}.json", uuid().unwrap()),
+            &handoff,
+        );
         spec
     }
     fn spec_with_diagnostic_edit(
@@ -657,6 +764,79 @@ fn import_receipt_binds_candidate_media_and_local_executables_without_approval()
     let stale_hash = f.package.spec.clone();
     fs::write(&stale_hash.import_receipt.path, b"{}%").unwrap();
     assert!(Package::prepare(stale_hash, 1000).is_err());
+}
+
+#[test]
+fn operator_handoff_binds_the_final_disk_and_review_reports_without_approval() {
+    let f = Fixture::new();
+    assert!(f.package.validate(1000).is_ok());
+    let mut missing = serde_json::to_value(&f.package.spec).unwrap();
+    missing.as_object_mut().unwrap().remove("operator_handoff");
+    assert!(serde_json::from_value::<DeploymentSpec>(missing).is_err());
+    for edit in [
+        ("status", json!("approved")),
+        ("raw_disk_sha256", json!("0".repeat(64))),
+        ("disk_raw", json!(f.root.join("other.raw"))),
+        ("import_package_ready", json!(true)),
+        ("private_mode_approved", json!(true)),
+    ] {
+        let spec = f.spec_with_handoff_edit(|handoff| handoff[edit.0] = edit.1);
+        assert!(
+            Package::prepare(spec, 1000).is_err(),
+            "handoff field {}",
+            edit.0
+        );
+    }
+    let redirected = f.spec_with_handoff_edit(|handoff| {
+        handoff["package_diagnostics"]["esp_diagnostic"]["sha256"] = json!("0".repeat(64));
+    });
+    assert!(Package::prepare(redirected, 1000).is_err());
+
+    let raw = f.root.join("disk.raw");
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&raw)
+        .unwrap()
+        .write_all(b"changed")
+        .unwrap();
+    assert!(Package::prepare(f.package.spec.clone(), 1000).is_err());
+    // Frozen package validation still checks the archive's expanded bytes.
+    assert!(f.package.validate(1000).is_ok());
+    fs::remove_file(raw).unwrap();
+    assert!(f.package.validate(1000).is_ok());
+}
+
+#[test]
+fn operator_handoff_rejects_rehashed_reinspection_and_report_tampering() {
+    let f = Fixture::new();
+    let spec = f.package.spec.clone();
+    let reinspection_path = f.root.join("reinspection.json");
+    let mut reinspection: Value =
+        serde_json::from_slice(&fs::read(&reinspection_path).unwrap()).unwrap();
+    reinspection["raw_disk_sha256"] = json!("0".repeat(64));
+    let bytes = serde_json::to_vec(&reinspection).unwrap();
+    fs::write(&reinspection_path, &bytes).unwrap();
+    let wrong_receipt = f.spec_with_handoff_edit(|handoff| {
+        handoff["reinspection_receipt"]["sha256"] = json!(digest(&bytes));
+    });
+    assert!(Package::prepare(wrong_receipt, 1000).is_err());
+
+    reinspection["raw_disk_sha256"] = json!(spec.raw_disk_sha256);
+    let gpt_path = f.root.join("gpt.json");
+    let mut gpt: Value = serde_json::from_slice(&fs::read(&gpt_path).unwrap()).unwrap();
+    gpt["status"] = json!("private-approved");
+    let gpt_bytes = serde_json::to_vec(&gpt).unwrap();
+    fs::write(&gpt_path, &gpt_bytes).unwrap();
+    let gpt_sha256 = digest(&gpt_bytes);
+    reinspection["reports"]["gpt"]["sha256"] = json!(gpt_sha256);
+    let receipt_bytes = serde_json::to_vec(&reinspection).unwrap();
+    fs::write(&reinspection_path, &receipt_bytes).unwrap();
+    let wrong_report = f.spec_with_handoff_edit(|handoff| {
+        handoff["reinspection_receipt"]["sha256"] = json!(digest(&receipt_bytes));
+        handoff["review_reports"]["gpt"]["sha256"] = json!(gpt_sha256);
+    });
+    assert!(Package::prepare(wrong_report, 1000).is_err());
 }
 
 struct Mock {

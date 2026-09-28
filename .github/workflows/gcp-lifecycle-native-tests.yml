@@ -1,4 +1,4 @@
-name: GCP lifecycle native journal tests
+name: GCP lifecycle native tests
 
 on:
   pull_request:
@@ -6,12 +6,15 @@ on:
       - .github/workflows/gcp-lifecycle-native-tests.yml
       - crates/lifecycle/src/gcp/store.rs
       - crates/lifecycle/src/gcp/store/tests.rs
+      - crates/lifecycle/src/gcp/package.rs
+      - crates/lifecycle/src/gcp/controller/tests.rs
+      - crates/lifecycle/src/bin/zrpc-gcp-lifecycle.rs
 
 permissions: {}
 
 jobs:
   lifecycle:
-    name: Exact-head networkless journal tests
+    name: Exact-head networkless journal and handoff tests
     runs-on: ubuntu-24.04
     env:
       ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
@@ -107,4 +110,32 @@ jobs:
             cargo test --locked --offline -p zrpc-lifecycle gcp::store::tests::
           test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" diff --quiet
-          echo 'Local journal tests only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Journal step: local tests only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Exercise final-disk handoff package checks without network
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/lifecycle-test"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          mkdir "$source/.codex-tmp"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --mount "type=bind,src=$scratch/tmp,dst=/workspace/.codex-tmp" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
+            CODEX_TMP_DIR=/workspace/.codex-tmp \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            cargo test --locked --offline -p zrpc-lifecycle \
+              gcp::controller::tests::operator_handoff_
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" diff --quiet
+          echo 'Local handoff checks only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"

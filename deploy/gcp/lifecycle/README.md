@@ -13,7 +13,7 @@ Run build and test commands through the project's managed container.
 
 ## Prepare a package
 
-Supply a `DeploymentSpec` JSON object with `schema_version: 6`, matching
+Supply a `DeploymentSpec` JSON object with `schema_version: 7`, matching
 `crates/lifecycle/src/gcp/package.rs`. Its artifact fields are objects containing
 an absolute `path` and lowercase `sha256`. Required inputs include the raw disk
 archive, release manifest, boot policy, memory measurements, reproducibility
@@ -31,6 +31,15 @@ or grant release approval. The package supplies all four Secure Boot
 variables to the image API; omitting `dbx` would select Google's default. Keep
 signing private keys outside this package. The operator package's `release_manifest`
 is not a client-embedded approved release.
+
+Supply the final image builder's `operator-handoff.json` as the
+`operator_handoff` artifact. Keep its referenced `disk.raw`,
+`reinspection.json`, and seven review reports at their recorded absolute paths
+through package preparation. Preparation hashes that exact loose disk and
+checks the handoff, reinspection receipt, and reports against the packaged
+archive. Later validation checks the archive's expanded disk identity without
+requiring the loose disk. The handoff remains diagnostic and does not grant
+private-mode approval.
 
 Save the JSON output of the offline `gcp_import_archive.py pack` command and
 supply it as the `import_receipt` artifact. Supply `import_verifier_python` as

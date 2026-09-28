@@ -4,11 +4,12 @@ use crate::MAX_LIFETIME_SECONDS;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
+    io::{Read, Write},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Mutex, OnceLock},
@@ -86,6 +87,113 @@ struct ImportReceipt {
     workspace_volume_override_used: bool,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ImportReports {
+    sizing: Artifact,
+    gpt: Artifact,
+    esp: Artifact,
+    verity: Artifact,
+    roothash: Artifact,
+    rootfs: Artifact,
+    #[serde(rename = "uki-digest")]
+    uki_digest: Artifact,
+}
+impl ImportReports {
+    fn entries(&self) -> [(&'static str, &Artifact, &'static str); 7] {
+        [
+            (
+                "sizing",
+                &self.sizing,
+                "diagnostic-import-sized-gpt-unapproved",
+            ),
+            ("gpt", &self.gpt, "diagnostic-gpt-only-unapproved"),
+            ("esp", &self.esp, "diagnostic-esp-uki-sections-unapproved"),
+            (
+                "verity",
+                &self.verity,
+                "diagnostic-raw-root-verity-unapproved",
+            ),
+            (
+                "roothash",
+                &self.roothash,
+                "diagnostic-uki-roothash-gpt-match-unapproved",
+            ),
+            (
+                "rootfs",
+                &self.rootfs,
+                "diagnostic-raw-root-overlay-bytes-matched-unapproved",
+            ),
+            (
+                "uki-digest",
+                &self.uki_digest,
+                "diagnostic-uki-pe-coff-sha384-unapproved",
+            ),
+        ]
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PackageDiagnostics {
+    esp_diagnostic: Artifact,
+    uki_digest_diagnostic: Artifact,
+    verity_diagnostic: Artifact,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorHandoff {
+    schema_version: u8,
+    status: String,
+    source_commit: String,
+    stage_manifest_sha256: String,
+    input_lock_sha256: String,
+    native_rust_manifest_sha256: String,
+    mkosi_disk_sha256: String,
+    mkosi_disk_bytes: u64,
+    raw_disk_sha256: String,
+    raw_disk_bytes: u64,
+    sfdisk_sha256: String,
+    sfdisk_package_archive_sha256: String,
+    sfdisk_archive_membership_rechecked: bool,
+    sfdisk_dynamic_runtime_authenticated: bool,
+    disk_raw: PathBuf,
+    reinspection_receipt: Artifact,
+    review_reports: ImportReports,
+    package_diagnostics: PackageDiagnostics,
+    import_archive_created: bool,
+    import_package_ready: bool,
+    boot_verified: bool,
+    private_mode_approved: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReinspectionReceipt {
+    schema_version: u8,
+    status: String,
+    source_commit: String,
+    stage_manifest_sha256: String,
+    input_lock_sha256: String,
+    native_rust_manifest_sha256: String,
+    mkosi_disk_sha256: String,
+    mkosi_disk_bytes: u64,
+    raw_disk_sha256: String,
+    raw_disk_bytes: u64,
+    sfdisk_sha256: String,
+    sfdisk_package_archive_sha256: String,
+    sfdisk_archive_membership_rechecked: bool,
+    sfdisk_dynamic_runtime_authenticated: bool,
+    disk_raw: PathBuf,
+    reports: ImportReports,
+    package_diagnostics: PackageDiagnostics,
+    import_archive_created: bool,
+    import_package_ready: bool,
+    boot_verified: bool,
+    private_mode_approved: bool,
+}
+
 /// Offline ESP inspection and PE hashing are consistency inputs only. Neither
 /// report proves a signed boot or authorizes a client release.
 #[derive(Debug, Deserialize)]
@@ -141,6 +249,187 @@ fn read_hashed_diagnostic(artifact: &Artifact) -> Result<Vec<u8>> {
         return Err(Error("diagnostic report SHA-256 mismatch"));
     }
     Ok(bytes)
+}
+
+fn same_file_identity(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    (
+        a.dev(),
+        a.ino(),
+        a.mode(),
+        a.nlink(),
+        a.len(),
+        a.mtime(),
+        a.mtime_nsec(),
+        a.ctime(),
+        a.ctime_nsec(),
+    ) == (
+        b.dev(),
+        b.ino(),
+        b.mode(),
+        b.nlink(),
+        b.len(),
+        b.mtime(),
+        b.mtime_nsec(),
+        b.ctime(),
+        b.ctime_nsec(),
+    )
+}
+
+fn verify_source_disk(path: &Path, expected_sha256: &str, expected_bytes: u64) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| Error("final import disk unavailable"))?;
+    let before = file
+        .metadata()
+        .map_err(|_| Error("final import disk metadata unavailable"))?;
+    if !before.is_file() || before.nlink() != 1 || before.len() != expected_bytes {
+        return Err(Error("final import disk size or file type differs"));
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|_| Error("final import disk read failed"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let after = file
+        .metadata()
+        .map_err(|_| Error("final import disk metadata unavailable"))?;
+    if !same_file_identity(&before, &after) || hex::encode(hasher.finalize()) != expected_sha256 {
+        return Err(Error("final import disk differs from operator handoff"));
+    }
+    Ok(())
+}
+
+fn verify_operator_handoff(spec: &DeploymentSpec, verify_disk: bool) -> Result<()> {
+    let handoff: OperatorHandoff =
+        serde_json::from_slice(&read_hashed_diagnostic(&spec.operator_handoff)?)
+            .map_err(|_| Error("invalid typed operator handoff"))?;
+    let directory = spec
+        .operator_handoff
+        .path
+        .parent()
+        .ok_or(Error("operator handoff parent missing"))?;
+    if handoff.schema_version != 1
+        || handoff.status != "diagnostic-operator-import-handoff-unapproved"
+        || handoff.source_commit.len() != 40
+        || !handoff.source_commit.bytes().all(|b| b.is_ascii_hexdigit())
+        || [
+            &handoff.stage_manifest_sha256,
+            &handoff.input_lock_sha256,
+            &handoff.native_rust_manifest_sha256,
+            &handoff.mkosi_disk_sha256,
+            &handoff.sfdisk_sha256,
+            &handoff.sfdisk_package_archive_sha256,
+        ]
+        .iter()
+        .any(|digest| !valid_digest(digest))
+        || handoff.mkosi_disk_bytes == 0
+        || handoff.raw_disk_sha256 != spec.raw_disk_sha256
+        || handoff.raw_disk_bytes != spec.raw_disk_bytes
+        || handoff.disk_raw != directory.join("disk.raw")
+        || handoff.reinspection_receipt.path != directory.join("reinspection.json")
+        || handoff.sfdisk_archive_membership_rechecked
+        || handoff.sfdisk_dynamic_runtime_authenticated
+        || handoff.import_archive_created
+        || handoff.import_package_ready
+        || handoff.boot_verified
+        || handoff.private_mode_approved
+        || handoff.package_diagnostics.esp_diagnostic != spec.esp_diagnostic
+        || handoff.package_diagnostics.uki_digest_diagnostic != spec.uki_digest_diagnostic
+        || handoff.package_diagnostics.verity_diagnostic != spec.verity_diagnostic
+        || handoff.package_diagnostics.esp_diagnostic != handoff.review_reports.esp
+        || handoff.package_diagnostics.uki_digest_diagnostic != handoff.review_reports.uki_digest
+        || handoff.package_diagnostics.verity_diagnostic != handoff.review_reports.verity
+    {
+        return Err(Error("operator handoff differs from candidate package"));
+    }
+    let receipt: ReinspectionReceipt =
+        serde_json::from_slice(&read_hashed_diagnostic(&handoff.reinspection_receipt)?)
+            .map_err(|_| Error("invalid typed import reinspection receipt"))?;
+    if receipt.schema_version != 1
+        || receipt.status != "diagnostic-import-disk-reinspected-unapproved"
+        || receipt.source_commit != handoff.source_commit
+        || receipt.stage_manifest_sha256 != handoff.stage_manifest_sha256
+        || receipt.input_lock_sha256 != handoff.input_lock_sha256
+        || receipt.native_rust_manifest_sha256 != handoff.native_rust_manifest_sha256
+        || receipt.mkosi_disk_sha256 != handoff.mkosi_disk_sha256
+        || receipt.mkosi_disk_bytes != handoff.mkosi_disk_bytes
+        || receipt.raw_disk_sha256 != handoff.raw_disk_sha256
+        || receipt.raw_disk_bytes != handoff.raw_disk_bytes
+        || receipt.sfdisk_sha256 != handoff.sfdisk_sha256
+        || receipt.sfdisk_package_archive_sha256 != handoff.sfdisk_package_archive_sha256
+        || receipt.sfdisk_archive_membership_rechecked
+        || receipt.sfdisk_dynamic_runtime_authenticated
+        || receipt.import_archive_created
+        || receipt.import_package_ready
+        || receipt.boot_verified
+        || receipt.private_mode_approved
+        || !receipt.disk_raw.is_absolute()
+        || receipt.package_diagnostics.esp_diagnostic != receipt.reports.esp
+        || receipt.package_diagnostics.uki_digest_diagnostic != receipt.reports.uki_digest
+        || receipt.package_diagnostics.verity_diagnostic != receipt.reports.verity
+    {
+        return Err(Error(
+            "import reinspection receipt differs from operator handoff",
+        ));
+    }
+    let guest_directory = receipt
+        .disk_raw
+        .parent()
+        .ok_or(Error("import reinspection disk parent missing"))?;
+    for ((name, host, status), (guest_name, guest, _)) in handoff
+        .review_reports
+        .entries()
+        .into_iter()
+        .zip(receipt.reports.entries())
+    {
+        if name != guest_name
+            || host.path != directory.join(format!("{name}.json"))
+            || guest.path != guest_directory.join(format!("{name}.json"))
+            || host.sha256 != guest.sha256
+        {
+            return Err(Error(
+                "import report identity differs from operator handoff",
+            ));
+        }
+        let report: Value = serde_json::from_slice(&read_hashed_diagnostic(host)?)
+            .map_err(|_| Error("invalid import review report"))?;
+        if report.get("status").and_then(Value::as_str) != Some(status)
+            || report.get("private_mode_approved").and_then(Value::as_bool) != Some(false)
+            || (name != "uki-digest"
+                && (report.get("raw_disk_sha256").and_then(Value::as_str)
+                    != Some(spec.raw_disk_sha256.as_str())
+                    || report.get("raw_disk_bytes").and_then(Value::as_u64)
+                        != Some(spec.raw_disk_bytes)))
+        {
+            return Err(Error("import review report differs from final disk"));
+        }
+        if name == "sizing"
+            && (report.get("mkosi_disk_sha256").and_then(Value::as_str)
+                != Some(handoff.mkosi_disk_sha256.as_str())
+                || report.get("mkosi_disk_bytes").and_then(Value::as_u64)
+                    != Some(handoff.mkosi_disk_bytes)
+                || report.get("sfdisk_sha256").and_then(Value::as_str)
+                    != Some(handoff.sfdisk_sha256.as_str()))
+        {
+            return Err(Error("import sizing report differs from operator handoff"));
+        }
+    }
+    if verify_disk {
+        verify_source_disk(
+            &handoff.disk_raw,
+            &spec.raw_disk_sha256,
+            spec.raw_disk_bytes,
+        )?;
+    }
+    Ok(())
 }
 
 fn reviewed_roothash(cmdline: &str) -> Option<&str> {
@@ -378,6 +667,9 @@ pub struct DeploymentSpec {
     pub raw_disk_bytes: u64,
     /// Hash-bound candidate record emitted by the offline archive packer.
     pub import_receipt: Artifact,
+    /// Pre-archive handoff from the final disk reinspection. Preparation hashes
+    /// its disk directly; later validation checks the frozen archive instead.
+    pub operator_handoff: Artifact,
     /// Exact operator-host interpreter for the embedded offline validator.
     /// This identity is separate from the producer's Python in the receipt.
     pub import_verifier_python: Artifact,
@@ -445,7 +737,10 @@ pub(crate) fn name(value: &str) -> bool {
 }
 impl DeploymentSpec {
     pub fn validate(&self, at: u64) -> Result<()> {
-        if self.schema_version != 6
+        self.validate_inner(at, true)
+    }
+    fn validate_inner(&self, at: u64, verify_disk: bool) -> Result<()> {
+        if self.schema_version != 7
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -535,6 +830,7 @@ impl DeploymentSpec {
         for artifact in self.artifacts() {
             artifact.verify()?;
         }
+        verify_operator_handoff(self, verify_disk)?;
         verify_import_receipt(self)?;
         verify_import_archive(
             &self.raw_image_tar_gz,
@@ -545,10 +841,11 @@ impl DeploymentSpec {
         verify_exact_uki_db(self)?;
         Ok(())
     }
-    pub fn artifacts(&self) -> [&Artifact; 15] {
+    pub fn artifacts(&self) -> [&Artifact; 16] {
         [
             &self.raw_image_tar_gz,
             &self.import_receipt,
+            &self.operator_handoff,
             &self.import_verifier_python,
             &self.release_manifest,
             &self.boot_policy,
@@ -574,7 +871,10 @@ impl DeploymentSpec {
 
 impl Package {
     pub fn prepare(spec: DeploymentSpec, at: u64) -> Result<Self> {
-        spec.validate(at)?;
+        Self::from_spec(spec, at, true)
+    }
+    fn from_spec(spec: DeploymentSpec, at: u64, verify_disk: bool) -> Result<Self> {
+        spec.validate_inner(at, verify_disk)?;
         let p = format!("projects/{}", spec.project);
         let z = format!("{p}/zones/{}", spec.zone);
         let r = format!("{p}/regions/{}", spec.region);
@@ -645,14 +945,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 6,
+            schema_version: 7,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
-        let expected = Self::prepare(self.spec.clone(), at)?;
-        if self.schema_version != 6 || self.resources != expected.resources {
+        let expected = Self::from_spec(self.spec.clone(), at, false)?;
+        if self.schema_version != 7 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));
