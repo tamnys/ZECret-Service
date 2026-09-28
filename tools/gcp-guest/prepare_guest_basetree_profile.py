@@ -73,6 +73,7 @@ def config_bytes(profile, include_overlay=False):
             f"CleanPackageMetadata=no\nSourceDateEpoch=0\n"
             f"\n[Build]\nWithNetwork=no\nCacheOnly=always\n"
             f"Incremental=no\n"
+            f"PackageCacheDirectory={profile.parent / (profile.name + '-package-cache')}\n"
             f"WorkspaceDirectory={profile.parent / (profile.name + '-work')}\n").encode()
 
 
@@ -456,6 +457,9 @@ def build_root_directory(metadata, archives, artifact, account_artifact,
     output = profile.parent / (profile.name + "-output") / OUTPUT_NAME
     if output.exists() or output.is_symlink():
         raise ValueError("mkosi diagnostic output already exists")
+    package_cache = profile.parent / (profile.name + "-package-cache")
+    if package_cache.exists() or package_cache.is_symlink():
+        raise ValueError("mkosi diagnostic package cache already exists")
     subprocess.run(["/usr/bin/mkosi", f"--directory={profile}", "build"], check=True)
     after = verify_profile(metadata, archives, artifact, account_artifact,
                            profile, workspace, include_overlay)

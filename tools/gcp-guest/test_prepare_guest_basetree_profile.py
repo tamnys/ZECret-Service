@@ -94,6 +94,8 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
         self.assertIn("Packages=\n", config)
         self.assertIn("SourceDateEpoch=0\n", config)
         self.assertIn("WithNetwork=no\nCacheOnly=always\nIncremental=no\n", config)
+        self.assertIn("PackageCacheDirectory=" +
+                      str(self.workspace / "profile-package-cache") + "\n", config)
         self.assertNotIn("FinalizeScripts=", config)
         self.assertNotIn("Initrds=", config)
         self.assertEqual({item.name for item in self.output.iterdir()},
@@ -312,6 +314,17 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                                              self.artifact, self.account_artifact,
                                              self.output,
                                              self.workspace)
+            mkosi.assert_not_called()
+
+    def test_build_rejects_preexisting_package_cache(self):
+        self.prepare()
+        (self.workspace / "profile-package-cache").mkdir()
+        with mock.patch.object(profile.base_tree, "verify", return_value=self.source), \
+                mock.patch.object(profile.subprocess, "run") as mkosi:
+            with self.assertRaisesRegex(ValueError, "package cache already exists"):
+                profile.build_root_directory(self.workspace, self.workspace,
+                                             self.artifact, self.account_artifact,
+                                             self.output, self.workspace)
             mkosi.assert_not_called()
 
     def test_build_rejects_input_mutated_while_mkosi_runs(self):

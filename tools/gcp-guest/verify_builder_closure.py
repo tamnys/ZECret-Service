@@ -273,6 +273,8 @@ def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot, runtime
         (root / "extended_states").write_bytes(b"")
         cache = root / "cache"
         cache.mkdir()
+        log = root / "log"
+        log.mkdir()
         etc = root / "etc"
         etc.mkdir()
         for name in ("apt.conf", "sources.list", "preferences"):
@@ -291,6 +293,7 @@ def apt_plan(index_bytes, scratch, apt_get, resolver, anchors, snapshot, runtime
             "-o", f"Dir::State::status={root / 'status'}",
             "-o", f"Dir::State::extended_states={root / 'extended_states'}",
             "-o", f"Dir::Cache={cache}/",
+            "-o", f"Dir::Log={log}/",
             "-o", f"Dir::Etc={etc}/", "-o", "Debug::NoLocking=1",
             "install", *(f'{entry["name"]}={entry["version"]}' for entry in anchors),
         ]
