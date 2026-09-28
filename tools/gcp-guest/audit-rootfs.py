@@ -13,7 +13,7 @@ MASKED_UNITS = (
     "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target",
     "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service",
     "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket",
-    "systemd-sysext@.service", "systemd-confext.service",
+    "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service",
     "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service",
     "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service",
     "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer",
