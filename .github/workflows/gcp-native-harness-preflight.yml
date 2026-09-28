@@ -99,8 +99,8 @@ jobs:
             exec /usr/bin/python3 -I -B "$1/source/tools/gcp-guest/native_full_image_harness.py" \
               --preflight-only --workspace "$1" --source "$1/source" \
               --scratch "$1/scratch" --staged "$1/staged" --revision "$2" \
-              --parent-user-namespace "$3" --parent-mount-namespace "$4" \
-              --parent-network-namespace "$5" --parent-pid-namespace "$6"
+              --parent-user-namespace "$3" --parent-mnt-namespace "$4" \
+              --parent-net-namespace "$5" --parent-pid-namespace "$6"
           ' _ "$root_stage" "$ZRPC_SOURCE_SHA" "$parent_user_ns" \
             "$parent_mount_ns" "$parent_net_ns" "$parent_pid_ns" | tee "$report"
 
