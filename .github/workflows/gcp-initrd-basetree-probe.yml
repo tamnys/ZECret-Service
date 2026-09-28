@@ -7,12 +7,17 @@ on:
       - deploy/gcp/guest/package-closure.lock.json
       - tools/gcp-guest/assemble_guest_base_tree.py
       - tools/gcp-guest/assemble_initrd_base_tree.py
+      - tools/gcp-guest/audit-initrd.py
       - tools/gcp-guest/debian_snapshot.py
+      - tools/gcp-guest/export_rust_inputs.py
       - tools/gcp-guest/fetch_guest_closure.py
       - tools/gcp-guest/preflight_guest_base_tree.py
+      - tools/gcp-guest/preflight_initrd_build.py
       - tools/gcp-guest/prepare.py
+      - tools/gcp-guest/prepare_initrd_basetree_profile.py
       - tools/gcp-guest/stage_builder_toolchain.py
       - tools/gcp-guest/test_assemble_initrd_base_tree.py
+      - tools/gcp-guest/test_prepare_initrd_basetree_profile.py
       - tools/gcp-guest/trust/**
   workflow_dispatch:
 
@@ -49,6 +54,8 @@ jobs:
             "$scratch/metadata" "$scratch/archives"
           python3 -B -m unittest discover -s tools/gcp-guest \
             -p 'test_*base_tree.py'
+          python3 -B -m unittest discover -s tools/gcp-guest \
+            -p 'test_prepare_initrd_basetree_profile.py'
           python3 -B tools/gcp-guest/fetch_guest_closure.py metadata \
             --directory "$scratch/metadata"
           python3 -B tools/gcp-guest/fetch_guest_closure.py prefetch \
