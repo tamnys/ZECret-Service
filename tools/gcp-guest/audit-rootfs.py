@@ -6,7 +6,7 @@ from pathlib import Path
 import stat
 import sys
 
-FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec")
+FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/unix_chkpwd", "usr/bin/mount", "usr/bin/umount", "usr/bin/su")
 MASKED_UNITS = (
     "ssh.service", "sshd.service", "ssh.socket",
     "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service",
