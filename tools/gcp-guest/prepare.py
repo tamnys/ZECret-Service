@@ -98,6 +98,18 @@ FIXED_KERNEL_CMDLINE = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_l
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
 
+def install_boot_overrides(rootfs):
+    """Install the same immutable unit policy in production and root probes."""
+    masks = rootfs / "etc/systemd/system"
+    masks.mkdir(parents=True, exist_ok=True)
+    for name in MASKS:
+        (masks / name).symlink_to("/dev/null")
+    (masks / "default.target").symlink_to("/usr/lib/systemd/system/zrpc.target")
+    (masks / "multi-user.target.wants").mkdir()
+    for name in ("systemd-networkd.service", "systemd-resolved.service"):
+        (masks / "multi-user.target.wants" / name).symlink_to("/usr/lib/systemd/system/" + name)
+    (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
+
 def validate_boot_profile(profile=PROFILE, staged_copy=False):
     """Reject source drift that would omit the direct UKI or unbind the root."""
     # mkosi discovers settings and executable hooks by filename. The staged
@@ -502,15 +514,7 @@ def stage(lock_path, source, destination):
         stream.write(f'ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec wrapper --platform gcp-tdx --listen 0.0.0.0:{runtime["listen_port"]} --node 127.0.0.1:18232 --max-connections {runtime["max_connections"]} --max-quotes {runtime["max_quotes"]} --quote-spacing-ms {runtime["quote_spacing_ms"]}\n')
     with (unit_dir / "zrpc-cookie.service").open("a") as stream:
         stream.write(f'ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec cookie --startup-timeout-secs {runtime["node_startup_timeout_secs"]} --poll-interval-ms {runtime["node_poll_interval_ms"]}\nTimeoutStartSec={runtime["node_startup_timeout_secs"]}s\n')
-    masks = rootfs / "etc/systemd/system"
-    masks.mkdir(parents=True, exist_ok=True)
-    for name in MASKS:
-        (masks / name).symlink_to("/dev/null")
-    (masks / "default.target").symlink_to("/usr/lib/systemd/system/zrpc.target")
-    (masks / "multi-user.target.wants").mkdir()
-    for name in ("systemd-networkd.service", "systemd-resolved.service"):
-        (masks / "multi-user.target.wants" / name).symlink_to("/usr/lib/systemd/system/" + name)
-    (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
+    install_boot_overrides(rootfs)
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
         stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
