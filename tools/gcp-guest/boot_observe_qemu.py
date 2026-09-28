@@ -205,7 +205,7 @@ def checked_output_mount(root, output):
 
 
 def prepare_output(root, output, uid, gid):
-    output.chown(uid, gid)
+    os.chown(output, uid, gid, follow_symlinks=False)
     output.chmod(0o700)
     template = toolchain.checked_file(
         root, {entry["path"]: entry for entry in json_file(root / stager.MANIFEST)["entries"]},
@@ -216,7 +216,7 @@ def prepare_output(root, output, uid, gid):
             target.write(chunk)
     if sha256_file(destination) != sha256_file(template):
         raise ValueError("QEMU firmware variable template copy differs")
-    destination.chown(uid, gid)
+    os.chown(destination, uid, gid, follow_symlinks=False)
     destination.chmod(0o600)
     return sha256_file(template)
 

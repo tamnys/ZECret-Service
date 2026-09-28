@@ -127,6 +127,25 @@ class ObserverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "explicit QEMU"):
                 observe.qemu_command(7, value, 2)
 
+    def test_output_preparation_copies_firmware_and_changes_owner_without_symlinks(self):
+        root = self.directory / "stage"
+        root.mkdir()
+        output = root / "observe"
+        output.mkdir()
+        (root / observe.stager.MANIFEST).write_text('{"entries": []}')
+        template = root / "vars-template"
+        template.write_bytes(b"synthetic firmware variables")
+        uid, gid = 1000, 1000
+        with (mock.patch.object(observe.toolchain, "checked_file", return_value=template),
+              mock.patch.object(observe.os, "chown") as chown):
+            self.assertEqual(observe.prepare_output(root, output, uid, gid),
+                             digest(template.read_bytes()))
+        destination = output / "OVMF_VARS_4M.fd"
+        self.assertEqual(destination.read_bytes(), template.read_bytes())
+        self.assertEqual(chown.call_args_list,
+                         [mock.call(output, uid, gid, follow_symlinks=False),
+                          mock.call(destination, uid, gid, follow_symlinks=False)])
+
     def test_qmp_event_before_reply_does_not_become_boot_evidence(self):
         client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(client.close)
