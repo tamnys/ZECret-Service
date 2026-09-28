@@ -282,6 +282,14 @@ class ProducedRootAuditTests(unittest.TestCase):
         self.assertFalse(result["authenticated_inputs_exact"])
         self.assertIn(("usr/local/bin/exec", "added"), self.changed(result))
         self.assertIn(("etc/other.conf", "added"), self.changed(result))
+        executable = next(item for item in result["difference_evidence"]
+                          if item["path"] == "usr/local/bin/exec")
+        self.assertIsNone(executable["expected"])
+        self.assertEqual(executable["observed"]["sha256"],
+                         hashlib.sha256(b"unreviewed executable").hexdigest())
+        self.assertEqual(executable["observed"]["mode"], 0o755)
+        self.assertNotIn("inode", executable["observed"])
+        self.assertNotIn("unreviewed executable", json.dumps(result))
         self.assertFalse(result["generated_effects_approved"])
 
     def test_changed_signed_account_file_is_reported_as_delta(self):
@@ -296,10 +304,16 @@ class ProducedRootAuditTests(unittest.TestCase):
         (self.root / "bin/runner").chmod(0o700)
         (self.root / "bin/alias").unlink()
         (self.root / "bin/alias").symlink_to("/outside")
-        changes = self.changed(self.run_audit())
+        result = self.run_audit()
+        changes = self.changed(result)
         self.assertIn(("etc/config", "content"), changes)
         self.assertIn(("bin/runner", "mode"), changes)
         self.assertIn(("bin/alias", "link-target"), changes)
+        link = next(item for item in result["difference_evidence"]
+                    if item["path"] == "bin/alias")
+        self.assertEqual(link["expected"]["target"], "runner")
+        self.assertEqual(link["observed"]["target"], "/outside")
+        self.assertFalse(result["generated_effects_approved"])
 
     def test_hardlink_break_and_owner_policy_drift_are_detected(self):
         (self.root / "bin/runner-hardlink").unlink()

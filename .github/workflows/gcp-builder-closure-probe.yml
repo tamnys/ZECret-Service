@@ -641,12 +641,20 @@ jobs:
               raise ValueError("produced root delta report changed diagnostic status")
           delta_bytes = (json.dumps(deltas, sort_keys=True,
                                     separators=(",", ":")) + "\n").encode()
+          evidence = tree["difference_evidence"]
+          if (len(evidence) != len(deltas)
+                  or any({key: item[key] for key in ("path", "difference")} != raw
+                         for item, raw in zip(evidence, deltas))):
+              raise ValueError("root delta evidence does not match differences")
           summary = {key: value for key, value in tree.items()
-                     if key != "differences"}
+                     if key not in {"differences", "difference_evidence"}}
           summary["difference_count"] = len(deltas)
           summary["difference_sha256"] = hashlib.sha256(delta_bytes).hexdigest()
+          summary["difference_evidence_sha256"] = hashlib.sha256(
+              (json.dumps(evidence, sort_keys=True,
+                          separators=(",", ":")) + "\n").encode()).hexdigest()
           print(json.dumps(summary, sort_keys=True))
-          for difference in deltas:
+          for difference in evidence:
               print(json.dumps({"unreviewed_root_delta": difference}, sort_keys=True))
           print("::warning::Mkosi root comparison is diagnostic only; no generated "
                 "effects, boot artifact, or private mode are approved")
@@ -714,12 +722,20 @@ jobs:
               raise ValueError("source-overlay tree audit changed diagnostic status")
           encoded = (json.dumps(deltas, sort_keys=True,
                                 separators=(",", ":")) + "\n").encode()
+          evidence = tree["difference_evidence"]
+          if (len(evidence) != len(deltas)
+                  or any({key: item[key] for key in ("path", "difference")} != raw
+                         for item, raw in zip(evidence, deltas))):
+              raise ValueError("source-overlay delta evidence does not match differences")
           summary = {key: value for key, value in tree.items()
-                     if key != "differences"}
+                     if key not in {"differences", "difference_evidence"}}
           summary["difference_count"] = len(deltas)
           summary["difference_sha256"] = hashlib.sha256(encoded).hexdigest()
+          summary["difference_evidence_sha256"] = hashlib.sha256(
+              (json.dumps(evidence, sort_keys=True,
+                          separators=(",", ":")) + "\n").encode()).hexdigest()
           print(json.dumps(summary, sort_keys=True))
-          for difference in deltas:
+          for difference in evidence:
               print(json.dumps({"unreviewed_source_overlay_root_delta": difference},
                                sort_keys=True))
           print("::warning::Source-overlay root is a no-package diagnostic only; "

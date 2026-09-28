@@ -264,6 +264,31 @@ def differences(expected_rows, observed):
     return changes
 
 
+def difference_evidence(expected_rows, observed, changes):
+    """Record reviewable metadata for each unapproved output difference.
+
+    Contents stay out of public CI logs. This is observed evidence only: a
+    matching digest or link does not approve mkosi's generated effects.
+    """
+    expected = {row["path"]: row for row in expected_rows}
+
+    def metadata(row, source):
+        if row is None:
+            return None
+        fields = ("kind", "uid", "gid", "size", "sha256", "target")
+        result = {key: row[key] for key in fields if key in row}
+        result["mode"] = row["output_mode"] if source else row["mode"]
+        result["mtime_ns"] = SOURCE_MTIME_NS if source else row["mtime_ns"]
+        if not source and row["kind"] == "file":
+            result["nlink"] = row["nlink"]
+        return result
+
+    return [{"path": change["path"], "difference": change["difference"],
+             "expected": metadata(expected.get(change["path"]), True),
+             "observed": metadata(observed.get(change["path"]), False)}
+            for change in changes]
+
+
 def source_consistent_unapproved_effects(expected_rows, observed, changes):
     """Identify exact shapes implied by two pinned mkosi functions.
 
@@ -347,6 +372,7 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
         raise ValueError("mkosi output directory is redirected")
     observed = scan_root(output)
     changes = differences(expected, observed)
+    evidence = difference_evidence(expected, observed, changes)
     source_effects = (source_consistent_unapproved_effects(expected, observed, changes)
                       if include_overlay else [])
     boot_overrides = None
@@ -367,7 +393,7 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
     if base_tree.verify(metadata, archives, artifact) != source:
         raise ValueError("signed guest BaseTrees changed during root scan")
     return {
-        "schema_version": 2, "status": STATUS if not changes else DELTA_STATUS,
+        "schema_version": 3, "status": STATUS if not changes else DELTA_STATUS,
         "signed_base_tree_sha256": source["archive_sha256"],
         "signed_base_tree_manifest_sha256": source["manifest_sha256"],
         "signed_account_tree_sha256": hashlib.sha256(account_tree).hexdigest(),
@@ -381,7 +407,8 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
         "signed_base_entry_count": len(entries),
         "authenticated_input_entry_count": len(expected),
         "produced_entry_count": len(observed),
-        "differences": changes, "authenticated_inputs_exact": not changes,
+        "differences": changes, "difference_evidence": evidence,
+        "authenticated_inputs_exact": not changes,
         "source_consistent_unapproved_effects": source_effects,
         "mkosi_execution_verified": False,
         "generated_effects_approved": False,
@@ -405,7 +432,7 @@ def main(argv=None):
                        args.account_artifact, args.profile, args.workspace,
                        args.source_overlay)
     except (OSError, ValueError, KeyError, TypeError, tarfile.TarError) as error:
-        report = {"schema_version": 2, "status": "blocked", "reason": str(error),
+        report = {"schema_version": 3, "status": "blocked", "reason": str(error),
                   "authenticated_inputs_exact": False,
                   "mkosi_execution_verified": False,
                   "generated_effects_approved": False,
