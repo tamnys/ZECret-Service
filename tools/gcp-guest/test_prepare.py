@@ -123,9 +123,9 @@ class CandidateTests(unittest.TestCase):
         recorded_bytes = report["manifest_bytes"]
 
         def replace_mask(candidate):
-            mask = candidate / "rootfs/etc/systemd/system/ssh.service"
+            mask = candidate / "rootfs/etc/systemd/system/systemd-udev-load-credentials.service"
             mask.unlink()
-            mask.symlink_to("/usr/lib/systemd/system/ssh.service")
+            mask.symlink_to("/usr/lib/systemd/system/systemd-udev-load-credentials.service")
 
         def add_hook(candidate):
             override = candidate / "mkosi.conf.d"
@@ -273,7 +273,8 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse(report["private_mode_approved"])
         self.assertIn("real TDX acceptance", report["remaining_gates"])
         self.assertTrue(any("operator-owned signing key" in gate for gate in report["remaining_gates"]))
-        for unit in ("systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service"):
+        for unit in ("systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service",
+                     "systemd-udev-load-credentials.service"):
             self.assertEqual((output / "rootfs/etc/systemd/system" / unit).readlink(), Path("/dev/null"))
         units = output / "rootfs/usr/lib/systemd/system"
         wrapper = (units / "zrpc-wrapper.service").read_text()
@@ -867,6 +868,12 @@ class CandidateTests(unittest.TestCase):
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
         self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
         root = self.synthetic_guest_root()
+        # Debian's udev post-install step may enable this vendor service in
+        # sysinit.target. The immutable same-name mask must still win.
+        wants = root / "etc/systemd/system/sysinit.target.wants"
+        wants.mkdir()
+        (wants / "systemd-udev-load-credentials.service").symlink_to(
+            "/usr/lib/systemd/system/systemd-udev-load-credentials.service")
         audit_rootfs.audit(root)
         group = root / "etc/group"
         good_group = group.read_text()
@@ -890,7 +897,8 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit_rootfs.audit(root)
         update_mask.symlink_to("/dev/null")
-        for unit in ("systemd-sysext.socket", "systemd-sysext@.service"):
+        for unit in ("systemd-sysext.socket", "systemd-sysext@.service",
+                     "systemd-udev-load-credentials.service"):
             mask = root / "etc/systemd/system" / unit
             mask.unlink()
             with self.assertRaisesRegex(ValueError, "administrative unit unmasked"):
