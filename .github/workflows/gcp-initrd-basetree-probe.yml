@@ -117,7 +117,9 @@ jobs:
           manifest = json.loads(manifest_bytes)
           archive = artifact / "guest-initrd-inputs.tar"
           if (manifest["status"] != "diagnostic-signed-initrd-basetree-input-unbuilt"
-                  or len(manifest["entries"]) != 102
+                  or len(manifest["entries"]) != 105
+                  or "usr/lib/udev/rules.d/60-persistent-storage.rules" not in
+                      {entry["path"] for entry in manifest["entries"]}
                   or len(manifest["selected_packages"]) != 28
                   or manifest["archive_sha256"] !=
                       "b76b22d39e106849e30d8e3d229cd6d8dd8a834d373bfd6ab71b1c5f4c8b15f4"

@@ -89,6 +89,10 @@ BOOT_FILES = (
     "etc/os-release",
     "lib64",
     "usr/lib/os-release",
+    # The verity generator names GPT partitions through /dev/disk/by-partuuid.
+    # This signed udev rule creates those links; runtime behavior still needs
+    # a boot test and is not established by selecting its package bytes.
+    "usr/lib/udev/rules.d/60-persistent-storage.rules",
     "usr/lib64/ld-linux-x86-64.so.2",
     "usr/lib/systemd/systemd-sysroot-fstab-check",
     "usr/lib/systemd/systemd-udevd",
