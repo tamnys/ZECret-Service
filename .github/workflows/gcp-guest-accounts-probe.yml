@@ -171,7 +171,9 @@ jobs:
                   raise ValueError(f"shadow line {line_index} has {len(fields)} fields")
               if not re.fullmatch(rb"[a-z_][a-z0-9_-]*", fields[0]):
                   raise ValueError(f"shadow line {line_index} username shape differs; length {len(fields[0])}")
-              if not re.fullmatch(rb"[!*]+", fields[1]):
+              # systemd v257.13 defines these two fixed sysusers markers.
+              # Neither can contain a previous password hash suffix.
+              if fields[1] not in {b"!unprovisioned", b"!*"}:
                   raise ValueError(f"shadow line {line_index} password is not a lock sentinel; length {len(fields[1])}")
               for field_index, field in enumerate(fields[2:], start=2):
                   if field and not field.isdigit():
