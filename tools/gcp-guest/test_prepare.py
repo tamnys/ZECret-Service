@@ -831,19 +831,26 @@ class CandidateTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "administrative binary present"):
                     audit_rootfs.audit(root)
                 path.unlink()
-        path = root / "usr/bin/unreviewed-setuid"
-        path.write_bytes(b"SYNTHETIC")
+        privileged = {
+            root / "usr/bin/unreviewed-setuid": stat.S_ISUID,
+            root / "usr/bin/unreviewed-setgid": stat.S_ISGID,
+        }
+        for path in privileged:
+            path.write_bytes(b"SYNTHETIC")
         original_lstat = Path.lstat
 
         def privileged_lstat(candidate):
             info = original_lstat(candidate)
-            if candidate == path:
-                return SimpleNamespace(st_mode=info.st_mode | stat.S_ISUID)
+            if candidate in privileged:
+                return SimpleNamespace(st_mode=info.st_mode | privileged[candidate])
             return info
 
         with mock.patch.object(Path, "lstat", privileged_lstat):
-            with self.assertRaisesRegex(ValueError, "setuid/setgid executable remains"):
+            with self.assertRaises(ValueError) as caught:
                 audit_rootfs.audit(root)
+        self.assertEqual(str(caught.exception),
+                         "setuid/setgid executable remains: "
+                         "['usr/bin/unreviewed-setgid', 'usr/bin/unreviewed-setuid']")
 
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
         self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))

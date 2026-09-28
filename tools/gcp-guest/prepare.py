@@ -47,6 +47,7 @@ EXTERNAL_SECURE_BOOT_KEY = "/run/zrpc-build-signing/secure-boot.key"
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
 ROOT_REMOVE_FILES = (
     "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount", "/usr/bin/su",
+    "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
