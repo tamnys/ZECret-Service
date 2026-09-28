@@ -5,7 +5,7 @@
   "inrelease_sha256": "0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675",
   "packages_index_sha256": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
   "signed_release_date_epoch": 1789199741,
-  "direct_lock_sha256": "679ce2083cb067fbdc80fb0d27a4ab78f37ce558f92ee9bcc14670cce3688f25",
+  "direct_lock_sha256": "34508977cd7f0bd83a76ac141e9265866091d5084673fd5fa5ce13a361400d53",
   "resolver": {
     "package": "apt",
     "version": "3.0.3",
@@ -159,6 +159,14 @@
       "filename": "pool/main/d/debianutils/debianutils_5.23.2_amd64.deb",
       "size": 92360,
       "sha256": "720e43fda316676076498b4224ad3318049deafe60cc7c601011048de03ee97d"
+    },
+    {
+      "name": "diffutils",
+      "version": "1:3.10-4",
+      "architecture": "amd64",
+      "filename": "pool/main/d/diffutils/diffutils_3.10-4_amd64.deb",
+      "size": 386504,
+      "sha256": "d3412669f7ae53ba895c3a509620ea7494ec1a36faa204c5215442ced381a479"
     },
     {
       "name": "dirmngr",
@@ -423,6 +431,14 @@
       "filename": "pool/main/b/bzip2/libbz2-1.0_1.0.8-6_amd64.deb",
       "size": 37912,
       "sha256": "cba4cda04244b5e481bb15524bc3c983a7d1b6f330013b9b381706a2fcb65310"
+    },
+    {
+      "name": "libc-bin",
+      "version": "2.41-12+deb13u4",
+      "architecture": "amd64",
+      "filename": "pool/main/g/glibc/libc-bin_2.41-12+deb13u4_amd64.deb",
+      "size": 638452,
+      "sha256": "dc8c79647fe3a5f37f72a400414f70263d0212f010ff2c09f990e30d91e38d1c"
     },
     {
       "name": "libc6",

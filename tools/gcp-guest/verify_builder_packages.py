@@ -26,10 +26,12 @@ IDENTITIES = ROOT / "deploy/gcp/guest/input-identities.json"
 # These packages supply the principal mkosi, archive, partition, UKI, signing,
 # verity, and import tools in the reviewed build path. Coreutils supplies
 # /usr/bin/env for ukify's shebang. Dash supplies the /bin/sh required by
-# APT's DPkg::Pre-Install-Pkgs hook in mkosi's Debian bootstrap. Their transitive
-# runtime dependencies and the remaining mkosi tools are deliberately out of scope.
+# APT's DPkg::Pre-Install-Pkgs hook in mkosi's Debian bootstrap. Diffutils
+# supplies diff and libc-bin supplies ldconfig for mkosi's bootstrap. Their
+# transitive runtime dependencies and remaining mkosi tools are out of scope.
 DIRECT_PACKAGES = frozenset({
-    "apt", "coreutils", "cryptsetup-bin", "dash", "dpkg", "gpgv", "gzip", "mkosi", "mount",
+    "apt", "coreutils", "cryptsetup-bin", "dash", "diffutils", "dpkg", "gpgv", "gzip",
+    "libc-bin", "mkosi", "mount",
     "reprepro", "sbsigntool", "systemd-boot-efi", "systemd-boot-tools",
     "systemd-repart", "systemd-ukify", "tar", "util-linux", "zstd",
 })

@@ -44,6 +44,7 @@ INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/debug-shell.service",
     "/usr/lib/systemd/system/getty.target",
     "/usr/lib/systemd/system/getty@.service",
+    "/etc/systemd/system/getty.target.wants/getty@tty1.service",
     "/usr/lib/systemd/system/autovt@.service",
     "/usr/lib/systemd/system/serial-getty@.service",
     "/usr/lib/systemd/system/console-getty.service",
@@ -51,7 +52,14 @@ INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/multi-user.target.wants/getty.target",
     "/usr/lib/systemd/system/runlevel1.target",
     "/usr/lib/systemd/systemd-sulogin-shell",
+    "/boot/loader",
+    "/var/log/journal",
+    "/var/mail",
+    "/etc/ssh",
+    "/usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
+    "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",
     "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh",
+    "/usr/bin/perl", "/usr/bin/perl5.40.1",
     "/usr/sbin/sulogin", "/usr/bin/login", "/usr/bin/su",
 )
 # The parent never mounts anything. This runs only after unshare has created

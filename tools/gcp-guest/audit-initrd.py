@@ -44,13 +44,20 @@ FORBIDDEN_UNITS = (
 )
 FORBIDDEN_EXECUTABLES = (
     "usr/lib/systemd/systemd-sulogin-shell", "usr/sbin/sulogin",
-    "usr/bin/bash", "usr/bin/dash", "usr/bin/sh", "usr/bin/login",
+    "usr/bin/bash", "usr/bin/dash", "usr/bin/sh", "usr/bin/perl",
+    "usr/bin/perl5.40.1", "usr/bin/login",
     "usr/bin/su", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/sshd",
     "bin/bash", "bin/dash", "bin/sh", "bin/login", "bin/su", "sbin/sulogin",
 )
 FORBIDDEN_TREES = (
     "usr/lib/modules", "usr/lib/zrpc", "etc/zrpc", "etc/ssh",
     "var/lib/zebra", "boot", "efi",
+)
+FORBIDDEN_FILES = (
+    "usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
+)
+FORBIDDEN_DIRECTORIES = (
+    "var/log/journal", "var/mail",
 )
 CREDENTIAL_TREES = (
     "etc/credstore", "etc/credstore.encrypted", "usr/lib/credstore",
@@ -122,6 +129,12 @@ def audit(root, expected_init_sha256=EXPECTED_INIT_SHA256):
         path = root / relative
         if path.is_symlink() or (path.is_dir() and any(path.iterdir())) or (present(path) and not path.is_dir()):
             raise ValueError(f"initrd unexpected content remains: {relative}")
+    for relative in FORBIDDEN_FILES:
+        if present(root / relative):
+            raise ValueError(f"initrd forbidden file remains: {relative}")
+    for relative in FORBIDDEN_DIRECTORIES:
+        if present(root / relative):
+            raise ValueError(f"initrd forbidden directory remains: {relative}")
     for relative in CREDENTIAL_TREES:
         path = root / relative
         if path.is_symlink() or (path.is_dir() and any(path.iterdir())) or (present(path) and not path.is_dir()):

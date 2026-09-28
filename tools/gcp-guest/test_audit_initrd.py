@@ -48,6 +48,58 @@ class InitrdAuditTests(unittest.TestCase):
     def test_synthetic_minimum_passes(self):
         audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_generated_getty_default_instance_alias_rejected(self):
+        alias = self.root / "etc/systemd/system/getty.target.wants/getty@tty1.service"
+        alias.parent.mkdir(parents=True)
+        alias.symlink_to("/usr/lib/systemd/system/getty@.service")
+        with self.assertRaisesRegex(ValueError, "administrative unit remains"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_signed_systemd_ssh_config_alias_rejected(self):
+        alias = self.root / "etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf"
+        alias.parent.mkdir(parents=True)
+        alias.symlink_to("/usr/lib/systemd/ssh_config.d/20-systemd-ssh-proxy.conf")
+        with self.assertRaisesRegex(ValueError, "unexpected content remains: etc/ssh"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_signed_systemd_ssh_tmpfiles_rule_rejected(self):
+        rule = self.root / "usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"
+        rule.parent.mkdir(parents=True)
+        rule.write_text("L$ /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf - - - - "
+                        "/usr/lib/systemd/ssh_config.d/20-systemd-ssh-proxy.conf\n")
+        with self.assertRaisesRegex(ValueError, "forbidden file remains: usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_generated_journal_and_mail_directories_rejected_even_when_empty(self):
+        for relative, mode in (("var/log/journal", 0o2755),
+                               ("var/mail", 0o2775)):
+            with self.subTest(relative=relative):
+                directory = self.root / relative
+                directory.mkdir(parents=True)
+                directory.chmod(mode)
+                with self.assertRaisesRegex(ValueError, f"forbidden directory remains: {relative}"):
+                    audit_initrd.audit(self.root, self.init_sha256)
+                directory.rmdir()
+                audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_perl_executables_removed_from_initrd(self):
+        for relative in ("usr/bin/perl", "usr/bin/perl5.40.1"):
+            with self.subTest(relative=relative):
+                executable = self.root / relative
+                executable.write_bytes(b"synthetic Perl executable")
+                executable.chmod(0o755)
+                with self.assertRaisesRegex(ValueError, f"administrative executable remains: {relative}"):
+                    audit_initrd.audit(self.root, self.init_sha256)
+                executable.unlink()
+                audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_mkosi_boot_loader_placeholder_rejected(self):
+        marker = self.root / "boot/loader/entries.srel"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("type1\n")
+        with self.assertRaisesRegex(ValueError, "unexpected content remains: boot"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
     def test_required_boot_components_and_ownership_fail_closed(self):
         for relative in audit_initrd.REQUIRED_EXECUTABLES:
             with self.subTest(relative=relative):
@@ -122,6 +174,29 @@ class InitrdAuditTests(unittest.TestCase):
         with mock.patch.object(Path, "lstat", lstat_with_setuid):
             with self.assertRaisesRegex(ValueError, "privileged file"):
                 audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_signed_package_privileged_executables_fail_closed(self):
+        # These exact paths and bits occur in the signed Debian initrd inputs.
+        for relative, privilege_bit in (
+            ("usr/sbin/unix_chkpwd", stat.S_ISGID),
+            ("usr/bin/mount", stat.S_ISUID),
+            ("usr/bin/umount", stat.S_ISUID),
+        ):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.write_bytes(b"synthetic package executable")
+                original_lstat = Path.lstat
+
+                def lstat_with_privilege(candidate):
+                    info = original_lstat(candidate)
+                    if candidate == path:
+                        return SimpleNamespace(st_mode=info.st_mode | privilege_bit)
+                    return info
+
+                with mock.patch.object(Path, "lstat", lstat_with_privilege):
+                    with self.assertRaisesRegex(ValueError, f"privileged file remains: {relative}"):
+                        audit_initrd.audit(self.root, self.init_sha256)
+                path.unlink()
 
     def test_early_boot_payloads_and_credentials_fail_closed(self):
         for relative in ("usr/lib/modules/kernel/drivers/md/dm-verity.ko.xz",

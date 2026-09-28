@@ -514,11 +514,23 @@ def extract_cpio(stream, root):
                 name = name[2:]
             parts = name.split("/")
             kind = stat.S_IFMT(mode)
-            if (name.startswith("/") or not name or any(part in ("", ".", "..") for part in parts)
-                    or name in seen or uid != 0 or gid != 0 or nlink < 1
-                    or (kind != stat.S_IFDIR and nlink != 1)
-                    or mode & (stat.S_ISUID | stat.S_ISGID)):
-                raise ValueError("initrd CPIO member path or metadata is unsafe")
+            violations = [label for label, failed in (
+                ("absolute_path", name.startswith("/")),
+                ("empty_path", not name),
+                ("unsafe_path_component", any(part in ("", ".", "..") for part in parts)),
+                ("duplicate_path", name in seen),
+                ("nonroot_uid", uid != 0),
+                ("nonroot_gid", gid != 0),
+                ("invalid_nlink", nlink < 1),
+                ("non_directory_hardlink", kind != stat.S_IFDIR and nlink != 1),
+                ("privileged_mode", bool(mode & (stat.S_ISUID | stat.S_ISGID))),
+            ) if failed]
+            if violations:
+                # Escape untrusted path control characters before writing public CI logs.
+                raise ValueError(
+                    "initrd CPIO member path or metadata is unsafe: "
+                    f"path={ascii(name)} violations={','.join(violations)} "
+                    f"uid={uid} gid={gid} nlink={nlink} mode={mode:#o}")
             seen.add(name)
             parent_fd = parent_directory(root_fd, parts[:-1])
             try:

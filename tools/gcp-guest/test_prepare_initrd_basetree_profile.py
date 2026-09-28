@@ -256,9 +256,9 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
         self.assertFalse((self.workspace / "profile-output").exists())
 
     @staticmethod
-    def newc(name, mode, content=b"", nlink=1):
+    def newc(name, mode, content=b"", nlink=1, uid=0, gid=0):
         name_bytes = name.encode() + b"\0"
-        fields = (1, mode, 0, 0, nlink, 0, len(content),
+        fields = (1, mode, uid, gid, nlink, 0, len(content),
                   0, 0, 0, 0, len(name_bytes), 0)
         header = b"070701" + b"".join(f"{value:08x}".encode() for value in fields)
         lead = header + name_bytes
@@ -291,6 +291,27 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
             changed_root.mkdir()
             with self.assertRaises(ValueError):
                 profile.extract_cpio(io.BytesIO(changed), changed_root)
+
+    def test_post_cpio_reader_names_unsafe_member_without_accepting_it(self):
+        cases = (
+            ("etc/shadow\ncontrol", stat.S_IFREG | 0o640, 1, 0, 42,
+             "nonroot_gid", "path='etc/shadow\\ncontrol'"),
+            ("usr/bin/hardlink", stat.S_IFREG | 0o755, 2, 0, 0,
+             "non_directory_hardlink", "path='usr/bin/hardlink'"),
+        )
+        for index, (name, mode, nlink, uid, gid, violation, escaped_name) in enumerate(cases):
+            with self.subTest(name=name):
+                root = self.workspace / f"unsafe-{index}"
+                root.mkdir()
+                archive = (self.newc(name, mode, nlink=nlink, uid=uid, gid=gid)
+                           + self.newc("TRAILER!!!", 0))
+                with self.assertRaisesRegex(ValueError, "member path or metadata is unsafe") as error:
+                    profile.extract_cpio(io.BytesIO(archive), root)
+                message = str(error.exception)
+                self.assertIn(escaped_name, message)
+                self.assertIn(f"violations={violation}", message)
+                self.assertIn(f"uid={uid} gid={gid} nlink={nlink} mode={mode:#o}", message)
+                self.assertNotIn("\n", message)
 
 
 if __name__ == "__main__":
