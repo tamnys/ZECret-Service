@@ -11,7 +11,6 @@ disk, append kernel modules, sign a UKI, or prove a boot.
 
 import argparse
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -23,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import types
 
 
 ROOT = Path(__file__).resolve(strict=True).parents[2]
@@ -34,6 +34,7 @@ PROFILE_STATUS = "diagnostic-production-initrd-subimage-profile-unbuilt"
 FULL_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 PROFILE_FILES = {"mkosi.conf", "audit-initrd.py", "profile-manifest.json", "rootfs", "packages"}
+ARCHIVE_PATH = re.compile(r"[A-Za-z0-9_./-]+\Z")
 
 
 def sha256(data):
@@ -44,31 +45,127 @@ def canonical(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
-def source_module(revision):
-    """Load the existing source-bound preflight after binding this new runner."""
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate Rust receipt field")
+        result[key] = value
+    return result
+
+
+class ReceiptSourceArchive:
+    """Read selected Git bytes from the exact-HEAD Rust receipt, without Git.
+
+    The outer workflow checks the selected Git commit and verifies this receipt
+    before mounting it read-only in the no-route builder. This inner check
+    retains the archive and receipt digests and permits only source reads used
+    by the existing verifier. Neither receipt nor archive approves private mode.
+    """
+
+    def __init__(self, rust_bundle, revision):
+        if not FULL_COMMIT.fullmatch(revision):
+            raise ValueError("exact full selected source commit required")
+        bundle = Path(rust_bundle)
+        report = json.loads(regular(bundle / "guest-inputs/diagnostic-rust-inputs.json"),
+                            object_pairs_hook=unique_object)
+        manifest_bytes = regular(bundle / "manifest.json")
+        manifest = json.loads(manifest_bytes, object_pairs_hook=unique_object)
+        if (not isinstance(report, dict) or not isinstance(manifest, dict)
+                or report.get("status") != "diagnostic-unsigned-x86_64-rust-inputs-unapproved"
+                or report.get("source_commit") != revision
+                or report.get("image_built") is not False
+                or report.get("private_mode_approved") is not False
+                or manifest.get("source_commit") != revision
+                or report.get("source_tree") != manifest.get("source_tree")
+                or not isinstance(report.get("source_tree"), str)
+                or not FULL_COMMIT.fullmatch(report["source_tree"])
+                or report.get("reproduction_manifest_sha256") != sha256(manifest_bytes)
+                or not isinstance(manifest.get("source_archive_sha256"), str)
+                or not HEX.fullmatch(manifest["source_archive_sha256"])):
+            raise ValueError("selected source archive lacks the matching Rust receipt")
+        raw = regular(bundle / "source.tar")
+        if sha256(raw) != manifest["source_archive_sha256"]:
+            raise ValueError("selected Git archive differs from Rust receipt")
+        self.revision = revision
+        self.tree = report["source_tree"]
+        self.archive = tarfile.open(fileobj=io.BytesIO(raw), mode="r:")
+        self.members = {}
+        for member in self.archive:
+            path = member.name.rstrip("/") if member.isdir() else member.name
+            if (not ARCHIVE_PATH.fullmatch(path)
+                    or any(part in {"", ".", ".."} for part in path.split("/"))
+                    or (member.name != path and not member.isdir())):
+                raise ValueError("selected Git archive has an unsafe member")
+            if path in self.members:
+                raise ValueError("selected Git archive has a duplicate member")
+            self.members[path] = member
+        self.report = report
+
+    def output(self, arguments):
+        if arguments == ["rev-parse", "HEAD"]:
+            return (self.revision + "\n").encode()
+        if arguments == ["show", "-s", "--format=%T", self.revision]:
+            return (self.tree + "\n").encode()
+        if (len(arguments) != 2 or arguments[0] != "show"
+                or not arguments[1].startswith(self.revision + ":")):
+            raise ValueError("unsupported selected source archive read")
+        path = arguments[1][len(self.revision) + 1:]
+        if (not ARCHIVE_PATH.fullmatch(path)
+                or any(part in {"", ".", ".."} for part in path.split("/"))):
+            raise ValueError("selected source archive path is unsafe")
+        member = self.members.get(path)
+        if member is None or not member.isfile():
+            raise ValueError("selected Git archive lacks a regular verifier input")
+        return self.archive.extractfile(member).read()
+
+
+def source_module(revision, selected):
+    """Load the existing source-bound preflight from checked archive bytes."""
     if not FULL_COMMIT.fullmatch(revision):
         raise ValueError("exact full selected source commit required")
     source = MODULE_DIR / "prepare_initrd_basetree_profile.py"
-    spec = importlib.util.spec_from_file_location("initrd_source_profile", source)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if module.source_git_output(["rev-parse", "HEAD"]).decode().strip() != revision:
+    selected_bytes = selected.output(
+        ["show", f"{revision}:tools/gcp-guest/prepare_initrd_basetree_profile.py"])
+    if regular(source) != selected_bytes:
+        raise ValueError("initrd source binder differs from selected HEAD")
+    module = types.ModuleType("initrd_source_profile")
+    module.__file__ = str(source)
+    exec(compile(selected_bytes, str(source), "exec"), module.__dict__)
+    if selected.output(["rev-parse", "HEAD"]).decode().strip() != revision:
         raise ValueError("selected HEAD differs from requested source")
-    if module.source_file(MODULE_DIR / Path(SCRIPT).name) != module.source_git_output(
+    if module.source_file(MODULE_DIR / Path(SCRIPT).name) != selected.output(
         ["show", f"{revision}:{SCRIPT}"]
     ):
         raise ValueError("package initrd runner differs from selected HEAD")
-    module.bind_selected_modules(revision)
+    module.bind_selected_modules(revision, selected_output=selected.output)
     return module
 
 
-def config_bytes(source, profile, packages):
+def preflight_rust_receipt(revision, selected, rust_bundle):
+    """Check the complete receipt before importing the remaining verifier."""
+    source = MODULE_DIR / "export_rust_inputs.py"
+    selected_bytes = selected.output(
+        ["show", f"{revision}:tools/gcp-guest/export_rust_inputs.py"])
+    if regular(source) != selected_bytes:
+        raise ValueError("Rust receipt verifier differs from selected HEAD")
+    module = types.ModuleType("initrd_rust_receipt")
+    module.__file__ = str(source)
+    exec(compile(selected_bytes, str(source), "exec"), module.__dict__)
+    report = module.inspect(Path(rust_bundle), revision,
+                            selected_output=selected.output)
+    if report != selected.report:
+        raise ValueError("Rust receipt differs from selected source archive")
+    return report
+
+
+def config_bytes(source, selected, profile, packages):
     """Materialize the production subimage and its universal parent settings."""
     prepare = source.guest.prepare
     prepare.validate_boot_profile()
     subimage_path = prepare.PROFILE / "mkosi.images/initrd/mkosi.conf"
     static = source.rust_inputs.regular_bytes(subimage_path)
-    if static != source.source_git_output(["show", f"{source._BOUND_REVISION}:{SUBIMAGE}"]):
+    if static != selected.output(["show", f"{source._BOUND_REVISION}:{SUBIMAGE}"]):
         raise ValueError("production initrd source differs from selected HEAD")
     versions = {entry["name"]: entry["version"] for entry in packages}
     if not prepare.INITRD_PACKAGES <= set(versions):
@@ -94,12 +191,15 @@ def config_bytes(source, profile, packages):
     return static + extension, sha256(static)
 
 
-def inputs(source, metadata, archives, rust_bundle, revision, workspace):
+def inputs(source, selected, metadata, archives, rust_bundle, revision, workspace):
     workspace = Path(workspace).resolve(strict=True)
     rust_bundle = Path(rust_bundle).resolve(strict=True)
     if not rust_bundle.is_relative_to(workspace):
         raise ValueError("Rust receipt must be on the selected workspace volume")
-    receipt = source.rust_inputs.inspect(rust_bundle, revision)
+    receipt = source.rust_inputs.inspect(
+        rust_bundle, revision, selected_output=selected.output)
+    if receipt != selected.report:
+        raise ValueError("Rust receipt differs after no-route verification")
     if (receipt.get("status") != "diagnostic-unsigned-x86_64-rust-inputs-unapproved"
             or receipt.get("image_built") is not False
             or receipt.get("private_mode_approved") is not False):
@@ -111,7 +211,7 @@ def inputs(source, metadata, archives, rust_bundle, revision, workspace):
     if sha256(binary) != early["sha256"] or not source.rust_inputs.x86_64_elf(binary):
         raise ValueError("/init differs from double-built x86_64 Rust receipt")
     audit_template = source.rust_inputs.regular_bytes(MODULE_DIR / "audit-initrd.py")
-    if (audit_template != source.source_git_output(
+    if (audit_template != selected.output(
             ["show", f"{revision}:tools/gcp-guest/audit-initrd.py"])
             or audit_template.count(b"__STAGED_INIT_SHA256__") != 1
             or not audit_template.startswith(b"#!/usr/bin/env python3\n")):
@@ -168,12 +268,12 @@ def regular(path, *, mode=None):
     return path.read_bytes()
 
 
-def prepare_profile(source, metadata, archives, rust_bundle, revision,
+def prepare_profile(source, selected, metadata, archives, rust_bundle, revision,
                     profile, workspace):
     preflight, binary, audit, packages = inputs(
-        source, metadata, archives, rust_bundle, revision, workspace)
+        source, selected, metadata, archives, rust_bundle, revision, workspace)
     profile = checked_profile(profile, workspace, source)
-    config, static_sha256 = config_bytes(source, profile, packages)
+    config, static_sha256 = config_bytes(source, selected, profile, packages)
     expected = manifest_for(source, preflight, packages, config, static_sha256, audit)
     parent_fd = source.builder.output_parent(Path(workspace), profile)
     try:
@@ -208,12 +308,12 @@ def prepare_profile(source, metadata, archives, rust_bundle, revision,
             "boot_verified": False, "private_mode_approved": False}
 
 
-def verify_profile(source, metadata, archives, rust_bundle, revision,
+def verify_profile(source, selected, metadata, archives, rust_bundle, revision,
                    profile, workspace):
     preflight, binary, audit, packages = inputs(
-        source, metadata, archives, rust_bundle, revision, workspace)
+        source, selected, metadata, archives, rust_bundle, revision, workspace)
     profile = checked_profile(profile, workspace, source)
-    config, static_sha256 = config_bytes(source, profile, packages)
+    config, static_sha256 = config_bytes(source, selected, profile, packages)
     expected = manifest_for(source, preflight, packages, config, static_sha256, audit)
     if profile.is_symlink() or stat.S_IMODE(profile.stat().st_mode) != 0o700 or set(os.listdir(profile)) != PROFILE_FILES:
         raise ValueError("package initrd profile contains unreviewed inputs")
@@ -259,9 +359,9 @@ def check_loopback_only_ip_state(parent_network_namespace, parent_mount_namespac
     for path, fields in (("/proc/net/route", 11), ("/proc/net/ipv6_route", 10)):
         lines = Path(path).read_text().splitlines()
         if path.endswith("/route"):
-            if not lines or not lines[0].startswith("Iface"):
+            if lines and lines[0].split()[:1] != ["Iface"]:
                 raise ValueError("IPv4 route table malformed")
-            lines = lines[1:]
+            lines = lines[1:] if lines else []
         for line in lines:
             parts = line.split()
             if len(parts) != fields or (parts[0] if fields == 11 else parts[-1]) != "lo":
@@ -412,10 +512,10 @@ def checked_mkosi_tmpdir(path=Path("/zrpc-apt-scratch/tmp"), *, expected_uid=0):
     return str(path)
 
 
-def build_profile(source, metadata, archives, rust_bundle, revision,
+def build_profile(source, selected, metadata, archives, rust_bundle, revision,
                   profile, workspace, parent_network_namespace,
                   parent_mount_namespace, mkosi, builder_archives):
-    before = verify_profile(source, metadata, archives, rust_bundle,
+    before = verify_profile(source, selected, metadata, archives, rust_bundle,
                             revision, profile, workspace)
     namespace = check_loopback_only_ip_state(parent_network_namespace,
                                               parent_mount_namespace)
@@ -436,7 +536,7 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
                             env=environment, check=False)
     if result.returncode:
         raise ValueError("pinned mkosi initrd build failed")
-    after = verify_profile(source, metadata, archives, rust_bundle,
+    after = verify_profile(source, selected, metadata, archives, rust_bundle,
                            revision, profile, workspace)
     if after != before:
         raise ValueError("source-bound initrd inputs changed during mkosi build")
@@ -456,6 +556,8 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
             "mkosi_manifest_sha256": manifest_hash,
             "installed_package_count": package_count,
             **cpio, **namespace,
+            "source_commit_tree_proof": "outer-exact-head-git-and-verified-rust-receipt",
+            "source_commit_tree_independently_rechecked_in_no_route_builder": False,
             "loopback_only_ip_state_observed_before_mkosi": True,
             "mkosi_executed": True, "initrd_built": True,
             "post_build_cpio_audited": True,
@@ -483,8 +585,10 @@ def main(argv=None):
     parser.add_argument("--builder-archives", type=Path)
     args = parser.parse_args(argv)
     try:
-        source = source_module(args.revision)
-        common = (source, args.metadata, args.archives, args.rust_bundle,
+        selected = ReceiptSourceArchive(args.rust_bundle, args.revision)
+        preflight_rust_receipt(args.revision, selected, args.rust_bundle)
+        source = source_module(args.revision, selected)
+        common = (source, selected, args.metadata, args.archives, args.rust_bundle,
                   args.revision, args.profile, args.workspace)
         if args.command == "prepare":
             report = prepare_profile(*common)

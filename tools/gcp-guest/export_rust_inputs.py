@@ -96,8 +96,9 @@ def git_bytes(revision, path):
     return git_output(["show", f"{revision}:{path}"])
 
 
-def selected_guest_roles(revision):
-    tree = ast.parse(git_bytes(revision, "tools/gcp-guest/prepare.py"))
+def selected_guest_roles(revision, *, selected_output=None):
+    read_selected = git_output if selected_output is None else selected_output
+    tree = ast.parse(read_selected(["show", f"{revision}:tools/gcp-guest/prepare.py"]))
     values = {}
     for statement in tree.body:
         if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
@@ -123,8 +124,9 @@ def x86_64_elf(data):
             and data[18:20] == b"\x3e\x00")
 
 
-def inspect(bundle, revision):
-    if git_output(["rev-parse", "HEAD"]).decode().strip() != revision:
+def inspect(bundle, revision, *, selected_output=None):
+    read_selected = git_output if selected_output is None else selected_output
+    if read_selected(["rev-parse", "HEAD"]).decode().strip() != revision:
         raise ValueError("Rust receipt source commit differs from exact checkout HEAD")
     manifest_bytes = regular_bytes(bundle / "manifest.json")
     manifest = json.loads(manifest_bytes, object_pairs_hook=unique_object,
@@ -145,10 +147,10 @@ def inspect(bundle, revision):
     if (not isinstance(version, str)
             or re.search(r"^host: x86_64-unknown-linux-gnu$", version, re.MULTILINE) is None):
         raise ValueError("reproduction did not use the x86_64 Rust host")
-    pin = tomllib.loads(git_bytes(revision, "rust-toolchain.toml").decode())["toolchain"]["channel"]
+    pin = tomllib.loads(read_selected(["show", f"{revision}:rust-toolchain.toml"]).decode())["toolchain"]["channel"]
     if re.search(r"^release: " + re.escape(pin) + r"$", version, re.MULTILINE) is None:
         raise ValueError("reproduction Rust release differs from committed toolchain pin")
-    if manifest.get("source_tree") != git_output(
+    if manifest.get("source_tree") != read_selected(
             ["show", "-s", "--format=%T", revision]).decode().strip():
         raise ValueError("reproduction source tree differs from selected commit")
     input_hashes = manifest.get("input_sha256")
@@ -159,14 +161,14 @@ def inspect(bundle, revision):
         ("rust-toolchain.toml", "rust-toolchain.toml"),
         ("scripts/reproduce-release.py", "script_in_source_sha256"),
     ):
-        expected = sha256(git_bytes(revision, path))
+        expected = sha256(read_selected(["show", f"{revision}:{path}"]))
         actual = input_hashes.get(field) if field in input_hashes else manifest.get(field)
         if actual != expected or (path == "scripts/reproduce-release.py"
                                   and manifest.get("script_sha256") != expected):
             raise ValueError("reproduction source input differs from selected commit")
     if sha256(regular_bytes(bundle / "source.tar")) != manifest.get("source_archive_sha256"):
         raise ValueError("source archive differs from reproduction receipt")
-    roles = selected_guest_roles(revision)
+    roles = selected_guest_roles(revision, selected_output=read_selected)
     selected = manifest.get("selected_binaries")
     if (not isinstance(selected, list) or not selected
             or any(not isinstance(item, dict) or set(item) != {"package", "name"}

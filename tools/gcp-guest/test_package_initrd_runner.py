@@ -1,8 +1,10 @@
 """Focused fail-closed checks for the package-backed initrd runner."""
 
 import importlib.util
+import io
 import json
 from pathlib import Path
+import tarfile
 import tempfile
 import types
 import unittest
@@ -17,6 +19,85 @@ SPEC.loader.exec_module(runner)
 
 
 class PackageInitrdRunnerTest(unittest.TestCase):
+    def source_bundle(self, root, members):
+        revision = "a" * 40
+        bundle = Path(root)
+        (bundle / "guest-inputs").mkdir()
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w") as contents:
+            for name, data in members:
+                entry = tarfile.TarInfo(name)
+                entry.size = len(data)
+                contents.addfile(entry, io.BytesIO(data))
+        (bundle / "source.tar").write_bytes(archive.getvalue())
+        manifest = {"source_commit": revision, "source_tree": "b" * 40,
+                    "source_archive_sha256": runner.sha256(archive.getvalue())}
+        manifest_bytes = json.dumps(manifest).encode()
+        (bundle / "manifest.json").write_bytes(manifest_bytes)
+        report = {"status": "diagnostic-unsigned-x86_64-rust-inputs-unapproved",
+                  "source_commit": revision, "source_tree": "b" * 40,
+                  "reproduction_manifest_sha256": runner.sha256(manifest_bytes),
+                  "image_built": False, "private_mode_approved": False}
+        (bundle / "guest-inputs/diagnostic-rust-inputs.json").write_text(
+            json.dumps(report))
+        return revision
+
+    def test_read_only_receipt_archive_rejects_mutation_and_unsupported_reads(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            revision = self.source_bundle(scratch, [("tools/gcp-guest/prepare.py", b"reviewed")])
+            selected = runner.ReceiptSourceArchive(Path(scratch), revision)
+            self.assertEqual(selected.output(["show", f"{revision}:tools/gcp-guest/prepare.py"]),
+                             b"reviewed")
+            self.assertEqual(selected.output(["show", "-s", "--format=%T", revision]),
+                             ("b" * 40 + "\n").encode())
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                selected.output(["fetch", "origin"])
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                selected.output(["show", f"{revision}:../prepare.py"])
+            (Path(scratch) / "source.tar").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "differs from Rust receipt"):
+                runner.ReceiptSourceArchive(Path(scratch), revision)
+
+    def test_receipt_archive_rejects_duplicate_and_escaping_members(self):
+        for members, reason in (
+            ([("tools/gcp-guest/prepare.py", b"a"),
+              ("tools/gcp-guest/prepare.py", b"b")], "duplicate member"),
+            ([("../prepare.py", b"a")], "unsafe member"),
+        ):
+            with self.subTest(members=members), tempfile.TemporaryDirectory() as scratch:
+                revision = self.source_bundle(scratch, members)
+                with self.assertRaisesRegex(ValueError, reason):
+                    runner.ReceiptSourceArchive(Path(scratch), revision)
+
+    def test_changed_verifier_module_rejected_before_import(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            revision = self.source_bundle(scratch, [
+                ("tools/gcp-guest/prepare_initrd_basetree_profile.py", b"changed"),
+                (runner.SCRIPT, (HERE / "package_initrd_runner.py").read_bytes()),
+            ])
+            selected = runner.ReceiptSourceArchive(Path(scratch), revision)
+            with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
+                    "Git must not run inside the no-route builder")):
+                with self.assertRaisesRegex(ValueError, "source binder differs"):
+                    runner.source_module(revision, selected)
+
+    def test_bound_verifier_uses_receipt_archive_without_git(self):
+        spec = importlib.util.spec_from_file_location(
+            "test_initrd_source_profile", HERE / "prepare_initrd_basetree_profile.py")
+        profile = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(profile)
+        checkout = HERE.parents[1]
+        files = set(profile.SOURCE_FILES) | {runner.SCRIPT}
+        members = [(path, (checkout / path).read_bytes()) for path in sorted(files)]
+        with tempfile.TemporaryDirectory() as scratch:
+            revision = self.source_bundle(scratch, members)
+            selected = runner.ReceiptSourceArchive(Path(scratch), revision)
+            with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
+                    "Git must not run inside the no-route builder")):
+                bound = runner.source_module(revision, selected)
+            self.assertEqual(bound._BOUND_REVISION, revision)
+            self.assertFalse(selected.report["private_mode_approved"])
+
     def test_production_config_uses_signed_package_versions_and_inherited_settings(self):
         static = b"[Output]\nFormat=cpio\nOutput=initrd\nManifestFormat=json\nCompressOutput=zstd\n"
         prepare = types.SimpleNamespace(
@@ -31,12 +112,12 @@ class PackageInitrdRunnerTest(unittest.TestCase):
                 SIGNED_RELEASE_EPOCH=1789199741,
             ),
             rust_inputs=types.SimpleNamespace(regular_bytes=lambda path: static),
-            source_git_output=lambda args: static,
             _BOUND_REVISION="a" * 40,
         )
+        selected_source = types.SimpleNamespace(output=lambda args: static)
         with tempfile.TemporaryDirectory() as scratch:
             profile = Path(scratch) / "profile"
-            data, static_hash = runner.config_bytes(source, profile, [
+            data, static_hash = runner.config_bytes(source, selected_source, profile, [
                 {"name": "systemd", "version": "257.9-1"},
                 {"name": "udev", "version": "257.9-1"},
             ])
@@ -48,7 +129,7 @@ class PackageInitrdRunnerTest(unittest.TestCase):
         self.assertIn(b"CacheOnly=always\nIncremental=no", data)
         self.assertNotIn(b"BaseTrees=", data)
         with self.assertRaisesRegex(ValueError, "misses production initrd package"):
-            runner.config_bytes(source, profile,
+            runner.config_bytes(source, selected_source, profile,
                                 [{"name": "systemd", "version": "257.9-1"}])
 
     def test_installed_manifest_rejects_package_outside_signed_closure(self):
@@ -91,6 +172,22 @@ class PackageInitrdRunnerTest(unittest.TestCase):
                 runner.socket, "if_nameindex", return_value=[(1, "lo")]), mock.patch.object(
                 runner.Path, "read_text", side_effect=["Iface\neth0 00000000 0 0 0 0 0 0 0 0 0\n", ""]):
             with self.assertRaisesRegex(ValueError, "non-loopback route"):
+                runner.check_loopback_only_ip_state("net:[1]", "mnt:[2]")
+
+    def test_loopback_check_accepts_empty_route_tables_but_rejects_bad_header(self):
+        common = (mock.patch.object(runner.sys, "platform", "linux"),
+                  mock.patch.object(runner.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")),
+                  mock.patch.object(runner.socket, "if_nameindex", return_value=[(1, "lo")]))
+        with common[0], common[1], common[2], mock.patch.object(
+                runner.os, "readlink", side_effect=["net:[4]", "mnt:[5]"]), mock.patch.object(
+                runner.Path, "read_text", side_effect=["", ""]):
+            report = runner.check_loopback_only_ip_state("net:[1]", "mnt:[2]")
+            self.assertTrue(report["loopback_only_ip_state_observed"])
+            self.assertFalse(report["network_egress_excluded"])
+        with common[0], common[1], common[2], mock.patch.object(
+                runner.os, "readlink", side_effect=["net:[4]", "mnt:[5]"]), mock.patch.object(
+                runner.Path, "read_text", side_effect=["Broken\n", ""]):
+            with self.assertRaisesRegex(ValueError, "IPv4 route table malformed"):
                 runner.check_loopback_only_ip_state("net:[1]", "mnt:[2]")
 
     def test_fresh_mkosi_cache_and_work_directories_reject_reuse(self):

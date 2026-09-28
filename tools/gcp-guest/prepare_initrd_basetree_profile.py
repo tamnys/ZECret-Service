@@ -93,16 +93,21 @@ def source_identity(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
-def verified_source_closure(revision, directory=MODULE_DIR):
-    """Bind every local verifier module to the selected HEAD before import."""
+def verified_source_closure(revision, directory=MODULE_DIR, selected_output=None):
+    """Bind local verifier modules to selected Git bytes before import.
+
+    A no-route builder may supply a source reader backed by the already
+    verified, read-only native Rust receipt's exact-HEAD Git archive.
+    """
     if not isinstance(revision, str) or not FULL_COMMIT.fullmatch(revision):
         raise ValueError("exact full source commit required")
-    if source_git_output(["rev-parse", "HEAD"]).decode().strip() != revision:
+    read_selected = source_git_output if selected_output is None else selected_output
+    if read_selected(["rev-parse", "HEAD"]).decode().strip() != revision:
         raise ValueError("initrd verifier source commit differs from selected HEAD")
     captured = {}
     for relative in SOURCE_FILES:
         observed = source_file(directory / Path(relative).name)
-        if observed != source_git_output(["show", f"{revision}:{relative}"]):
+        if observed != read_selected(["show", f"{revision}:{relative}"]):
             raise ValueError(f"initrd verifier source differs from selected HEAD: {relative}")
         captured[relative] = observed
     return captured
@@ -134,10 +139,11 @@ class BoundSourceFinder(importlib.abc.MetaPathFinder):
         return None
 
 
-def bind_selected_modules(revision):
+def bind_selected_modules(revision, *, selected_output=None):
     """Execute captured exact-HEAD source bytes, never ambient pycache code."""
     global _BOUND_REVISION, _BOUND_SCRIPT
-    captured = verified_source_closure(revision)
+    captured = (verified_source_closure(revision) if selected_output is None else
+                verified_source_closure(revision, selected_output=selected_output))
     if _BOUND_REVISION is not None:
         if revision != _BOUND_REVISION:
             raise ValueError("local verifier already bound to a different commit")

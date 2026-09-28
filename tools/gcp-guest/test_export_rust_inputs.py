@@ -93,6 +93,26 @@ class GuestRustInputTests(unittest.TestCase):
         self.assertFalse(result["image_built"])
         self.assertFalse(result["private_mode_approved"])
 
+    def test_receipt_archive_reader_preserves_checks_without_git_binary(self):
+        required = ("tools/gcp-guest/prepare.py", "Cargo.lock",
+                    "rust-toolchain.toml", "scripts/reproduce-release.py")
+        selected = {path: exporter.git_bytes(self.revision, path) for path in required}
+
+        def archive_output(arguments):
+            if arguments == ["rev-parse", "HEAD"]:
+                return (self.revision + "\n").encode()
+            if arguments == ["show", "-s", "--format=%T", self.revision]:
+                return (self.manifest["source_tree"] + "\n").encode()
+            if len(arguments) == 2 and arguments[0] == "show":
+                return selected[arguments[1].removeprefix(self.revision + ":")]
+            raise ValueError("unexpected archive source request")
+
+        with mock.patch.object(exporter, "git_output", side_effect=AssertionError(
+                "Git must not run inside the no-route builder")):
+            report = exporter.inspect(self.bundle, self.revision,
+                                      selected_output=archive_output)
+        self.assertFalse(report["private_mode_approved"])
+
     def test_changed_copy_is_rejected(self):
         (self.bundle / "build-b/target/release/zrpc-gcp-guard").write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "binary differs"):
