@@ -359,9 +359,9 @@ def check_loopback_only_ip_state(parent_network_namespace, parent_mount_namespac
     for path, fields in (("/proc/net/route", 11), ("/proc/net/ipv6_route", 10)):
         lines = Path(path).read_text().splitlines()
         if path.endswith("/route"):
-            if not lines or not lines[0].startswith("Iface"):
+            if lines and lines[0].split()[:1] != ["Iface"]:
                 raise ValueError("IPv4 route table malformed")
-            lines = lines[1:]
+            lines = lines[1:] if lines else []
         for line in lines:
             parts = line.split()
             if len(parts) != fields or (parts[0] if fields == 11 else parts[-1]) != "lo":

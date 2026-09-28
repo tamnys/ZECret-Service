@@ -174,6 +174,22 @@ class PackageInitrdRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-loopback route"):
                 runner.check_loopback_only_ip_state("net:[1]", "mnt:[2]")
 
+    def test_loopback_check_accepts_empty_route_tables_but_rejects_bad_header(self):
+        common = (mock.patch.object(runner.sys, "platform", "linux"),
+                  mock.patch.object(runner.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")),
+                  mock.patch.object(runner.socket, "if_nameindex", return_value=[(1, "lo")]))
+        with common[0], common[1], common[2], mock.patch.object(
+                runner.os, "readlink", side_effect=["net:[4]", "mnt:[5]"]), mock.patch.object(
+                runner.Path, "read_text", side_effect=["", ""]):
+            report = runner.check_loopback_only_ip_state("net:[1]", "mnt:[2]")
+            self.assertTrue(report["loopback_only_ip_state_observed"])
+            self.assertFalse(report["network_egress_excluded"])
+        with common[0], common[1], common[2], mock.patch.object(
+                runner.os, "readlink", side_effect=["net:[4]", "mnt:[5]"]), mock.patch.object(
+                runner.Path, "read_text", side_effect=["Broken\n", ""]):
+            with self.assertRaisesRegex(ValueError, "IPv4 route table malformed"):
+                runner.check_loopback_only_ip_state("net:[1]", "mnt:[2]")
+
     def test_fresh_mkosi_cache_and_work_directories_reject_reuse(self):
         with tempfile.TemporaryDirectory() as scratch:
             profile = Path(scratch) / "profile"
