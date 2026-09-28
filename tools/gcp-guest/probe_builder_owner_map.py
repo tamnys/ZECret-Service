@@ -86,7 +86,10 @@ def check_child(parent, parent_net_fd, scratch, command):
         os.close(descriptor)
         target.unlink()
     if command:
-        os.execve(command[0], command, {"PATH": "/usr/bin:/bin", "LC_ALL": "C"})
+        os.execve(command[0], command, {
+            "PATH": "/usr/bin:/bin", "LC_ALL": "C",
+            "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+        })
     print(json.dumps({
         "status": "diagnostic-parent-written-guest-owner-map-permitted-unbuilt",
         "native_x86_64_linux": True,
