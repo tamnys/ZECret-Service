@@ -2,23 +2,47 @@ name: GCP unsigned synthetic full-disk diagnostic
 
 on:
   workflow_dispatch:
+    inputs:
+      prepare_boot_diagnostic:
+        description: Prepare unsigned boot-test disk and QEMU tools; no VM launch
+        required: true
+        default: false
+        type: boolean
+      native_rust_run_id:
+        description: Successful exact-HEAD native Rust workflow run ID for boot-test preparation
+        required: false
+        type: string
+      native_rust_run_attempt:
+        description: Successful native Rust run attempt for boot-test preparation
+        required: false
+        type: string
+      native_rust_artifact_digest:
+        description: Independently recorded SHA-256 of native Rust artifact ZIP
+        required: false
+        type: string
   pull_request:
     branches: [main]
     paths:
       - .github/workflows/gcp-unsigned-full-disk-probe.yml
+      - deploy/gcp/boot-toolchain.lock.json
       - deploy/gcp/guest/**
       - tools/gcp-guest/**
 
-permissions: {}
+permissions:
+  actions: read
 
 jobs:
   diagnostic:
-    name: Native x86_64 full disk, no boot or private approval
+    name: Native x86_64 diagnostic disk, no private approval
     runs-on: ubuntu-24.04
     env:
       ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      ZRPC_PREPARE_BOOT_DIAGNOSTIC: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_boot_diagnostic || false }}
+      ZRPC_RUST_RUN_ID: ${{ inputs.native_rust_run_id }}
+      ZRPC_RUST_RUN_ATTEMPT: ${{ inputs.native_rust_run_attempt }}
+      ZRPC_RUST_ARTIFACT_DIGEST: ${{ inputs.native_rust_artifact_digest }}
     steps:
-      - name: Fetch exact public source and signed snapshot inputs
+      - name: Fetch exact public source
         shell: bash
         run: |
           set -euo pipefail
@@ -33,6 +57,33 @@ jobs:
           test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" checkout -q --detach FETCH_HEAD
           test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Fetch selected exact-commit native Rust receipt for boot-test preparation
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_boot_diagnostic }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/full-disk"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          python3 -I -B "$source/tools/gcp-guest/fetch_native_rust_receipt.py" \
+            --repository "$GITHUB_REPOSITORY" \
+            --revision "$ZRPC_SOURCE_SHA" \
+            --run-id "$ZRPC_RUST_RUN_ID" \
+            --run-attempt "$ZRPC_RUST_RUN_ATTEMPT" \
+            --artifact-digest "$ZRPC_RUST_ARTIFACT_DIGEST" \
+            --output "$scratch/native-rust"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Fetch locked signed snapshot inputs and stage reviewed builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/full-disk"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
           cd "$source"
           ZRPC_SCRATCH="$scratch" python3 -I -B - <<'PY'
           import json
@@ -64,6 +115,13 @@ jobs:
           CODEX_WORKSPACE_DIR="$GITHUB_WORKSPACE" \
             python3 -B tools/gcp-guest/stage_builder_toolchain.py \
               --archives "$scratch/builder-archives" --output "$scratch/staged"
+          if test "$ZRPC_PREPARE_BOOT_DIAGNOSTIC" = true; then
+            python3 -I -B tools/gcp-guest/boot_qemu_toolchain.py fetch \
+              --metadata "$scratch/metadata" \
+              --archives "$scratch/builder-archives"
+          else
+            test "$ZRPC_PREPARE_BOOT_DIAGNOSTIC" = false
+          fi
           test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
 
       - name: Build and inspect unsigned synthetic full disk in no-route namespace
@@ -94,7 +152,7 @@ jobs:
             --scratch "/var/tmp/zrpc-owner-map-full-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             -- /usr/bin/bash -c '
             set -euo pipefail
-            if test "$#" -ne 10; then
+            if test "$#" -ne 11; then
               echo "namespace handoff argument count differs" >&2
               exit 1
             fi
@@ -102,6 +160,7 @@ jobs:
             source=$7
             scratch=$8
             chroot_command=${10}
+            boot_diagnostic=${11}
             test "$staged" = "$scratch/staged"
             test "$(readlink /proc/self/ns/user)" != "$2"
             test "$(readlink /proc/self/ns/mnt)" != "$3"
@@ -123,6 +182,10 @@ jobs:
             mountpoint -q "$staged"
             mkdir -m 0700 "$scratch/apt-scratch" "$scratch/diagnostic-work" \
               "$scratch/guest-payload"
+            if test "$boot_diagnostic" = true; then
+              cp -a -- "$scratch/native-rust/verified/rust-bundle" \
+                "$scratch/guest-payload/rust-bundle"
+            fi
             mkdir -m 0700 "$source/.codex-tmp" "$scratch/guest-payload/source"
             for directory in workspace zrpc-archives zrpc-metadata zrpc-guest-archives \
                              zrpc-apt-scratch proc dev; do
@@ -134,11 +197,19 @@ jobs:
             mount --bind "$scratch/guest-payload" "$staged/workspace"
             mount --bind "$source" "$staged/workspace/source"
             mount -o remount,bind,ro "$staged/workspace/source"
+            if test "$boot_diagnostic" = true; then
+              test -d "$staged/workspace/rust-bundle"
+              test ! -L "$staged/workspace/rust-bundle"
+              mount --bind "$scratch/guest-payload/rust-bundle" \
+                "$staged/workspace/rust-bundle"
+              mount -o remount,bind,ro "$staged/workspace/rust-bundle"
+            fi
             mount --bind "$scratch/diagnostic-work" \
               "$staged/workspace/source/.codex-tmp"
-            for pair in "$scratch/builder-archives:zrpc-archives" \
-                        "$scratch/metadata:zrpc-metadata" \
-                        "$scratch/guest-archives:zrpc-guest-archives"; do
+            pairs=("$scratch/builder-archives:zrpc-archives"
+                   "$scratch/metadata:zrpc-metadata"
+                   "$scratch/guest-archives:zrpc-guest-archives")
+            for pair in "${pairs[@]}"; do
               origin=${pair%%:*}
               target=${pair#*:}
               mount --bind "$origin" "$staged/$target"
@@ -158,6 +229,12 @@ jobs:
                 *) exit 1 ;;
               esac
             done
+            if test "$boot_diagnostic" = true; then
+              case ",$(findmnt -n -o OPTIONS --target "$staged/workspace/rust-bundle")," in
+                *,ro,*) ;;
+                *) exit 1 ;;
+              esac
+            fi
             for writable in zrpc-apt-scratch workspace workspace/source/.codex-tmp; do
               case ",$(findmnt -n -o OPTIONS --target "$staged/$writable")," in
                 *,rw,*) ;;
@@ -175,16 +252,39 @@ jobs:
                     --guest-archives /zrpc-guest-archives \
                     --inputs /workspace/source/.codex-tmp/inputs \
                     --lock /workspace/source/.codex-tmp/inputs.lock.json)
-            run_staged /usr/bin/python3 -I -B "$tool" create-inputs "${prefix[@]}"
-            run_staged /usr/bin/python3 -I -B "$tool" build "${prefix[@]}" \
+            receipt=()
+            if test "$boot_diagnostic" = true; then
+              create_mode=create-boot-inputs
+              build_mode=build-boot
+              receipt=(--rust-bundle /workspace/rust-bundle --revision "$9")
+            elif test "$boot_diagnostic" = false; then
+              create_mode=create-inputs
+              build_mode=build
+            else
+              echo "Invalid boot diagnostic selection" >&2
+              exit 1
+            fi
+            run_staged /usr/bin/python3 -I -B "$tool" "$create_mode" \
+              "${prefix[@]}" "${receipt[@]}"
+            run_staged /usr/bin/python3 -I -B "$tool" "$build_mode" \
+              "${prefix[@]}" "${receipt[@]}" \
               --stage /workspace/source/.codex-tmp/stage \
               --builder-archives /zrpc-archives --workspace /workspace \
               --apt-scratch /zrpc-apt-scratch \
               --parent-net-ns "$4" --parent-user-ns "$2" --parent-pid-ns "$5"
-            echo "::warning::Unsigned synthetic disk is diagnostic only; not booted, signed, or approved for private mode."
+            if test "$boot_diagnostic" = true; then
+              mkdir -m 0700 "$staged/workspace/boot-apt-scratch"
+              run_staged /usr/bin/python3 -I -B \
+                /workspace/source/tools/gcp-guest/boot_qemu_toolchain.py stage \
+                --metadata /zrpc-metadata \
+                --archives /zrpc-archives \
+                --output /workspace/boot-toolchain \
+                --scratch /workspace/boot-apt-scratch --workspace /workspace
+            fi
+            echo "::warning::Unsigned synthetic-service disk is diagnostic only; not signed or approved for private mode."
           ' _ "$staged" "$parent_user_ns" "$parent_mount_ns" \
             "$parent_net_ns" "$parent_pid_ns" \
             "$root_stage" "$source" "$scratch" \
-            "$ZRPC_SOURCE_SHA" "$chroot_command"
+            "$ZRPC_SOURCE_SHA" "$chroot_command" "$ZRPC_PREPARE_BOOT_DIAGNOSTIC"
           echo "Exact source: $ZRPC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
-          echo 'Result: unsigned synthetic full-disk diagnostic only; no boot or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Result: unsigned synthetic-service full-disk diagnostic only; QEMU tools staged only when selected; no boot or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"

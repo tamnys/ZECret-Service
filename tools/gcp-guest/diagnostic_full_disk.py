@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build and inspect one unsigned, unbootable-by-design synthetic GCP disk.
+"""Build and inspect unsigned, non-approving GCP diagnostic disks.
 
 This rehearses the production mkosi/repart source with only the explicit
-``--secure-boot=no`` invocation override. All application executables are
-the same deliberately invalid ELF fixture. The output is diagnostic evidence
-only: it has no Secure Boot signature, real Zebra, live TDX evidence, or path
-into the approved-release catalog. Never import or boot this disk as a service.
+``--secure-boot=no`` invocation override. The original rehearsal uses invalid
+ELF fixtures for every guest executable. The separate boot-input variant uses
+only an exact-HEAD, double-built Rust receipt's early init; all service
+executables remain invalid. Neither output has a Secure Boot signature, real
+Zebra, live TDX evidence, or a path into the approved-release catalog. Never
+import or boot either disk as a service.
 """
 
 import argparse
@@ -14,6 +16,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -28,8 +31,10 @@ import inspect_raw_rootfs as rootfs
 import inspect_raw_roothash as roothash
 import inspect_raw_verity as verity
 import outer_image_runner as outer
+import package_initrd_runner as package_runner
 import prepare
 import prepare_guest_disk_basetree_profile as builder
+import export_rust_inputs as rust_inputs
 
 
 _package_spec = importlib.util.spec_from_file_location(
@@ -39,6 +44,7 @@ _package_spec.loader.exec_module(packages)
 
 
 STATUS = "diagnostic-unsigned-synthetic-full-disk-unapproved"
+BOOT_STATUS = "diagnostic-unsigned-early-init-boot-disk-unapproved"
 SYNTHETIC_MARKER = b"ZRPC_SYNTHETIC_UNEXECUTABLE_FULL_DISK_REHEARSAL"
 # The header satisfies the staging architecture check, but this is not a
 # runnable ELF: it has no entry point, program header, or loadable segments.
@@ -51,21 +57,23 @@ SYNTHETIC_CERTIFICATE = b"ZRPC_SYNTHETIC_NOT_A_CERTIFICATE\n"
 SYNTHETIC_BOOT_POLICY = b"ZRPC_SYNTHETIC_NOT_A_BOOT_POLICY\n"
 SYNTHETIC_ROLES = frozenset(prepare.BINARIES) | {prepare.EARLY_INIT_ROLE}
 SECURE_BOOT_OVERRIDE = "--secure-boot=no"
+SOURCE_REVISION = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def checked_synthetic_inputs(lock, inputs):
-    """A caller cannot substitute a real executable or certificate here."""
+def checked_diagnostic_inputs(lock, inputs, early_init):
+    """Only the separately verified early-init role may differ from fixtures."""
     if type(lock) is not dict or type(lock.get("artifacts")) is not dict:
         raise ValueError("synthetic input lock is malformed")
     for role in SYNTHETIC_ROLES | {"secure_boot_certificate", "boot_policy"}:
         entry = lock["artifacts"].get(role)
         if type(entry) is not dict or set(entry) != {"path", "sha256"}:
             raise ValueError("synthetic role identity is absent")
-        expected = (SYNTHETIC_ELF if role in SYNTHETIC_ROLES else
+        expected = (early_init if role == prepare.EARLY_INIT_ROLE else
+                    SYNTHETIC_ELF if role in SYNTHETIC_ROLES else
                     SYNTHETIC_CERTIFICATE if role == "secure_boot_certificate" else
                     SYNTHETIC_BOOT_POLICY)
         path = inputs / entry["path"]
@@ -74,8 +82,58 @@ def checked_synthetic_inputs(lock, inputs):
     return sorted(SYNTHETIC_ROLES)
 
 
-def create_inputs(metadata, guest_archives, inputs, lock_path):
-    """Write a fresh, signed-package-backed lock with only invalid guest code."""
+def checked_synthetic_inputs(lock, inputs):
+    """The original disk mode accepts no real guest executable."""
+    return checked_diagnostic_inputs(lock, inputs, SYNTHETIC_ELF)
+
+
+def selected_boot_source(rust_bundle, revision):
+    """Use the receipt's authenticated Git archive; the builder has no Git."""
+    package_path = Path(__file__).with_name("package_initrd_runner.py")
+    outer.checked_package_runner_bytes(revision, rust_bundle, package_path)
+    selected = package_runner.ReceiptSourceArchive(rust_bundle, revision)
+    producer = "tools/gcp-guest/diagnostic_full_disk.py"
+    if outer.regular_bytes(Path(__file__)) != selected.output(
+            ["show", f"{revision}:{producer}"]):
+        raise ValueError("boot diagnostic producer differs from exact HEAD")
+    return selected
+
+
+def checked_boot_receipt(rust_bundle, revision):
+    """Bind the one runnable guest role to both exact-HEAD native builds."""
+    if (not SOURCE_REVISION.fullmatch(revision)
+            or not rust_bundle.is_absolute() or rust_bundle.is_symlink()):
+        raise ValueError("exact-HEAD native Rust receipt path and revision required")
+    selected = selected_boot_source(rust_bundle, revision)
+    report = rust_inputs.inspect(rust_bundle, revision,
+                                 selected_output=selected.output)
+    if report != selected.report:
+        raise ValueError("native Rust receipt differs from selected source archive")
+    artifacts = report.get("artifacts") if type(report) is dict else None
+    early = artifacts.get(prepare.EARLY_INIT_ROLE) if type(artifacts) is dict else None
+    manifest_sha256 = report.get("reproduction_manifest_sha256") if type(report) is dict else None
+    if (type(report) is not dict
+            or report.get("status") != "diagnostic-unsigned-x86_64-rust-inputs-unapproved"
+            or report.get("source_commit") != revision
+            or report.get("image_built") is not False
+            or report.get("private_mode_approved") is not False
+            or type(manifest_sha256) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+            or type(early) is not dict
+            or early.get("path") != prepare.EARLY_INIT_ROLE
+            or type(early.get("sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", early["sha256"])):
+        raise ValueError("native Rust receipt cannot supply boot early init")
+    binary = rust_inputs.regular_bytes(
+        rust_bundle / "artifacts/zrpc-gcp-early-init")
+    if (binary == SYNTHETIC_ELF or not rust_inputs.x86_64_elf(binary)
+            or sha256(binary) != early["sha256"]):
+        raise ValueError("boot early init differs from exact-HEAD native Rust receipt")
+    return binary, manifest_sha256
+
+
+def _create_inputs(metadata, guest_archives, inputs, lock_path, early_init):
+    """Write fresh signed-package-backed inputs; callers choose the one init."""
     if inputs.exists() or inputs.is_symlink() or lock_path.exists() or lock_path.is_symlink():
         raise ValueError("synthetic input and lock destinations must be fresh")
     checked = guest.verify_cached_archives(metadata, guest_archives)
@@ -88,6 +146,7 @@ def create_inputs(metadata, guest_archives, inputs, lock_path):
     (inputs / "debs").mkdir(mode=0o700)
     artifacts = {}
     fixed = {**{role: SYNTHETIC_ELF for role in SYNTHETIC_ROLES},
+             prepare.EARLY_INIT_ROLE: early_init,
              "secure_boot_certificate": SYNTHETIC_CERTIFICATE,
              "boot_policy": SYNTHETIC_BOOT_POLICY,
              "package_manifest": package_bytes,
@@ -112,13 +171,33 @@ def create_inputs(metadata, guest_archives, inputs, lock_path):
             "source_date_epoch": guest.SIGNED_RELEASE_EPOCH,
             "kernel_version": prepare.KERNEL_VERSION, "snapshot": guest.SNAPSHOT,
             "artifacts": artifacts, "runtime": runtime}
-    checked_synthetic_inputs(lock, inputs)
+    checked_diagnostic_inputs(lock, inputs, early_init)
     prepare.validate_lock(lock, inputs)
     lock_path.write_text(json.dumps(lock, sort_keys=True, separators=(",", ":")) + "\n")
     return {"status": "diagnostic-synthetic-inputs-staged-unapproved",
             "synthetic_workload": True, "signed_guest_packages_checked": len(manifest),
             "input_lock_sha256": prepare.digest(lock_path),
             "image_built": False, "private_mode_approved": False}
+
+
+def create_inputs(metadata, guest_archives, inputs, lock_path):
+    """Preserve the original entirely unexecutable synthetic rehearsal."""
+    return _create_inputs(metadata, guest_archives, inputs, lock_path, SYNTHETIC_ELF)
+
+
+def create_boot_inputs(metadata, guest_archives, inputs, lock_path,
+                       rust_bundle, revision):
+    """Use real early init only; keep every service input unexecutable."""
+    early_init, manifest_sha256 = checked_boot_receipt(rust_bundle, revision)
+    report = _create_inputs(metadata, guest_archives, inputs, lock_path, early_init)
+    report.update({"status": "diagnostic-boot-inputs-staged-unapproved",
+                   "synthetic_workload": False,
+                   "synthetic_service_payloads": True,
+                   "native_early_init_sha256": sha256(early_init),
+                   "native_rust_manifest_sha256": manifest_sha256,
+                   "source_commit": revision,
+                   "boot_verified": False})
+    return report
 
 
 def checked_override(stage, manifest_sha256, manifest_bytes):
@@ -182,9 +261,13 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
 
 
 def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
-          workspace, apt_scratch, parent_net_ns, parent_user_ns, parent_pid_ns):
+          workspace, apt_scratch, parent_net_ns, parent_user_ns, parent_pid_ns,
+          *, boot_receipt=None):
+    early_init = SYNTHETIC_ELF
+    if boot_receipt is not None:
+        early_init, receipt_sha256 = checked_boot_receipt(*boot_receipt)
     lock = json.loads(outer.regular_bytes(lock_path), object_pairs_hook=prepare.unique_object)
-    checked_synthetic_inputs(lock, inputs)
+    checked_diagnostic_inputs(lock, inputs, early_init)
     if stage.exists() or stage.is_symlink() or not workspace.is_dir():
         raise ValueError("fresh rehearsal stage and workspace required")
     execution = builder.verify_execution_context(
@@ -211,8 +294,14 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
             or prepare.digest(stage / "candidate-manifest.json") != staged["manifest_sha256"]):
         raise ValueError("source-bound image inputs changed during rehearsal")
     observed = inspect(stage, metadata, builder_archives, workspace, manifest)
-    return {"schema_version": 1, "status": STATUS,
-            "production_image": False, "synthetic_workload": True,
+    if boot_receipt is not None:
+        final_early_init, final_receipt_sha256 = checked_boot_receipt(*boot_receipt)
+        if final_early_init != early_init or final_receipt_sha256 != receipt_sha256:
+            raise ValueError("native Rust receipt changed during boot disk build")
+    report = {"schema_version": 1,
+            "status": BOOT_STATUS if boot_receipt is not None else STATUS,
+            "production_image": False,
+            "synthetic_workload": boot_receipt is None,
             "source_profile_sha256": prepare.digest(prepare.PROFILE / "mkosi.conf"),
             "stage_manifest_sha256": staged["manifest_sha256"],
             "secure_boot_override": override,
@@ -220,27 +309,59 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
             "mkosi_executed": True, "diagnostic_disk_built": True,
             **observed, "boot_verified": False, "hardware_verified": False,
             "private_mode_approved": False}
+    if boot_receipt is not None:
+        report.update({"synthetic_service_payloads": True,
+                       "native_early_init_sha256": sha256(early_init),
+                       "native_rust_manifest_sha256": receipt_sha256,
+                       "source_commit": boot_receipt[1]})
+    return report
+
+
+def build_boot(lock_path, inputs, stage, metadata, guest_archives,
+               builder_archives, workspace, apt_scratch, parent_net_ns,
+               parent_user_ns, parent_pid_ns, rust_bundle, revision):
+    return build(lock_path, inputs, stage, metadata, guest_archives,
+                 builder_archives, workspace, apt_scratch, parent_net_ns,
+                 parent_user_ns, parent_pid_ns,
+                 boot_receipt=(rust_bundle, revision))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    create = sub.add_parser("create-inputs")
-    create.add_argument("--metadata", required=True, type=Path)
-    create.add_argument("--guest-archives", required=True, type=Path)
-    create.add_argument("--inputs", required=True, type=Path)
-    create.add_argument("--lock", required=True, type=Path)
-    run = sub.add_parser("build")
-    for flag in ("lock", "inputs", "stage", "metadata", "guest-archives",
-                 "builder-archives", "workspace", "apt-scratch"):
-        run.add_argument("--" + flag, required=True, type=Path)
-    for flag in ("parent-net-ns", "parent-user-ns", "parent-pid-ns"):
-        run.add_argument("--" + flag, required=True)
+    for name in ("create-inputs", "create-boot-inputs"):
+        create = sub.add_parser(name)
+        for flag in ("metadata", "guest-archives", "inputs", "lock"):
+            create.add_argument("--" + flag, required=True, type=Path)
+        if name == "create-boot-inputs":
+            create.add_argument("--rust-bundle", required=True, type=Path)
+            create.add_argument("--revision", required=True)
+    for name in ("build", "build-boot"):
+        run = sub.add_parser(name)
+        for flag in ("lock", "inputs", "stage", "metadata", "guest-archives",
+                     "builder-archives", "workspace", "apt-scratch"):
+            run.add_argument("--" + flag, required=True, type=Path)
+        for flag in ("parent-net-ns", "parent-user-ns", "parent-pid-ns"):
+            run.add_argument("--" + flag, required=True)
+        if name == "build-boot":
+            run.add_argument("--rust-bundle", required=True, type=Path)
+            run.add_argument("--revision", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "create-inputs":
             report = create_inputs(args.metadata, args.guest_archives,
                                    args.inputs, args.lock)
+        elif args.command == "create-boot-inputs":
+            report = create_boot_inputs(args.metadata, args.guest_archives,
+                                        args.inputs, args.lock,
+                                        args.rust_bundle, args.revision)
+        elif args.command == "build-boot":
+            report = build_boot(args.lock, args.inputs, args.stage,
+                                args.metadata, args.guest_archives,
+                                args.builder_archives, args.workspace,
+                                args.apt_scratch, args.parent_net_ns,
+                                args.parent_user_ns, args.parent_pid_ns,
+                                args.rust_bundle, args.revision)
         else:
             report = build(args.lock, args.inputs, args.stage, args.metadata,
                            args.guest_archives, args.builder_archives,
