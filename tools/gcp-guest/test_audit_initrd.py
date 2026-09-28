@@ -55,6 +55,21 @@ class InitrdAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "administrative unit remains"):
             audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_signed_systemd_ssh_config_alias_rejected(self):
+        alias = self.root / "etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf"
+        alias.parent.mkdir(parents=True)
+        alias.symlink_to("/usr/lib/systemd/ssh_config.d/20-systemd-ssh-proxy.conf")
+        with self.assertRaisesRegex(ValueError, "unexpected content remains: etc/ssh"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
+    def test_signed_systemd_ssh_tmpfiles_rule_rejected(self):
+        rule = self.root / "usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"
+        rule.parent.mkdir(parents=True)
+        rule.write_text("L$ /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf - - - - "
+                        "/usr/lib/systemd/ssh_config.d/20-systemd-ssh-proxy.conf\n")
+        with self.assertRaisesRegex(ValueError, "forbidden file remains: usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
     def test_required_boot_components_and_ownership_fail_closed(self):
         for relative in audit_initrd.REQUIRED_EXECUTABLES:
             with self.subTest(relative=relative):

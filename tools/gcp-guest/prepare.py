@@ -52,6 +52,8 @@ INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/multi-user.target.wants/getty.target",
     "/usr/lib/systemd/system/runlevel1.target",
     "/usr/lib/systemd/systemd-sulogin-shell",
+    "/etc/ssh",
+    "/usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
     "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh",
     "/usr/sbin/sulogin", "/usr/bin/login", "/usr/bin/su",
 )
