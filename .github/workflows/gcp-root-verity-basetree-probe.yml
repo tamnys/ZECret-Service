@@ -1,0 +1,293 @@
+name: GCP authenticated BaseTrees root/verity disk probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  disk:
+    name: Non-bootable no-package raw disk diagnostic
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact source and locked signed-snapshot bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/basetree-disk"
+          mkdir "$source" "$scratch" "$scratch/builder-archives" \
+            "$scratch/guest-archives" "$scratch/metadata"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all)"
+          cd "$source"
+          ZRPC_SCRATCH="$scratch" python3 -I - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import fetch_builder_closure as builder
+          import fetch_guest_closure as guest
+
+          scratch = Path(os.environ["ZRPC_SCRATCH"])
+          lock, _, _ = builder.reviewed_lock(builder.closure.LOCK)
+          archives = scratch / "builder-archives"
+          directory = os.open(archives, os.O_RDONLY | os.O_DIRECTORY |
+                              os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              for entry in lock["packages"]:
+                  builder.download_one(directory, entry, lock["snapshot"])
+                  if not builder.verify_cached(directory, entry):
+                      raise ValueError("reviewed builder archive missing after download")
+          finally:
+              os.close(directory)
+          builder.fetch_reviewed_metadata(scratch / "metadata")
+          guest.prefetch_archives(scratch / "guest-archives")
+          print(json.dumps({"status": "diagnostic-locked-bytes-fetched-signature-unchecked",
+                            "builder_archives": len(lock["packages"]),
+                            "disk_image_built": False,
+                            "private_mode_approved": False}, sort_keys=True))
+          PY
+          CODEX_WORKSPACE_DIR="$GITHUB_WORKSPACE" \
+            python3 tools/gcp-guest/stage_builder_toolchain.py \
+              --archives "$scratch/builder-archives" --output "$scratch/staged"
+
+      - name: Build and inspect in a no-route x86 namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/basetree-disk"
+          staged="$scratch/staged"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          chroot_command="$(command -v chroot)"
+          sudo -n unshare --mount --net --propagation private bash -c '
+            set -euo pipefail
+            staged=$1
+            run_uid=$2
+            run_gid=$3
+            test "$(readlink /proc/self/ns/user)" = "$4"
+            test "$(readlink /proc/self/ns/mnt)" != "$5"
+            test "$(readlink /proc/self/ns/net)" != "$6"
+            chroot_command=$7
+            source=$8
+            archives=$9
+            metadata=${10}
+            guest_archives=${11}
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            test ! -L "$staged"
+            mount --bind "$staged" "$staged"
+            mountpoint -q "$staged"
+            for directory in zrpc-source zrpc-archives zrpc-metadata zrpc-guest-archives zrpc-apt-scratch zrpc-guest-payload-parent proc dev; do
+              test ! -L "$staged/$directory"
+              mkdir -p "$staged/$directory"
+            done
+            chown "$run_uid:$run_gid" "$staged/zrpc-apt-scratch"
+            chown "$run_uid:$run_gid" "$staged/zrpc-guest-payload-parent"
+            for pair in "$source:zrpc-source" "$archives:zrpc-archives" \
+                        "$metadata:zrpc-metadata" "$guest_archives:zrpc-guest-archives"; do
+              origin=${pair%%:*}
+              target=${pair#*:}
+              mount --bind "$origin" "$staged/$target"
+              mount -o remount,bind,ro "$staged/$target"
+            done
+            mount -t proc proc "$staged/proc"
+            for device in null zero full random urandom tty; do
+              test -c "/dev/$device"
+              test ! -e "$staged/dev/$device"
+              touch "$staged/dev/$device"
+              mount --bind "/dev/$device" "$staged/dev/$device"
+            done
+            run_staged() {
+              /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+                LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                "$chroot_command" --userspec="$run_uid:$run_gid" "$staged" "$@"
+            }
+            run_staged_root() {
+              /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
+                LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                "$chroot_command" "$staged" "$@"
+            }
+            # Authenticate signed snapshot membership before executing staged
+            # builder tools. This checks the APT plan, not all runtime loads.
+            run_staged /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import verify_builder_closure
+          import fetch_guest_closure
+
+          builder = verify_builder_closure.verify(
+              Path("/zrpc-metadata/InRelease"),
+              Path("/zrpc-metadata/Packages.xz"),
+              Path("/zrpc-archives"), Path("/usr/bin/apt-get"),
+              Path("/zrpc-apt-scratch"))
+          guest = fetch_guest_closure.verify_cached_archives(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"))
+          if (builder["status"] !=
+                  "diagnostic-signed-builder-apt-plan-matched-unbuilt"
+                  or builder["private_mode_approved"] is not False
+                  or guest["status"] !=
+                  "diagnostic-guest-archives-matched-signed-snapshot-unbuilt"
+                  or guest["private_mode_approved"] is not False):
+              raise ValueError("signed archive preflight changed status")
+          print(json.dumps({"builder_status": builder["status"],
+                            "guest_status": guest["status"],
+                            "private_mode_approved": False}, sort_keys=True))
+          PY
+            run_staged_root /usr/bin/python3 -I - "$6" <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import assemble_guest_base_tree as base
+          import build_guest_accounts as accounts
+          import prepare_guest_basetree_profile as root
+          import prepare_guest_disk_basetree_profile as disk
+          import audit_mkosi_root_tree as audit
+
+          metadata = Path("/zrpc-metadata")
+          archives = Path("/zrpc-guest-archives")
+          workspace = Path("/zrpc-guest-payload-parent")
+          artifact = workspace / "root-basetree"
+          account_artifact = workspace / "expected-accounts"
+          source_profile = workspace / "source-overlay-profile"
+
+          builder = disk.verify_execution_context(
+              metadata, Path("/zrpc-archives"), sys.argv[1],
+              Path("/zrpc-apt-scratch"))
+          if (builder["status"] != "diagnostic-signed-staged-builder-no-route"
+                  or builder["private_mode_approved"] is not False):
+              raise ValueError("signed builder guard changed status")
+          print(json.dumps(builder, sort_keys=True))
+
+          base.assemble(metadata, archives, artifact, workspace)
+          accounts.build(metadata, archives, workspace, account_artifact)
+          source = root.prepare_profile(metadata, archives, artifact,
+                                        account_artifact, source_profile,
+                                        workspace, include_overlay=True)
+          if (source["runtime_binaries_included"] is not False
+                  or source["private_mode_approved"] is not False):
+              raise ValueError("source overlay profile changed status")
+          root.build_root_directory(metadata, archives, artifact,
+                                    account_artifact, source_profile,
+                                    workspace, include_overlay=True)
+          deltas = audit.audit(metadata, archives, artifact, account_artifact,
+                               source_profile, workspace, include_overlay=True)
+          if (deltas["generated_effects_approved"] is not False
+                  or deltas["private_mode_approved"] is not False):
+              raise ValueError("root delta audit changed status")
+          for difference in deltas["differences"]:
+              print(json.dumps({"unreviewed_root_delta": difference}, sort_keys=True))
+          print(json.dumps({"status": deltas["status"],
+                            "generated_delta_count": len(deltas["differences"]),
+                            "generated_effects_approved": False,
+                            "private_mode_approved": False}, sort_keys=True))
+          PY
+            source_mount="$staged/zrpc-guest-payload-parent/source-overlay-profile"
+            mount --bind "$source_mount" "$source_mount"
+            mount -o remount,bind,ro "$source_mount"
+            case ",$(findmnt -n -o OPTIONS --target "$source_mount")," in
+              *,ro,*) ;;
+              *) exit 1 ;;
+            esac
+            run_staged_root /usr/bin/python3 -I - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import prepare_guest_disk_basetree_profile as disk
+
+          metadata = Path("/zrpc-metadata")
+          archives = Path("/zrpc-guest-archives")
+          workspace = Path("/zrpc-guest-payload-parent")
+          artifact = workspace / "root-basetree"
+          account_artifact = workspace / "expected-accounts"
+          source_profile = workspace / "source-overlay-profile"
+          disk_profile = workspace / "root-verity-disk-profile"
+          disk.prepare_profile(metadata, archives, artifact, account_artifact,
+                               source_profile, disk_profile, workspace)
+          report = disk.verify_profile(metadata, archives, artifact,
+                                       account_artifact, source_profile,
+                                       disk_profile, workspace)
+          if (report["status"] != disk.STATUS
+                  or report["disk_image_built"] is not False
+                  or report["private_mode_approved"] is not False):
+              raise ValueError("disk profile changed diagnostic status")
+          print(json.dumps(report, sort_keys=True))
+          PY
+            disk_mount="$staged/zrpc-guest-payload-parent/root-verity-disk-profile"
+            mount --bind "$disk_mount" "$disk_mount"
+            mount -o remount,bind,ro "$disk_mount"
+            case ",$(findmnt -n -o OPTIONS --target "$disk_mount")," in
+              *,ro,*) ;;
+              *) exit 1 ;;
+            esac
+            run_staged_root /usr/bin/python3 -I - "$6" <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import prepare_guest_disk_basetree_profile as disk
+          import inspect_basetree_disk as inspect
+
+          metadata = Path("/zrpc-metadata")
+          archives = Path("/zrpc-guest-archives")
+          workspace = Path("/zrpc-guest-payload-parent")
+          artifact = workspace / "root-basetree"
+          account_artifact = workspace / "expected-accounts"
+          source_profile = workspace / "source-overlay-profile"
+          disk_profile = workspace / "root-verity-disk-profile"
+          built = disk.build_disk(metadata, archives, artifact,
+                                  account_artifact, source_profile,
+                                  disk_profile, workspace,
+                                  Path("/zrpc-archives"), sys.argv[1],
+                                  Path("/zrpc-apt-scratch"))
+          if (built["status"] != disk.BUILT_STATUS
+                  or built["package_install_configured"] is not False
+                  or built["runtime_binaries_included"] is not False
+                  or built["production_image_built"] is not False
+                  or built["private_mode_approved"] is not False):
+              raise ValueError("disk build changed diagnostic status")
+          print(json.dumps(built, sort_keys=True))
+          raw = disk_profile.parent / (disk_profile.name + "-output") / disk.OUTPUT
+          evidence = inspect.inspect(
+              raw, built["raw_disk_sha256"], built["raw_disk_bytes"], 512,
+              metadata / "InRelease", metadata / "Packages.xz",
+              Path("/zrpc-archives"), workspace)
+          if (evidence["status"] !=
+                  "diagnostic-no-boot-root-verity-inspected-unapproved"
+                  or evidence["verity_userspace_verified"] is not True
+                  or evidence["trusted_roothash_bound_to_boot"] is not False
+                  or evidence["root_contents_approved"] is not False
+                  or evidence["private_mode_approved"] is not False):
+              raise ValueError("disk inspection changed diagnostic status")
+          print(json.dumps(evidence, sort_keys=True))
+          print("::warning::Root/verity is diagnostic only: no approved runtime, "
+                "ESP, UKI, measured boot, or private-mode release")
+          PY
+          ' _ "$staged" "$runner_uid" "$runner_gid" \
+            "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" \
+            "$chroot_command" "$source" "$scratch/builder-archives" \
+            "$scratch/metadata" "$scratch/guest-archives"
