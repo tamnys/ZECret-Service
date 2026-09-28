@@ -106,6 +106,32 @@ class PackageInitrdRunnerTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 runner.fresh_sibling(profile, "-work")
 
+    def test_mkosi_scratch_requires_private_writable_directory(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            parent = Path(scratch)
+            target = parent / "tmp"
+            target.mkdir(mode=0o700)
+            self.assertEqual(runner.checked_mkosi_tmpdir(
+                target, expected_uid=runner.os.getuid()), str(target))
+            self.assertEqual(list(target.iterdir()), [])
+            target.chmod(0o755)
+            with self.assertRaisesRegex(ValueError, "private storage"):
+                runner.checked_mkosi_tmpdir(
+                    target, expected_uid=runner.os.getuid())
+            target.chmod(0o700)
+            with mock.patch.object(runner.os, "fstatvfs", return_value=types.SimpleNamespace(
+                    f_flag=runner.os.ST_RDONLY)):
+                with self.assertRaisesRegex(ValueError, "private storage"):
+                    runner.checked_mkosi_tmpdir(
+                        target, expected_uid=runner.os.getuid())
+            with self.assertRaisesRegex(ValueError, "root-owned"):
+                runner.checked_mkosi_tmpdir(target, expected_uid=-1)
+            redirect = parent / "redirect"
+            redirect.symlink_to(parent)
+            with self.assertRaises(OSError):
+                runner.checked_mkosi_tmpdir(
+                    redirect / "tmp", expected_uid=runner.os.getuid())
+
     def test_loopback_observation_does_not_claim_egress_exclusion(self):
         with (mock.patch.object(runner.sys, "platform", "linux"),
               mock.patch.object(runner.os, "uname", return_value=types.SimpleNamespace(machine="x86_64")),
