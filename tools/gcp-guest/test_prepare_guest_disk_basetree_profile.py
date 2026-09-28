@@ -72,7 +72,9 @@ class DiskProfileTests(unittest.TestCase):
         config = (self.profile / disk.CONFIG).read_text()
         for required in ("Distribution=custom\n", "Format=disk\n",
                          "RepartOffline=yes\n", "Bootable=no\n", "Packages=\n",
-                         "WithNetwork=no\n", "SourceDateEpoch=0\n"):
+                         "WithNetwork=no\n", "SourceDateEpoch=0\n",
+                         "PackageCacheDirectory=" +
+                         str(self.workspace / "disk-profile-package-cache") + "\n"):
             self.assertIn(required, config)
         for forbidden in ("Initrds=", "SecureBoot=yes", "PackageDirectories=",
                           "Bootloader=uki", "Format=directory"):
@@ -116,6 +118,14 @@ class DiskProfileTests(unittest.TestCase):
         (output / disk.OUTPUT).write_bytes(b"untrusted prior image")
         with mock.patch.object(disk.subprocess, "run") as run:
             with self.assertRaises(ValueError):
+                self.invoke(disk.build_disk)
+            run.assert_not_called()
+
+    def test_rejects_preexisting_package_cache_before_mkosi(self):
+        self.invoke(disk.prepare_profile)
+        (self.workspace / "disk-profile-package-cache").mkdir()
+        with mock.patch.object(disk.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "package cache already exists"):
                 self.invoke(disk.build_disk)
             run.assert_not_called()
 

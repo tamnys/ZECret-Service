@@ -68,6 +68,7 @@ def config_bytes(profile, source_manifest_sha256):
             f"CleanPackageMetadata=no\nSourceDateEpoch=0\n"
             f"\n[Build]\nWithNetwork=no\nCacheOnly=always\n"
             f"Incremental=no\nRepartOffline=yes\n"
+            f"PackageCacheDirectory={profile.parent / (profile.name + '-package-cache')}\n"
             f"WorkspaceDirectory={profile.parent / (profile.name + '-work')}\n").encode()
 
 
@@ -494,6 +495,9 @@ def build_disk(metadata, archives, artifact, account_artifact, source,
     output = Path(profile).parent / (Path(profile).name + "-output") / OUTPUT
     if output.exists() or output.is_symlink():
         raise ValueError("disk diagnostic output already exists")
+    package_cache = Path(profile).parent / (Path(profile).name + "-package-cache")
+    if package_cache.exists() or package_cache.is_symlink():
+        raise ValueError("disk diagnostic package cache already exists")
     if not isinstance(builder_archives, Path) or not isinstance(apt_scratch, Path):
         raise ValueError("signed builder archive and scratch paths required")
     execution = verify_execution_context(metadata, builder_archives,
