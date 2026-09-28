@@ -34,9 +34,9 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
           test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" checkout -q --detach FETCH_HEAD
-          test -z "$(git -C "$source" status --porcelain --untracked-files=all)"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
           cd "$source"
-          ZRPC_SCRATCH="$scratch" python3 -I - <<'PY'
+          ZRPC_SCRATCH="$scratch" python3 -I -B - <<'PY'
           import json
           import os
           from pathlib import Path
@@ -66,7 +66,7 @@ jobs:
                             "private_mode_approved": False}, sort_keys=True))
           PY
           CODEX_WORKSPACE_DIR="$GITHUB_WORKSPACE" \
-            python3 tools/gcp-guest/stage_builder_toolchain.py \
+            python3 -B tools/gcp-guest/stage_builder_toolchain.py \
               --archives "$scratch/builder-archives" --output "$scratch/staged"
 
       - name: Build and inspect in a no-route x86 namespace
@@ -78,7 +78,7 @@ jobs:
           scratch="$GITHUB_WORKSPACE/basetree-disk"
           staged="$scratch/staged"
           test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
-          test -z "$(git -C "$source" status --porcelain --untracked-files=all)"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
           parent_user_ns="$(readlink /proc/self/ns/user)"
@@ -136,7 +136,7 @@ jobs:
             }
             # Authenticate signed snapshot membership before executing staged
             # builder tools. This checks the APT plan, not all runtime loads.
-            run_staged /usr/bin/python3 -I - <<"PY"
+            run_staged /usr/bin/python3 -I -B - <<"PY"
           import json
           from pathlib import Path
           import sys
@@ -163,7 +163,7 @@ jobs:
                             "guest_status": guest["status"],
                             "private_mode_approved": False}, sort_keys=True))
           PY
-            run_staged_root /usr/bin/python3 -I - "$6" <<"PY"
+            run_staged_root /usr/bin/python3 -I -B - "$6" <<"PY"
           import json
           from pathlib import Path
           import sys
@@ -220,7 +220,7 @@ jobs:
               *,ro,*) ;;
               *) exit 1 ;;
             esac
-            run_staged_root /usr/bin/python3 -I - <<"PY"
+            run_staged_root /usr/bin/python3 -I -B - <<"PY"
           import json
           from pathlib import Path
           import sys
@@ -253,7 +253,7 @@ jobs:
               *,ro,*) ;;
               *) exit 1 ;;
             esac
-            run_staged_root /usr/bin/python3 -I - "$6" <<"PY"
+            run_staged_root /usr/bin/python3 -I -B - "$6" <<"PY"
           import json
           from pathlib import Path
           import sys
