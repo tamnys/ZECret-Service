@@ -33,6 +33,32 @@ MODULES = frozenset({
 PACKAGE_METADATA = frozenset({
     "modules.builtin", "modules.builtin.modinfo", "modules.order",
 })
+BOOT_CONFIG = {
+    # Google requires these options for custom TDX images. The quote broker
+    # additionally needs the upstream TDX/TSM ConfigFS report interface.
+    "CONFIG_INTEL_TDX_GUEST": frozenset({"y"}),
+    "CONFIG_TDX_GUEST_DRIVER": frozenset({"m"}),
+    "CONFIG_TSM_REPORTS": frozenset({"m"}),
+    "CONFIG_CONFIGFS_FS": frozenset({"y", "m"}),
+    "CONFIG_GVE": frozenset({"m"}),
+    "CONFIG_NET_VENDOR_GOOGLE": frozenset({"y"}),
+    "CONFIG_PCI_MSI": frozenset({"y"}),
+    "CONFIG_SWIOTLB": frozenset({"y"}),
+    # The reviewed final initrd deliberately contains no NVMe modules, so
+    # the root disk can only be mounted if both NVMe drivers are built in.
+    "CONFIG_BLK_DEV_NVME": frozenset({"y"}),
+    "CONFIG_NVME_CORE": frozenset({"y"}),
+}
+BOOT_MODULES = {
+    "CONFIG_TDX_GUEST_DRIVER": "kernel/drivers/virt/coco/tdx-guest/tdx-guest.ko.xz",
+    "CONFIG_TSM_REPORTS": "kernel/drivers/virt/coco/tsm.ko.xz",
+    "CONFIG_CONFIGFS_FS": "kernel/fs/configfs/configfs.ko.xz",
+    "CONFIG_GVE": "kernel/drivers/net/ethernet/google/gve/gve.ko.xz",
+}
+NVME_BUILTINS = frozenset({
+    "kernel/drivers/nvme/host/nvme-core.ko",
+    "kernel/drivers/nvme/host/nvme.ko",
+})
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 CPIO_FIELDS = re.compile(rb"[0-9a-fA-F]{104}\Z")
 
@@ -122,6 +148,66 @@ def package_tree(payload, root, kernel_version):
         if base + name not in signed:
             raise ValueError("reviewed dm-verity module or package metadata is absent")
     return signed
+
+
+def signed_kernel_config(payload, kernel_version):
+    """Read only the exact config from the already hash-checked kernel deb."""
+    target = "./boot/config-" + kernel_version
+    config = None
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as archive:
+        for member in archive:
+            if member.name != target:
+                continue
+            if (config is not None or not member.isfile() or member.size <= 0
+                    or member.uid or member.gid or member.mode != 0o644):
+                raise ValueError("signed kernel config is duplicate or not a regular package file")
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("signed kernel config cannot be read")
+            config = stream.read()
+            if len(config) != member.size:
+                raise ValueError("signed kernel config is truncated")
+    if config is None:
+        raise ValueError("signed kernel package omits its exact config")
+    return config
+
+
+def boot_driver_preflight(config, builtins, signed, kernel_version):
+    """Check package-described boot drivers; this does not prove a TDX boot."""
+    try:
+        lines = config.decode("ascii").splitlines()
+        builtin_lines = builtins.decode("ascii").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError("signed kernel driver metadata is not ASCII") from error
+    values = {}
+    for line in lines:
+        if line.startswith("CONFIG_"):
+            name, separator, value = line.partition("=")
+        elif line.startswith("# CONFIG_") and line.endswith(" is not set"):
+            name, separator, value = line[2:-11], "=", "n"
+        else:
+            continue
+        if name in BOOT_CONFIG:
+            if not separator or name in values:
+                raise ValueError("signed kernel boot config is ambiguous")
+            values[name] = value
+    for name, allowed in BOOT_CONFIG.items():
+        if values.get(name) not in allowed:
+            raise ValueError(f"signed kernel lacks required boot option {name}")
+    if not NVME_BUILTINS <= set(builtin_lines):
+        raise ValueError("signed kernel lacks built-in NVMe root-disk drivers")
+    prefix = "usr/lib/modules/" + kernel_version + "/"
+    module_hashes = {}
+    for option, relative in BOOT_MODULES.items():
+        if values[option] == "m":
+            identity = signed.get(prefix + relative)
+            if identity is None:
+                raise ValueError(f"signed kernel lacks required module {relative}")
+            module_hashes[option] = identity[1]
+    return {"status": "diagnostic-signed-kernel-boot-drivers-unapproved",
+            "kernel_config_sha256": sha256(config),
+            "nvme_builtin": True, "module_sha256": module_hashes,
+            "private_mode_approved": False}
 
 
 def checked_depmod_tool(payload, library_payload, source):
@@ -371,9 +457,16 @@ def inspect(base_sha256, base_bytes, final, final_sha256, final_bytes,
     depmod = checked_depmod_tool(kmod, libkmod, source)
     with tempfile.TemporaryDirectory(prefix="zrpc-final-initrd-", dir=workspace) as scratch:
         root = Path(scratch)
-        signed = package_tree(kernel, root, source.guest.prepare.KERNEL_VERSION)
+        kernel_version = source.guest.prepare.KERNEL_VERSION
+        signed = package_tree(kernel, root, kernel_version)
         expected, generated = reconstructed_members(
-            root, signed, source.guest.prepare.KERNEL_VERSION, depmod)
+            root, signed, kernel_version, depmod)
+        builtin_name = "usr/lib/modules/" + kernel_version + "/modules.builtin"
+        builtins = (root / builtin_name).read_bytes()
+        if ((len(builtins), sha256(builtins)) != signed[builtin_name][:2]):
+            raise ValueError("signed kernel built-in inventory changed")
+        boot_drivers = boot_driver_preflight(
+            signed_kernel_config(kernel, kernel_version), builtins, signed, kernel_version)
         descriptor = os.open(final, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             before = os.fstat(descriptor)
@@ -415,4 +508,5 @@ def inspect(base_sha256, base_bytes, final, final_sha256, final_bytes,
             "libkmod_package_sha256": libkmod_entry["sha256"],
             "reviewed_module_count": len(MODULES),
             "reconstructed_metadata_count": len(generated),
+            "boot_driver_preflight": boot_drivers,
             **report, "private_mode_approved": False}

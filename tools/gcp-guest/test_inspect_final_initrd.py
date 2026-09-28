@@ -6,8 +6,11 @@ import hashlib
 import io
 from pathlib import Path
 import stat
+import tarfile
+import tempfile
 import types
 import unittest
+from unittest import mock
 
 import inspect_final_initrd as final
 import prepare_initrd_basetree_profile as source
@@ -19,6 +22,15 @@ CONTENTS = {FILE: b"reviewed module bytes", METADATA: b"reviewed depmod bytes"}
 IDENTITIES = {name: (len(data), hashlib.sha256(data).hexdigest(), 0o644)
               for name, data in CONTENTS.items()}
 SOURCE = types.SimpleNamespace(exact=source.exact, padded=source.padded)
+KERNEL = "test-kernel"
+BOOT_CONFIG = ("\n".join(
+    f"{name}={next(iter(allowed))}" for name, allowed in sorted(final.BOOT_CONFIG.items())
+    if name != "CONFIG_CONFIGFS_FS") + "\nCONFIG_CONFIGFS_FS=m\n").encode()
+BUILTINS = ("\n".join(sorted(final.NVME_BUILTINS)) + "\n").encode()
+BOOT_MODULES = {
+    "usr/lib/modules/" + KERNEL + "/" + relative: (4, "a" * 64, 0o644)
+    for relative in final.BOOT_MODULES.values()
+}
 
 
 def newc_member(name, data=b"", mode=stat.S_IFREG | 0o644, nlink=1, uid=0,
@@ -127,6 +139,113 @@ class FinalInitrdTests(unittest.TestCase):
                 final.decompress_single_zstd_frame(changed, library_path, len(payload))
         with self.assertRaisesRegex(ValueError, "exceeds reconstructed package size"):
             final.decompress_single_zstd_frame(frame, library_path, len(payload) - 1)
+
+    def test_boot_profile_requires_signed_modules_and_builtin_nvme(self):
+        report = final.boot_driver_preflight(BOOT_CONFIG, BUILTINS, BOOT_MODULES, KERNEL)
+        self.assertEqual(report["nvme_builtin"], True)
+        self.assertEqual(report["private_mode_approved"], False)
+        self.assertIn("unapproved", report["status"])
+        for missing in BOOT_MODULES:
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "module"):
+                final.boot_driver_preflight(
+                    BOOT_CONFIG, BUILTINS, {key: value for key, value in BOOT_MODULES.items()
+                                            if key != missing}, KERNEL)
+        for missing in final.NVME_BUILTINS:
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "NVMe"):
+                final.boot_driver_preflight(BOOT_CONFIG, BUILTINS.replace(
+                    (missing + "\n").encode(), b""), BOOT_MODULES, KERNEL)
+
+    def test_boot_profile_rejects_missing_disabled_modular_and_ambiguous_options(self):
+        for option, allowed in final.BOOT_CONFIG.items():
+            value = "m" if option == "CONFIG_CONFIGFS_FS" else next(iter(allowed))
+            original = f"{option}={value}".encode()
+            with self.subTest(option=option, disabled=True), self.assertRaisesRegex(
+                    ValueError, option):
+                final.boot_driver_preflight(BOOT_CONFIG.replace(
+                    original, f"{option}=n".encode()), BUILTINS, BOOT_MODULES, KERNEL)
+            with self.subTest(option=option, missing=True), self.assertRaisesRegex(
+                    ValueError, option):
+                final.boot_driver_preflight(BOOT_CONFIG.replace(
+                    original + b"\n", b""), BUILTINS, BOOT_MODULES, KERNEL)
+        with self.assertRaisesRegex(ValueError, "CONFIG_BLK_DEV_NVME"):
+            final.boot_driver_preflight(BOOT_CONFIG.replace(
+                b"CONFIG_BLK_DEV_NVME=y", b"CONFIG_BLK_DEV_NVME=m"),
+                BUILTINS, BOOT_MODULES, KERNEL)
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            final.boot_driver_preflight(BOOT_CONFIG + b"CONFIG_GVE=m\n",
+                                        BUILTINS, BOOT_MODULES, KERNEL)
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            final.boot_driver_preflight(BOOT_CONFIG + b"# CONFIG_GVE is not set\n",
+                                        BUILTINS, BOOT_MODULES, KERNEL)
+        with self.assertRaisesRegex(ValueError, "ASCII"):
+            final.boot_driver_preflight(BOOT_CONFIG + b"\xff", BUILTINS,
+                                        BOOT_MODULES, KERNEL)
+
+    def test_kernel_config_must_be_one_exact_regular_signed_package_member(self):
+        def package(entries):
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w:xz") as archive:
+                for name, contents, kind in entries:
+                    member = tarfile.TarInfo(name)
+                    member.mode = 0o644
+                    member.type = kind
+                    member.size = len(contents) if kind == tarfile.REGTYPE else 0
+                    archive.addfile(member, io.BytesIO(contents) if kind == tarfile.REGTYPE
+                                    else None)
+            return output.getvalue()
+
+        correct = ("./boot/config-" + KERNEL, BOOT_CONFIG, tarfile.REGTYPE)
+        self.assertEqual(final.signed_kernel_config(package([correct]), KERNEL), BOOT_CONFIG)
+        for entries in ([], [correct, correct],
+                        [(correct[0], b"", tarfile.SYMTYPE)],
+                        [("./boot/config-other", BOOT_CONFIG, tarfile.REGTYPE)]):
+            with self.subTest(entries=entries), self.assertRaises(ValueError):
+                final.signed_kernel_config(package(entries), KERNEL)
+
+    def test_final_initrd_inspection_cannot_report_success_without_boot_profile(self):
+        base, suffix = b"base", b"suffix"
+        names = {"kernel": "linux-image-test", "kmod": "kmod", "libkmod": "libkmod2"}
+        entries = {
+            label: {"name": name, "version": "1" if label == "kernel" else "34.2-2",
+                    "architecture": "amd64", "sha256": "a" * 64}
+            for label, name in names.items()
+        }
+        profile = types.SimpleNamespace(
+            exact=source.exact,
+            guest=types.SimpleNamespace(prepare=types.SimpleNamespace(
+                KERNEL_PACKAGE=names["kernel"], KERNEL_PACKAGE_VERSION="1",
+                KERNEL_VERSION=KERNEL)))
+
+        def stage_modules(_payload, root, _version):
+            path = root / "usr/lib/modules" / KERNEL / "modules.builtin"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(BUILTINS)
+            return {**BOOT_MODULES, "usr/lib/modules/" + KERNEL + "/modules.builtin":
+                    (len(BUILTINS), final.sha256(BUILTINS), 0o644)}
+
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "final.initrd"
+            artifact.write_bytes(base + suffix)
+            arguments = (final.sha256(base), len(base), artifact,
+                         final.sha256(base + suffix), len(base + suffix),
+                         artifact, entries["kernel"], artifact, entries["kmod"],
+                         artifact, entries["libkmod"], artifact, directory, profile)
+            with (mock.patch.object(final, "checked_package", return_value=b"signed package"),
+                  mock.patch.object(final, "checked_depmod_tool", return_value=artifact),
+                  mock.patch.object(final, "package_tree", side_effect=stage_modules),
+                  mock.patch.object(final, "reconstructed_members",
+                                    return_value=({"reviewed": (1, "b" * 64, 0o644)}, set())),
+                  mock.patch.object(final, "signed_kernel_config", return_value=BOOT_CONFIG)
+                  as config,
+                  mock.patch.object(final, "decompress_single_zstd_frame", return_value=b"cpio"),
+                  mock.patch.object(final, "parse_cpio", return_value={"file_count": 1})):
+                report = final.inspect(*arguments)
+                self.assertEqual(report["boot_driver_preflight"]["nvme_builtin"], True)
+                self.assertEqual(report["private_mode_approved"], False)
+                config.return_value = BOOT_CONFIG.replace(
+                    b"CONFIG_BLK_DEV_NVME=y", b"CONFIG_BLK_DEV_NVME=m")
+                with self.assertRaisesRegex(ValueError, "CONFIG_BLK_DEV_NVME"):
+                    final.inspect(*arguments)
 
 
 if __name__ == "__main__":
