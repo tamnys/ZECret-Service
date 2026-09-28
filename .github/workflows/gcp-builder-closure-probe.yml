@@ -534,16 +534,17 @@ jobs:
                 "$chroot_command" "$staged" "$@"
             }
             # Pinned mkosi still runs its sysusers/tmpfiles/preset/depmod/
-            # firstboot/hwdb and output stages. This exercises those stages
-            # only for a root directory; the account-file comparison below
-            # does not audit the rest of the tree or establish bootability.
+            # firstboot/hwdb and output stages. The checks below report
+            # produced-root differences without approving any generated effect.
             run_staged_root /usr/bin/python3 -I - <<"PY"
           import json
+          import hashlib
           from pathlib import Path
           import sys
 
           sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
           import audit_mkosi_root_accounts as account_audit
+          import audit_mkosi_root_tree as tree_audit
           import build_guest_accounts as accounts
           import prepare_guest_basetree_profile as diagnostic
 
@@ -586,6 +587,34 @@ jobs:
                   or compared["private_mode_approved"] is not False):
               raise ValueError("produced root account audit changed diagnostic status")
           print(json.dumps(compared, sort_keys=True))
+
+          tree = tree_audit.audit(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+              Path("/zrpc-guest-payload-parent/root-basetree"), expected,
+              Path("/zrpc-guest-payload-parent/mkosi-root-profile"), workspace,
+          )
+          deltas = tree["differences"]
+          if (tree["status"] not in {tree_audit.STATUS, tree_audit.DELTA_STATUS}
+                  or (tree["status"] == tree_audit.DELTA_STATUS) != bool(deltas)
+                  or tree["authenticated_inputs_exact"] is not (not deltas)
+                  or tree["generated_effects_approved"] is not False
+                  or tree["mkosi_execution_verified"] is not False
+                  or tree["post_mkosi_tree_audited"] is not False
+                  or tree["disk_image_built"] is not False
+                  or tree["boot_verified"] is not False
+                  or tree["private_mode_approved"] is not False):
+              raise ValueError("produced root delta report changed diagnostic status")
+          delta_bytes = (json.dumps(deltas, sort_keys=True,
+                                    separators=(",", ":")) + "\n").encode()
+          summary = {key: value for key, value in tree.items()
+                     if key != "differences"}
+          summary["difference_count"] = len(deltas)
+          summary["difference_sha256"] = hashlib.sha256(delta_bytes).hexdigest()
+          print(json.dumps(summary, sort_keys=True))
+          for difference in deltas:
+              print(json.dumps({"unreviewed_root_delta": difference}, sort_keys=True))
+          print("::warning::Mkosi root comparison is diagnostic only; no generated "
+                "effects, boot artifact, or private mode are approved")
           PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"

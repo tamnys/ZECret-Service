@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -30,25 +31,44 @@ class ProducedRootAuditTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.workspace = Path(temporary.name)
         self.profile = self.workspace / "profile"
+        self.account_artifact = self.workspace / "expected-accounts"
         self.root = self.workspace / "profile-output" / audit.profile.OUTPUT_NAME
         self.root.mkdir(parents=True, mode=0o700)
         (self.root / "bin").mkdir(mode=0o755)
         (self.root / "etc").mkdir(mode=0o755)
+        (self.root / "usr/lib/sysusers.d").mkdir(parents=True, mode=0o755)
         (self.root / "bin/runner").write_bytes(b"signed executable\n")
         (self.root / "bin/runner").chmod(0o755)
         (self.root / "etc/config").write_bytes(b"signed configuration\n")
         (self.root / "etc/config").chmod(0o644)
         (self.root / "bin/alias").symlink_to("runner")
         os.link(self.root / "bin/runner", self.root / "bin/runner-hardlink")
+        self.account_files = {
+            "passwd": (b"synthetic passwd\n", 0o644),
+            "group": (b"synthetic group\n", 0o644),
+            "shadow": (b"synthetic shadow\n", 0o644),
+        }
+        self.project = b"synthetic project sysusers\n"
+        for name, (data, mode) in self.account_files.items():
+            path = self.root / "etc" / name
+            path.write_bytes(data)
+            path.chmod(mode)
+            os.utime(path, ns=(0, 0))
+        (self.root / "usr/lib/sysusers.d/zrpc.conf").write_bytes(self.project)
+        (self.root / "usr/lib/sysusers.d/zrpc.conf").chmod(0o644)
+        os.utime(self.root / "usr/lib/sysusers.d/zrpc.conf", ns=(0, 0))
         for path in (self.root / "bin/runner", self.root / "etc/config",
                      self.root / "bin/alias", self.root / "bin", self.root / "etc",
-                     self.root):
+                     self.root / "usr/lib/sysusers.d", self.root / "usr/lib",
+                     self.root / "usr", self.root):
             os.utime(path, ns=(0, 0), follow_symlinks=False)
         uid, gid = os.getuid(), os.getgid()
         self.entries = [
             source_row(".", "directory", 0o700, uid, gid),
             source_row("bin", "directory", 0o755, uid, gid),
             source_row("etc", "directory", 0o755, uid, gid),
+            source_row("usr", "directory", 0o755, uid, gid),
+            source_row("usr/lib", "directory", 0o755, uid, gid),
             source_row("bin/runner", "file", 0o755, uid, gid,
                        b"signed executable\n"),
             source_row("bin/runner-hardlink", "hardlink", 0o755, uid, gid,
@@ -70,6 +90,7 @@ class ProducedRootAuditTests(unittest.TestCase):
             "status": audit.profile.STATUS,
             "base_tree_sha256": self.source["archive_sha256"],
             "profile_manifest_sha256": "c" * 64,
+            "account_files_preseeded_from_signed_source": True,
             "package_install_configured": False,
             "package_scripts_executed": False,
             "root_directory_built": False, "disk_image_built": False,
@@ -77,22 +98,75 @@ class ProducedRootAuditTests(unittest.TestCase):
         }
 
     def run_audit(self):
+        # The unit test runs without CAP_CHOWN; the real ExtraTrees tar owns
+        # these paths as root. Preserve its parsing, then map only synthetic
+        # overlay owners to this test process for the filesystem scan.
+        compose = audit.expected_input_rows
+
+        def local_owners(entries, account_tree):
+            rows = compose(entries, account_tree)
+            for row in rows:
+                if row["path"] in audit.ACCOUNT_DIRECTORIES | audit.ACCOUNT_FILES:
+                    row["uid"], row["gid"] = os.getuid(), os.getgid()
+            return rows
+
         with (mock.patch.object(audit.base_tree, "verify", return_value=self.source) as verified,
               mock.patch.object(audit.profile, "checked_profile_path",
                                 return_value=self.profile),
               mock.patch.object(audit.profile, "verify_profile",
                                 return_value=self.pinned_profile) as checked_profile,
+              mock.patch.object(audit.profile, "verified_account_files",
+                                return_value=self.account_files),
+              mock.patch.object(audit.profile, "project_sysusers_bytes",
+                                return_value=self.project),
+              mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES,
+                              {"shadow": 0o644}),
+              mock.patch.object(audit, "expected_input_rows",
+                                side_effect=local_owners),
               mock.patch.object(audit.preflight, "authenticated_archives",
                                 return_value=["synthetic signed package"]),
               mock.patch.object(audit.base_tree, "source_plan",
                                 return_value=(None, self.entries))):
             result = audit.audit(Path("/synthetic/metadata"),
                                  Path("/synthetic/archives"),
-                                 Path("/synthetic/artifact"), self.profile,
+                                 Path("/synthetic/artifact"),
+                                 self.account_artifact, self.profile,
                                  self.workspace)
         self.assertEqual(verified.call_count, 2)
         self.assertEqual(checked_profile.call_count, 2)
         return result
+
+    def test_account_overlay_has_only_reviewed_root_owned_paths(self):
+        with mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES,
+                             {"shadow": 0o644}):
+            account_tree = audit.profile.account_tree_bytes(
+                self.project, self.account_files)
+            rows = audit.expected_input_rows(self.entries, account_tree)
+        by_path = {row["path"]: row for row in rows}
+        self.assertEqual(set(by_path) - {row["path"] for row in self.entries},
+                         {"usr/lib/sysusers.d", *audit.ACCOUNT_FILES})
+        for path in audit.ACCOUNT_DIRECTORIES | audit.ACCOUNT_FILES:
+            self.assertEqual((by_path[path]["uid"], by_path[path]["gid"]), (0, 0))
+        self.assertEqual(by_path["etc/passwd"]["sha256"],
+                         hashlib.sha256(self.account_files["passwd"][0]).hexdigest())
+
+    def test_account_overlay_rejects_unreviewed_tar_member(self):
+        source = audit.profile.account_tree_bytes(self.project, self.account_files)
+        rewritten = io.BytesIO()
+        with (tarfile.open(fileobj=io.BytesIO(source), mode="r:") as original,
+              tarfile.open(fileobj=rewritten, mode="w:",
+                           format=tarfile.USTAR_FORMAT) as changed):
+            for member in original:
+                changed.addfile(member, original.extractfile(member)
+                                if member.isfile() else None)
+            extra = tarfile.TarInfo("usr/local/bin/extra")
+            extra.size = len(b"unexpected executable")
+            extra.mode = 0o755
+            changed.addfile(extra, io.BytesIO(b"unexpected executable"))
+        with (mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES,
+                              {"shadow": 0o644}),
+              self.assertRaisesRegex(ValueError, "unreviewed path")):
+            audit.expected_input_rows(self.entries, rewritten.getvalue())
 
     @staticmethod
     def changed(result):
@@ -101,11 +175,12 @@ class ProducedRootAuditTests(unittest.TestCase):
 
     def test_exact_source_baseline_is_still_not_boot_or_private_approval(self):
         result = self.run_audit()
-        self.assertEqual(result["status"], audit.STATUS)
+        self.assertEqual(result["status"], audit.STATUS, result["differences"])
         self.assertEqual(result["differences"], [])
-        self.assertTrue(result["source_baseline_exact"])
-        self.assertEqual(result["signed_entry_count"], len(self.entries))
-        self.assertEqual(result["produced_entry_count"], len(self.entries))
+        self.assertTrue(result["authenticated_inputs_exact"])
+        self.assertEqual(result["signed_base_entry_count"], len(self.entries))
+        self.assertEqual(result["authenticated_input_entry_count"], len(self.entries) + 5)
+        self.assertEqual(result["produced_entry_count"], len(self.entries) + 5)
         for field in ("generated_effects_approved", "post_mkosi_tree_audited",
                       "mkosi_execution_verified", "disk_image_built",
                       "boot_verified", "private_mode_approved"):
@@ -117,11 +192,18 @@ class ProducedRootAuditTests(unittest.TestCase):
         (self.root / "usr/local/bin/exec").chmod(0o755)
         (self.root / "etc/other.conf").write_bytes(b"unreviewed configuration")
         result = self.run_audit()
-        self.assertEqual(result["status"], "blocked")
-        self.assertFalse(result["source_baseline_exact"])
+        self.assertEqual(result["status"], audit.DELTA_STATUS)
+        self.assertFalse(result["authenticated_inputs_exact"])
         self.assertIn(("usr/local/bin/exec", "added"), self.changed(result))
         self.assertIn(("etc/other.conf", "added"), self.changed(result))
         self.assertFalse(result["generated_effects_approved"])
+
+    def test_changed_signed_account_file_is_reported_as_delta(self):
+        (self.root / "etc/passwd").write_bytes(b"changed synthetic passwd\n")
+        result = self.run_audit()
+        self.assertEqual(result["status"], audit.DELTA_STATUS)
+        self.assertIn(("etc/passwd", "content"), self.changed(result))
+        self.assertFalse(result["post_mkosi_tree_audited"])
 
     def test_changed_content_mode_and_link_target_are_reported(self):
         (self.root / "etc/config").write_bytes(b"changed configuration\n")
@@ -160,6 +242,8 @@ class ProducedRootAuditTests(unittest.TestCase):
         outside.mkdir()
         (outside / "secret").write_text("outside-canary")
         (self.root / "etc/config").unlink()
+        for name in self.account_files:
+            (self.root / "etc" / name).unlink()
         (self.root / "etc").rmdir()
         (self.root / "etc").symlink_to(outside)
         result = self.run_audit()
@@ -184,7 +268,8 @@ class ProducedRootAuditTests(unittest.TestCase):
               mock.patch.object(audit, "scan_root") as scan):
             with self.assertRaisesRegex(ValueError, "changed diagnostic state"):
                 audit.audit(Path("/synthetic/metadata"), Path("/synthetic/archives"),
-                            Path("/synthetic/artifact"), self.profile,
+                            Path("/synthetic/artifact"), self.account_artifact,
+                            self.profile,
                             self.workspace)
         scan.assert_not_called()
 
@@ -197,13 +282,20 @@ class ProducedRootAuditTests(unittest.TestCase):
                                 return_value=self.profile),
               mock.patch.object(audit.profile, "verify_profile",
                                 return_value=self.pinned_profile),
+              mock.patch.object(audit.profile, "verified_account_files",
+                                return_value=self.account_files),
+              mock.patch.object(audit.profile, "project_sysusers_bytes",
+                                return_value=self.project),
+              mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES,
+                              {"shadow": 0o644}),
               mock.patch.object(audit.preflight, "authenticated_archives",
                                 return_value=["synthetic signed package"]),
               mock.patch.object(audit.base_tree, "source_plan",
                                 return_value=(None, self.entries))):
             with self.assertRaisesRegex(ValueError, "output directory is redirected"):
                 audit.audit(Path("/synthetic/metadata"), Path("/synthetic/archives"),
-                            Path("/synthetic/artifact"), self.profile,
+                            Path("/synthetic/artifact"), self.account_artifact,
+                            self.profile,
                             self.workspace)
 
     def test_special_files_and_replaced_source_are_blocked(self):
@@ -218,13 +310,20 @@ class ProducedRootAuditTests(unittest.TestCase):
                                 return_value=self.profile),
               mock.patch.object(audit.profile, "verify_profile",
                                 return_value=self.pinned_profile),
+              mock.patch.object(audit.profile, "verified_account_files",
+                                return_value=self.account_files),
+              mock.patch.object(audit.profile, "project_sysusers_bytes",
+                                return_value=self.project),
+              mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES,
+                              {"shadow": 0o644}),
               mock.patch.object(audit.preflight, "authenticated_archives",
                                 return_value=["synthetic signed package"]),
               mock.patch.object(audit.base_tree, "source_plan",
                                 return_value=(None, self.entries))):
             with self.assertRaisesRegex(ValueError, "changed during root scan"):
                 audit.audit(Path("/synthetic/metadata"), Path("/synthetic/archives"),
-                            Path("/synthetic/artifact"), self.profile,
+                            Path("/synthetic/artifact"), self.account_artifact,
+                            self.profile,
                             self.workspace)
 
     def test_cli_failure_keeps_every_acceptance_flag_false(self):
@@ -233,6 +332,7 @@ class ProducedRootAuditTests(unittest.TestCase):
             code = audit.main(["--metadata", "/synthetic/metadata",
                                "--archives", "/synthetic/archives",
                                "--artifact", "/synthetic/artifact",
+                               "--account-artifact", str(self.account_artifact),
                                "--profile", str(self.profile),
                                "--workspace", str(self.workspace)])
         self.assertEqual(code, 1)
@@ -240,6 +340,24 @@ class ProducedRootAuditTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertFalse(result["post_mkosi_tree_audited"])
         self.assertFalse(result["private_mode_approved"])
+
+    def test_cli_unreviewed_delta_succeeds_only_as_diagnostic(self):
+        (self.root / "etc/config").write_bytes(b"changed")
+        report = self.run_audit()
+        self.assertEqual(report["status"], audit.DELTA_STATUS)
+        with (mock.patch.object(audit, "audit", return_value=report),
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            code = audit.main(["--metadata", "/synthetic/metadata",
+                               "--archives", "/synthetic/archives",
+                               "--artifact", "/synthetic/artifact",
+                               "--account-artifact", str(self.account_artifact),
+                               "--profile", str(self.profile),
+                               "--workspace", str(self.workspace)])
+        self.assertEqual(code, 0)
+        encoded = json.loads(output.getvalue())
+        self.assertEqual(encoded["status"], audit.DELTA_STATUS)
+        self.assertFalse(encoded["generated_effects_approved"])
+        self.assertFalse(encoded["private_mode_approved"])
 
 
 if __name__ == "__main__":
