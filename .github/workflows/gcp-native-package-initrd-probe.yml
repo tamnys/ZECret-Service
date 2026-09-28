@@ -140,6 +140,10 @@ jobs:
             --scratch "/var/tmp/zrpc-owner-map-initrd-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             -- /usr/bin/bash -c '
             set -euo pipefail
+            if test "$#" -ne 12; then
+              echo "namespace builder handoff argument count differs" >&2
+              exit 1
+            fi
             staged=$1
             test "$staged" = "$6/staged"
             test "$(readlink /proc/self/ns/user)" != "$2"
@@ -231,14 +235,15 @@ jobs:
           print(json.dumps({"builder": builder, "signed_guest": signed,
                             "private_mode_approved": False}, sort_keys=True))
           PY
-            # APT runs mkosi's Pre-Install-Pkgs hook through /bin/sh before
-            # extracting the guest. Check the signed builder's merged-usr
-            # links and execute the hook's shell/redirection in this same
+            # APT runs the mkosi Pre-Install-Pkgs hook through /bin/sh before
+            # extracting the guest. Check signed merged-usr links and exercise
+            # the hook shell and redirection in this same
             # read-only, no-route staged environment.
             test -L "$staged/bin" && test "$(readlink "$staged/bin")" = usr/bin
             test -L "$staged/usr/bin/sh" && test "$(readlink "$staged/usr/bin/sh")" = dash
             test -x "$staged/usr/bin/dash"
-            run_staged /bin/sh -c '\''printf "%s\n" zrpc-hook-probe | cat > /zrpc-apt-scratch/tmp/zrpc-shell-probe && test "$(cat /zrpc-apt-scratch/tmp/zrpc-shell-probe)" = zrpc-hook-probe'\''
+            run_staged /bin/sh -c "cat > /zrpc-apt-scratch/tmp/zrpc-shell-probe" <<< zrpc-hook-probe
+            test "$(run_staged /usr/bin/cat /zrpc-apt-scratch/tmp/zrpc-shell-probe)" = zrpc-hook-probe
             args=(--metadata /zrpc-metadata --archives /zrpc-guest-archives
                   --rust-bundle /workspace/rust-bundle --revision "$revision"
                   --profile /workspace/package-initrd-profile
