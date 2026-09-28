@@ -312,7 +312,8 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("ExtraTrees=rootfs", initrd)
         self.assertIn("FinalizeScripts=audit-initrd.py", initrd)
         for relative in ("/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",
-                         "/usr/bin/perl", "/usr/bin/perl5.40.1"):
+                         "/usr/bin/perl", "/usr/bin/perl5.40.1",
+                         "/var/log/journal", "/var/mail"):
             self.assertIn(relative, prepare.INITRD_REMOVE_FILES)
             self.assertIn(relative, initrd)
         audit = output / "mkosi.images/initrd/audit-initrd.py"
@@ -383,6 +384,8 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.images/initrd/mkosi.conf", "autovt@.service,", ""),
             ("mkosi.images/initrd/mkosi.conf", "multi-user.target.wants/getty.target,", ""),
             ("mkosi.images/initrd/mkosi.conf", "boot/loader,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "var/log/journal,", ""),
+            ("mkosi.images/initrd/mkosi.conf", "var/mail,", ""),
             ("mkosi.images/initrd/mkosi.conf", "etc/ssh,", ""),
             ("mkosi.images/initrd/mkosi.conf", "20-systemd-ssh-generator.conf,", ""),
             ("mkosi.images/initrd/mkosi.conf", "usr/sbin/unix_chkpwd,", ""),

@@ -56,6 +56,9 @@ FORBIDDEN_TREES = (
 FORBIDDEN_FILES = (
     "usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
 )
+FORBIDDEN_DIRECTORIES = (
+    "var/log/journal", "var/mail",
+)
 CREDENTIAL_TREES = (
     "etc/credstore", "etc/credstore.encrypted", "usr/lib/credstore",
     "usr/lib/credstore.encrypted",
@@ -129,6 +132,9 @@ def audit(root, expected_init_sha256=EXPECTED_INIT_SHA256):
     for relative in FORBIDDEN_FILES:
         if present(root / relative):
             raise ValueError(f"initrd forbidden file remains: {relative}")
+    for relative in FORBIDDEN_DIRECTORIES:
+        if present(root / relative):
+            raise ValueError(f"initrd forbidden directory remains: {relative}")
     for relative in CREDENTIAL_TREES:
         path = root / relative
         if path.is_symlink() or (path.is_dir() and any(path.iterdir())) or (present(path) and not path.is_dir()):

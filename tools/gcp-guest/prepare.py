@@ -53,6 +53,8 @@ INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/runlevel1.target",
     "/usr/lib/systemd/systemd-sulogin-shell",
     "/boot/loader",
+    "/var/log/journal",
+    "/var/mail",
     "/etc/ssh",
     "/usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
     "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",

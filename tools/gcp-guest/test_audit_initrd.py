@@ -70,6 +70,18 @@ class InitrdAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "forbidden file remains: usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"):
             audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_generated_journal_and_mail_directories_rejected_even_when_empty(self):
+        for relative, mode in (("var/log/journal", 0o2755),
+                               ("var/mail", 0o2775)):
+            with self.subTest(relative=relative):
+                directory = self.root / relative
+                directory.mkdir(parents=True)
+                directory.chmod(mode)
+                with self.assertRaisesRegex(ValueError, f"forbidden directory remains: {relative}"):
+                    audit_initrd.audit(self.root, self.init_sha256)
+                directory.rmdir()
+                audit_initrd.audit(self.root, self.init_sha256)
+
     def test_perl_executables_removed_from_initrd(self):
         for relative in ("usr/bin/perl", "usr/bin/perl5.40.1"):
             with self.subTest(relative=relative):
