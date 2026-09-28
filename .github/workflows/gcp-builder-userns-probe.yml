@@ -35,5 +35,6 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/source"
-          python3 -I -B tools/gcp-guest/probe_builder_userns.py parent \
-            --scratch "$GITHUB_WORKSPACE/userns-probe"
+          sudo -n /usr/bin/python3 -I -B \
+            "$GITHUB_WORKSPACE/source/tools/gcp-guest/probe_builder_userns.py" \
+            parent --parent-mode root --scratch "$GITHUB_WORKSPACE/userns-probe"

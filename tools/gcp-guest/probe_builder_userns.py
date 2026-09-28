@@ -82,7 +82,7 @@ def child(arguments):
         "status": "diagnostic-child-userns-capabilities-present-unbuilt",
         "native_x86_64_linux": True,
         "user_mount_network_pid_namespaces_separated": True,
-        "single_runner_uid_gid_mapping": True,
+        "single_parent_uid_gid_mapping": True,
         "pid_specific_proc_mounted": True,
         "only_loopback_interface_and_routes_observed": True,
         "parent_network_setns_denied_eperm": True,
@@ -98,8 +98,10 @@ def child(arguments):
 def parent(arguments):
     if sys.platform != "linux" or os.uname().machine != "x86_64":
         raise ValueError("native x86_64 Linux runner required")
-    if os.geteuid() == 0:
-        raise ValueError("runner must enter the child user namespace unprivileged")
+    if arguments.parent_mode == "unprivileged" and os.geteuid() == 0:
+        raise ValueError("unprivileged probe parent unexpectedly has root")
+    if arguments.parent_mode == "root" and os.geteuid() != 0:
+        raise ValueError("root probe parent lacks the explicit root identity")
     scratch = Path(arguments.scratch)
     if not scratch.is_absolute() or scratch.exists() or scratch.is_symlink():
         raise ValueError("fresh absolute mount probe scratch required")
@@ -126,6 +128,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("parent", "child"))
     parser.add_argument("--scratch", required=True)
+    parser.add_argument("--parent-mode", choices=("unprivileged", "root"),
+                        default="unprivileged")
     parser.add_argument("--parent-net-fd", type=int)
     parser.add_argument("--parent-uid", type=int)
     parser.add_argument("--parent-gid", type=int)
