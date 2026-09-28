@@ -186,6 +186,10 @@ def assemble(*, revision, rust_bundle, zebra_stage, guest_metadata,
         source = guest_archives / (package["sha256"] + ".deb")
         target = inputs / package["path"]
         copy_checked(source, target, package["sha256"], package["size"])
+    for role, package in prepare.DISK_TOOL_PACKAGES.items():
+        source = guest_archives / (package["sha256"] + ".deb")
+        copy_checked(source, inputs / role, package["sha256"], package["size"])
+        artifacts[role] = {"path": role, "sha256": package["sha256"]}
     if set(artifacts) != prepare.ROLES:
         raise ValueError("assembled roles differ from production schema")
     lock = {"schema_version": 6, "mkosi_source_commit": prepare.SOURCE_COMMIT,

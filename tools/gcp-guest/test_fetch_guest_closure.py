@@ -28,6 +28,9 @@ class GuestFetchTests(unittest.TestCase):
             prefix="gcp-guest-fetch-synthetic-", dir=os.environ.get("CODEX_TMP_DIR"),
         )
         self.addCleanup(self.temporary.cleanup)
+        self.disk_packages = mock.patch.object(fetcher.prepare, "DISK_TOOL_PACKAGES", {})
+        self.disk_packages.start()
+        self.addCleanup(self.disk_packages.stop)
         self.root = Path(self.temporary.name)
         self.metadata = self.root / "metadata"
         self.metadata.mkdir()
@@ -204,6 +207,29 @@ class GuestFetchTests(unittest.TestCase):
                 lambda _: self.fail("cached archive unexpectedly used network"),
             )
             self.assertEqual((report["downloaded_count"], report["reused_count"]), (0, 1))
+
+    def test_disk_tool_archive_requires_signed_index_and_cached_bytes(self):
+        tool_bytes = b"!<arch>\nsynthetic disk tool"
+        tool = {
+            "name": "nvme-cli", "version": "2.13-synthetic", "architecture": "amd64",
+            "filename": "pool/main/n/nvme-cli/nvme-cli_synthetic_amd64.deb",
+            "size": len(tool_bytes), "sha256": hashlib.sha256(tool_bytes).hexdigest(),
+        }
+        self.records[(tool["name"], tool["version"], tool["architecture"])] = {
+            "Filename": tool["filename"], "Size": str(tool["size"]),
+            "SHA256": tool["sha256"],
+        }
+        with mock.patch.object(fetcher.prepare, "DISK_TOOL_PACKAGES", {"nvme_cli_deb": tool}):
+            with self.overrides():
+                with self.assertRaisesRegex(ValueError, "archive absent"):
+                    self.verify_cached()
+                self.prefetch(lambda request: Response(
+                    self.archive if request.full_url.endswith(self.package["filename"])
+                    else tool_bytes, request.full_url))
+                self.assertTrue(self.verify_cached()["archive_bytes_checked"])
+                self.records[(tool["name"], tool["version"], tool["architecture"])]["SHA256"] = "00" * 32
+                with self.assertRaisesRegex(ValueError, "differs from signed Debian index"):
+                    self.verify_cached()
 
     def test_bad_download_and_redirect_publish_no_archive(self):
         with self.overrides():

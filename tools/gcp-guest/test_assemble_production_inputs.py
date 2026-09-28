@@ -205,7 +205,8 @@ class SyntheticAssemblyPlumbingTests(unittest.TestCase):
             package = b"synthetic-package"
             (archives / (digest(package) + ".deb")).write_bytes(package)
             names = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker",
-                     "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie",
+                     "guard": "zrpc-gcp-guard", "disk_id": "zrpc-gcp-disk-id",
+                     "cookie": "zrpc-gcp-cookie",
                      "early_init": "zrpc-gcp-early-init"}
             rust_roles = {}
             for role, name in names.items():
@@ -230,7 +231,7 @@ class SyntheticAssemblyPlumbingTests(unittest.TestCase):
             validate = mock.Mock()
             prepare = types.SimpleNamespace(
                 SOURCE_COMMIT="c" * 40, KERNEL_VERSION="synthetic-kernel",
-                ROLES=roles, validate_lock=validate)
+                ROLES=roles, DISK_TOOL_PACKAGES={}, validate_lock=validate)
             guest = types.SimpleNamespace(
                 prepare=prepare, SIGNED_RELEASE_EPOCH=1,
                 SNAPSHOT="synthetic-snapshot", INRELEASE_SHA256=digest(inrelease),

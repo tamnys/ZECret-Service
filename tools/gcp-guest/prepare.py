@@ -7,6 +7,7 @@ credential discovery, image builder, signing operation or scheduler is invoked.
 import argparse
 import configparser
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -16,9 +17,11 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import uuid
 
 import debian_snapshot
+import verify_builder_closure
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "deploy/gcp/guest"
@@ -37,9 +40,28 @@ SOURCE_COMMIT = "54c625c380ef5500f17460981a3c67b109b6a847"
 KERNEL_VERSION = "6.12.107+deb13-cloud-amd64"
 KERNEL_PACKAGE = f"linux-image-{KERNEL_VERSION}"
 KERNEL_PACKAGE_VERSION = "6.12.107-1"
-BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
+BINARIES = {"wrapper": "zrpc-node-wrapper", "broker": "zrpc-gcp-quote-broker", "guard": "zrpc-gcp-guard", "disk_id": "zrpc-gcp-disk-id", "cookie": "zrpc-gcp-cookie", "zebra": "zebrad"}
 EARLY_INIT_ROLE = "early_init"
-ROLES = set(BINARIES) | {EARLY_INIT_ROLE, "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
+# These are signed Debian archives, extracted as inert data. Their package
+# scripts, NVMe-oF units, udev rules, CLI plugins, UUID daemon, and the
+# uuid-runtime/adduser/passwd dependency closure are never installed.
+DISK_TOOL_PACKAGES = {
+    "nvme_cli_deb": {"name": "nvme-cli", "version": "2.13-2", "architecture": "amd64", "filename": "pool/main/n/nvme-cli/nvme-cli_2.13-2_amd64.deb", "size": 801800, "sha256": "cd78752dd935ba71c676fc6cb1fd0b3d671c447bff33677caf4a20b2f32921d4"},
+    "libnvme_deb": {"name": "libnvme1t64", "version": "1.13-2", "architecture": "amd64", "filename": "pool/main/libn/libnvme/libnvme1t64_1.13-2_amd64.deb", "size": 81324, "sha256": "1de883115b82a991b7b1b456177c4d4ab122d6ecc1db106d649cf0203cf04745"},
+    "libkeyutils_deb": {"name": "libkeyutils1", "version": "1.6.3-6", "architecture": "amd64", "filename": "pool/main/k/keyutils/libkeyutils1_1.6.3-6_amd64.deb", "size": 9456, "sha256": "0b11ad17be0300b63ad4eeb4c6450fed24d34b7b740f23e5363dcb29ee6d5eba"},
+}
+DISK_TOOL_ELFS = {
+    "usr/sbin/nvme": ("nvme_cli_deb", "usr/sbin/nvme", 1477760, "2ecb01494cd51dc4793f14ce30bdd18133f0caad48316e7d7c8093c687957140"),
+    "usr/lib/x86_64-linux-gnu/libnvme.so.1": ("libnvme_deb", "libnvme.so.1", 209096, "49eb38e4e8952b4f38946562d35419354209116082bce9172bd969faa3293c85"),
+    "usr/lib/x86_64-linux-gnu/libnvme-mi.so.1": ("libnvme_deb", "libnvme-mi.so.1", 35392, "c9066ca1ab54637064ccd4f0b2c8dce13563ac3591d53f3417e2e1db935feac0"),
+    "usr/lib/x86_64-linux-gnu/libkeyutils.so.1": ("libkeyutils_deb", "libkeyutils.so.1", 22448, "e5d5a7450d08eff7d4bbcaac75ef2b94d3447c81a1b2ddf3ab85d2de4709a9a8"),
+}
+PINNED_DISK_FILES = {
+    "etc/fstab": "9ea5dfdcd0381e01357a1fabaf36a7b612151c9f2e6e49b627718453d4267169",
+    "usr/lib/udev/rules.d/65-gce-disk-naming.rules": "b06b83104359437859d4f497973eede0da1d8b3958afc4aab073d9f94e9d7b19",
+    "usr/lib/systemd/system/zrpc-gcp-disk-trigger.service": "60da51b2fb02e6591a42bdce024594c3f891a314d5622ab88237049ae3ac9737",
+}
+ROLES = set(BINARIES) | set(DISK_TOOL_PACKAGES) | {EARLY_INIT_ROLE, "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 # Builder-only handoff. A later operator build must supply this private key
 # from a memory-backed mount. Staging never checks that mount, copies the key,
 # or treats this reference as evidence of a signed image.
@@ -136,7 +158,7 @@ REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-se
 # selected name; no shipped backend is named "none".
 FIXED_KERNEL_CMDLINE = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service pstore.backend=none panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality"
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service", "systemd-network-generator.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
-FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd"}
+FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd", "nvme-cli", "libnvme1t64", "libkeyutils1", "uuid-runtime", "adduser", "passwd"}
 
 def install_boot_overrides(rootfs):
     """Install the same immutable unit policy in production and root probes."""
@@ -203,6 +225,12 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
                 or stat.S_IMODE(path.stat().st_mode) != source_mode
                 or digest(path) != expected_sha256):
             raise ValueError("reviewed guest account source differs: " + name)
+    for relative, expected_sha256 in PINNED_DISK_FILES.items():
+        path = profile / "rootfs" / relative
+        if (path.is_symlink() or not path.is_file()
+                or stat.S_IMODE(path.stat().st_mode) != 0o644
+                or digest(path) != expected_sha256):
+            raise ValueError("measured public-disk boot input differs: " + relative)
     repart = profile / "repart"
     expected = {"10-root.conf", "20-root-verity.conf", "30-esp.conf"}
     if {path.name for path in repart.iterdir()} != expected:
@@ -421,6 +449,65 @@ def preflight():
                     blockers.append("isolated tmpfs mount/unmount unavailable")
     return {"schema_version": 1, "status": "blocked" if blockers else "capabilities-present-input-review-required", "architecture": platform.machine(), "tools": tools, "blockers": blockers, "image_built": False, "private_mode_approved": False}
 
+def verify_disk_tool_archives(paths, snapshot):
+    """Bind three inert extraction inputs to the same signed Debian index."""
+    epoch, (index_hash, _), index_bytes = debian_snapshot.authenticated_index_bytes(
+        paths["snapshot_inrelease"], paths["packages_index"],
+        snapshot["inrelease_sha256"],
+    )
+    if epoch != snapshot["source_date_epoch"] or index_hash != snapshot["index_sha256"]:
+        raise ValueError("public-disk tool index differs from signed guest snapshot")
+    records = debian_snapshot.package_records(io.BytesIO(index_bytes))
+    for role, entry in DISK_TOOL_PACKAGES.items():
+        record = records.get((entry["name"], entry["version"], entry["architecture"]))
+        if (record is None or any(str(entry[field]) != record.get(index_field)
+                for field, index_field in (("filename", "Filename"), ("size", "Size"),
+                                           ("sha256", "SHA256")))):
+            raise ValueError("public-disk tool differs from signed Debian index: " + role)
+        path = paths[role]
+        if (path.is_symlink() or path.stat().st_size != entry["size"]
+                or digest(path) != entry["sha256"]):
+            raise ValueError("public-disk tool archive differs: " + role)
+
+def disk_tool_member(archive_bytes, member_path, expected_size, expected_sha256):
+    """Select one exact ELF member, never package scripts or other files."""
+    payload = verify_builder_closure.deb_data_tar(archive_bytes)
+    found = None
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as contents:
+        for member in contents:
+            if member.name in (member_path, "./" + member_path):
+                if found is not None or not member.isfile() or member.size != expected_size:
+                    raise ValueError("public-disk tool ELF is ambiguous or changed")
+                with contents.extractfile(member) as stream:
+                    found = stream.read(expected_size + 1)
+    if (found is None or len(found) != expected_size
+            or hashlib.sha256(found).hexdigest() != expected_sha256
+            or found[:6] != b"\x7fELF\x02\x01" or found[18:20] != b"\x3e\x00"):
+        raise ValueError("public-disk tool ELF differs from reviewed signed archive")
+    return found
+
+def stage_disk_tool(rootfs, artifacts):
+    """Copy only four reviewed ELF members into the authenticated root tree."""
+    archives = {}
+    for role, entry in DISK_TOOL_PACKAGES.items():
+        archive = artifacts / role
+        data = archive.read_bytes()
+        if len(data) != entry["size"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            raise ValueError("staged public-disk archive changed: " + role)
+        archives[role] = data
+    for relative, (role, member, size, sha256) in DISK_TOOL_ELFS.items():
+        if member.startswith("lib"):
+            value = verify_builder_closure.package_elf(archives[role], member)
+            if (len(value) != size or hashlib.sha256(value).hexdigest() != sha256):
+                raise ValueError("public-disk shared library differs from reviewed archive")
+        else:
+            value = disk_tool_member(archives[role], member, size, sha256)
+        path = rootfs / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("xb") as stream:
+            stream.write(value)
+        path.chmod(0o555 if member == "usr/sbin/nvme" else 0o444)
+
 def validate_lock(lock, source):
     if set(lock) != {"schema_version", "mkosi_source_commit", "source_date_epoch", "kernel_version", "snapshot", "artifacts", "runtime"} or lock["schema_version"] != 6 or lock["mkosi_source_commit"] != SOURCE_COMMIT:
         raise ValueError("unsupported or incomplete input lock")
@@ -464,7 +551,7 @@ def validate_lock(lock, source):
     # networkd/resolved, stable /dev/disk links, the direct UKI/verity path,
     # x-systemd.makefs for the public ext4 data disk, and mkosi's depmod step
     # need these binaries.
-    if names & FORBIDDEN_PACKAGES or not ({"systemd-boot-efi", "systemd-resolved", "e2fsprogs"} | INITRD_PACKAGES) <= names:
+    if names & FORBIDDEN_PACKAGES or not ({"systemd-boot-efi", "systemd-resolved", "e2fsprogs", "libc6", "libjson-c5", "libssl3t64"} | INITRD_PACKAGES) <= names:
         raise ValueError("guest package surface does not match appliance policy")
     # Signed archive membership authenticates individual packages, but does
     # not authorize a caller to select a different executable/dependency set.
@@ -478,6 +565,7 @@ def validate_lock(lock, source):
     if set(runtime) != {"listen_port", "max_connections", "max_quotes", "quote_spacing_ms", "node_startup_timeout_secs", "node_poll_interval_ms"} or any(type(value) is not int or value <= 0 for value in runtime.values()) or runtime["listen_port"] > 65535:
         raise ValueError("explicit measured runtime limits required")
     snapshot, packages = debian_snapshot.verify_snapshot(lock, paths, source, manifest)
+    verify_disk_tool_archives(paths, snapshot)
     return paths, manifest, snapshot, packages
 
 def stage(lock_path, source, destination):
@@ -562,6 +650,7 @@ def stage(lock_path, source, destination):
     for role, name in BINARIES.items():
         shutil.copyfile(artifacts / role, binaries / name)
         (binaries / name).chmod(0o555)
+    stage_disk_tool(rootfs, artifacts)
     (rootfs / "etc/zrpc").mkdir(parents=True)
     # Zebra otherwise enables a HOME/XDG peer cache outside the public node tree.
     (rootfs / "etc/zrpc/zebra.toml").write_text('[network]\nnetwork = "Testnet"\nlisten_addr = "127.0.0.1:18233"\ncache_dir = false\n[state]\ncache_dir = "/var/lib/zebra"\n[rpc]\nlisten_addr = "127.0.0.1:18232"\ncookie_dir = "/run/zrpc-node"\nenable_cookie_auth = true\n[tracing]\nfilter = "off"\n')

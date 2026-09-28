@@ -1,8 +1,9 @@
-"""Fail-closed tests for the unsigned, deliberately unbootable disk rehearsal."""
+"""Fail-closed tests for both unsigned full-disk rehearsal input modes."""
 
 import json
 from pathlib import Path
 import struct
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
@@ -53,6 +54,46 @@ class DiagnosticDiskTests(unittest.TestCase):
             f"{diagnostic.sha256((output / name).read_bytes())} *{name}\n"
             for name in names))
         return stage
+
+    def boot_receipt(self):
+        bundle = self.root / "native-rust"
+        artifacts = bundle / "artifacts"
+        artifacts.mkdir(parents=True)
+        binary = bytearray(96)
+        binary[:6] = b"\x7fELF\x02\x01"
+        binary[16:18] = b"\x03\x00"
+        binary[18:20] = b"\x3e\x00"
+        binary[64:] = b"TEST_ONLY_NATIVE_RECEIPT_BINARY____"
+        binary = bytes(binary)
+        (artifacts / "zrpc-gcp-early-init").write_bytes(binary)
+        revision = "a" * 40
+        manifest_sha256 = "b" * 64
+        report = {
+            "status": "diagnostic-unsigned-x86_64-rust-inputs-unapproved",
+            "source_commit": revision,
+            "reproduction_manifest_sha256": manifest_sha256,
+            "artifacts": {"early_init": {
+                "path": "early_init", "sha256": diagnostic.sha256(binary)}},
+            "image_built": False,
+            "private_mode_approved": False,
+        }
+        return bundle, revision, binary, report
+
+    def selected(self, report):
+        return SimpleNamespace(report=report, output=lambda _: b"selected source")
+
+    def boot_input_lock(self, inputs, binary):
+        inputs.mkdir()
+        artifacts = {}
+        for role in diagnostic.SYNTHETIC_ROLES | {
+                "secure_boot_certificate", "boot_policy"}:
+            data = (binary if role == "early_init" else
+                    diagnostic.SYNTHETIC_ELF if role in diagnostic.SYNTHETIC_ROLES else
+                    diagnostic.SYNTHETIC_CERTIFICATE if role == "secure_boot_certificate" else
+                    diagnostic.SYNTHETIC_BOOT_POLICY)
+            (inputs / role).write_bytes(data)
+            artifacts[role] = {"path": role, "sha256": diagnostic.sha256(data)}
+        return {"artifacts": artifacts}
 
     def test_missing_esp_root_or_verity_blocks_integrated_inspection(self):
         for index, role in enumerate(("root", "verity", "ESP")):
@@ -148,6 +189,189 @@ class DiagnosticDiskTests(unittest.TestCase):
                                  self.root, self.root, self.root, self.root,
                                  "user:[0]", "net:[0]", "pid:[0]")
             run.assert_not_called()
+
+    def test_boot_receipt_accepts_only_exact_head_native_early_init(self):
+        bundle, revision, binary, report = self.boot_receipt()
+        selected = self.selected(report)
+        with (mock.patch.object(diagnostic, "selected_boot_source", return_value=selected),
+              mock.patch.object(diagnostic.rust_inputs, "inspect", return_value=report) as inspect):
+            observed, manifest = diagnostic.checked_boot_receipt(bundle, revision)
+        self.assertEqual(observed, binary)
+        self.assertEqual(manifest, report["reproduction_manifest_sha256"])
+        inspect.assert_called_once_with(bundle, revision,
+                                        selected_output=selected.output)
+
+        with (mock.patch.object(diagnostic, "selected_boot_source") as source,
+              mock.patch.object(diagnostic.rust_inputs, "inspect", return_value=report) as inspect):
+            with self.assertRaisesRegex(ValueError, "exact-HEAD"):
+                diagnostic.checked_boot_receipt(bundle, "HEAD")
+            source.assert_not_called()
+            inspect.assert_not_called()
+        for changed in (
+                {**report, "source_commit": "c" * 40},
+                {**report, "private_mode_approved": True},
+                {**report, "status": "approved"},
+                {**report, "artifacts": {"early_init": {
+                    "path": "wrapper", "sha256": diagnostic.sha256(binary)}}},
+        ):
+            with self.subTest(receipt=changed):
+                with (mock.patch.object(diagnostic, "selected_boot_source",
+                                        return_value=self.selected(changed)),
+                      mock.patch.object(diagnostic.rust_inputs, "inspect", return_value=changed)):
+                    with self.assertRaisesRegex(ValueError, "cannot supply"):
+                        diagnostic.checked_boot_receipt(bundle, revision)
+        (bundle / "artifacts/zrpc-gcp-early-init").write_bytes(binary + b"changed")
+        with (mock.patch.object(diagnostic, "selected_boot_source", return_value=selected),
+              mock.patch.object(diagnostic.rust_inputs, "inspect", return_value=report)):
+            with self.assertRaisesRegex(ValueError, "differs from exact-HEAD"):
+                diagnostic.checked_boot_receipt(bundle, revision)
+        (bundle / "artifacts/zrpc-gcp-early-init").write_bytes(diagnostic.SYNTHETIC_ELF)
+        synthetic = {**report, "artifacts": {"early_init": {
+            "path": "early_init", "sha256": diagnostic.sha256(diagnostic.SYNTHETIC_ELF)}}}
+        with (mock.patch.object(diagnostic, "selected_boot_source",
+                                return_value=self.selected(synthetic)),
+              mock.patch.object(diagnostic.rust_inputs, "inspect", return_value=synthetic)):
+            with self.assertRaisesRegex(ValueError, "differs from exact-HEAD"):
+                diagnostic.checked_boot_receipt(bundle, revision)
+
+    def test_boot_source_must_match_selected_archive_without_git(self):
+        bundle, revision, _, report = self.boot_receipt()
+        producer = Path(diagnostic.__file__).read_bytes()
+        selected = SimpleNamespace(report=report, output=lambda _: producer)
+        with (mock.patch.object(diagnostic.outer, "checked_package_runner_bytes") as package,
+              mock.patch.object(diagnostic.package_runner, "ReceiptSourceArchive",
+                                return_value=selected)):
+            self.assertIs(diagnostic.selected_boot_source(bundle, revision), selected)
+            package.assert_called_once_with(
+                revision, bundle, Path(diagnostic.__file__).with_name("package_initrd_runner.py"))
+        changed = SimpleNamespace(report=report, output=lambda _: b"changed source")
+        with (mock.patch.object(diagnostic.outer, "checked_package_runner_bytes"),
+              mock.patch.object(diagnostic.package_runner, "ReceiptSourceArchive",
+                                return_value=changed)):
+            with self.assertRaisesRegex(ValueError, "producer differs"):
+                diagnostic.selected_boot_source(bundle, revision)
+
+    def test_boot_input_creation_binds_only_init_and_cannot_approve(self):
+        bundle, revision, binary, report = self.boot_receipt()
+        metadata = self.root / "metadata"
+        archives = self.root / "archives"
+        metadata.mkdir()
+        archives.mkdir()
+        (metadata / "InRelease").write_bytes(b"test signed metadata")
+        (metadata / "Packages.xz").write_bytes(b"test signed package index")
+        package_bytes = b"test signed package archive"
+        package_sha256 = diagnostic.sha256(package_bytes)
+        (archives / (package_sha256 + ".deb")).write_bytes(package_bytes)
+        manifest = [{"path": "debs/package.deb", "size": len(package_bytes),
+                     "sha256": package_sha256}]
+        disk_packages = {role: {"size": len(package_bytes), "sha256": package_sha256}
+                         for role in diagnostic.prepare.DISK_TOOL_PACKAGES}
+        inputs = self.root / "inputs"
+        lock_path = self.root / "inputs.lock.json"
+        with (mock.patch.object(diagnostic, "selected_boot_source",
+                                return_value=self.selected(report)),
+              mock.patch.object(diagnostic.rust_inputs, "inspect", return_value=report),
+              mock.patch.object(diagnostic.guest, "verify_cached_archives", return_value={
+                  "status": "diagnostic-guest-archives-matched-signed-snapshot-unbuilt",
+                  "signed_snapshot_rechecked": True,
+                  "private_mode_approved": False}),
+              mock.patch.object(diagnostic.guest, "reviewed_manifest",
+                                return_value=(b"[]", manifest)),
+              mock.patch.object(diagnostic.prepare, "DISK_TOOL_PACKAGES", disk_packages),
+              mock.patch.object(diagnostic.prepare, "validate_lock")):
+            staged = diagnostic.create_boot_inputs(metadata, archives, inputs,
+                                                   lock_path, bundle, revision)
+        lock = json.loads(lock_path.read_text())
+        for role in disk_packages:
+            self.assertEqual((inputs / role).read_bytes(), package_bytes)
+            self.assertEqual(lock["artifacts"][role]["sha256"], package_sha256)
+        self.assertEqual((inputs / "early_init").read_bytes(), binary)
+        self.assertEqual((inputs / "wrapper").read_bytes(), diagnostic.SYNTHETIC_ELF)
+        self.assertEqual((inputs / "zebra").read_bytes(), diagnostic.SYNTHETIC_ELF)
+        self.assertEqual(diagnostic.checked_diagnostic_inputs(lock, inputs, binary),
+                         sorted(diagnostic.SYNTHETIC_ROLES))
+        with self.assertRaisesRegex(ValueError, "non-synthetic"):
+            diagnostic.checked_synthetic_inputs(lock, inputs)
+        self.assertFalse(staged["synthetic_workload"])
+        self.assertTrue(staged["synthetic_service_payloads"])
+        self.assertFalse(staged["boot_verified"])
+        self.assertFalse(staged["private_mode_approved"])
+        self.assertEqual(staged["native_early_init_sha256"], diagnostic.sha256(binary))
+
+        for role in ("wrapper", "zebra", "secure_boot_certificate"):
+            with self.subTest(changed=role):
+                before = (inputs / role).read_bytes()
+                (inputs / role).write_bytes(before + b"changed")
+                with self.assertRaisesRegex(ValueError, "non-synthetic"):
+                    diagnostic.checked_diagnostic_inputs(lock, inputs, binary)
+                (inputs / role).write_bytes(before)
+
+    def test_bad_boot_receipt_creates_no_inputs_or_invokes_builder(self):
+        bundle, revision, binary, report = self.boot_receipt()
+        inputs = self.root / "inputs"
+        lock_path = self.root / "inputs.lock.json"
+        with (mock.patch.object(diagnostic, "selected_boot_source",
+                                return_value=self.selected(report)),
+              mock.patch.object(diagnostic.rust_inputs, "inspect",
+                                side_effect=ValueError("receipt rejected"))):
+            with self.assertRaisesRegex(ValueError, "receipt rejected"):
+                diagnostic.create_boot_inputs(self.root, self.root, inputs,
+                                              lock_path, bundle, revision)
+        self.assertFalse(inputs.exists())
+        self.assertFalse(lock_path.exists())
+        self.boot_input_lock(inputs, binary)
+        (inputs / "wrapper").write_bytes(b"changed service")
+        lock = {"artifacts": {role: {"path": role,
+                "sha256": diagnostic.sha256((inputs / role).read_bytes())}
+                for role in diagnostic.SYNTHETIC_ROLES | {
+                    "secure_boot_certificate", "boot_policy"}}}
+        lock_path.write_text(json.dumps(lock))
+        with (mock.patch.object(diagnostic, "selected_boot_source",
+                                return_value=self.selected(report)),
+              mock.patch.object(diagnostic.rust_inputs, "inspect", return_value=report),
+              mock.patch.object(diagnostic.subprocess, "run") as run):
+            with self.assertRaisesRegex(ValueError, "non-synthetic"):
+                diagnostic.build_boot(lock_path, inputs, self.root / "stage",
+                                      self.root, self.root, self.root, self.root,
+                                      self.root, "net:[0]", "user:[0]", "pid:[0]",
+                                      bundle, revision)
+            run.assert_not_called()
+
+    def test_boot_build_rechecks_native_receipt_after_mkosi(self):
+        bundle, revision, binary, _ = self.boot_receipt()
+        inputs = self.root / "inputs"
+        lock = self.boot_input_lock(inputs, binary)
+        lock_path = self.root / "inputs.lock.json"
+        lock_path.write_text(json.dumps(lock))
+        stage = self.root / "stage"
+        receipt = [(binary, "b" * 64), (binary + b"changed", "b" * 64)]
+
+        def staged(*_):
+            stage.mkdir()
+            (stage / "candidate-manifest.json").write_text("{}")
+            return {"manifest_sha256": "c" * 64, "manifest_bytes": b"manifest"}
+
+        with (mock.patch.object(diagnostic, "checked_boot_receipt", side_effect=receipt),
+              mock.patch.object(diagnostic.builder, "verify_execution_context",
+                                return_value={"status": "diagnostic-signed-staged-builder-no-route"}),
+              mock.patch.object(diagnostic.guest, "verify_cached_archives",
+                                return_value={"signed_snapshot_rechecked": True}),
+              mock.patch.object(diagnostic.prepare, "stage", side_effect=staged),
+              mock.patch.object(diagnostic, "checked_override",
+                                return_value=diagnostic.SECURE_BOOT_OVERRIDE),
+              mock.patch.object(diagnostic.outer, "immutable_stage_inventory",
+                                return_value={}),
+              mock.patch.object(diagnostic.prepare, "digest", return_value="c" * 64),
+              mock.patch.object(diagnostic.subprocess, "run",
+                                return_value=SimpleNamespace(returncode=0)) as run,
+              mock.patch.object(diagnostic, "inspect", return_value={
+                  "private_mode_approved": False})):
+            with self.assertRaisesRegex(ValueError, "changed during boot disk build"):
+                diagnostic.build_boot(lock_path, inputs, stage, self.root,
+                                      self.root, self.root, self.root, self.root,
+                                      "net:[0]", "user:[0]", "pid:[0]",
+                                      bundle, revision)
+        run.assert_called_once()
 
 
 if __name__ == "__main__":

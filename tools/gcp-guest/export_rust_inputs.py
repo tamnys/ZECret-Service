@@ -23,12 +23,13 @@ EXPECTED_GUEST_BINARIES = {
     "wrapper": "zrpc-node-wrapper",
     "broker": "zrpc-gcp-quote-broker",
     "guard": "zrpc-gcp-guard",
+    "disk_id": "zrpc-gcp-disk-id",
     "cookie": "zrpc-gcp-cookie",
     "early_init": "zrpc-gcp-early-init",
 }
 EXPECTED_ALL_BINARIES = {
     "zrpc", "zrpc-wrapper", "zrpc-node-wrapper", "zrpc-quote-proxy",
-    "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-cookie",
+    "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-disk-id", "zrpc-gcp-cookie",
     "zrpc-gcp-early-init", "zrpc-gcp-lifecycle", "zrpc-uki-digest",
 }
 EXPECTED_SELECTED = ({("zrpc-cli", "zrpc"),

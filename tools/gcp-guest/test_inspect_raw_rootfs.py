@@ -84,6 +84,14 @@ class RawRootfsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "staged rootfs symlink differs"):
             rootfs.checked_overlay(self.manifest, self.stage)
 
+    def test_changed_connection_helper_is_rejected_by_image_inventory(self):
+        helper = self.stage / "rootfs/usr/lib/zrpc/zrpc-gcp-disk-id"
+        helper.chmod(0o755)
+        helper.write_bytes(b"tampered ELF")
+        helper.chmod(0o555)
+        with self.assertRaisesRegex(ValueError, "staged rootfs file bytes differ"):
+            rootfs.checked_overlay(self.manifest, self.stage)
+
     def test_inode_parser_requires_pinned_reader_and_unambiguous_type(self):
         record = (b"Inode: 20   Type: regular    Mode:  0555   Flags: 0x80000\n"
                   b"User: 0   Group: 0   Project: 0   Size: 9\n")
