@@ -13,7 +13,7 @@ use std::{
 // mkosi 25.3 prepends its repart-derived roothash to KernelCommandLine.
 // This checks the fixed flags and shape of that hash, not its identity. The
 // signed UKI and reviewed release must bind the exact final .cmdline bytes.
-const FIXED_CMDLINE: &str = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality";
+const FIXED_CMDLINE: &str = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service pstore.backend=none panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality";
 const ROOT_HASH_PREFIX: &[u8] = b"roothash=";
 const SHA256_HEX_BYTES: usize = 64;
 
@@ -151,6 +151,12 @@ mod tests {
             format!("{accepted}init=/bin/sh"),
             format!("{accepted}\n"),
             accepted.replace("lockdown=confidentiality", "lockdown=none"),
+            accepted.replace("pstore.backend=none ", ""),
+            accepted.replace("pstore.backend=none", "pstore.backend=efi_pstore"),
+            accepted.replace(
+                "pstore.backend=none",
+                "pstore.backend=none pstore.backend=efi_pstore",
+            ),
             accepted.replace(
                 "systemd.import_credentials=no",
                 "systemd.import_credentials=yes",
