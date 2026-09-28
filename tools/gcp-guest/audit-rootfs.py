@@ -14,6 +14,7 @@ MASKED_UNITS = (
     "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service",
     "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket",
     "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service",
+    "systemd-network-generator.service",
     "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service",
     "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service",
     "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer",
@@ -22,7 +23,9 @@ APPLIANCE_UNITS = (
     "zrpc-node.service", "zrpc-gcp-quote.service", "zrpc-cookie.service",
     "zrpc-wrapper.service", "zrpc.target",
 )
-PROTECTED_UNITS = (*APPLIANCE_UNITS, "multi-user.target")
+PROTECTED_UNITS = (*APPLIANCE_UNITS, "multi-user.target", "systemd-resolved.service")
+RESOLVED_CREDENTIAL_DROPIN = "10-no-credentials.conf"
+RESOLVED_CREDENTIAL_DROPIN_BYTES = b"[Service]\nImportCredential=\n"
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
 # units must also be checked on the exact booted image; they do not exist in a
 # finalized rootfs and this audit does not claim to check their later output.
@@ -90,6 +93,17 @@ def audit_appliance_units(root):
     configured = root / "etc/systemd/system"
     if configured.is_symlink() or not configured.is_dir():
         raise ValueError("system unit configuration directory missing or redirected")
+    resolved_dropins = configured / "systemd-resolved.service.d"
+    if (resolved_dropins.is_symlink() or not resolved_dropins.is_dir()
+            or {entry.name for entry in resolved_dropins.iterdir()} !=
+            {RESOLVED_CREDENTIAL_DROPIN}):
+        raise ValueError("resolved credential override differs")
+    resolved_dropin = resolved_dropins / RESOLVED_CREDENTIAL_DROPIN
+    if (resolved_dropin.is_symlink() or not resolved_dropin.is_file()
+            or resolved_dropin.stat().st_nlink != 1
+            or stat.S_IMODE(resolved_dropin.stat().st_mode) != 0o644
+            or resolved_dropin.read_bytes() != RESOLVED_CREDENTIAL_DROPIN_BYTES):
+        raise ValueError("resolved credential override differs")
     default = configured / "default.target"
     if not default.is_symlink() or default.readlink() != Path("/usr/lib/systemd/system/zrpc.target"):
         raise ValueError("appliance default target differs")
@@ -110,6 +124,8 @@ def audit_appliance_units(root):
         if not directory.is_dir():
             raise ValueError("system unit load path redirected")
         for name in additions:
+            if name == "systemd-resolved.service.d" and directory == configured:
+                continue
             # The exact /etc network wants are checked above. Debian may
             # install vendor wants; their final set remains an image-review
             # gate, not a license for extra wants in other load paths.
