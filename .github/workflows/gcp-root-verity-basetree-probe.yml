@@ -168,6 +168,7 @@ jobs:
             done
             mount --bind "$scratch/apt-scratch" "$staged/zrpc-apt-scratch"
             mount --bind "$scratch/guest-payload" "$staged/zrpc-guest-payload-parent"
+            mkdir -m 0700 "$staged/zrpc-apt-scratch/tmp"
             for pair in "$source:zrpc-source" "$archives:zrpc-archives" \
                         "$metadata:zrpc-metadata" "$guest_archives:zrpc-guest-archives"; do
               origin=${pair%%:*}
@@ -196,11 +197,13 @@ jobs:
             run_staged() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                TMPDIR=/zrpc-apt-scratch/tmp \
                 "$chroot_command" "$staged" "$@"
             }
             run_staged_root() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                TMPDIR=/zrpc-apt-scratch/tmp \
                 "$chroot_command" "$staged" "$@"
             }
             # Authenticate signed snapshot membership before executing staged
