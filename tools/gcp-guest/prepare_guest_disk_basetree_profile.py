@@ -325,10 +325,17 @@ def verify_execution_context(metadata, builder_archives, parent_net_ns,
         raise ValueError("outer no-route network namespace not established")
     ipv4 = Path("/proc/net/route").read_text().splitlines()
     ipv6 = Path("/proc/net/ipv6_route").read_text().splitlines()
-    if (not ipv4
-            or any(not line.split() or line.split()[0] != "lo" for line in ipv4[1:])
-            or any(not line.split() or line.split()[-1] != "lo" for line in ipv6)):
-        raise ValueError("outer namespace has a non-loopback route")
+    ipv4_rows = [line.split() for line in ipv4[1:]]
+    ipv6_rows = [line.split() for line in ipv6]
+    if (not ipv4 or any(not row or row[0] != "lo" for row in ipv4_rows)
+            or any(not row or row[-1] != "lo" for row in ipv6_rows)):
+        # Report interface names and row counts only; no route destinations.
+        raise ValueError(
+            "outer namespace has a non-loopback route: "
+            f"ipv4_header={bool(ipv4)}, "
+            f"ipv4_interfaces={sorted({row[0] for row in ipv4_rows if row})}, "
+            f"ipv6_interfaces={sorted({row[-1] for row in ipv6_rows if row})}, "
+            f"ipv4_rows={len(ipv4_rows)}, ipv6_rows={len(ipv6_rows)}")
     signed = builder_closure.verify(
         metadata / "InRelease", metadata / "Packages.xz",
         builder_archives, Path("/usr/bin/apt-get"), apt_scratch)
