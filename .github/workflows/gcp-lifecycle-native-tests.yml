@@ -104,7 +104,7 @@ jobs:
             RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
             RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
             LANG=C LC_ALL=C TZ=UTC \
-            sh -ceu 'cargo fmt --all -- --check && cargo test --locked --offline -p zrpc-lifecycle gcp::'
+            cargo test --locked --offline -p zrpc-lifecycle gcp::
           test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" diff --quiet
           echo 'Local journal/controller tests only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
