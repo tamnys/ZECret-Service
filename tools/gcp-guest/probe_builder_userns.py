@@ -82,7 +82,7 @@ def child(arguments):
         "status": "diagnostic-child-userns-capabilities-present-unbuilt",
         "native_x86_64_linux": True,
         "user_mount_network_pid_namespaces_separated": True,
-        "single_runner_uid_gid_mapping": True,
+        "host_root_only_uid_gid_mapping": True,
         "pid_specific_proc_mounted": True,
         "only_loopback_interface_and_routes_observed": True,
         "parent_network_setns_denied_eperm": True,
@@ -102,42 +102,30 @@ def parent(arguments):
         raise ValueError("unprivileged probe parent unexpectedly has root")
     if arguments.parent_mode == "root" and os.geteuid() != 0:
         raise ValueError("root probe parent lacks the explicit root identity")
-    if arguments.parent_mode == "root" and (
-        arguments.mapped_host_uid is None or arguments.mapped_host_uid <= 0
-        or arguments.mapped_host_gid is None or arguments.mapped_host_gid <= 0
-    ):
-        raise ValueError("root probe requires the nonroot runner UID and GID")
     scratch = Path(arguments.scratch)
     if not scratch.is_absolute() or scratch.exists() or scratch.is_symlink():
         raise ValueError("fresh absolute mount probe scratch required")
     scratch.mkdir(mode=0o700)
-    if arguments.parent_mode == "root":
-        os.chown(scratch, arguments.mapped_host_uid, arguments.mapped_host_gid)
     parent_namespaces = [namespace(kind) for kind in NAMESPACES]
     parent_net_fd = os.open("/proc/self/ns/net", os.O_RDONLY | os.O_CLOEXEC)
     try:
-        if arguments.parent_mode == "root":
-            user_mapping = [
-                "--user", f"--map-users=0:{arguments.mapped_host_uid}:1",
-                f"--map-groups=0:{arguments.mapped_host_gid}:1",
-                "--setgroups=deny", "--setuid=0", "--setgid=0",
-            ]
-            mapped_uid = arguments.mapped_host_uid
-            mapped_gid = arguments.mapped_host_gid
-        else:
-            user_mapping = ["--user", "--map-root-user"]
-            mapped_uid = os.geteuid()
-            mapped_gid = os.getegid()
+        # The public runner rejected an unprivileged map and a privileged
+        # map of the runner UID. Deliver only this public, exact-HEAD script
+        # as a command argument; the child need not traverse the runner-owned
+        # checkout while this host-root-only namespace is being evaluated.
+        source = Path(__file__).read_text()
         command = [
-            "/usr/bin/unshare", *user_mapping, "--mount", "--net",
+            "/usr/bin/unshare", "--user", "--map-root-user", "--mount", "--net",
             "--pid", "--fork", "--mount-proc", "--kill-child",
             "--propagation", "private", "--", sys.executable, "-I", "-B",
-            str(Path(__file__).resolve(strict=True)), "child", "--scratch",
+            "-c", source, "child", "--scratch",
             str(scratch), "--parent-net-fd", str(parent_net_fd),
-            "--parent-uid", str(mapped_uid), "--parent-gid", str(mapped_gid),
+            "--parent-uid", str(os.geteuid()), "--parent-gid", str(os.getegid()),
             "--parent-namespaces", *parent_namespaces,
         ]
-        subprocess.run(command, pass_fds=(parent_net_fd,), check=True)
+        outcome = subprocess.run(command, pass_fds=(parent_net_fd,), check=False)
+        if outcome.returncode:
+            raise ValueError("child namespace probe failed")
     finally:
         os.close(parent_net_fd)
         scratch.rmdir()
@@ -149,8 +137,6 @@ def main(argv=None):
     parser.add_argument("--scratch", required=True)
     parser.add_argument("--parent-mode", choices=("unprivileged", "root"),
                         default="unprivileged")
-    parser.add_argument("--mapped-host-uid", type=int)
-    parser.add_argument("--mapped-host-gid", type=int)
     parser.add_argument("--parent-net-fd", type=int)
     parser.add_argument("--parent-uid", type=int)
     parser.add_argument("--parent-gid", type=int)

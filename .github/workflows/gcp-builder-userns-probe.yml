@@ -37,5 +37,5 @@ jobs:
           cd "$GITHUB_WORKSPACE/source"
           sudo -n /usr/bin/python3 -I -B \
             "$GITHUB_WORKSPACE/source/tools/gcp-guest/probe_builder_userns.py" \
-            parent --parent-mode root --scratch "$GITHUB_WORKSPACE/userns-probe" \
-            --mapped-host-uid "$(id -u)" --mapped-host-gid "$(id -g)"
+            parent --parent-mode root \
+            --scratch "/var/tmp/zrpc-userns-probe-$GITHUB_RUN_ID"
