@@ -4,6 +4,7 @@
 //! receipt grants private-mode approval. Live execution is an explicit command
 //! and checks external controls before requesting an OAuth access token.
 pub mod controller;
+pub mod iam_diagnostic;
 pub mod package;
 pub mod provider;
 pub mod store;
