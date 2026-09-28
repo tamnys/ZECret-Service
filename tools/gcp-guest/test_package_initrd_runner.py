@@ -155,10 +155,10 @@ class PackageInitrdRunnerTest(unittest.TestCase):
                         "packages": [{"type": "deb", "name": "systemd",
                                       "version": "257.9-1", "architecture": "amd64"}]}
             path.write_text(json.dumps(manifest))
-            digest, count = runner.installed_manifest(path, [
+            digest, names = runner.installed_manifest(path, [
                 {"name": "systemd", "version": "257.9-1", "architecture": "amd64"}], source)
             self.assertEqual(digest, runner.sha256(path.read_bytes()))
-            self.assertEqual(count, 1)
+            self.assertEqual(names, ("systemd",))
             manifest["packages"][0]["version"] = "257.10-1"
             path.write_text(json.dumps(manifest))
             with self.assertRaisesRegex(ValueError, "unlocked package"):
@@ -170,6 +170,113 @@ class PackageInitrdRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "manifest is unsupported"):
                 runner.installed_manifest(path, [
                     {"name": "systemd", "version": "257.9-1", "architecture": "amd64"}], source)
+
+    def test_signed_payload_plan_uses_only_exact_installed_package_subset(self):
+        identities = [{"name": name, "version": "1", "architecture": "amd64",
+                       "size": 3, "sha256": runner.sha256(name.encode())}
+                      for name in ("alpha", "beta", "gamma")]
+        archives = [(identity, name.encode()) for identity, name in
+                    zip(identities, ("alpha", "beta", "gamma"))]
+        rows = [
+            {"path": ".", "kind": "directory", "uid": 0, "gid": 0,
+             "output_mode": 0o755},
+            {"path": "usr/bin/helper", "kind": "file", "uid": 0, "gid": 0,
+             "output_mode": 0o755, "size": 6,
+             "sha256": runner.sha256(b"helper")},
+            {"path": "etc/helper", "kind": "symlink", "uid": 0, "gid": 0,
+             "output_mode": 0o777, "target": "../usr/bin/helper"},
+        ]
+        source_plan = mock.Mock(return_value=(None, rows))
+        source = types.SimpleNamespace(
+            preflight=types.SimpleNamespace(authenticated_archives=lambda *_: archives),
+            root_tree=types.SimpleNamespace(source_plan=source_plan))
+        expected, selected = runner.signed_payload_plan(
+            source, "metadata", "archives", ("alpha", "gamma"), b"Rust /init")
+        self.assertEqual([row["name"] for row in selected], ["alpha", "gamma"])
+        self.assertEqual([row[0]["name"] for row in source_plan.call_args.args[0]],
+                         ["alpha", "gamma"])
+        self.assertEqual(expected["usr/bin/helper"]["sha256"],
+                         runner.sha256(b"helper"))
+        self.assertEqual(expected["etc/helper"]["target"],
+                         "../usr/bin/helper")
+        self.assertEqual(expected["init"], {
+            "kind": "file", "uid": 0, "gid": 0, "mode": 0o500,
+            "size": len(b"Rust /init"), "sha256": runner.sha256(b"Rust /init")})
+        with self.assertRaisesRegex(ValueError, "subset differs"):
+            runner.signed_payload_plan(
+                source, "metadata", "archives", ("alpha", "missing"), b"Rust /init")
+        source_plan.return_value = (None, rows + [{"path": "init"}])
+        with self.assertRaisesRegex(ValueError, "conflicts with pinned Rust"):
+            runner.signed_payload_plan(
+                source, "metadata", "archives", ("alpha", "gamma"), b"Rust /init")
+
+    def test_signed_payload_delta_records_every_changed_path_without_approval(self):
+        digest = runner.sha256
+        expected = {
+            "init": {"kind": "file", "uid": 0, "gid": 0, "mode": 0o500,
+                     "size": 4, "sha256": digest(b"init")},
+            "usr/bin/helper": {"kind": "file", "uid": 0, "gid": 0,
+                               "mode": 0o755, "size": 6,
+                               "sha256": digest(b"helper")},
+            "usr/lib/required": {"kind": "file", "uid": 0, "gid": 0,
+                                 "mode": 0o644, "size": 8,
+                                 "sha256": digest(b"required")},
+        }
+        observed = {
+            "init": expected["init"],
+            "usr/bin/helper": {**expected["usr/bin/helper"],
+                               "sha256": digest(b"changed")},
+            "usr/bin/unreviewed": {"kind": "file", "uid": 0, "gid": 0,
+                                   "mode": 0o755, "size": 4,
+                                   "sha256": digest(b"code")},
+            "etc/systemd/system/sysinit.target.wants/unreviewed.service": {
+                "kind": "symlink", "uid": 0, "gid": 0, "mode": 0o777,
+                "target": "/usr/lib/systemd/system/unreviewed.service"},
+        }
+        identity = [{"name": "systemd", "version": "1", "architecture": "amd64",
+                     "size": 123, "sha256": digest(b"signed deb")}]
+        cpio_sha = digest(b"actual compressed CPIO")
+        summary, rows = runner.signed_payload_delta(
+            expected, observed, identity, cpio_sha)
+        self.assertEqual([(row["path"], row["difference"]) for row in rows], [
+            ("etc/systemd/system/sysinit.target.wants/unreviewed.service", "added"),
+            ("usr/bin/helper", "changed"),
+            ("usr/bin/unreviewed", "added"),
+            ("usr/lib/required", "missing"),
+        ])
+        self.assertEqual(rows[1]["signed_payload"]["sha256"], digest(b"helper"))
+        self.assertEqual(rows[1]["observed_cpio"]["sha256"], digest(b"changed"))
+        self.assertEqual(summary["difference_count"], 4)
+        self.assertEqual(summary["cpio_sha256"], cpio_sha)
+        self.assertEqual(summary["installed_package_names"], ["systemd"])
+        self.assertFalse(summary["generated_effects_fully_audited"])
+        self.assertFalse(summary["private_mode_approved"])
+        changed = dict(observed)
+        changed["usr/bin/helper"] = {**expected["usr/bin/helper"], "mode": 0o700}
+        changed_summary, changed_rows = runner.signed_payload_delta(
+            expected, changed, identity, cpio_sha)
+        self.assertNotEqual(changed_summary["difference_sha256"],
+                            summary["difference_sha256"])
+        self.assertEqual(changed_rows[1]["observed_cpio"]["mode"], 0o700)
+        changed["usr/bin/helper"] = {
+            "kind": "symlink", "uid": 0, "gid": 0, "mode": 0o777,
+            "target": "/usr/bin/unreviewed"}
+        changed_summary, changed_rows = runner.signed_payload_delta(
+            expected, changed, identity, cpio_sha)
+        self.assertEqual(changed_rows[1]["signed_payload"]["kind"], "file")
+        self.assertEqual(changed_rows[1]["observed_cpio"]["target"],
+                         "/usr/bin/unreviewed")
+        self.assertNotEqual(changed_summary["difference_sha256"],
+                            summary["difference_sha256"])
+        changed_identity = [{**identity[0], "sha256": digest(b"different signed deb")}]
+        changed_summary, _ = runner.signed_payload_delta(
+            expected, observed, changed_identity, cpio_sha)
+        self.assertNotEqual(changed_summary["installed_package_identity_sha256"],
+                            summary["installed_package_identity_sha256"])
+        self.assertNotEqual(changed_summary["difference_sha256"],
+                            summary["difference_sha256"])
+        with self.assertRaisesRegex(ValueError, "lacks bound inputs"):
+            runner.signed_payload_delta(expected, observed, identity, "unbound")
 
     def test_mkosi_output_requires_exact_compressed_alias(self):
         with tempfile.TemporaryDirectory() as scratch:
