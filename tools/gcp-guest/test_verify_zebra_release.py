@@ -30,7 +30,7 @@ class ZebraArtifactTests(unittest.TestCase):
             "vulnerabilities": [{
                 "package": {"ecosystem": "rust", "name": "zebrad"},
                 "vulnerable_version_range": ">= 6.4.0, < 6.4.2",
-                "first_patched_version": None,
+                "patched_versions": "6.4.2",
             }],
         }]
         count, digest = zebra.advisory_snapshot(self.advisories)
@@ -93,6 +93,25 @@ class ZebraArtifactTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.metadata(now)
                 self.release, self.tag_ref, self.advisories = release, tag_ref, advisories
+
+    def test_patched_version_is_bound_to_reviewed_snapshot(self):
+        now = zebra.utc(self.lock["asset"]["created_at"]) + timedelta(days=8)
+        self.advisories[0]["vulnerabilities"][0]["patched_versions"] = "6.4.3"
+        with self.assertRaisesRegex(ValueError, "advisories changed"):
+            self.metadata(now)
+
+    def test_missing_or_malformed_repository_advisory_fields_fail_closed(self):
+        vulnerability = self.advisories[0]["vulnerabilities"][0]
+        for field in ("patched_versions", "vulnerable_version_range"):
+            with self.subTest(field=field):
+                original = vulnerability.pop(field)
+                with self.assertRaisesRegex(ValueError, "published vulnerability malformed"):
+                    zebra.advisory_snapshot(self.advisories)
+                vulnerability[field] = original
+                vulnerability[field] = None
+                with self.assertRaisesRegex(ValueError, "published vulnerability malformed"):
+                    zebra.advisory_snapshot(self.advisories)
+                vulnerability[field] = original
 
     def test_hold_precedes_any_archive_access(self):
         with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:
