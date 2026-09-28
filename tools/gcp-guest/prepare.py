@@ -67,6 +67,7 @@ INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/systemd-sysext.service",
     "/usr/lib/systemd/system/systemd-sysext.socket",
     "/usr/lib/systemd/system/systemd-sysext@.service",
+    "/usr/lib/systemd/system/sockets.target.wants/systemd-sysext.socket",
     "/usr/lib/systemd/system/systemd-confext.service",
     "/usr/lib/systemd/system/systemd-udev-load-credentials.service",
     "/etc/systemd/system/sysinit.target.wants/systemd-sysext.service",
