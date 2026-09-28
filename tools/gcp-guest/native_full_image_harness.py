@@ -6,8 +6,9 @@ source, staged signed builder, and scratch must be separate siblings on the
 workspace volume. This does not fetch inputs, create keys, deploy, or approve
 an image. The caller supplies the independently reviewed inputs and an
 already-mounted, private tmpfs signing key.
-Only loopback IP state is checked; host AF_UNIX paths or nested mounts in
-scratch are not excluded by this diagnostic handoff.
+Before handoff, the bound trees are checked for nested mounts and AF_UNIX
+socket paths. This does not establish that network egress is excluded after
+the builder starts.
 """
 
 import argparse
@@ -31,6 +32,8 @@ SOURCE_IN_GUEST = Path("/workspace")
 SCRATCH_IN_GUEST = SOURCE_IN_GUEST / ".codex-tmp"
 INPUT_FILES = ("inputs.lock.json", "zebra-provenance.json")
 INPUT_DIRS = ("inputs", "rust-bundle", "metadata", "builder-archives")
+STAGED_MOUNT_TARGETS = frozenset({"proc", "dev", "workspace", "zrpc-apt-scratch"})
+MOUNT_PATH_ESCAPES = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
 ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C",
        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"}
 
@@ -77,6 +80,113 @@ def checked_layout(workspace, source, scratch, staged):
         if os.listdir(apt):
             raise ValueError("APT scratch must be fresh")
     return overlay, apt
+
+
+def mountinfo_path(value):
+    """Decode the path escaping specified for /proc/self/mountinfo."""
+    decoded = []
+    index = 0
+    while index < len(value):
+        if value[index] == "\\":
+            escape = value[index + 1:index + 4]
+            if escape not in MOUNT_PATH_ESCAPES:
+                raise ValueError("malformed mountinfo path escape")
+            decoded.append(MOUNT_PATH_ESCAPES[escape])
+            index += 4
+        else:
+            decoded.append(value[index])
+            index += 1
+    path = "".join(decoded)
+    if not path.startswith("/") or os.path.normpath(path) != path:
+        raise ValueError("malformed mountinfo path")
+    return Path(path)
+
+
+def checked_bound_mounts(source, scratch, staged, mountinfo=None):
+    """Reject every mount rooted at or below a tree passed to the builder."""
+    contents = (Path("/proc/self/mountinfo").read_text()
+                if mountinfo is None else mountinfo)
+    lines = contents.splitlines()
+    if not lines:
+        raise ValueError("mountinfo is empty")
+    roots = (source, scratch, staged)
+    for line in lines:
+        if line.count(" - ") != 1:
+            raise ValueError("malformed mountinfo record")
+        left, right = line.split(" - ")
+        fields = left.split(" ")
+        trailer = right.split(" ")
+        if (len(fields) < 6 or len(trailer) < 3
+                or any(not field for field in fields + trailer)
+                or not fields[0].isdigit() or not fields[1].isdigit()
+                or not re.fullmatch(r"[0-9]+:[0-9]+", fields[2])):
+            raise ValueError("malformed mountinfo record")
+        mountinfo_path(fields[3])
+        target = mountinfo_path(fields[4])
+        if any(target == root or target.is_relative_to(root) for root in roots):
+            raise ValueError("bound builder tree contains a mountpoint: " + str(target))
+
+
+def checked_bound_sockets(source, scratch, staged):
+    """Scan bound trees without following legitimate source or package symlinks."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    def walk(directory, relative):
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name
+                child = f"{relative}/{name}" if relative else name
+                observed = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if stat.S_ISSOCK(observed.st_mode):
+                    raise ValueError("bound builder tree contains an AF_UNIX socket: " + child)
+                if stat.S_ISDIR(observed.st_mode):
+                    descriptor = os.open(name, directory_flags, dir_fd=directory)
+                    try:
+                        opened = os.fstat(descriptor)
+                        if (observed.st_dev, observed.st_ino, observed.st_mode) != \
+                                (opened.st_dev, opened.st_ino, opened.st_mode):
+                            raise ValueError("bound builder tree changed during socket scan")
+                        walk(descriptor, child)
+                    finally:
+                        os.close(descriptor)
+
+    for root in (source, scratch, staged):
+        descriptor = os.open(root, directory_flags)
+        try:
+            walk(descriptor, str(root))
+        finally:
+            os.close(descriptor)
+
+
+def checked_staged_mount_targets(staged, reserved):
+    """Validate every directory excluded from the signed builder inventory."""
+    if not STAGED_MOUNT_TARGETS <= reserved:
+        raise ValueError("staged builder mount target inventory differs")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root = os.open(staged, directory_flags)
+    try:
+        for name in sorted(reserved):
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+                raise ValueError("invalid staged builder mount target")
+            try:
+                observed = os.stat(name, dir_fd=root, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if name not in STAGED_MOUNT_TARGETS:
+                raise ValueError("unused staged builder mount target is present: " + name)
+            if not stat.S_ISDIR(observed.st_mode):
+                raise ValueError("staged builder mount target is not a real directory: " + name)
+            descriptor = os.open(name, directory_flags, dir_fd=root)
+            try:
+                opened = os.fstat(descriptor)
+                if ((observed.st_dev, observed.st_ino, observed.st_mode) !=
+                        (opened.st_dev, opened.st_ino, opened.st_mode)
+                        or os.listdir(descriptor)):
+                    raise ValueError("staged builder mount target must be empty: " + name)
+            finally:
+                os.close(descriptor)
+    finally:
+        os.close(root)
 
 
 def git_output(source, *args):
@@ -219,6 +329,7 @@ def checked_staged_builder(source, scratch, staged, revision):
         disk = importlib.import_module("prepare_guest_disk_basetree_profile")
     finally:
         sys.path.remove(source_modules)
+    checked_staged_mount_targets(staged, disk.MOUNTED_SCRATCH)
     lock, lock_sha256, _ = disk.builder_fetch.reviewed_lock(
         disk.builder_closure.LOCK)
     archives_fd = disk.guest.open_directory(scratch / "builder-archives",
@@ -284,6 +395,8 @@ def run_in_builder(staged, arguments):
 
 def build(args):
     overlay, apt = checked_layout(args.workspace, args.source, args.scratch, args.staged)
+    checked_bound_mounts(args.source, args.scratch, args.staged)
+    checked_bound_sockets(args.source, args.scratch, args.staged)
     checked_source(args.source, args.revision)
     checked_namespace(vars(args))
     checked_staged_builder(args.source, args.scratch, args.staged, args.revision)
@@ -296,6 +409,8 @@ def build(args):
     tmp.mkdir(mode=0o700)
     if tmp.stat().st_uid != 0 or stat.S_IMODE(tmp.stat().st_mode) != 0o700:
         raise ValueError("APT scratch is not private mapped-root storage")
+    checked_bound_mounts(args.source, args.scratch, args.staged)
+    checked_bound_sockets(args.source, args.scratch, args.staged)
     staged = args.staged
     bind(staged, staged, readonly=False)
     for name in ("workspace", "zrpc-apt-scratch", "proc", "dev"):

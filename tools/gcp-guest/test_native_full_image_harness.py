@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hashlib
+import socket
 import stat
 import subprocess
 import tempfile
@@ -11,6 +12,11 @@ from unittest import mock
 
 import native_full_image_harness as harness
 import prepare_guest_disk_basetree_profile as disk
+
+
+def mount_record(target):
+    escaped = str(target).replace("\\", "\\134").replace(" ", "\\040")
+    return f"2 1 0:2 / {escaped} rw - tmpfs tmpfs rw\n"
 
 
 class LayoutTests(unittest.TestCase):
@@ -63,6 +69,151 @@ class LayoutTests(unittest.TestCase):
                 harness.checked_layout(root, source, source, staged)
 
 
+class BoundTreeTests(unittest.TestCase):
+    def test_live_mountinfo_accepts_unmounted_bound_trees(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            roots = tuple(Path(temporary) / name for name in
+                          ("source", "scratch", "staged"))
+            for root in roots:
+                root.mkdir()
+            harness.checked_bound_mounts(*roots)
+
+    def test_nested_and_root_mounts_are_rejected_for_each_bound_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            roots = tuple(Path(temporary) / name for name in
+                          ("source", "scratch", "staged"))
+            for root in roots:
+                root.mkdir()
+            baseline = mount_record(Path("/"))
+            harness.checked_bound_mounts(*roots, mountinfo=baseline)
+            for root in roots:
+                for target in (root, root / "nested mount"):
+                    with self.subTest(target=target):
+                        with self.assertRaisesRegex(ValueError, "contains a mountpoint"):
+                            harness.checked_bound_mounts(
+                                *roots, mountinfo=baseline + mount_record(target))
+
+    def test_malformed_mountinfo_fails_closed(self):
+        roots = (Path("/workspace/source"), Path("/workspace/scratch"),
+                 Path("/workspace/staged"))
+        for contents in ("", "2 1 0:2 / / rw tmpfs tmpfs rw\n",
+                         "x 1 0:2 / / rw - tmpfs tmpfs rw\n",
+                         "2 1 0:2 / /\\777 rw - tmpfs tmpfs rw\n",
+                         "2 1 0:2 / /../tmp rw - tmpfs tmpfs rw\n"):
+            with self.subTest(contents=contents):
+                with self.assertRaisesRegex(ValueError, "mountinfo"):
+                    harness.checked_bound_mounts(*roots, mountinfo=contents)
+
+    def test_socket_paths_are_rejected_without_following_symlinks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            roots = tuple(Path(temporary) / name for name in
+                          ("source", "scratch", "staged"))
+            for root in roots:
+                (root / "nested").mkdir(parents=True)
+                (root / "ordinary-link").symlink_to("nested", target_is_directory=True)
+            harness.checked_bound_sockets(*roots)
+            for root in roots:
+                path = root / "nested" / "relay.sock"
+                with self.subTest(root=root), socket.socket(socket.AF_UNIX) as endpoint:
+                    endpoint.bind(str(path))
+                    with self.assertRaisesRegex(ValueError, "AF_UNIX socket"):
+                        harness.checked_bound_sockets(*roots)
+                path.unlink()
+
+    def test_socket_rejected_before_signer_or_mount(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, scratch, staged = (root / name for name in
+                                       ("source", "scratch", "staged"))
+            for directory in (source, scratch, staged):
+                directory.mkdir()
+            args = types.SimpleNamespace(workspace=root, source=source, scratch=scratch,
+                                         staged=staged, revision="a" * 40)
+            socket_path = scratch / "host.sock"
+            with socket.socket(socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(socket_path))
+                with (mock.patch.object(harness, "checked_layout",
+                                        return_value=(source / ".codex-tmp",
+                                                      scratch / "apt-scratch")),
+                      mock.patch.object(harness, "checked_source"),
+                      mock.patch.object(harness, "checked_namespace"),
+                      mock.patch.object(harness, "checked_staged_builder"),
+                      mock.patch.object(harness, "checked_signing_mount") as signer,
+                      mock.patch.object(harness, "mount") as mounted):
+                    with self.assertRaisesRegex(ValueError, "AF_UNIX socket"):
+                        harness.build(args)
+                    signer.assert_not_called()
+                    mounted.assert_not_called()
+
+    def test_mount_rejected_before_staged_inspection_or_mount(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = types.SimpleNamespace(workspace=root, source=root / "source",
+                                         scratch=root / "scratch", staged=root / "staged",
+                                         revision="a" * 40)
+            with (mock.patch.object(harness, "checked_layout",
+                                    return_value=(args.source / ".codex-tmp",
+                                                  args.scratch / "apt-scratch")),
+                  mock.patch.object(harness, "checked_bound_mounts",
+                                    side_effect=ValueError("bound builder tree contains a mountpoint")),
+                  mock.patch.object(harness, "checked_source") as source,
+                  mock.patch.object(harness, "checked_staged_builder") as builder,
+                  mock.patch.object(harness, "mount") as mounted):
+                with self.assertRaisesRegex(ValueError, "contains a mountpoint"):
+                    harness.build(args)
+                source.assert_not_called()
+                builder.assert_not_called()
+                mounted.assert_not_called()
+
+
+class StagedMountTargetTests(unittest.TestCase):
+    def test_empty_used_targets_and_package_symlink_are_allowed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary)
+            (staged / "workspace").mkdir()
+            (staged / "usr").mkdir()
+            (staged / "bin").symlink_to("usr", target_is_directory=True)
+            harness.checked_staged_mount_targets(staged, disk.MOUNTED_SCRATCH)
+
+    def test_nonempty_or_redirected_used_target_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary)
+            target = staged / "workspace"
+            target.mkdir()
+            (target / "host.sock").write_text("unreviewed")
+            with self.assertRaisesRegex(ValueError, "must be empty"):
+                harness.checked_staged_mount_targets(staged, disk.MOUNTED_SCRATCH)
+            (target / "host.sock").unlink()
+            target.rmdir()
+            target.symlink_to("usr", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "not a real directory"):
+                harness.checked_staged_mount_targets(staged, disk.MOUNTED_SCRATCH)
+
+    def test_existing_mount_on_used_target_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, scratch, staged = (root / name for name in
+                                       ("source", "scratch", "staged"))
+            for directory in (source, scratch, staged, staged / "workspace"):
+                directory.mkdir()
+            harness.checked_staged_mount_targets(staged, disk.MOUNTED_SCRATCH)
+            with self.assertRaisesRegex(ValueError, "contains a mountpoint"):
+                harness.checked_bound_mounts(
+                    source, scratch, staged,
+                    mountinfo=mount_record(staged / "workspace"))
+
+    def test_unused_reserved_target_must_be_absent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary)
+            (staged / "zrpc-source").mkdir()
+            with self.assertRaisesRegex(ValueError, "unused staged builder mount target"):
+                harness.checked_staged_mount_targets(staged, disk.MOUNTED_SCRATCH)
+            with socket.socket(socket.AF_UNIX) as endpoint:
+                endpoint.bind(str(staged / "zrpc-source" / "host.sock"))
+                with self.assertRaisesRegex(ValueError, "unused staged builder mount target"):
+                    harness.checked_staged_mount_targets(staged, disk.MOUNTED_SCRATCH)
+
+
 class SigningTests(unittest.TestCase):
     def test_missing_signing_mount_blocks_before_any_mount(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -75,6 +226,8 @@ class SigningTests(unittest.TestCase):
                   mock.patch.object(harness, "checked_source"),
                   mock.patch.object(harness, "checked_namespace"),
                   mock.patch.object(harness, "checked_staged_builder"),
+                  mock.patch.object(harness, "checked_bound_mounts"),
+                  mock.patch.object(harness, "checked_bound_sockets"),
                   mock.patch.object(harness, "SIGNING_MOUNT", root / "missing"),
                   mock.patch.object(harness, "mount") as mounted):
                 with self.assertRaisesRegex(ValueError, "fixed signing mount is missing"):
@@ -158,6 +311,7 @@ class StagedBuilderTests(unittest.TestCase):
                 locked_archive=lambda entry, descriptor: b"reviewed",
                 payload_entries=lambda packages: ({}, expected))
             fake_disk = types.SimpleNamespace(
+                MOUNTED_SCRATCH=disk.MOUNTED_SCRATCH,
                 builder_fetch=types.SimpleNamespace(
                     reviewed_lock=lambda path: (lock, "a" * 64, None)),
                 builder_closure=types.SimpleNamespace(LOCK=Path("reviewed-lock")),
@@ -216,6 +370,8 @@ class StagedBuilderTests(unittest.TestCase):
                                     return_value=(source / ".codex-tmp", root / "apt")),
                   mock.patch.object(harness, "checked_source"),
                   mock.patch.object(harness, "checked_namespace"),
+                  mock.patch.object(harness, "checked_bound_mounts"),
+                  mock.patch.object(harness, "checked_bound_sockets"),
                   mock.patch.object(harness.importlib, "import_module") as imported,
                   mock.patch.object(harness, "mount") as mounted,
                   mock.patch.object(harness, "run_in_builder") as executed):
