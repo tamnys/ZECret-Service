@@ -3,8 +3,10 @@
 
 The selected HEAD, signed Debian guest closure, production input lock, and
 double-built x86_64 /init receipt are inputs. The build needs an independently
-reviewed mkosi 25.3 builder and an outer no-route network namespace. This does
-not build a disk, append kernel modules, sign a UKI, or prove a boot.
+reviewed mkosi 25.3 builder and externally enforced isolation. This runner
+observes loopback-only IP state but cannot prove outer namespace creation,
+mount isolation, or the absence of UNIX-socket egress. It does not build a
+disk, append kernel modules, sign a UKI, or prove a boot.
 """
 
 import argparse
@@ -268,7 +270,7 @@ def verify_profile(source, metadata, archives, rust_bundle, revision,
             "boot_verified": False, "private_mode_approved": False}
 
 
-def no_route(parent_network_namespace, parent_mount_namespace):
+def check_loopback_only_ip_state(parent_network_namespace, parent_mount_namespace):
     if sys.platform != "linux" or os.uname().machine != "x86_64":
         raise ValueError("native x86_64 Linux builder required")
     current_net = os.readlink("/proc/self/ns/net")
@@ -277,7 +279,7 @@ def no_route(parent_network_namespace, parent_mount_namespace):
             or current_net == parent_network_namespace
             or not re.fullmatch(r"mnt:\[[0-9]+\]", parent_mount_namespace)
             or current_mount == parent_mount_namespace):
-        raise ValueError("outer network and mount namespaces were not separated")
+        raise ValueError("caller-reported parent namespace IDs do not differ")
     if [name for _, name in socket.if_nameindex()] != ["lo"]:
         raise ValueError("outer network namespace has a non-loopback interface")
     for path, fields in (("/proc/net/route", 11), ("/proc/net/ipv6_route", 10)):
@@ -290,7 +292,34 @@ def no_route(parent_network_namespace, parent_mount_namespace):
             parts = line.split()
             if len(parts) != fields or (parts[0] if fields == 11 else parts[-1]) != "lo":
                 raise ValueError("outer network namespace has a non-loopback route")
-    return {"network_namespace": current_net, "mount_namespace": current_mount}
+    # These parent IDs are supplied by the caller, not independently
+    # authenticated evidence of namespace creation. Loopback-only IP state
+    # cannot exclude inherited UNIX sockets or other mounted network access.
+    return {"network_namespace": current_net, "mount_namespace": current_mount,
+            "caller_reported_parent_namespace_differs": True,
+            "loopback_only_ip_state_observed": True,
+            "outer_namespace_separation_verified": False,
+            "builder_mounts_verified": False,
+            "network_egress_excluded": False}
+
+
+def fresh_sibling(profile, suffix):
+    """Create a new empty mkosi work/cache directory; reject reused state."""
+    parent = profile.parent
+    name = profile.name + suffix
+    directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY |
+                        os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=directory)
+        created = os.open(name, os.O_RDONLY | os.O_DIRECTORY |
+                          os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+        try:
+            if stat.S_IMODE(os.fstat(created).st_mode) != 0o700 or os.listdir(created):
+                raise ValueError("fresh mkosi state directory differs")
+        finally:
+            os.close(created)
+    finally:
+        os.close(directory)
 
 
 def installed_manifest(path, packages, source):
@@ -300,7 +329,9 @@ def installed_manifest(path, packages, source):
             or data["manifest_version"] != 1
             or not isinstance(data["config"], dict)
             or set(data["config"]) - {"name", "distribution", "release", "architecture", "version"}
-            or data["config"].get("name") != "initrd"
+            # Pinned mkosi 25.3 uses ImageId or "image" here. The production
+            # subimage has no ImageId; adding one would also alter os-release.
+            or data["config"].get("name") != "image"
             or data["config"].get("distribution") != "debian"
             or data["config"].get("release") != "trixie"
             or data["config"].get("architecture") != "x86-64"
@@ -381,7 +412,8 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
                   parent_mount_namespace, mkosi, builder_archives):
     before = verify_profile(source, metadata, archives, rust_bundle,
                             revision, lock_path, profile, workspace)
-    namespace = no_route(parent_network_namespace, parent_mount_namespace)
+    namespace = check_loopback_only_ip_state(parent_network_namespace,
+                                              parent_mount_namespace)
     if Path(mkosi) != Path("/usr/bin/mkosi") or Path(mkosi).is_symlink():
         raise ValueError("reviewed Debian mkosi executable required")
     builder_identity = verified_mkosi(source, metadata, builder_archives)
@@ -389,6 +421,8 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
     output = profile.parent / (profile.name + "-output")
     if output.exists() or output.is_symlink():
         raise ValueError("fresh mkosi output directory required")
+    fresh_sibling(profile, "-work")
+    fresh_sibling(profile, "-package-cache")
     environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C",
                    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
     result = subprocess.run([mkosi, f"--directory={profile}", "build"],
@@ -406,14 +440,16 @@ def build_profile(source, metadata, archives, rust_bundle, revision,
     audit_hash = json.loads((profile / "profile-manifest.json").read_bytes())["initrd_audit_sha256"]
     cpio = source.audit_cpio(output / "initrd.cpio.zst", profile / "audit-initrd.py",
                              workspace, audit_hash)
-    if no_route(parent_network_namespace, parent_mount_namespace) != namespace:
+    if check_loopback_only_ip_state(parent_network_namespace,
+                                    parent_mount_namespace) != namespace:
         raise ValueError("outer build namespace changed during mkosi execution")
     return {"status": STATUS, "source_commit": revision,
             "profile_manifest_sha256": before["profile_manifest_sha256"],
             **builder_identity,
             "mkosi_manifest_sha256": manifest_hash,
             "installed_package_count": package_count,
-            **cpio, **namespace, "no_route_observed_before_mkosi": True,
+            **cpio, **namespace,
+            "loopback_only_ip_state_observed_before_mkosi": True,
             "mkosi_executed": True, "initrd_built": True,
             "post_build_cpio_audited": True,
             "complete_package_script_trigger_helper_closure_verified": False,
