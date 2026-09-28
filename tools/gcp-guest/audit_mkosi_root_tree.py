@@ -13,6 +13,7 @@ import io
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import stat
 import sys
 import tarfile
@@ -140,7 +141,7 @@ def scan_root(root):
         os.close(fd)
 
 
-def expected_input_rows(base_entries, account_tree):
+def expected_input_rows(base_entries, account_tree, source_overlay=None):
     """Apply only the exact signed-source ExtraTrees paths in the mkosi profile."""
     expected = {row["path"]: dict(row) for row in base_entries}
     if len(expected) != len(base_entries) or "." not in expected:
@@ -183,6 +184,44 @@ def expected_input_rows(base_entries, account_tree):
                                   "sha256": hashlib.sha256(data).hexdigest()}
     if seen != ACCOUNT_DIRECTORIES | ACCOUNT_FILES:
         raise ValueError("account ExtraTrees inventory is incomplete")
+    if source_overlay is not None:
+        overlay_paths = set()
+        with tarfile.open(fileobj=io.BytesIO(source_overlay), mode="r:") as archive:
+            for member in archive:
+                path = member.name.rstrip("/")
+                if (path in overlay_paths or not path
+                        or PurePosixPath(path).as_posix() != path
+                        or PurePosixPath(path).is_absolute()
+                        or any(part in {"", ".", ".."} for part in path.split("/"))):
+                    raise ValueError("source overlay has noncanonical or duplicate path")
+                overlay_paths.add(path)
+                if (member.uid != 0 or member.gid != 0 or member.mtime != 0
+                        or member.pax_headers or member.uname or member.gname):
+                    raise ValueError("source overlay metadata differs")
+                if member.isdir():
+                    row = {"path": path, "kind": "directory", "uid": 0,
+                           "gid": 0, "output_mode": member.mode}
+                elif member.issym():
+                    row = {"path": path, "kind": "symlink", "uid": 0,
+                           "gid": 0, "output_mode": member.mode,
+                           "target": member.linkname}
+                elif member.isfile():
+                    data = archive.extractfile(member)
+                    if data is None:
+                        raise ValueError("source overlay file is unreadable")
+                    content = data.read()
+                    if len(content) != member.size:
+                        raise ValueError("source overlay file size differs")
+                    row = {"path": path, "kind": "file", "uid": 0,
+                           "gid": 0, "output_mode": member.mode,
+                           "size": len(content),
+                           "sha256": hashlib.sha256(content).hexdigest()}
+                else:
+                    raise ValueError("source overlay contains unsupported entry")
+                previous = expected.get(path)
+                if previous is not None and previous["kind"] != row["kind"]:
+                    raise ValueError("source overlay replaces input with different kind")
+                expected[path] = row
     return list(expected.values())
 
 
@@ -221,7 +260,8 @@ def differences(expected_rows, observed):
     return changes
 
 
-def audit(metadata, archives, artifact, account_artifact, profile_path, workspace):
+def audit(metadata, archives, artifact, account_artifact, profile_path, workspace,
+          include_overlay=False):
     source = base_tree.verify(metadata, archives, artifact)
     if (source.get("status") != base_tree.STATUS
             or source.get("signed_snapshot_rechecked") is not True
@@ -232,10 +272,13 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
         raise ValueError("signed guest BaseTrees changed diagnostic state")
     profile_path = profile.checked_profile_path(profile_path, workspace)
     pinned_profile = profile.verify_profile(metadata, archives, artifact,
-                                            account_artifact, profile_path, workspace)
-    if (pinned_profile.get("status") != profile.STATUS
+                                            account_artifact, profile_path, workspace,
+                                            include_overlay)
+    expected_status = profile.OVERLAY_STATUS if include_overlay else profile.STATUS
+    if (pinned_profile.get("status") != expected_status
             or pinned_profile.get("base_tree_sha256") != source["archive_sha256"]
             or pinned_profile.get("account_files_preseeded_from_signed_source") is not True
+            or pinned_profile.get("committed_rootfs_overlay_included") is not include_overlay
             or any(pinned_profile.get(field) is not False for field in
                    ("package_install_configured", "package_scripts_executed",
                     "root_directory_built", "disk_image_built", "boot_verified",
@@ -249,14 +292,27 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
         profile.project_sysusers_bytes(),
         profile.verified_account_files(metadata, archives, account_artifact,
                                        workspace))
-    expected = expected_input_rows(entries, account_tree)
+    source_overlay = profile.source_overlay_bytes(workspace) if include_overlay else None
+    expected = expected_input_rows(entries, account_tree, source_overlay)
     output = profile_path.parent / (profile_path.name + "-output") / profile.OUTPUT_NAME
     if output.parent.is_symlink():
         raise ValueError("mkosi output directory is redirected")
     observed = scan_root(output)
     changes = differences(expected, observed)
+    boot_overrides = None
+    if include_overlay:
+        paths = {"etc/resolv.conf", "etc/systemd/system/default.target"}
+        paths.update("etc/systemd/system/" + name for name in profile.prepare.MASKS)
+        paths.update("etc/systemd/system/multi-user.target.wants/" + name
+                     for name in ("systemd-networkd.service", "systemd-resolved.service"))
+        expected_links = {row["path"]: row["target"] for row in expected
+                          if row["path"] in paths and row["kind"] == "symlink"}
+        boot_overrides = (set(expected_links) == paths and all(
+            observed.get(path, {}).get("kind") == "symlink"
+            and observed[path]["target"] == target
+            for path, target in expected_links.items()))
     if profile.verify_profile(metadata, archives, artifact, account_artifact,
-                              profile_path, workspace) != pinned_profile:
+                              profile_path, workspace, include_overlay) != pinned_profile:
         raise ValueError("mkosi BaseTrees profile changed during root scan")
     if base_tree.verify(metadata, archives, artifact) != source:
         raise ValueError("signed guest BaseTrees changed during root scan")
@@ -265,6 +321,12 @@ def audit(metadata, archives, artifact, account_artifact, profile_path, workspac
         "signed_base_tree_sha256": source["archive_sha256"],
         "signed_base_tree_manifest_sha256": source["manifest_sha256"],
         "signed_account_tree_sha256": hashlib.sha256(account_tree).hexdigest(),
+        "source_overlay_sha256": (hashlib.sha256(source_overlay).hexdigest()
+                                  if source_overlay is not None else None),
+        "committed_rootfs_overlay_included": include_overlay,
+        "boot_overrides_match_source": boot_overrides,
+        "runtime_binaries_included": False,
+        "production_package_install_exercised": False,
         "mkosi_profile_manifest_sha256": pinned_profile["profile_manifest_sha256"],
         "signed_base_entry_count": len(entries),
         "authenticated_input_entry_count": len(expected),
@@ -285,10 +347,12 @@ def main(argv=None):
     parser.add_argument("--account-artifact", required=True, type=Path)
     parser.add_argument("--profile", required=True, type=Path)
     parser.add_argument("--workspace", required=True, type=Path)
+    parser.add_argument("--source-overlay", action="store_true")
     args = parser.parse_args(argv)
     try:
         report = audit(args.metadata, args.archives, args.artifact,
-                       args.account_artifact, args.profile, args.workspace)
+                       args.account_artifact, args.profile, args.workspace,
+                       args.source_overlay)
     except (OSError, ValueError, KeyError, TypeError, tarfile.TarError) as error:
         report = {"schema_version": 2, "status": "blocked", "reason": str(error),
                   "authenticated_inputs_exact": False,

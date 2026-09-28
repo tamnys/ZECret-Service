@@ -517,6 +517,28 @@ jobs:
                   or prepared["private_mode_approved"] is not False):
               raise ValueError("mkosi BaseTrees profile changed diagnostic status")
           print(json.dumps(prepared, sort_keys=True))
+          overlay_profile = workspace / "mkosi-source-overlay-profile"
+          prepared_overlay = diagnostic.prepare_profile(
+              metadata, archives, artifact, expected, overlay_profile, workspace,
+              include_overlay=True,
+          )
+          checked_overlay = diagnostic.verify_profile(
+              metadata, archives, artifact, expected, overlay_profile, workspace,
+              include_overlay=True,
+          )
+          if (prepared_overlay != checked_overlay
+                  or prepared_overlay["status"] != diagnostic.OVERLAY_STATUS
+                  or prepared_overlay["committed_rootfs_overlay_included"] is not True
+                  or prepared_overlay["runtime_binaries_included"] is not False
+                  or prepared_overlay["production_package_install_exercised"] is not False
+                  or prepared_overlay["package_install_configured"] is not False
+                  or prepared_overlay["package_scripts_executed"] is not False
+                  or prepared_overlay["root_directory_built"] is not False
+                  or prepared_overlay["disk_image_built"] is not False
+                  or prepared_overlay["boot_verified"] is not False
+                  or prepared_overlay["private_mode_approved"] is not False):
+              raise ValueError("mkosi source-overlay profile changed diagnostic status")
+          print(json.dumps(prepared_overlay, sort_keys=True))
           PY
             profile_root="$staged/zrpc-guest-payload-parent/mkosi-root-profile"
             echo "Diagnostic profile bind mount starting"
@@ -528,6 +550,12 @@ jobs:
             printf "Diagnostic profile observed mount options: %s\n" "$profile_options"
             case ",$profile_options," in *,ro,*) ;; *) exit 1 ;; esac
             echo "Diagnostic profile read-only assertion succeeded"
+            overlay_profile_root="$staged/zrpc-guest-payload-parent/mkosi-source-overlay-profile"
+            mount --bind "$overlay_profile_root" "$overlay_profile_root"
+            mount -o remount,bind,ro "$overlay_profile_root"
+            overlay_options="$(findmnt -n -o OPTIONS --target "$overlay_profile_root")"
+            case ",$overlay_options," in *,ro,*) ;; *) exit 1 ;; esac
+            echo "Source-overlay profile read-only assertion succeeded"
             run_staged_root() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
@@ -615,6 +643,73 @@ jobs:
               print(json.dumps({"unreviewed_root_delta": difference}, sort_keys=True))
           print("::warning::Mkosi root comparison is diagnostic only; no generated "
                 "effects, boot artifact, or private mode are approved")
+          PY
+            # Rehearse the committed rootfs overlay and production unit masks
+            # against the same signed BaseTrees. No production package install,
+            # application binaries, UKI, disk image, or boot is involved.
+            run_staged_root /usr/bin/python3 -I - <<"PY"
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import audit_mkosi_root_tree as tree_audit
+          import prepare_guest_basetree_profile as diagnostic
+
+          metadata = Path("/zrpc-metadata")
+          archives = Path("/zrpc-guest-archives")
+          artifact = Path("/zrpc-guest-payload-parent/root-basetree")
+          workspace = Path("/zrpc-guest-payload-parent")
+          accounts = workspace / "expected-accounts"
+          overlay_profile = workspace / "mkosi-source-overlay-profile"
+          built = diagnostic.build_root_directory(
+              metadata, archives, artifact, accounts, overlay_profile,
+              workspace, include_overlay=True,
+          )
+          if (built["status"] != "diagnostic-root-directory-built-unapproved"
+                  or built["committed_rootfs_overlay_included"] is not True
+                  or built["runtime_binaries_included"] is not False
+                  or built["production_package_install_exercised"] is not False
+                  or built["package_install_configured"] is not False
+                  or built["package_scripts_executed"] is not False
+                  or built["root_directory_built"] is not True
+                  or built["post_mkosi_tree_audited"] is not False
+                  or built["disk_image_built"] is not False
+                  or built["boot_verified"] is not False
+                  or built["private_mode_approved"] is not False):
+              raise ValueError("source-overlay root build changed diagnostic status")
+          print(json.dumps(built, sort_keys=True))
+
+          tree = tree_audit.audit(
+              metadata, archives, artifact, accounts, overlay_profile,
+              workspace, include_overlay=True,
+          )
+          deltas = tree["differences"]
+          if (tree["status"] not in {tree_audit.STATUS, tree_audit.DELTA_STATUS}
+                  or (tree["status"] == tree_audit.DELTA_STATUS) != bool(deltas)
+                  or tree["committed_rootfs_overlay_included"] is not True
+                  or tree["boot_overrides_match_source"] is not True
+                  or tree["runtime_binaries_included"] is not False
+                  or tree["production_package_install_exercised"] is not False
+                  or tree["generated_effects_approved"] is not False
+                  or tree["post_mkosi_tree_audited"] is not False
+                  or tree["disk_image_built"] is not False
+                  or tree["boot_verified"] is not False
+                  or tree["private_mode_approved"] is not False):
+              raise ValueError("source-overlay tree audit changed diagnostic status")
+          encoded = (json.dumps(deltas, sort_keys=True,
+                                separators=(",", ":")) + "\n").encode()
+          summary = {key: value for key, value in tree.items()
+                     if key != "differences"}
+          summary["difference_count"] = len(deltas)
+          summary["difference_sha256"] = hashlib.sha256(encoded).hexdigest()
+          print(json.dumps(summary, sort_keys=True))
+          for difference in deltas:
+              print(json.dumps({"unreviewed_source_overlay_root_delta": difference},
+                               sort_keys=True))
+          print("::warning::Source-overlay root is a no-package diagnostic only; "
+                "generated differences remain unapproved")
           PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"

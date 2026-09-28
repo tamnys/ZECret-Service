@@ -91,6 +91,7 @@ class ProducedRootAuditTests(unittest.TestCase):
             "base_tree_sha256": self.source["archive_sha256"],
             "profile_manifest_sha256": "c" * 64,
             "account_files_preseeded_from_signed_source": True,
+            "committed_rootfs_overlay_included": False,
             "package_install_configured": False,
             "package_scripts_executed": False,
             "root_directory_built": False, "disk_image_built": False,
@@ -103,8 +104,8 @@ class ProducedRootAuditTests(unittest.TestCase):
         # overlay owners to this test process for the filesystem scan.
         compose = audit.expected_input_rows
 
-        def local_owners(entries, account_tree):
-            rows = compose(entries, account_tree)
+        def local_owners(entries, account_tree, source_overlay=None):
+            rows = compose(entries, account_tree, source_overlay)
             for row in rows:
                 if row["path"] in audit.ACCOUNT_DIRECTORIES | audit.ACCOUNT_FILES:
                     row["uid"], row["gid"] = os.getuid(), os.getgid()
@@ -167,6 +168,58 @@ class ProducedRootAuditTests(unittest.TestCase):
                               {"shadow": 0o644}),
               self.assertRaisesRegex(ValueError, "unreviewed path")):
             audit.expected_input_rows(self.entries, rewritten.getvalue())
+
+    def test_source_overlay_links_are_expected_and_changed_targets_are_deltas(self):
+        account_tree = audit.profile.account_tree_bytes(self.project, self.account_files)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
+            for name in ("etc/systemd", "etc/systemd/system"):
+                entry = tarfile.TarInfo(name)
+                entry.type = tarfile.DIRTYPE
+                entry.mode = 0o755
+                archive.addfile(entry)
+            entry = tarfile.TarInfo("etc/systemd/system/default.target")
+            entry.type = tarfile.SYMTYPE
+            entry.linkname = "/usr/lib/systemd/system/zrpc.target"
+            entry.mode = 0o777
+            archive.addfile(entry)
+        with mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES, {"shadow": 0o644}):
+            rows = audit.expected_input_rows(self.entries, account_tree, stream.getvalue())
+        by_path = {row["path"]: row for row in rows}
+        self.assertEqual(by_path["etc/systemd/system/default.target"]["target"],
+                         "/usr/lib/systemd/system/zrpc.target")
+        (self.root / "etc/systemd/system").mkdir(parents=True)
+        (self.root / "etc/systemd/system/default.target").symlink_to("/dev/null")
+        observed = audit.scan_root(self.root)
+        self.assertIn({"path": "etc/systemd/system/default.target",
+                       "difference": "link-target"}, audit.differences(rows, observed))
+
+    def test_committed_overlay_combines_with_signed_account_inputs(self):
+        account_tree = audit.profile.account_tree_bytes(self.project, self.account_files)
+        overlay = audit.profile.source_overlay_bytes(self.workspace)
+        with mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES, {"shadow": 0o644}):
+            rows = audit.expected_input_rows(self.entries, account_tree, overlay)
+        by_path = {row["path"]: row for row in rows}
+        self.assertEqual(by_path["etc/systemd/system/default.target"]["target"],
+                         "/usr/lib/systemd/system/zrpc.target")
+        for name in audit.profile.prepare.MASKS:
+            self.assertEqual(by_path["etc/systemd/system/" + name]["target"],
+                             "/dev/null")
+        self.assertEqual(by_path["usr/lib/systemd/system/zrpc.target"]["sha256"],
+                         hashlib.sha256((audit.profile.prepare.PROFILE /
+                                         "rootfs/usr/lib/systemd/system/zrpc.target").read_bytes()).hexdigest())
+
+    def test_source_overlay_rejects_escaping_path(self):
+        account_tree = audit.profile.account_tree_bytes(self.project, self.account_files)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
+            entry = tarfile.TarInfo("../outside")
+            entry.size = 1
+            archive.addfile(entry, io.BytesIO(b"x"))
+        with (mock.patch.dict(audit.profile.INSTALLED_ACCOUNT_MODES,
+                              {"shadow": 0o644}),
+              self.assertRaisesRegex(ValueError, "noncanonical")):
+            audit.expected_input_rows(self.entries, account_tree, stream.getvalue())
 
     @staticmethod
     def changed(result):

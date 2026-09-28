@@ -58,17 +58,17 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
             "manifest_sha256": "a" * 64,
         }
 
-    def prepare(self):
+    def prepare(self, include_overlay=False):
         with mock.patch.object(profile.base_tree, "verify", return_value=self.source):
             return profile.prepare_profile(self.workspace, self.workspace,
                                            self.artifact, self.account_artifact, self.output,
-                                           self.workspace)
+                                           self.workspace, include_overlay)
 
-    def verify(self):
+    def verify(self, include_overlay=False):
         with mock.patch.object(profile.base_tree, "verify", return_value=self.source):
             return profile.verify_profile(self.workspace, self.workspace,
                                           self.artifact, self.account_artifact, self.output,
-                                          self.workspace)
+                                          self.workspace, include_overlay)
 
     @staticmethod
     def rewrite(path, data):
@@ -124,6 +124,42 @@ class GuestBaseTreeProfileTests(unittest.TestCase):
                          hashlib.sha256(account_input.read_bytes()).hexdigest())
         self.assertTrue(manifest["account_artifact_regenerated_and_verified"])
         self.assertTrue(manifest["account_files_preseeded_from_signed_source"])
+
+    def test_source_overlay_is_snapshot_of_production_rootfs_and_overrides(self):
+        report = self.prepare(include_overlay=True)
+        self.assertEqual(report, self.verify(include_overlay=True))
+        self.assertEqual(report["status"], profile.OVERLAY_STATUS)
+        self.assertTrue(report["committed_rootfs_overlay_included"])
+        for field in ("runtime_binaries_included", "production_package_install_exercised",
+                      "package_install_configured", "package_scripts_executed",
+                      "root_directory_built", "disk_image_built", "boot_verified",
+                      "private_mode_approved"):
+            self.assertFalse(report[field])
+        config = (self.output / profile.CONFIG).read_text()
+        self.assertIn("ExtraTrees=" + str(self.output / profile.ACCOUNT_TREE) + "," +
+                      str(self.output / profile.SOURCE_OVERLAY) + "\n", config)
+        self.assertIn("Packages=\n", config)
+        self.assertIn("Format=directory\n", config)
+        self.assertIn("Bootable=no\n", config)
+        overlay = self.output / profile.SOURCE_OVERLAY
+        with tarfile.open(overlay) as archive:
+            self.assertEqual(archive.getmember("etc/systemd/system/default.target").linkname,
+                             "/usr/lib/systemd/system/zrpc.target")
+            self.assertEqual(archive.getmember("etc/systemd/system/ssh.service").linkname,
+                             "/dev/null")
+            self.assertEqual(archive.extractfile("usr/lib/systemd/system/zrpc.target").read(),
+                             (profile.prepare.PROFILE / "rootfs/usr/lib/systemd/system/zrpc.target").read_bytes())
+        manifest = json.loads((self.output / profile.MANIFEST).read_bytes())
+        self.assertEqual(manifest["source_overlay_sha256"],
+                         hashlib.sha256(overlay.read_bytes()).hexdigest())
+        self.rewrite(overlay, overlay.read_bytes()[:-1] + b"X")
+        with self.assertRaisesRegex(ValueError, "source overlay differs"):
+            self.verify(include_overlay=True)
+
+    def test_overlay_profile_cannot_be_verified_as_minimal_profile(self):
+        self.prepare(include_overlay=True)
+        with self.assertRaisesRegex(ValueError, "unreviewed inputs"):
+            self.verify()
 
     def test_source_authentication_and_snapshot_hash_fail_closed(self):
         with mock.patch.object(profile.base_tree, "verify",

@@ -16,10 +16,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 import assemble_guest_base_tree as base_tree
 import build_guest_accounts as accounts
@@ -33,6 +35,8 @@ MANIFEST = "profile-manifest.json"
 CONFIG = "mkosi.conf"
 INPUT = "input/guest-root.tar"
 ACCOUNT_TREE = "account-tree.tar"
+SOURCE_OVERLAY = "source-overlay.tar"
+OVERLAY_STATUS = "diagnostic-no-package-source-overlay-profile-unbuilt"
 ACCOUNT_FILE = "zrpc.conf"
 INSTALLED_ACCOUNT_MODES = {"passwd": 0o644, "group": 0o644, "shadow": 0o000}
 PROJECT_SYSUSERS = accounts.PROJECT_SYSUSERS
@@ -55,24 +59,85 @@ def checked_profile_path(profile, workspace):
     return profile
 
 
-def config_bytes(profile):
-    """Only the authenticated archive and one project sysusers file enter."""
+def config_bytes(profile, include_overlay=False):
+    """Use signed Debian payloads and, optionally, the reviewed source overlay."""
+    extra = f"{profile / ACCOUNT_TREE}"
+    if include_overlay:
+        extra += f",{profile / SOURCE_OVERLAY}"
     return (f"[Distribution]\nDistribution=custom\nArchitecture=x86-64\n"
             f"\n[Output]\nFormat=directory\nOutput={OUTPUT_NAME}\n"
             f"OutputDirectory={profile.parent / (profile.name + '-output')}\n"
             f"\n[Content]\nBootable=no\nSsh=no\nAutologin=no\n"
             f"BaseTrees={profile / INPUT}\n"
-            f"ExtraTrees={profile / ACCOUNT_TREE}\nPackages=\n"
+            f"ExtraTrees={extra}\nPackages=\n"
             f"CleanPackageMetadata=no\nSourceDateEpoch=0\n"
             f"\n[Build]\nWithNetwork=no\nCacheOnly=always\n"
             f"Incremental=no\n"
             f"WorkspaceDirectory={profile.parent / (profile.name + '-work')}\n").encode()
 
 
-def expected_manifest(source, archive_size, config, project, account_tree):
-    return {
+def source_overlay_bytes(workspace):
+    """Archive all committed rootfs files plus production's boot overrides."""
+    prepare.validate_boot_profile()
+    source = prepare.PROFILE / "rootfs"
+    source_fd = prepare.open_stage_directory(source)
+    try:
+        source_entries = prepare.staged_inventory(source_fd)
+    finally:
+        os.close(source_fd)
+    with tempfile.TemporaryDirectory(prefix="zrpc-source-overlay-", dir=workspace) as scratch:
+        tree = Path(scratch) / "rootfs"
+        shutil.copytree(source, tree, symlinks=True)
+        copied_fd = guest.open_directory(tree, "copied source overlay")
+        try:
+            prepare.staged_inventory(copied_fd, source_entries)
+        finally:
+            os.close(copied_fd)
+        prepare.install_boot_overrides(tree)
+        root = guest.open_directory(tree, "source overlay with boot overrides")
+        try:
+            entries = prepare.staged_inventory(root)
+        finally:
+            os.close(root)
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
+            for relative in sorted(entries, key=lambda item: (item.count("/"), item)):
+                entry = entries[relative]
+                path = tree / relative
+                observed = path.lstat()
+                header = tarfile.TarInfo(relative + ("/" if entry["type"] == "directory" else ""))
+                header.uid = header.gid = 0
+                header.mtime = 0
+                header.mode = entry.get("mode", 0o777)
+                if entry["type"] == "directory":
+                    if not stat.S_ISDIR(observed.st_mode):
+                        raise ValueError("source overlay directory changed")
+                    header.type = tarfile.DIRTYPE
+                    archive.addfile(header)
+                elif entry["type"] == "symlink":
+                    if not stat.S_ISLNK(observed.st_mode) or path.readlink().as_posix() != entry["target"]:
+                        raise ValueError("source overlay link changed")
+                    header.type = tarfile.SYMTYPE
+                    header.linkname = entry["target"]
+                    archive.addfile(header)
+                elif entry["type"] == "file":
+                    if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+                        raise ValueError("source overlay regular file changed or hardlinked")
+                    data = path.read_bytes()
+                    if len(data) != observed.st_size or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+                        raise ValueError("source overlay file changed")
+                    header.type = tarfile.REGTYPE
+                    header.size = len(data)
+                    archive.addfile(header, io.BytesIO(data))
+                else:
+                    raise ValueError("source overlay contains unsupported entry")
+        return output.getvalue()
+
+
+def expected_manifest(source, archive_size, config, project, account_tree, overlay=None):
+    manifest = {
         "schema_version": 2,
-        "status": STATUS,
+        "status": OVERLAY_STATUS if overlay is not None else STATUS,
         "guest_package_closure_sha256": prepare.PACKAGE_CLOSURE_SHA256,
         "mkosi_source_commit": prepare.SOURCE_COMMIT,
         "source_manifest_sha256": source["manifest_sha256"],
@@ -94,6 +159,13 @@ def expected_manifest(source, archive_size, config, project, account_tree):
         "boot_verified": False,
         "private_mode_approved": False,
     }
+    if overlay is not None:
+        manifest.update(source_overlay_sha256=hashlib.sha256(overlay).hexdigest(),
+                        source_overlay_size=len(overlay),
+                        committed_rootfs_overlay_included=True,
+                        runtime_binaries_included=False,
+                        production_package_install_exercised=False)
+    return manifest
 
 
 def write_file(parent, name, data, mode=0o400):
@@ -195,7 +267,8 @@ def account_tree_bytes(project, files):
     return stream.getvalue()
 
 
-def prepare_profile(metadata, archives, artifact, account_artifact, profile, workspace):
+def prepare_profile(metadata, archives, artifact, account_artifact, profile, workspace,
+                    include_overlay=False):
     profile = checked_profile_path(profile, workspace)
     artifact = Path(artifact)
     if (not artifact.is_absolute() or artifact.resolve(strict=True) != artifact
@@ -205,7 +278,8 @@ def prepare_profile(metadata, archives, artifact, account_artifact, profile, wor
     project = project_sysusers_bytes()
     account_tree = account_tree_bytes(
         project, verified_account_files(metadata, archives, account_artifact, workspace))
-    config = config_bytes(profile)
+    overlay = source_overlay_bytes(workspace) if include_overlay else None
+    config = config_bytes(profile, include_overlay)
     parent = builder.output_parent(Path(workspace), profile)
     try:
         os.mkdir(profile.name, mode=0o700, dir_fd=parent)
@@ -253,16 +327,21 @@ def prepare_profile(metadata, archives, artifact, account_artifact, profile, wor
             os.close(artifact_fd)
             os.close(input_fd)
         write_file(root, ACCOUNT_TREE, account_tree)
-        manifest = expected_manifest(source, copied, config, project, account_tree)
+        if overlay is not None:
+            write_file(root, SOURCE_OVERLAY, overlay)
+        manifest = expected_manifest(source, copied, config, project, account_tree, overlay)
         write_file(root, CONFIG, config)
         encoded = canonical_bytes(manifest)
         write_file(root, MANIFEST, encoded)
         os.fsync(root)
     finally:
         os.close(root)
-    return {"status": STATUS, "profile_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
+    return {"status": manifest["status"], "profile_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
             "base_tree_sha256": source["archive_sha256"],
             "account_files_preseeded_from_signed_source": True,
+            "committed_rootfs_overlay_included": include_overlay,
+            "runtime_binaries_included": False,
+            "production_package_install_exercised": False,
             "package_install_configured": False, "package_scripts_executed": False,
             "root_directory_built": False, "disk_image_built": False,
             "boot_verified": False, "private_mode_approved": False}
@@ -317,21 +396,25 @@ def verified_archive(parent):
         os.close(fd)
 
 
-def verify_profile(metadata, archives, artifact, account_artifact, profile, workspace):
+def verify_profile(metadata, archives, artifact, account_artifact, profile, workspace,
+                   include_overlay=False):
     profile = checked_profile_path(profile, workspace)
     source = base_tree.verify(metadata, archives, artifact)
     project = project_sysusers_bytes()
     account_tree = account_tree_bytes(
         project, verified_account_files(metadata, archives, account_artifact, workspace))
+    overlay = source_overlay_bytes(workspace) if include_overlay else None
     root = guest.open_directory(profile, "mkosi diagnostic profile")
     try:
         if stat.S_IMODE(os.fstat(root).st_mode) != 0o700:
             raise ValueError("mkosi diagnostic profile directory mode differs")
-        if {entry.name for entry in os.scandir(root)} != {"input", ACCOUNT_TREE,
-                                                         CONFIG, MANIFEST}:
+        expected_names = {"input", ACCOUNT_TREE, CONFIG, MANIFEST}
+        if include_overlay:
+            expected_names.add(SOURCE_OVERLAY)
+        if {entry.name for entry in os.scandir(root)} != expected_names:
             raise ValueError("mkosi diagnostic profile has unreviewed inputs")
-        config = verified_file(root, CONFIG, len(config_bytes(profile)))
-        if config != config_bytes(profile):
+        config = verified_file(root, CONFIG, len(config_bytes(profile, include_overlay)))
+        if config != config_bytes(profile, include_overlay):
             raise ValueError("mkosi diagnostic config differs from script-free profile")
         input_fd = os.open("input", builder.DIRECTORY_FLAGS, dir_fd=root)
         try:
@@ -345,32 +428,37 @@ def verify_profile(metadata, archives, artifact, account_artifact, profile, work
             raise ValueError("mkosi diagnostic BaseTrees archive differs from signed source")
         if verified_file(root, ACCOUNT_TREE, len(account_tree)) != account_tree:
             raise ValueError("mkosi diagnostic account tree differs from signed source")
-        manifest = expected_manifest(source, archive_size, config, project, account_tree)
+        if overlay is not None and verified_file(root, SOURCE_OVERLAY, len(overlay)) != overlay:
+            raise ValueError("mkosi diagnostic source overlay differs from committed source")
+        manifest = expected_manifest(source, archive_size, config, project, account_tree, overlay)
         encoded = canonical_bytes(manifest)
         if verified_file(root, MANIFEST, len(encoded)) != encoded:
             raise ValueError("mkosi diagnostic profile manifest differs from signed source")
     finally:
         os.close(root)
-    return {"status": STATUS, "profile_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
+    return {"status": manifest["status"], "profile_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
             "base_tree_sha256": archive_sha256,
             "account_files_preseeded_from_signed_source": True,
+            "committed_rootfs_overlay_included": include_overlay,
+            "runtime_binaries_included": False,
+            "production_package_install_exercised": False,
             "package_install_configured": False, "package_scripts_executed": False,
             "root_directory_built": False, "disk_image_built": False,
             "boot_verified": False, "private_mode_approved": False}
 
 
 def build_root_directory(metadata, archives, artifact, account_artifact,
-                         profile, workspace):
+                         profile, workspace, include_overlay=False):
     """Run the pinned CI tool after source checks; never create a boot image."""
     profile = checked_profile_path(profile, workspace)
     before = verify_profile(metadata, archives, artifact, account_artifact,
-                            profile, workspace)
+                            profile, workspace, include_overlay)
     output = profile.parent / (profile.name + "-output") / OUTPUT_NAME
     if output.exists() or output.is_symlink():
         raise ValueError("mkosi diagnostic output already exists")
     subprocess.run(["/usr/bin/mkosi", f"--directory={profile}", "build"], check=True)
     after = verify_profile(metadata, archives, artifact, account_artifact,
-                           profile, workspace)
+                           profile, workspace, include_overlay)
     if after != before or output.is_symlink() or not output.is_dir():
         raise ValueError("mkosi diagnostic build did not preserve verified inputs or output a directory")
     return {**before, "status": "diagnostic-root-directory-built-unapproved",
@@ -386,13 +474,15 @@ def main(argv=None):
     parser.add_argument("--account-artifact", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--workspace", type=Path)
+    parser.add_argument("--source-overlay", action="store_true")
     args = parser.parse_args(argv)
     try:
         workspace = args.workspace or Path(os.environ["CODEX_WORKSPACE_DIR"])
         action = {"prepare": prepare_profile, "verify": verify_profile,
                   "build": build_root_directory}[args.command]
         report = action(args.metadata, args.archives, args.artifact,
-                        args.account_artifact, args.profile, workspace)
+                        args.account_artifact, args.profile, workspace,
+                        args.source_overlay)
     except (OSError, ValueError, KeyError, TypeError,
             subprocess.CalledProcessError, tarfile.TarError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error),
