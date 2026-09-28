@@ -260,6 +260,8 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse(report["private_mode_approved"])
         self.assertIn("real TDX acceptance", report["remaining_gates"])
         self.assertTrue(any("operator-owned signing key" in gate for gate in report["remaining_gates"]))
+        for unit in ("systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service"):
+            self.assertEqual((output / "rootfs/etc/systemd/system" / unit).readlink(), Path("/dev/null"))
         units = output / "rootfs/usr/lib/systemd/system"
         wrapper = (units / "zrpc-wrapper.service").read_text()
         self.assertIn("--platform gcp-tdx", wrapper)
@@ -775,6 +777,16 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             audit_rootfs.audit(root)
         update_mask.symlink_to("/dev/null")
+        for unit in ("systemd-sysext.socket", "systemd-sysext@.service"):
+            mask = root / "etc/systemd/system" / unit
+            mask.unlink()
+            with self.assertRaisesRegex(ValueError, "administrative unit unmasked"):
+                audit_rootfs.audit(root)
+            mask.symlink_to("/usr/lib/systemd/system/" + unit)
+            with self.assertRaisesRegex(ValueError, "administrative unit unmasked"):
+                audit_rootfs.audit(root)
+            mask.unlink()
+            mask.symlink_to("/dev/null")
         (root / "boot").mkdir()
         companion = root / "boot/unapproved.addon.efi"
         companion.write_bytes(b"SYNTHETIC")
