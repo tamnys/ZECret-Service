@@ -112,6 +112,12 @@ class SignedCacheAccountTests(unittest.TestCase):
             self.assertTrue(receipt["independent_generation_runs_matched"])
             self.assertFalse(receipt["installed_rootfs_accounts_compared"])
             self.assertFalse(receipt["private_mode_approved"])
+            self.assertEqual({row["path"] for row in receipt["outputs"]},
+                             {"etc/" + name for name in accounts.OUTPUT_FILES})
+            for row in receipt["outputs"]:
+                self.assertIs(type(row["sysusers_generated_mode"]), int)
+                self.assertEqual(row["expected_root_uid"], 0)
+                self.assertEqual(row["expected_root_gid"], 0)
             accounts.audit_rootfs.audit_accounts(output)
             verified = accounts.verify(Path(metadata), Path(archives), workspace, output)
             self.assertEqual(verified["status"],

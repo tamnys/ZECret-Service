@@ -485,6 +485,7 @@ jobs:
           import sys
 
           sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import build_guest_accounts as accounts
           import prepare_guest_basetree_profile as diagnostic
 
           metadata = Path("/zrpc-metadata")
@@ -492,13 +493,22 @@ jobs:
           artifact = Path("/zrpc-guest-payload-parent/root-basetree")
           profile = Path("/zrpc-guest-payload-parent/mkosi-root-profile")
           workspace = Path("/zrpc-guest-payload-parent")
+          expected = workspace / "expected-accounts"
+          generated = accounts.build(metadata, archives, workspace, expected)
+          if (generated["status"] != "diagnostic-reproducible-guest-accounts-unbuilt"
+                  or generated["independent_generation_runs_matched"] is not True
+                  or generated["installed_rootfs_accounts_compared"] is not False
+                  or generated["image_built"] is not False
+                  or generated["private_mode_approved"] is not False):
+              raise ValueError("signed-source account generation changed diagnostic status")
           prepared = diagnostic.prepare_profile(
-              metadata, archives, artifact, profile, workspace,
+              metadata, archives, artifact, expected, profile, workspace,
           )
           checked = diagnostic.verify_profile(
-              metadata, archives, artifact, profile, workspace,
+              metadata, archives, artifact, expected, profile, workspace,
           )
           if (prepared != checked or prepared["status"] != diagnostic.STATUS
+                  or prepared["account_files_preseeded_from_signed_source"] is not True
                   or prepared["package_install_configured"] is not False
                   or prepared["package_scripts_executed"] is not False
                   or prepared["root_directory_built"] is not False
@@ -525,22 +535,29 @@ jobs:
             }
             # Pinned mkosi still runs its sysusers/tmpfiles/preset/depmod/
             # firstboot/hwdb and output stages. This exercises those stages
-            # only for a root directory, which remains unaudited and unbootable.
+            # only for a root directory; the account-file comparison below
+            # does not audit the rest of the tree or establish bootability.
             run_staged_root /usr/bin/python3 -I - <<"PY"
           import json
           from pathlib import Path
           import sys
 
           sys.path.insert(0, "/zrpc-source/tools/gcp-guest")
+          import audit_mkosi_root_accounts as account_audit
+          import build_guest_accounts as accounts
           import prepare_guest_basetree_profile as diagnostic
 
+          workspace = Path("/zrpc-guest-payload-parent")
+          expected = workspace / "expected-accounts"
           result = diagnostic.build_root_directory(
               Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
               Path("/zrpc-guest-payload-parent/root-basetree"),
+              expected,
               Path("/zrpc-guest-payload-parent/mkosi-root-profile"),
-              Path("/zrpc-guest-payload-parent"),
+              workspace,
           )
           if (result["status"] != "diagnostic-root-directory-built-unapproved"
+                  or result["account_files_preseeded_from_signed_source"] is not True
                   or result["package_install_configured"] is not False
                   or result["package_scripts_executed"] is not False
                   or result["root_directory_built"] is not True
@@ -550,6 +567,25 @@ jobs:
                   or result["private_mode_approved"] is not False):
               raise ValueError("mkosi root directory changed diagnostic status")
           print(json.dumps(result, sort_keys=True))
+
+          compared = account_audit.audit(
+              Path("/zrpc-metadata"), Path("/zrpc-guest-archives"),
+              Path("/zrpc-guest-payload-parent/root-basetree"),
+              Path("/zrpc-guest-payload-parent/mkosi-root-profile"),
+              workspace, expected,
+          )
+          if (compared["status"] != account_audit.STATUS
+                  or compared["account_artifact_regenerated_and_verified"] is not True
+                  or compared["account_files_preseeded_from_signed_source"] is not True
+                  or compared["produced_root_account_bytes_modes_owners_compared"] is not True
+                  or compared["package_install_configured"] is not False
+                  or compared["package_scripts_executed"] is not False
+                  or compared["post_mkosi_tree_audited"] is not False
+                  or compared["disk_image_built"] is not False
+                  or compared["boot_verified"] is not False
+                  or compared["private_mode_approved"] is not False):
+              raise ValueError("produced root account audit changed diagnostic status")
+          print(json.dumps(compared, sort_keys=True))
           PY
             test "$(run_staged /usr/bin/python3 -I -c "import os; print(os.geteuid())")" = "$run_uid"
             echo "Staged command UID: $run_uid"

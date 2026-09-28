@@ -189,12 +189,20 @@ def run_once(directory, selected, binary, library, crypto):
     shadow = root / "etc/shadow"
     if shadow.is_symlink() or not shadow.is_file():
         raise ValueError("signed systemd-sysusers omitted shadow")
+    generated_modes = {}
+    for name in OUTPUT_FILES:
+        observed = (root / "etc" / name).lstat()
+        if (not stat.S_ISREG(observed.st_mode)
+                or (observed.st_uid, observed.st_gid) != (os.geteuid(), os.getegid())):
+            raise ValueError("signed systemd-sysusers account metadata differs: " + name)
+        generated_modes[name] = stat.S_IMODE(observed.st_mode)
     # systemd creates shadow with mode 000. Read it as the local owner for the
     # diagnostic comparison; the published account artifact remains 0400.
     shadow.chmod(0o400)
     audit_rootfs.audit_accounts(root)
     check_master_ids(root, selected)
-    return {name: (root / "etc" / name).read_bytes() for name in OUTPUT_FILES}
+    return {name: {"bytes": (root / "etc" / name).read_bytes(),
+                   "generated_mode": generated_modes[name]} for name in OUTPUT_FILES}
 
 
 def build(metadata, archives, workspace, output):
@@ -223,8 +231,8 @@ def build(metadata, archives, workspace, output):
             raise ValueError("systemd-sysusers account bytes are nondeterministic")
         artifact = scratch / "artifact"
         (artifact / "etc").mkdir(parents=True)
-        for name, data in first.items():
-            write_input(artifact / "etc" / name, data,
+        for name, result in first.items():
+            write_input(artifact / "etc" / name, result["bytes"],
                         0o400 if name == "shadow" else 0o444)
         receipt = {
             "schema_version": 1,
@@ -234,9 +242,11 @@ def build(metadata, archives, workspace, output):
             "signed_packages_index_sha256": guest.PACKAGES_SHA256,
             "source_date_epoch": guest.SIGNED_RELEASE_EPOCH,
             "inputs": sources,
-            "outputs": [{"path": "etc/" + name, "size": len(first[name]),
-                         "sha256": sha256(first[name]),
-                         "mode": 0o400 if name == "shadow" else 0o444}
+            "outputs": [{"path": "etc/" + name, "size": len(first[name]["bytes"]),
+                         "sha256": sha256(first[name]["bytes"]),
+                         "mode": 0o400 if name == "shadow" else 0o444,
+                         "sysusers_generated_mode": first[name]["generated_mode"],
+                         "expected_root_uid": 0, "expected_root_gid": 0}
                         for name in OUTPUT_FILES],
             "independent_generation_runs_matched": True,
             "package_scripts_executed": False,
