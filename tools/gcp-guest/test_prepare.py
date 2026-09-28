@@ -368,6 +368,8 @@ class CandidateTests(unittest.TestCase):
             ("repart/20-root-verity.conf", "Verity=hash", "Verity=off"),
             ("repart/20-root-verity.conf", "Minimize=best", "Minimize=off"),
             ("mkosi.conf", "SecureBoot=yes", "SecureBoot=no"),
+            ("mkosi.conf", "SectorSize=512", "SectorSize=4096"),
+            ("mkosi.conf", "SectorSize=512\n", ""),
             ("mkosi.conf", "KernelModulesInitrd=yes", "KernelModulesInitrd=no"),
             ("mkosi.conf", "KernelModulesInitrdInclude=^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdInclude=.*"),
             ("mkosi.conf", "KernelModulesInitrdExclude=.*", "KernelModulesInitrdExclude="),

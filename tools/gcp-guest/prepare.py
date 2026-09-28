@@ -134,7 +134,7 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
         parser.read_file(stream)
     expected_settings = {
         "Distribution": {"Distribution": "debian", "Release": "trixie", "Architecture": "x86-64", "RepositoryKeyCheck": "yes", "RepositoryKeyFetch": "no"},
-        "Output": {"Format": "disk", "Output": "zrpc-gcp", "ManifestFormat": "json", "RepartDirectories": "repart"},
+        "Output": {"Format": "disk", "Output": "zrpc-gcp", "ManifestFormat": "json", "RepartDirectories": "repart", "SectorSize": "512"},
         "Config": {"Dependencies": "initrd"},
         "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": FIXED_KERNEL_CMDLINE, "ExtraTrees": "rootfs"},
         "Validation": {"SecureBoot": "yes", "SecureBootAutoEnroll": "no", "SignExpectedPcr": "no", "Checksum": "yes"},
