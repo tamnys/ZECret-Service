@@ -138,10 +138,9 @@ jobs:
                 --metadata "$4/guest-metadata" --archives "$4/guest-archives" \
                 --workspace "$4" --output "$4/account-artifact"
           ' _ "$runner_uid" "$runner_gid" "$parent_net_ns" "$scratch" "$source"
-          # The fixed hashes below are diagnostic outputs from two prior native
-          # signed-input runs. Check every byte and the shadow field shape
-          # before printing any account data for independent source review.
-          python3 - "$scratch/account-artifact/etc" <<'PY'
+          # Compare signed-input output and its reviewed root-lock transform
+          # with the immutable overlay. Do not publish shadow contents.
+          python3 - "$scratch/account-artifact/etc" "$source/deploy/gcp/guest/rootfs/etc" <<'PY'
           import hashlib
           from pathlib import Path
           import re
@@ -149,6 +148,7 @@ jobs:
           import sys
 
           directory = Path(sys.argv[1])
+          committed = Path(sys.argv[2])
           expected = {
               "passwd": (1092, "f652ac1e113c0fad438ad2309b747e1cbadb531c178f9942df80da4f0f0637ac", 0o444),
               "group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00", 0o444),
@@ -178,9 +178,30 @@ jobs:
               for field_index, field in enumerate(fields[2:], start=2):
                   if field and not field.isdigit():
                       raise ValueError(f"shadow line {line_index} aging field {field_index} shape differs; length {len(field)}")
-          for name in ("passwd", "group", "shadow"):
-              print("Reviewed diagnostic " + name + ":")
-              print(checked[name].decode("ascii"), end="")
+          original_passwd = b"root:x:0:0::/root:/bin/bash\n"
+          original_shadow = b"root:!unprovisioned:20708::::::\n"
+          if (checked["passwd"].count(original_passwd) != 1
+                  or checked["shadow"].count(original_shadow) != 1):
+              raise ValueError("signed root account differs from reviewed transform input")
+          transformed = dict(checked)
+          transformed["passwd"] = checked["passwd"].replace(
+              original_passwd, b"root:x:0:0::/root:/usr/sbin/nologin\n")
+          transformed["shadow"] = checked["shadow"].replace(
+              original_shadow, b"root:!*:20708::::::\n")
+          normalized = {
+              "passwd": (1100, "f42d295b4a2ad2a9d9a82865bc4ba6043fafe03e77e5b57e7081a8d67450c2ff"),
+              "group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00"),
+              "shadow": (509, "92ec1ef612eb9c38cbe22403a595d268bf38546cadded7d8e0471bf271f15d13"),
+          }
+          for name, (size, digest) in normalized.items():
+              source_file = committed / name
+              data = transformed[name]
+              if (source_file.is_symlink() or not source_file.is_file()
+                      or stat.S_IMODE(source_file.stat().st_mode) != 0o644
+                      or (len(data), hashlib.sha256(data).hexdigest()) != (size, digest)
+                      or source_file.read_bytes() != data):
+                  raise ValueError("reviewed account overlay differs from signed-source transform")
+          print("Signed-source account transform matches pinned, all-locked overlay; image remains unbuilt")
           PY
           python3 - "$scratch/account-artifact/receipt.json" <<'PY'
           import json

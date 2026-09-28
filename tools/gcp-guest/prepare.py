@@ -24,6 +24,15 @@ ROOT = Path(__file__).resolve().parents[2]
 PROFILE = ROOT / "deploy/gcp/guest"
 PACKAGE_CLOSURE_LOCK = PROFILE / "package-closure.lock.json"
 PACKAGE_CLOSURE_SHA256 = "a6994a27c6bcfbed584751ed6eb10cb393c21808c58b628b3ff1584a570b0ca5"
+PROJECT_SYSUSERS_SHA256 = "bb73c9f2f8cc45f160ffde8f21870e588cf728e2c7f7ec6f47978cfde14fd8d6"
+# Reviewed deterministic transform of the signed-input account diagnostic:
+# root's shell is nologin and its password is permanently invalid. The
+# generator's host dynamic runtime is not part of the production build path.
+ACCOUNT_OUTPUTS = {
+    "passwd": (1100, "f42d295b4a2ad2a9d9a82865bc4ba6043fafe03e77e5b57e7081a8d67450c2ff", 0o644, 0o644),
+    "group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00", 0o644, 0o644),
+    "shadow": (509, "92ec1ef612eb9c38cbe22403a595d268bf38546cadded7d8e0471bf271f15d13", 0o644, 0o400),
+}
 SOURCE_COMMIT = "54c625c380ef5500f17460981a3c67b109b6a847"
 KERNEL_VERSION = "6.12.107+deb13-cloud-amd64"
 KERNEL_PACKAGE = f"linux-image-{KERNEL_VERSION}"
@@ -161,6 +170,17 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
         raise ValueError("systemd initrd subimage recipe differs")
     if any((profile / "rootfs" / path).exists() or (profile / "rootfs" / path).is_symlink() for path in ("boot", "lib/modules", "usr/lib/modules")):
         raise ValueError("ExtraTrees must not supply a kernel or module tree")
+    sysusers = profile / "rootfs/usr/lib/sysusers.d/zrpc.conf"
+    if (sysusers.is_symlink() or not sysusers.is_file()
+            or digest(sysusers) != PROJECT_SYSUSERS_SHA256):
+        raise ValueError("project sysusers source differs from reviewed accounts")
+    for name, (size, expected_sha256, source_mode, _) in ACCOUNT_OUTPUTS.items():
+        path = profile / "rootfs/etc" / name
+        if (path.is_symlink() or not path.is_file()
+                or path.stat().st_size != size
+                or stat.S_IMODE(path.stat().st_mode) != source_mode
+                or digest(path) != expected_sha256):
+            raise ValueError("reviewed guest account source differs: " + name)
     repart = profile / "repart"
     expected = {"10-root.conf", "20-root-verity.conf", "30-esp.conf"}
     if {path.name for path in repart.iterdir()} != expected:
@@ -473,6 +493,12 @@ def stage(lock_path, source, destination):
     # Also parse the copied mkosi and repart recipe before generated settings
     # or binaries are added; the inventory comparison covers copied rootfs.
     validate_boot_profile(destination, staged_copy=True)
+    # The public, all-locked shadow bytes are owner-readable in the stage so
+    # its manifest and outer immutable inventory can hash them unprivileged.
+    # The source-bound finalizer seals the installed copy to mode 000.
+    (destination / "rootfs/etc/shadow").chmod(ACCOUNT_OUTPUTS["shadow"][3])
+    shutil.copyfile(Path(__file__).with_name("seal-shadow.py"), destination / "seal-shadow.py")
+    (destination / "seal-shadow.py").chmod(0o555)
     shutil.copyfile(Path(__file__).with_name("audit-rootfs.py"), destination / "audit-rootfs.py")
     (destination / "audit-rootfs.py").chmod(0o555)
     artifacts = destination / "artifacts"
@@ -526,7 +552,7 @@ def stage(lock_path, source, destination):
     install_boot_overrides(rootfs)
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=seal-shadow.py,audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
     with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
         versions = {package["name"]: package["version"] for package in package_manifest}
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))

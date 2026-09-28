@@ -35,9 +35,12 @@ class RawRootfsTest(unittest.TestCase):
                 self.entries["rootfs/" + ancestor.as_posix()] = {
                     "type": "directory", "mode": path.stat().st_mode & 0o777}
             path = self.stage / "rootfs" / relative
-            data = ("approved " + relative + "\n").encode()
+            data = ((Path(__file__).resolve().parents[2] / "deploy/gcp/guest/rootfs" / relative).read_bytes()
+                    if relative in rootfs.ACCOUNT_FILES
+                    else ("approved " + relative + "\n").encode())
             path.write_bytes(data)
-            path.chmod(0o555 if relative.startswith("usr/lib/zrpc/") else 0o644)
+            path.chmod(rootfs.ACCOUNT_FILES[relative][2] if relative in rootfs.ACCOUNT_FILES
+                       else 0o555 if relative.startswith("usr/lib/zrpc/") else 0o644)
             self.entries["rootfs/" + relative] = {
                 "type": "file", "mode": path.stat().st_mode & 0o777,
                 "sha256": digest(data)}
@@ -90,6 +93,7 @@ class RawRootfsTest(unittest.TestCase):
             parsed = rootfs.run_stat(Path("/synthetic/debugfs"), self.root, "usr/lib/zrpc/zebrad")
         self.assertEqual(parsed["type"], "regular")
         self.assertEqual((parsed["mode"], parsed["size"]), (0o555, 9))
+        self.assertEqual((parsed["uid"], parsed["gid"]), (0, 0))
         for stderr, stdout in ((rootfs.READER_BANNER + b"error\n", record),
                                (rootfs.READER_BANNER, record + record)):
             with mock.patch.object(rootfs.subprocess, "run", return_value=
@@ -138,6 +142,28 @@ class RawRootfsTest(unittest.TestCase):
                 "type": "symlink", "mode": 0o777, "size": 9, "link": "/dev/null"}):
             with self.assertRaisesRegex(ValueError, "raw rootfs symlink target differs"):
                 rootfs.inspect_entries(fake, image, {link: selected[link]}, self.root)
+
+    def test_final_account_bytes_modes_and_root_owner_are_required(self):
+        selected = rootfs.checked_overlay(self.manifest, self.stage)
+        file = "etc/shadow"
+        account = selected[file]
+        final = {"type": "regular", "mode": 0o000, "uid": 0, "gid": 0,
+                 "size": account["size"], "link": None}
+        with mock.patch.object(rootfs, "run_stat", return_value=final), \
+                mock.patch.object(rootfs, "run_cat", return_value=account["sha256"]):
+            self.assertEqual(rootfs.inspect_entries(None, None, {file: account}, self.root),
+                             {"file": 1, "directory": 0, "symlink": 0})
+        for change in ({"mode": 0o400}, {"uid": 1000}, {"gid": 1000}):
+            with self.subTest(change=change), \
+                    mock.patch.object(rootfs, "run_stat", return_value={**final, **change}), \
+                    mock.patch.object(rootfs, "run_cat", side_effect=AssertionError(
+                        "account metadata must reject before extraction")):
+                with self.assertRaisesRegex(ValueError, "raw rootfs file metadata differs"):
+                    rootfs.inspect_entries(None, None, {file: account}, self.root)
+        with mock.patch.object(rootfs, "run_stat", return_value=final), \
+                mock.patch.object(rootfs, "run_cat", return_value="0" * 64):
+            with self.assertRaisesRegex(ValueError, "raw rootfs file bytes differ"):
+                rootfs.inspect_entries(None, None, {file: account}, self.root)
 
     def test_mismatched_verity_evidence_rejects_before_partition_read(self):
         layout = {"status": "diagnostic-gpt-only-unapproved",
