@@ -271,6 +271,10 @@ def difference_evidence(expected_rows, observed, changes):
     matching digest or link does not approve mkosi's generated effects.
     """
     expected = {row["path"]: row for row in expected_rows}
+    aliases = {}
+    for path, row in observed.items():
+        if row["kind"] == "file":
+            aliases.setdefault(row["inode"], []).append(path)
 
     def metadata(row, source):
         if row is None:
@@ -283,10 +287,17 @@ def difference_evidence(expected_rows, observed, changes):
             result["nlink"] = row["nlink"]
         return result
 
-    return [{"path": change["path"], "difference": change["difference"],
-             "expected": metadata(expected.get(change["path"]), True),
-             "observed": metadata(observed.get(change["path"]), False)}
-            for change in changes]
+    evidence = []
+    for change in changes:
+        path = change["path"]
+        actual = observed.get(path)
+        actual_metadata = metadata(actual, False)
+        if change["difference"] == "hardlink" and actual is not None:
+            actual_metadata["hardlink_aliases"] = sorted(aliases[actual["inode"]])
+        evidence.append({"path": path, "difference": change["difference"],
+                         "expected": metadata(expected.get(path), True),
+                         "observed": actual_metadata})
+    return evidence
 
 
 def source_consistent_unapproved_effects(expected_rows, observed, changes):

@@ -324,6 +324,22 @@ class ProducedRootAuditTests(unittest.TestCase):
         self.assertIn(("bin/runner-hardlink", "hardlink"), changes)
         self.assertIn(("etc/config", "owner"), changes)
 
+    def test_hardlink_evidence_identifies_wrong_same_content_alias(self):
+        (self.root / "bin/runner-hardlink").unlink()
+        other = self.root / "bin/other-runner"
+        other.write_bytes(b"signed executable\n")
+        other.chmod(0o755)
+        os.utime(other, ns=(0, 0))
+        os.link(other, self.root / "bin/runner-hardlink")
+        result = self.run_audit()
+        hardlink = next(item for item in result["difference_evidence"]
+                        if item["path"] == "bin/runner-hardlink"
+                        and item["difference"] == "hardlink")
+        self.assertEqual(hardlink["expected"]["target"], "bin/runner")
+        self.assertEqual(hardlink["observed"]["hardlink_aliases"],
+                         ["bin/other-runner", "bin/runner-hardlink"])
+        self.assertFalse(result["generated_effects_approved"])
+
     def test_external_hardlink_to_signed_file_is_rejected(self):
         os.link(self.root / "etc/config", self.workspace / "mutable-alias")
         with self.assertRaisesRegex(ValueError, "outside hardlink: etc/config"):
