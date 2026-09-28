@@ -17,8 +17,8 @@
     "updated_at": "2026-09-25T19:59:12Z"
   },
   "signer_workflow": "ZcashFoundation/zebra/.github/workflows/zfnd-release-binaries.yml",
-  "reviewed_advisory_count": 42,
-  "reviewed_advisory_snapshot_sha256": "749920d2f8219cf2ee9da68d64cb5fa00e7f96e6101c0cd1f57df5eb5c52a632",
+  "reviewed_advisory_count": 45,
+  "reviewed_advisory_snapshot_sha256": "4ce49bd8f88fa6f14d19f7900d83778437d69536393339f98b37d0cae95f6c3c",
   "gh_verifier_source": {
     "repository": "cli/cli",
     "tag": "v2.101.0",
