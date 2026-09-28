@@ -41,6 +41,9 @@ FORBIDDEN_UNITS = (
     "debug-shell.service", "getty.target", "getty@.service", "serial-getty@.service",
     "console-getty.service", "container-getty@.service",
     "runlevel1.target",
+    "systemd-sysext.service", "systemd-sysext.socket",
+    "systemd-sysext@.service", "systemd-confext.service",
+    "systemd-udev-load-credentials.service",
 )
 FORBIDDEN_EXECUTABLES = (
     "usr/lib/systemd/systemd-sulogin-shell", "usr/sbin/sulogin",

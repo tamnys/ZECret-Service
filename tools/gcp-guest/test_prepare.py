@@ -338,7 +338,16 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("FinalizeScripts=audit-initrd.py", initrd)
         for relative in ("/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",
                          "/usr/bin/perl", "/usr/bin/perl5.40.1",
-                         "/var/log/journal", "/var/mail"):
+                         "/var/log/journal", "/var/mail",
+                         "/usr/lib/systemd/system/systemd-sysext.service",
+                         "/usr/lib/systemd/system/systemd-sysext.socket",
+                         "/usr/lib/systemd/system/systemd-sysext@.service",
+                         "/usr/lib/systemd/system/systemd-confext.service",
+                         "/usr/lib/systemd/system/systemd-udev-load-credentials.service",
+                         "/etc/systemd/system/sysinit.target.wants/systemd-sysext.service",
+                         "/etc/systemd/system/sockets.target.wants/systemd-sysext.socket",
+                         "/etc/systemd/system/sysinit.target.wants/systemd-confext.service",
+                         "/etc/systemd/system/sysinit.target.wants/systemd-udev-load-credentials.service"):
             self.assertIn(relative, prepare.INITRD_REMOVE_FILES)
             self.assertIn(relative, initrd)
         audit = output / "mkosi.images/initrd/audit-initrd.py"

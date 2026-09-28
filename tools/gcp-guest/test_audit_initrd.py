@@ -55,6 +55,31 @@ class InitrdAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "administrative unit remains"):
             audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_extension_and_credential_startup_units_rejected(self):
+        for relative in (
+            "usr/lib/systemd/system/systemd-sysext.service",
+            "usr/lib/systemd/system/systemd-sysext.socket",
+            "usr/lib/systemd/system/systemd-sysext@.service",
+            "usr/lib/systemd/system/systemd-confext.service",
+            "usr/lib/systemd/system/systemd-udev-load-credentials.service",
+            "etc/systemd/system/sysinit.target.wants/systemd-sysext.service",
+            "etc/systemd/system/sockets.target.wants/systemd-sysext.socket",
+            "etc/systemd/system/sysinit.target.wants/systemd-confext.service",
+            "etc/systemd/system/sysinit.target.wants/systemd-udev-load-credentials.service",
+        ):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to("/usr/lib/systemd/system/systemd-sysext.service")
+                with self.assertRaisesRegex(ValueError, "administrative unit remains"):
+                    audit_initrd.audit(self.root, self.init_sha256)
+                path.unlink()
+        alias = self.root / "etc/systemd/system/sysinit.target.wants/unreviewed.service"
+        alias.parent.mkdir(parents=True, exist_ok=True)
+        alias.symlink_to("/usr/lib/systemd/system/systemd-confext.service")
+        with self.assertRaisesRegex(ValueError, "administrative unit remains"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
     def test_signed_systemd_ssh_config_alias_rejected(self):
         alias = self.root / "etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf"
         alias.parent.mkdir(parents=True)
