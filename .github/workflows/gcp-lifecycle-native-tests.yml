@@ -1,0 +1,110 @@
+name: GCP lifecycle native journal tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/gcp-lifecycle-native-tests.yml
+      - crates/lifecycle/src/gcp/store.rs
+      - crates/lifecycle/src/gcp/store/tests.rs
+
+permissions: {}
+
+jobs:
+  lifecycle:
+    name: Exact-head networkless lifecycle tests
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+    steps:
+      - name: Fetch exact public source and check live dependency policies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          [[ "$ZRPC_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/lifecycle-test"
+          mkdir "$source" "$scratch" "$scratch/cargo-home" "$scratch/target" "$scratch/tmp"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          python3 -I - "$source/rust-toolchain.toml" <<'PY'
+          from pathlib import Path
+          import sys
+          import tomllib
+          if tomllib.loads(Path(sys.argv[1]).read_text())["toolchain"]["channel"] != "1.94.1":
+              raise SystemExit("reviewed Rust toolchain pin differs")
+          PY
+          python3 -I "$source/scripts/check-cargo-registry-age.py"
+          python3 -I "$source/scripts/check-cargo-git-source.py"
+
+      - name: Verify reviewed dstack Git object before Cargo fetch
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          repository="$GITHUB_WORKSPACE/dstack-source"
+          commit=282eeb27d22d8f091ad0fa5a90e638f85cf68751
+          mkdir "$repository"
+          git -C "$repository" init -q
+          git -C "$repository" fetch -q --no-tags --depth=1 \
+            https://github.com/Dstack-TEE/dstack "$commit"
+          test "$(git -C "$repository" rev-parse FETCH_HEAD)" = "$commit"
+          python3 -I "$source/scripts/check-cargo-fetched-git-source.py" \
+            "$source" "$repository"
+
+      - name: Fetch locked dependencies in pinned native Rust container
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/lifecycle-test"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          docker pull --platform linux/amd64 "$RUST_IMAGE"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$RUST_IMAGE")" = linux/amd64
+          case "$(docker image inspect --format '{{json .RepoDigests}}' "$RUST_IMAGE")" in
+            *"${RUST_IMAGE##*@}"*) ;;
+            *) echo 'Pinned Rust image digest differs from review' >&2; exit 1 ;;
+          esac
+          docker run --rm --pull=never --platform linux/amd64 --network bridge \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            cargo fetch --locked --target x86_64-unknown-linux-gnu
+
+      - name: Exercise journal failures and lifecycle regressions without network
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/lifecycle-test"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --mount "type=bind,src=$scratch/tmp,dst=/workspace-scratch" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
+            CODEX_TMP_DIR=/workspace-scratch \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            sh -ceu 'cargo fmt --all -- --check && cargo test --locked --offline -p zrpc-lifecycle gcp::'
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" diff --quiet
+          echo 'Local journal/controller tests only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
