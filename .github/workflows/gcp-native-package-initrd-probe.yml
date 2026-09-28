@@ -153,8 +153,9 @@ jobs:
             test "$(ip -o link show | wc -l)" -eq 1
             test -z "$(ip -4 route show)"
             test -z "$(ip -6 route show)"
-            for fd in /proc/self/fd/*; do
-              case "$(readlink "$fd")" in socket:*) exit 1;; esac
+            for fd in /proc/$$/fd/*; do
+              target=$(readlink "$fd") || exit 1
+              case "$target" in socket:*) exit 1;; esac
             done
             source=$7
             archives=$8
