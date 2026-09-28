@@ -76,28 +76,45 @@ jobs:
           test "$(uname -m)" = x86_64
           source="$GITHUB_WORKSPACE/source"
           scratch="$GITHUB_WORKSPACE/basetree-disk"
-          staged="$scratch/staged"
           test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
           test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
-          runner_uid="$(id -u)"
-          runner_gid="$(id -g)"
+          # The public runner denied mapping its nonroot UID into a child user
+          # namespace. Copy only fetched diagnostic inputs to a fresh root-owned
+          # path; the child maps host root alone and cannot traverse the
+          # runner-owned checkout. Signed bytes are rechecked inside the child.
+          root_stage="/var/tmp/zrpc-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$root_stage"
+          sudo -n install -d -m 0700 "$root_stage"
+          sudo -n cp -a -- "$source" "$scratch" "$root_stage/"
+          sudo -n chown -R 0:0 "$root_stage"
+          source="$root_stage/source"
+          scratch="$root_stage/basetree-disk"
+          staged="$scratch/staged"
+          test "$(sudo -n git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(sudo -n git -C "$source" status --porcelain --untracked-files=all --ignored)"
           parent_user_ns="$(readlink /proc/self/ns/user)"
           parent_mount_ns="$(readlink /proc/self/ns/mnt)"
           parent_net_ns="$(readlink /proc/self/ns/net)"
+          parent_pid_ns="$(readlink /proc/self/ns/pid)"
           chroot_command="$(command -v chroot)"
-          sudo -n unshare --mount --net --propagation private bash -c '
+          sudo -n unshare --user --map-root-user --mount --net --pid \
+            --fork --mount-proc --kill-child --propagation private bash -c '
             set -euo pipefail
             staged=$1
-            run_uid=$2
-            run_gid=$3
-            test "$(readlink /proc/self/ns/user)" = "$4"
-            test "$(readlink /proc/self/ns/mnt)" != "$5"
-            test "$(readlink /proc/self/ns/net)" != "$6"
-            chroot_command=$7
-            source=$8
-            archives=$9
-            metadata=${10}
-            guest_archives=${11}
+            test "$(readlink /proc/self/ns/user)" != "$2"
+            test "$(readlink /proc/self/ns/mnt)" != "$3"
+            test "$(readlink /proc/self/ns/net)" != "$4"
+            test "$(readlink /proc/self/ns/pid)" != "$5"
+            test "$(readlink /proc/1/ns/pid)" = "$(readlink /proc/self/ns/pid)"
+            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/uid_map)" = "0 0 1"
+            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/gid_map)" = "0 0 1"
+            test "$(wc -l < /proc/self/uid_map)" -eq 1
+            test "$(wc -l < /proc/self/gid_map)" -eq 1
+            chroot_command=$6
+            source=$7
+            archives=$8
+            metadata=$9
+            guest_archives=${10}
             test "$(ip -o link show | wc -l)" -eq 1
             test -z "$(ip -4 route show)"
             test -z "$(ip -6 route show)"
@@ -108,8 +125,6 @@ jobs:
               test ! -L "$staged/$directory"
               mkdir -p "$staged/$directory"
             done
-            chown "$run_uid:$run_gid" "$staged/zrpc-apt-scratch"
-            chown "$run_uid:$run_gid" "$staged/zrpc-guest-payload-parent"
             for pair in "$source:zrpc-source" "$archives:zrpc-archives" \
                         "$metadata:zrpc-metadata" "$guest_archives:zrpc-guest-archives"; do
               origin=${pair%%:*}
@@ -127,7 +142,7 @@ jobs:
             run_staged() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
                 LC_ALL=C PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
-                "$chroot_command" --userspec="$run_uid:$run_gid" "$staged" "$@"
+                "$chroot_command" "$staged" "$@"
             }
             run_staged_root() {
               /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent \
@@ -163,7 +178,7 @@ jobs:
                             "guest_status": guest["status"],
                             "private_mode_approved": False}, sort_keys=True))
           PY
-            run_staged_root /usr/bin/python3 -I -B - "$6" <<"PY"
+            run_staged_root /usr/bin/python3 -I -B - "$4" "$2" "$5" <<"PY"
           import json
           from pathlib import Path
           import sys
@@ -184,7 +199,7 @@ jobs:
 
           builder = disk.verify_execution_context(
               metadata, Path("/zrpc-archives"), sys.argv[1],
-              Path("/zrpc-apt-scratch"))
+              Path("/zrpc-apt-scratch"), sys.argv[2], sys.argv[3])
           if (builder["status"] != "diagnostic-signed-staged-builder-no-route"
                   or builder["private_mode_approved"] is not False):
               raise ValueError("signed builder guard changed status")
@@ -253,7 +268,7 @@ jobs:
               *,ro,*) ;;
               *) exit 1 ;;
             esac
-            run_staged_root /usr/bin/python3 -I -B - "$6" <<"PY"
+            run_staged_root /usr/bin/python3 -I -B - "$4" "$2" "$5" <<"PY"
           import json
           from pathlib import Path
           import sys
@@ -273,7 +288,8 @@ jobs:
                                   account_artifact, source_profile,
                                   disk_profile, workspace,
                                   Path("/zrpc-archives"), sys.argv[1],
-                                  Path("/zrpc-apt-scratch"))
+                                  Path("/zrpc-apt-scratch"), sys.argv[2],
+                                  sys.argv[3])
           if (built["status"] != disk.BUILT_STATUS
                   or built["package_install_configured"] is not False
                   or built["runtime_binaries_included"] is not False
@@ -297,7 +313,7 @@ jobs:
           print("::warning::Root/verity is diagnostic only: no approved runtime, "
                 "ESP, UKI, measured boot, or private-mode release")
           PY
-          ' _ "$staged" "$runner_uid" "$runner_gid" \
-            "$parent_user_ns" "$parent_mount_ns" "$parent_net_ns" \
+          ' _ "$staged" "$parent_user_ns" "$parent_mount_ns" \
+            "$parent_net_ns" "$parent_pid_ns" \
             "$chroot_command" "$source" "$scratch/builder-archives" \
             "$scratch/metadata" "$scratch/guest-archives"

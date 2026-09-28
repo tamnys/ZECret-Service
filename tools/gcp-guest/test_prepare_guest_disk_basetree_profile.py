@@ -1,6 +1,7 @@
 """Synthetic negative tests for the no-boot BaseTrees disk profile."""
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -55,7 +56,8 @@ class DiskProfileTests(unittest.TestCase):
                 self.workspace, self.source, self.profile,
                 self.workspace)
         if action is disk.build_disk:
-            return action(*args, self.workspace, "net:[42]", self.workspace)
+            return action(*args, self.workspace, "net:[42]", self.workspace,
+                          "user:[42]", "pid:[42]")
         return action(*args)
 
     @staticmethod
@@ -83,6 +85,8 @@ class DiskProfileTests(unittest.TestCase):
                       "runtime_binaries_included", "esp_included", "uki_included",
                       "boot_verified", "disk_image_built", "private_mode_approved"):
             self.assertFalse(prepared[field])
+        manifest = json.loads((self.profile / disk.MANIFEST).read_text())
+        self.assertFalse(manifest["signed_snapshot_rechecked"])
 
     def test_rejects_mutable_config_repart_and_extra_mkosi_hook(self):
         self.invoke(disk.prepare_profile)
@@ -149,17 +153,20 @@ class DiskProfileTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_builder_guard_rejects_same_namespace_and_network_route(self):
-        with (mock.patch.object(disk.platform, "system", return_value="Linux"),
-              mock.patch.object(disk.platform, "machine", return_value="x86_64"),
-              mock.patch.object(disk.os, "readlink", return_value="net:[42]"),
-              mock.patch.object(disk.builder_closure, "verify") as verify):
-            with self.assertRaisesRegex(ValueError, "outer no-route"):
-                disk.verify_execution_context(self.workspace, self.workspace,
-                                              "net:[42]", self.workspace)
-            verify.assert_not_called()
+        namespaces = {
+            "/proc/self/ns/net": "net:[43]",
+            "/proc/self/ns/user": "user:[43]",
+            "/proc/self/ns/pid": "pid:[43]",
+            "/proc/1/ns/pid": "pid:[43]",
+        }
         original_read_text = Path.read_text
 
+        def namespace_readlink(path):
+            return namespaces[path]
+
         def routes(path, *args, **kwargs):
+            if str(path) == "/proc/self/uid_map" or str(path) == "/proc/self/gid_map":
+                return "0 0 1\n"
             if str(path) == "/proc/net/route":
                 return "Iface Destination\neth0 route\n"
             if str(path) == "/proc/net/ipv6_route":
@@ -168,17 +175,49 @@ class DiskProfileTests(unittest.TestCase):
 
         with (mock.patch.object(disk.platform, "system", return_value="Linux"),
               mock.patch.object(disk.platform, "machine", return_value="x86_64"),
-              mock.patch.object(disk.os, "readlink", return_value="net:[43]"),
+              mock.patch.object(disk.os, "readlink", side_effect=namespace_readlink),
+              mock.patch.object(disk.builder_closure, "verify") as verify):
+            with self.assertRaisesRegex(ValueError, "outer no-route"):
+                disk.verify_execution_context(self.workspace, self.workspace,
+                                              "net:[43]", self.workspace,
+                                              "user:[42]", "pid:[42]")
+            verify.assert_not_called()
+        with (mock.patch.object(disk.platform, "system", return_value="Linux"),
+              mock.patch.object(disk.platform, "machine", return_value="x86_64"),
+              mock.patch.object(disk.os, "readlink", side_effect=namespace_readlink),
+              mock.patch.object(disk.os, "geteuid", return_value=0),
               mock.patch.object(disk.socket, "if_nameindex", return_value=[(1, "lo")]),
               mock.patch.object(Path, "read_text", autospec=True,
                                 side_effect=routes),
               mock.patch.object(disk.builder_closure, "verify") as verify):
             with self.assertRaisesRegex(ValueError, "non-loopback route"):
                 disk.verify_execution_context(self.workspace, self.workspace,
-                                              "net:[42]", self.workspace)
+                                              "net:[42]", self.workspace,
+                                              "user:[42]", "pid:[42]")
+            verify.assert_not_called()
+
+        def broad_mapping(path, *args, **kwargs):
+            if str(path) in {"/proc/self/uid_map", "/proc/self/gid_map"}:
+                return "0 0 4294967295\n"
+            return routes(path, *args, **kwargs)
+
+        with (mock.patch.object(disk.platform, "system", return_value="Linux"),
+              mock.patch.object(disk.platform, "machine", return_value="x86_64"),
+              mock.patch.object(disk.os, "readlink", side_effect=namespace_readlink),
+              mock.patch.object(disk.os, "geteuid", return_value=0),
+              mock.patch.object(disk.socket, "if_nameindex", return_value=[(1, "lo")]),
+              mock.patch.object(Path, "read_text", autospec=True,
+                                side_effect=broad_mapping),
+              mock.patch.object(disk.builder_closure, "verify") as verify):
+            with self.assertRaisesRegex(ValueError, "outer no-route"):
+                disk.verify_execution_context(self.workspace, self.workspace,
+                                              "net:[42]", self.workspace,
+                                              "user:[42]", "pid:[42]")
             verify.assert_not_called()
 
         def loopback_routes(path, *args, **kwargs):
+            if str(path) in {"/proc/self/uid_map", "/proc/self/gid_map"}:
+                return "0 0 1\n"
             if str(path) == "/proc/net/route":
                 return ""  # Native no-route namespace can expose no IPv4 header.
             if str(path) == "/proc/net/ipv6_route":
@@ -187,7 +226,8 @@ class DiskProfileTests(unittest.TestCase):
 
         with (mock.patch.object(disk.platform, "system", return_value="Linux"),
               mock.patch.object(disk.platform, "machine", return_value="x86_64"),
-              mock.patch.object(disk.os, "readlink", return_value="net:[43]"),
+              mock.patch.object(disk.os, "readlink", side_effect=namespace_readlink),
+              mock.patch.object(disk.os, "geteuid", return_value=0),
               mock.patch.object(disk.socket, "if_nameindex", return_value=[(1, "lo")]),
               mock.patch.object(Path, "read_text", autospec=True,
                                 side_effect=loopback_routes),
@@ -195,7 +235,8 @@ class DiskProfileTests(unittest.TestCase):
                                 side_effect=ValueError("signed closure sentinel")) as verify):
             with self.assertRaisesRegex(ValueError, "signed closure sentinel"):
                 disk.verify_execution_context(self.workspace, self.workspace,
-                                              "net:[42]", self.workspace)
+                                              "net:[42]", self.workspace,
+                                              "user:[42]", "pid:[42]")
             verify.assert_called_once()
 
     def test_staged_builder_rejects_mutated_or_extra_payload(self):

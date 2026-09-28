@@ -201,7 +201,10 @@ def expected_manifest(source_report, inputs, repart, config):
         "mkosi_config_sha256": sha256(config),
         "repart_seed": str(seed_for(source_report["profile_manifest_sha256"])),
         "sector_size": 512,
-        "signed_snapshot_rechecked": True,
+        # A local caller can replace imported verifier code. The signed
+        # snapshot check is only source-authenticated by the exact-HEAD CI
+        # workflow, not by this standalone profile or its manifest.
+        "signed_snapshot_rechecked": False,
         "package_install_configured": False,
         "package_scripts_executed": False,
         "runtime_binaries_included": False,
@@ -312,17 +315,32 @@ def inspect_staged_builder(root, expected):
 
 
 def verify_execution_context(metadata, builder_archives, parent_net_ns,
-                             apt_scratch):
-    """Fail before mkosi unless signed tools and no-route isolation are live."""
+                             apt_scratch, parent_user_ns, parent_pid_ns):
+    """Fail before mkosi unless signed tools and child isolation are live."""
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("native x86_64 Linux builder required")
     current = os.readlink("/proc/self/ns/net")
+    current_user = os.readlink("/proc/self/ns/user")
+    current_pid = os.readlink("/proc/self/ns/pid")
+    root_only_mapping = ["0", "0", "1"]
     if (not isinstance(parent_net_ns, str)
             or not re.fullmatch(r"net:\[[0-9]+\]", parent_net_ns)
             or not re.fullmatch(r"net:\[[0-9]+\]", current)
             or current == parent_net_ns
+            or not isinstance(parent_user_ns, str)
+            or not re.fullmatch(r"user:\[[0-9]+\]", parent_user_ns)
+            or not re.fullmatch(r"user:\[[0-9]+\]", current_user)
+            or current_user == parent_user_ns
+            or not isinstance(parent_pid_ns, str)
+            or not re.fullmatch(r"pid:\[[0-9]+\]", parent_pid_ns)
+            or not re.fullmatch(r"pid:\[[0-9]+\]", current_pid)
+            or current_pid == parent_pid_ns
+            or os.geteuid() != 0
+            or Path("/proc/self/uid_map").read_text().split() != root_only_mapping
+            or Path("/proc/self/gid_map").read_text().split() != root_only_mapping
+            or os.readlink("/proc/1/ns/pid") != current_pid
             or {name for _, name in socket.if_nameindex()} != {"lo"}):
-        raise ValueError("outer no-route network namespace not established")
+        raise ValueError("outer no-route user/network/PID namespaces not established")
     ipv4 = Path("/proc/net/route").read_text().splitlines()
     ipv6 = Path("/proc/net/ipv6_route").read_text().splitlines()
     if ipv4 and ipv4[0].split()[:1] != ["Iface"]:
@@ -378,6 +396,8 @@ def verify_execution_context(metadata, builder_archives, parent_net_ns,
             "signed_builder_package_count": len(lock["packages"]),
             "staged_entries_checked": count,
             "network_namespace": current,
+            "user_namespace": current_user,
+            "pid_namespace": current_pid,
             "complete_builder_toolchain": False,
             "private_mode_approved": False}
 
@@ -461,7 +481,7 @@ def verify_profile(metadata, archives, artifact, account_artifact, source,
 
 def build_disk(metadata, archives, artifact, account_artifact, source,
                profile, workspace, builder_archives, parent_net_ns,
-               apt_scratch):
+               apt_scratch, parent_user_ns, parent_pid_ns):
     before = verify_profile(metadata, archives, artifact, account_artifact,
                             source, profile, workspace)
     output = Path(profile).parent / (Path(profile).name + "-output") / OUTPUT
@@ -470,7 +490,8 @@ def build_disk(metadata, archives, artifact, account_artifact, source,
     if not isinstance(builder_archives, Path) or not isinstance(apt_scratch, Path):
         raise ValueError("signed builder archive and scratch paths required")
     execution = verify_execution_context(metadata, builder_archives,
-                                         parent_net_ns, apt_scratch)
+                                         parent_net_ns, apt_scratch,
+                                         parent_user_ns, parent_pid_ns)
     subprocess.run(["/usr/bin/mkosi", f"--directory={profile}", "build"], check=True)
     after = verify_profile(metadata, archives, artifact, account_artifact,
                            source, profile, workspace)
@@ -509,6 +530,8 @@ def main(argv=None):
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--builder-archives", type=Path)
     parser.add_argument("--parent-network-namespace")
+    parser.add_argument("--parent-user-namespace")
+    parser.add_argument("--parent-pid-namespace")
     parser.add_argument("--apt-scratch", type=Path)
     args = parser.parse_args(argv)
     try:
@@ -518,7 +541,9 @@ def main(argv=None):
                       args.profile, workspace)
         if args.command == "build":
             report = build_disk(*parameters, args.builder_archives,
-                                args.parent_network_namespace, args.apt_scratch)
+                                args.parent_network_namespace, args.apt_scratch,
+                                args.parent_user_namespace,
+                                args.parent_pid_namespace)
         else:
             report = {"prepare": prepare_profile,
                       "verify": verify_profile}[args.command](*parameters)
