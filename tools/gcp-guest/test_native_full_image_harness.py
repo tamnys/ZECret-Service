@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hashlib
+import json
 import socket
 import stat
 import subprocess
@@ -510,6 +511,174 @@ class PreflightTests(unittest.TestCase):
                 bound.assert_not_called()
                 mounted.assert_not_called()
                 executed.assert_not_called()
+
+
+class ImportHandoffTests(unittest.TestCase):
+    def setUp(self):
+        workspace_temp = Path.cwd() / ".codex-tmp"
+        workspace_temp.mkdir(exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix="synthetic-import-handoff-", dir=workspace_temp)
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.args = types.SimpleNamespace(
+            scratch=root / "scratch", staged=root / "staged",
+            revision="a" * 40, net="net:[3]", mnt="mnt:[2]")
+        self.args.scratch.mkdir()
+        self.args.staged.mkdir()
+        self.source_sha = "b" * 64
+        self.stage_manifest_sha = "c" * 64
+        self.build_report = {
+            "status": "candidate-outer-image-built-unapproved",
+            "source_commit": self.args.revision,
+            "candidate_manifest_sha256": self.stage_manifest_sha,
+            "input_lock_sha256": "1" * 64,
+            "raw_disk_sha256": self.source_sha,
+            "raw_disk_bytes": 852361216,
+            "image_built": True, "signed_uki_checked": True,
+            "verity_userspace_verified": True, "gpt_roothash_matched": True,
+            "private_mode_approved": False,
+        }
+        self.write_private(self.args.scratch / "outer-image-report.json",
+                           self.build_report)
+
+    def write_private(self, path, report):
+        path.write_text(json.dumps(report) + "\n")
+        path.chmod(0o600)
+
+    def produce_reinspection(self, _staged, command, *, source_sha=None):
+        self.assertIn("reinspect-import", command)
+        directory = self.args.scratch / "import-disk"
+        directory.mkdir()
+        (directory / "disk.raw").touch()
+        final = {"raw_disk_sha256": "e" * 64,
+                 "raw_disk_bytes": 1024 ** 3,
+                 "private_mode_approved": False}
+        statuses = {
+            "sizing": "diagnostic-import-sized-gpt-unapproved",
+            "gpt": "diagnostic-gpt-only-unapproved",
+            "esp": "diagnostic-esp-uki-sections-unapproved",
+            "verity": "diagnostic-raw-root-verity-unapproved",
+            "roothash": "diagnostic-uki-roothash-gpt-match-unapproved",
+            "rootfs": "diagnostic-raw-root-overlay-bytes-matched-unapproved",
+            "uki-digest": "diagnostic-uki-pe-coff-sha384-unapproved",
+        }
+        reports = {}
+        for name in ("sizing", "gpt", "esp", "verity", "roothash",
+                     "rootfs", "uki-digest"):
+            contents = ({"mkosi_disk_sha256": self.source_sha,
+                         "mkosi_disk_bytes": self.build_report["raw_disk_bytes"],
+                         "sfdisk_sha256": "3" * 64, **final} if name == "sizing" else
+                        {"uki_sha256": "9" * 64, "private_mode_approved": False}
+                        if name == "uki-digest" else
+                        {**final, **({"uki_sha256": "9" * 64} if name == "esp" else {})})
+            contents["status"] = statuses[name]
+            host_path = directory / (name + ".json")
+            self.write_private(host_path, contents)
+            reports[name] = {
+                "path": str(harness.SCRATCH_IN_GUEST / "import-disk" /
+                            (name + ".json")),
+                "sha256": hashlib.sha256(host_path.read_bytes()).hexdigest()}
+        receipt = {
+            "status": "diagnostic-import-disk-reinspected-unapproved",
+            "source_commit": self.args.revision,
+            "stage_manifest_sha256": self.stage_manifest_sha,
+            "input_lock_sha256": self.build_report["input_lock_sha256"],
+            "native_rust_manifest_sha256": "2" * 64,
+            "mkosi_disk_sha256": self.source_sha if source_sha is None else source_sha,
+            "mkosi_disk_bytes": self.build_report["raw_disk_bytes"],
+            "raw_disk_sha256": "e" * 64,
+            "raw_disk_bytes": 1024 ** 3,
+            "sfdisk_sha256": "3" * 64,
+            "sfdisk_package_archive_sha256": "4" * 64,
+            "sfdisk_archive_membership_rechecked": False,
+            "sfdisk_dynamic_runtime_authenticated": False,
+            "disk_raw": str(harness.SCRATCH_IN_GUEST / "import-disk/disk.raw"),
+            "reports": reports,
+            "package_diagnostics": {
+                "esp_diagnostic": reports["esp"],
+                "uki_digest_diagnostic": reports["uki-digest"],
+                "verity_diagnostic": reports["verity"]},
+            "import_archive_created": False,
+            "import_package_ready": False,
+            "boot_verified": False,
+            "private_mode_approved": False,
+        }
+        self.write_private(directory / "reinspection.json", receipt)
+
+    def test_verified_build_hands_exact_source_identity_to_same_builder(self):
+        with (mock.patch.object(harness, "run_in_builder",
+                                side_effect=self.produce_reinspection) as executed,
+              mock.patch.object(harness, "checked_final_disk") as checked):
+            report = harness.postbuild_import(self.args.staged, self.args)
+        checked.assert_called_once_with(self.args.scratch / "import-disk/disk.raw",
+                                        "e" * 64, 1024 ** 3)
+        self.assertEqual(report["status"],
+                         "diagnostic-operator-import-handoff-unapproved")
+        self.assertEqual(report["mkosi_disk_sha256"], self.source_sha)
+        self.assertFalse(report["import_package_ready"])
+        self.assertFalse(report["private_mode_approved"])
+        self.assertEqual(report["package_diagnostics"]["esp_diagnostic"]["path"],
+                         str(self.args.scratch / "import-disk/esp.json"))
+        self.assertEqual(report["handoff_artifact"]["sha256"],
+                         hashlib.sha256((self.args.scratch /
+                                         "import-disk/operator-handoff.json").read_bytes()).hexdigest())
+        command = executed.call_args.args[1]
+        self.assertEqual(executed.call_args.args[0], self.args.staged)
+        self.assertEqual(command[command.index("--mkosi-disk-sha256") + 1],
+                         self.source_sha)
+        self.assertEqual(command[command.index("--sfdisk") + 1],
+                         "/usr/sbin/sfdisk")
+        self.assertEqual(command[command.index("--parent-network-namespace") + 1],
+                         self.args.net)
+        self.assertEqual(command[command.index("--parent-mount-namespace") + 1],
+                         self.args.mnt)
+
+    def test_unverified_build_stops_before_import_command(self):
+        self.build_report["signed_uki_checked"] = False
+        self.write_private(self.args.scratch / "outer-image-report.json",
+                           self.build_report)
+        with mock.patch.object(harness, "run_in_builder") as executed:
+            with self.assertRaisesRegex(ValueError, "verified mkosi report"):
+                harness.postbuild_import(self.args.staged, self.args)
+            executed.assert_not_called()
+
+    def test_reinspection_receipt_rejects_wrong_source_disk(self):
+        def wrong_source(staged, command):
+            self.produce_reinspection(staged, command, source_sha="0" * 64)
+        with mock.patch.object(harness, "run_in_builder", side_effect=wrong_source):
+            with self.assertRaisesRegex(ValueError, "receipt differs"):
+                harness.postbuild_import(self.args.staged, self.args)
+
+    def test_reinspection_report_change_rejects_operator_handoff(self):
+        def changed_report(staged, command):
+            self.produce_reinspection(staged, command)
+            report = self.args.scratch / "import-disk/esp.json"
+            data = report.read_bytes()
+            report.write_bytes(data.replace(b'"uki_sha256": "', b'"uki_sha256": "0', 1))
+        with mock.patch.object(harness, "run_in_builder", side_effect=changed_report):
+            with self.assertRaisesRegex(ValueError, "handoff SHA-256 differs"):
+                harness.postbuild_import(self.args.staged, self.args)
+        self.assertFalse((self.args.scratch /
+                          "import-disk/operator-handoff.json").exists())
+
+    def test_handoff_reader_rejects_duplicate_fields(self):
+        path = self.args.scratch / "duplicate.json"
+        path.write_bytes(b'{"status":"one","status":"two"}')
+        path.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "duplicate outer image handoff field"):
+            harness.handoff_json(path)
+
+    def test_final_disk_reader_rejects_same_size_mutation(self):
+        path = self.args.scratch / "small-disk.raw"
+        original = b"synthetic disk bytes"
+        path.write_bytes(original)
+        expected = hashlib.sha256(original).hexdigest()
+        harness.checked_final_disk(path, expected, len(original))
+        path.write_bytes(b"changed disk!! bytes")
+        self.assertEqual(path.stat().st_size, len(original))
+        with self.assertRaisesRegex(ValueError, "differs from reinspection receipt"):
+            harness.checked_final_disk(path, expected, len(original))
 
 
 if __name__ == "__main__":

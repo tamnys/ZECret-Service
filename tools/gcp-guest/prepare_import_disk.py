@@ -28,6 +28,7 @@ WORKSPACE = Path("/workspace")
 # The executable digest was extracted from its exact hash-checked .deb, without
 # executing a package hook. Dynamic loader/library trust remains a separate
 # builder-host requirement; this diagnostic cannot grant production approval.
+SFDISK_PACKAGE_SHA256 = "7f37094ca3f63c3a07b4431532b0bcc4aa64291e75c48cabebf41bf42ad706b1"
 SFDISK_SHA256 = "d0cfef56b8bd47f19e2ec6b73836f89b0d3d4956233eeff4f32ae03dfa4e8919"
 SFDISK = Path("/usr/sbin/sfdisk")
 CHUNK = 1024 * 1024
@@ -102,7 +103,7 @@ def _remove_old_backup(fd, old_start, old_end, new_start, new_end):
 
 
 def _prepare(source, expected_sha256, expected_bytes, destination, sfdisk,
-             *, allow_non_workspace_paths=False, sfdisk_env=None):
+             *, allow_non_workspace_paths=False, sfdisk_env=None, gpt_module=None):
     source, destination, sfdisk = map(Path, (source, destination, sfdisk))
     if (not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
             or type(expected_bytes) is not int or expected_bytes <= 0
@@ -119,7 +120,9 @@ def _prepare(source, expected_sha256, expected_bytes, destination, sfdisk,
                  or not destination.is_relative_to(WORKSPACE))):
         raise ValueError("source and output must remain on the workspace volume")
     target_bytes = expected_bytes + (-expected_bytes % GIB)
-    gpt = _load_gpt()
+    # The production outer runner passes its selected-commit GPT module. The
+    # standalone diagnostic keeps its adjacent inspector for local use.
+    gpt = _load_gpt() if gpt_module is None else gpt_module
     source_fd, source_info = _open_regular(source)
     temp_path = None
     try:
@@ -202,6 +205,9 @@ def _prepare(source, expected_sha256, expected_bytes, destination, sfdisk,
                     "raw_disk_sha256": final_sha256,
                     "raw_disk_bytes": target_bytes,
                     "sfdisk_sha256": SFDISK_SHA256,
+                    "sfdisk_package_archive_sha256": SFDISK_PACKAGE_SHA256,
+                    "sfdisk_archive_membership_rechecked": False,
+                    "sfdisk_dynamic_runtime_authenticated": False,
                     "gpt_reinspected": True,
                     "partition_bytes_preserved": True,
                     "old_backup_gpt_removed": target_bytes != expected_bytes,

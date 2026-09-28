@@ -13,6 +13,7 @@ path establishes that network egress is excluded after the builder starts.
 """
 
 import argparse
+import hashlib
 import importlib
 import json
 import lzma
@@ -421,6 +422,210 @@ def run_in_builder(staged, arguments):
                    stdin=subprocess.DEVNULL, env=ENV)
 
 
+def handoff_json(path, expected_sha256=None):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600):
+            raise ValueError("outer image handoff is not one private regular file")
+        data = stream.read(before.st_size + 1)
+        after = os.fstat(stream.fileno())
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_mode,
+                             item.st_nlink, item.st_size, item.st_mtime_ns,
+                             item.st_ctime_ns)
+    if len(data) != before.st_size or identity(before) != identity(after):
+        raise ValueError("outer image handoff changed during read")
+    observed_sha256 = hashlib.sha256(data).hexdigest()
+    if expected_sha256 is not None and observed_sha256 != expected_sha256:
+        raise ValueError("outer image handoff SHA-256 differs")
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate outer image handoff field")
+            result[key] = value
+        return result
+    report = json.loads(data, object_pairs_hook=unique)
+    if type(report) is not dict:
+        raise ValueError("outer image handoff is not an object")
+    return report, observed_sha256
+
+
+def checked_final_disk(path, expected_sha256, expected_bytes):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size != expected_bytes):
+            raise ValueError("postbuild import disk differs from reinspection receipt")
+        observed_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
+        after = os.fstat(stream.fileno())
+    identity = lambda item: (item.st_dev, item.st_ino, item.st_mode,
+                             item.st_nlink, item.st_size, item.st_mtime_ns,
+                             item.st_ctime_ns)
+    if (identity(before) != identity(after)
+            or observed_sha256 != expected_sha256):
+        raise ValueError("postbuild import disk differs from reinspection receipt")
+
+
+def postbuild_import(staged, args):
+    """Keep import conversion inside the same checked no-route builder."""
+    report_host = args.scratch / "outer-image-report.json"
+    report, _ = handoff_json(report_host)
+    source_sha256 = report.get("raw_disk_sha256")
+    source_bytes = report.get("raw_disk_bytes")
+    if (report.get("status") != "candidate-outer-image-built-unapproved"
+            or report.get("source_commit") != args.revision
+            or report.get("image_built") is not True
+            or report.get("signed_uki_checked") is not True
+            or report.get("verity_userspace_verified") is not True
+            or report.get("gpt_roothash_matched") is not True
+            or report.get("private_mode_approved") is not False
+            or type(source_sha256) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", source_sha256)
+            or type(source_bytes) is not int or source_bytes <= 0
+            or type(report.get("candidate_manifest_sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", report["candidate_manifest_sha256"])):
+        raise ValueError("verified mkosi report is required before import reinspection")
+    import_guest = SCRATCH_IN_GUEST / "import-disk"
+    import_host = args.scratch / "import-disk"
+    if import_host.exists() or import_host.is_symlink():
+        raise ValueError("import reinspection output must be fresh")
+    run_in_builder(staged, [
+        "/usr/bin/python3", "-I", "-B",
+        "/workspace/tools/gcp-guest/outer_image_runner.py", "reinspect-import",
+        "--inputs", str(SCRATCH_IN_GUEST / "inputs"),
+        "--zebra-receipt", str(SCRATCH_IN_GUEST / "zebra-provenance.json"),
+        "--rust-bundle", str(SCRATCH_IN_GUEST / "rust-bundle"),
+        "--stage", str(SCRATCH_IN_GUEST / "candidate-stage"),
+        "--metadata", str(SCRATCH_IN_GUEST / "metadata"),
+        "--builder-archives", str(SCRATCH_IN_GUEST / "builder-archives"),
+        "--workspace", str(SCRATCH_IN_GUEST),
+        "--import-directory", str(import_guest),
+        "--sfdisk", "/usr/sbin/sfdisk",
+        "--mkosi-disk-sha256", source_sha256,
+        "--mkosi-disk-bytes", str(source_bytes),
+        "--revision", args.revision,
+        "--parent-network-namespace", args.net,
+        "--parent-mount-namespace", args.mnt,
+    ])
+    finished, reinspection_sha256 = handoff_json(import_host / "reinspection.json")
+    raw_sha256 = finished.get("raw_disk_sha256")
+    raw_bytes = finished.get("raw_disk_bytes")
+    reports = finished.get("reports")
+    expected_reports = {"sizing", "gpt", "esp", "verity", "roothash",
+                        "rootfs", "uki-digest"}
+    if (finished.get("status") != "diagnostic-import-disk-reinspected-unapproved"
+            or finished.get("source_commit") != args.revision
+            or finished.get("stage_manifest_sha256") != report["candidate_manifest_sha256"]
+            or finished.get("input_lock_sha256") != report.get("input_lock_sha256")
+            or type(finished.get("native_rust_manifest_sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", finished["native_rust_manifest_sha256"])
+            or finished.get("mkosi_disk_sha256") != source_sha256
+            or finished.get("mkosi_disk_bytes") != source_bytes
+            or type(raw_sha256) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", raw_sha256)
+            or type(raw_bytes) is not int or raw_bytes <= 0
+            or raw_bytes % (1024 ** 3) != 0
+            or type(finished.get("sfdisk_sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", finished["sfdisk_sha256"])
+            or type(finished.get("sfdisk_package_archive_sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", finished["sfdisk_package_archive_sha256"])
+            or finished.get("sfdisk_archive_membership_rechecked") is not False
+            or finished.get("sfdisk_dynamic_runtime_authenticated") is not False
+            or finished.get("disk_raw") != str(import_guest / "disk.raw")
+            or type(reports) is not dict or set(reports) != expected_reports
+            or finished.get("package_diagnostics") != {
+                "esp_diagnostic": reports["esp"],
+                "uki_digest_diagnostic": reports["uki-digest"],
+                "verity_diagnostic": reports["verity"]}
+            or finished.get("import_archive_created") is not False
+            or finished.get("import_package_ready") is not False
+            or finished.get("boot_verified") is not False
+            or finished.get("private_mode_approved") is not False):
+        raise ValueError("postbuild import receipt differs from verified mkosi output")
+    expected_statuses = {
+        "sizing": "diagnostic-import-sized-gpt-unapproved",
+        "gpt": "diagnostic-gpt-only-unapproved",
+        "esp": "diagnostic-esp-uki-sections-unapproved",
+        "verity": "diagnostic-raw-root-verity-unapproved",
+        "roothash": "diagnostic-uki-roothash-gpt-match-unapproved",
+        "rootfs": "diagnostic-raw-root-overlay-bytes-matched-unapproved",
+        "uki-digest": "diagnostic-uki-pe-coff-sha384-unapproved",
+    }
+    host_reports = {}
+    observed = {}
+    for name in sorted(expected_reports):
+        artifact = reports[name]
+        guest_path = import_guest / (name + ".json")
+        host_path = import_host / (name + ".json")
+        if (type(artifact) is not dict or set(artifact) != {"path", "sha256"}
+                or artifact["path"] != str(guest_path)
+                or type(artifact["sha256"]) is not str
+                or not re.fullmatch(r"[0-9a-f]{64}", artifact["sha256"])):
+            raise ValueError("import inspector artifact path or identity differs")
+        observed[name], _ = handoff_json(host_path, artifact["sha256"])
+        if (observed[name].get("status") != expected_statuses[name]
+                or observed[name].get("private_mode_approved") is not False):
+            raise ValueError("import inspector report status cannot approve private mode")
+        host_reports[name] = {"path": str(host_path), "sha256": artifact["sha256"]}
+    for name in ("gpt", "esp", "verity", "roothash", "rootfs"):
+        if (observed[name].get("raw_disk_sha256") != raw_sha256
+                or observed[name].get("raw_disk_bytes") != raw_bytes):
+            raise ValueError("import inspector report differs from final disk identity")
+    if (observed["sizing"].get("mkosi_disk_sha256") != source_sha256
+            or observed["sizing"].get("mkosi_disk_bytes") != source_bytes
+            or observed["sizing"].get("raw_disk_sha256") != raw_sha256
+            or observed["sizing"].get("raw_disk_bytes") != raw_bytes
+            or observed["sizing"].get("sfdisk_sha256") != finished["sfdisk_sha256"]
+            or observed["uki-digest"].get("uki_sha256") !=
+               observed["esp"].get("uki_sha256")):
+        raise ValueError("import sizing or UKI report differs from final disk identity")
+    handoff = {
+        "schema_version": 1,
+        "status": "diagnostic-operator-import-handoff-unapproved",
+        "source_commit": args.revision,
+        "stage_manifest_sha256": finished["stage_manifest_sha256"],
+        "input_lock_sha256": finished["input_lock_sha256"],
+        "native_rust_manifest_sha256": finished["native_rust_manifest_sha256"],
+        "mkosi_disk_sha256": source_sha256,
+        "mkosi_disk_bytes": source_bytes,
+        "raw_disk_sha256": raw_sha256,
+        "raw_disk_bytes": raw_bytes,
+        "sfdisk_sha256": finished["sfdisk_sha256"],
+        "sfdisk_package_archive_sha256": finished["sfdisk_package_archive_sha256"],
+        "sfdisk_archive_membership_rechecked": False,
+        "sfdisk_dynamic_runtime_authenticated": False,
+        "disk_raw": str(import_host / "disk.raw"),
+        "reinspection_receipt": {"path": str(import_host / "reinspection.json"),
+                                 "sha256": reinspection_sha256},
+        "review_reports": host_reports,
+        "package_diagnostics": {
+            "esp_diagnostic": host_reports["esp"],
+            "uki_digest_diagnostic": host_reports["uki-digest"],
+            "verity_diagnostic": host_reports["verity"]},
+        "import_archive_created": False,
+        "import_package_ready": False,
+        "boot_verified": False,
+        "private_mode_approved": False,
+    }
+    handoff_path = import_host / "operator-handoff.json"
+    data = (json.dumps(handoff, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    descriptor = os.open(handoff_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(data)
+        output.flush()
+        os.fsync(output.fileno())
+    checked, handoff_sha256 = handoff_json(handoff_path, hashlib.sha256(data).hexdigest())
+    if checked != handoff:
+        raise ValueError("operator import handoff changed after publication")
+    checked_final_disk(import_host / "disk.raw", raw_sha256, raw_bytes)
+    return {**handoff, "handoff_artifact": {"path": str(handoff_path),
+                                            "sha256": handoff_sha256}}
+
+
 def build(args, *, preflight_only=False):
     if preflight_only:
         input_files, input_dirs = (), PREFLIGHT_INPUT_DIRS
@@ -503,9 +708,11 @@ print(json.dumps(result,sort_keys=True))'''
                             "--metadata", str(SCRATCH_IN_GUEST / "metadata"),
                             "--builder-archives", str(SCRATCH_IN_GUEST / "builder-archives"),
                             "--workspace", str(SCRATCH_IN_GUEST),
+                            "--report-path", str(SCRATCH_IN_GUEST / "outer-image-report.json"),
                             "--revision", args.revision,
                             "--parent-network-namespace", args.net,
                             "--parent-mount-namespace", args.mnt])
+    return postbuild_import(staged, args)
 
 
 def main(argv=None):
@@ -526,7 +733,7 @@ def main(argv=None):
         if args.preflight_only:
             print(json.dumps(build(args, preflight_only=True), sort_keys=True))
         else:
-            build(args)
+            print(json.dumps(build(args), sort_keys=True))
     except (OSError, ValueError, lzma.LZMAError, tarfile.TarError,
             subprocess.SubprocessError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error),
