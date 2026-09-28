@@ -55,7 +55,7 @@ class GuestRustInputTests(unittest.TestCase):
             "source_commit": self.revision,
             "source_tree": git(["show", "-s", "--format=%T", self.revision]),
             "source_archive_sha256": hashlib.sha256(b"synthetic archive").hexdigest(),
-            "tools": {"rustc": {"version": "rustc 1.94.1\nhost: x86_64-unknown-linux-gnu\n"}},
+            "tools": {"rustc": {"version": "rustc 1.94.1\nrelease: 1.94.1\nhost: x86_64-unknown-linux-gnu\n"}},
             "script_sha256": hashlib.sha256(exporter.git_bytes(
                 self.revision, "scripts/reproduce-release.py")).hexdigest(),
             "script_in_source_sha256": hashlib.sha256(exporter.git_bytes(
@@ -65,7 +65,9 @@ class GuestRustInputTests(unittest.TestCase):
                 self.revision, path)).hexdigest() for path in (
                     "Cargo.lock", "rust-toolchain.toml")},
             "selected_binaries": [
-                {"package": "zrpc-cli" if name == "zrpc" else "zrpc-server",
+                {"package": {"zrpc": "zrpc-cli",
+                             "zrpc-gcp-lifecycle": "zrpc-lifecycle",
+                             "zrpc-uki-digest": "zrpc-uki-digest"}.get(name, "zrpc-server"),
                  "name": name} for name in sorted(digests)
             ],
             "artifact_sha256": digests,
@@ -102,6 +104,19 @@ class GuestRustInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not an x86_64 ELF"):
             exporter.inspect(self.bundle, self.revision)
 
+    def test_non_guest_binary_machine_is_checked(self):
+        self.contents["zrpc-uki-digest"] = elf("zrpc-uki-digest", b"\xb7\x00")
+        self.write_bundle()
+        with self.assertRaisesRegex(ValueError, "not an x86_64 ELF"):
+            exporter.inspect(self.bundle, self.revision)
+
+    def test_wrong_rust_release_is_rejected(self):
+        self.manifest["tools"]["rustc"]["version"] = (
+            "rustc 1.93.0\nrelease: 1.93.0\nhost: x86_64-unknown-linux-gnu\n")
+        (self.bundle / "manifest.json").write_text(json.dumps(self.manifest))
+        with self.assertRaisesRegex(ValueError, "differs from committed toolchain pin"):
+            exporter.inspect(self.bundle, self.revision)
+
     def test_approval_flag_is_rejected(self):
         self.manifest["private_accepted"] = True
         (self.bundle / "manifest.json").write_text(json.dumps(self.manifest))
@@ -113,6 +128,18 @@ class GuestRustInputTests(unittest.TestCase):
         (self.bundle / "manifest.json").write_text(json.dumps(self.manifest))
         with self.assertRaisesRegex(ValueError, "did not use the x86_64 Rust host"):
             exporter.inspect(self.bundle, self.revision)
+
+    def test_receipt_for_another_checkout_head_is_rejected(self):
+        original = exporter.git_output
+
+        def changed_head(arguments):
+            if arguments == ["rev-parse", "HEAD"]:
+                return b"0" * len(self.revision)
+            return original(arguments)
+
+        with mock.patch.object(exporter, "git_output", side_effect=changed_head):
+            with self.assertRaisesRegex(ValueError, "exact checkout HEAD"):
+                exporter.inspect(self.bundle, self.revision)
 
     def test_replace_ref_cannot_substitute_selected_source_tree(self):
         with tempfile.TemporaryDirectory() as temporary:

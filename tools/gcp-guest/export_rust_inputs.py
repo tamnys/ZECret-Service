@@ -15,6 +15,7 @@ import re
 import stat
 import subprocess
 import sys
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,11 +29,13 @@ EXPECTED_GUEST_BINARIES = {
 EXPECTED_ALL_BINARIES = {
     "zrpc", "zrpc-wrapper", "zrpc-node-wrapper", "zrpc-quote-proxy",
     "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-cookie",
-    "zrpc-gcp-early-init",
+    "zrpc-gcp-early-init", "zrpc-gcp-lifecycle", "zrpc-uki-digest",
 }
-EXPECTED_SELECTED = {("zrpc-cli", "zrpc")} | {
-    ("zrpc-server", name) for name in EXPECTED_ALL_BINARIES if name != "zrpc"
-}
+EXPECTED_SELECTED = ({("zrpc-cli", "zrpc"),
+                      ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),
+                      ("zrpc-uki-digest", "zrpc-uki-digest")}
+                     | {("zrpc-server", name) for name in EXPECTED_ALL_BINARIES
+                        if name not in {"zrpc", "zrpc-gcp-lifecycle", "zrpc-uki-digest"}})
 
 
 def unique_object(pairs):
@@ -121,6 +124,8 @@ def x86_64_elf(data):
 
 
 def inspect(bundle, revision):
+    if git_output(["rev-parse", "HEAD"]).decode().strip() != revision:
+        raise ValueError("Rust receipt source commit differs from exact checkout HEAD")
     manifest_bytes = regular_bytes(bundle / "manifest.json")
     manifest = json.loads(manifest_bytes, object_pairs_hook=unique_object,
                           parse_constant=reject_nonfinite)
@@ -140,6 +145,9 @@ def inspect(bundle, revision):
     if (not isinstance(version, str)
             or re.search(r"^host: x86_64-unknown-linux-gnu$", version, re.MULTILINE) is None):
         raise ValueError("reproduction did not use the x86_64 Rust host")
+    pin = tomllib.loads(git_bytes(revision, "rust-toolchain.toml").decode())["toolchain"]["channel"]
+    if re.search(r"^release: " + re.escape(pin) + r"$", version, re.MULTILINE) is None:
+        raise ValueError("reproduction Rust release differs from committed toolchain pin")
     if manifest.get("source_tree") != git_output(
             ["show", "-s", "--format=%T", revision]).decode().strip():
         raise ValueError("reproduction source tree differs from selected commit")
@@ -193,8 +201,8 @@ def inspect(bundle, revision):
             data = regular_bytes(path)
             if sha256(data) != expected:
                 raise ValueError("binary differs from independent build receipts")
-            if name in roles.values() and not x86_64_elf(data):
-                raise ValueError("guest binary is not an x86_64 ELF executable")
+            if not x86_64_elf(data):
+                raise ValueError("project binary is not an x86_64 ELF executable")
     return {
         "schema_version": 1,
         "status": "diagnostic-unsigned-x86_64-rust-inputs-unapproved",

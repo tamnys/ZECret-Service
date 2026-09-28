@@ -7,7 +7,7 @@ permissions: {}
 
 jobs:
   native_cargo:
-    name: Live source gates, locked fetch, and networkless diagnostic build
+    name: Live source gates, locked fetch, and networkless double-build receipt
     runs-on: ubuntu-24.04
     steps:
       - name: Fetch exact project source
@@ -37,12 +37,14 @@ jobs:
         run: |
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
-          if python3 -I "$source/scripts/check-cargo-registry-age.py"; then
+          scratch="$GITHUB_WORKSPACE/native-cargo"
+          mkdir "$scratch"
+          if python3 -I "$source/scripts/check-cargo-registry-age.py" | tee "$scratch/registry-age.json"; then
             registry_status=0
           else
             registry_status=$?
           fi
-          if python3 -I "$source/scripts/check-cargo-git-source.py"; then
+          if python3 -I "$source/scripts/check-cargo-git-source.py" | tee "$scratch/git-source-age.json"; then
             git_status=0
           else
             git_status=$?
@@ -66,7 +68,7 @@ jobs:
             https://github.com/Dstack-TEE/dstack "$commit"
           test "$(git -C "$repository" rev-parse FETCH_HEAD)" = "$commit"
           python3 -I "$source/scripts/check-cargo-fetched-git-source.py" \
-            "$source" "$repository"
+            "$source" "$repository" | tee "$GITHUB_WORKSPACE/native-cargo/git-object.json"
 
       - name: Fetch locked Cargo packages with pinned native Rust
         shell: bash
@@ -76,7 +78,7 @@ jobs:
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
           scratch="$GITHUB_WORKSPACE/native-cargo"
-          mkdir "$scratch" "$scratch/cargo-home" "$scratch/target"
+          mkdir "$scratch/cargo-home" "$scratch/target"
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           docker pull --platform linux/amd64 "$RUST_IMAGE"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$RUST_IMAGE")" = linux/amd64
@@ -101,7 +103,7 @@ jobs:
           git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
           echo 'Locked native dependency fetch completed; no code built or guest image created.'
 
-      - name: Build workspace binaries with no network or source write access
+      - name: Build and export matching native binaries with no network or source write access
         shell: bash
         env:
           RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
@@ -109,17 +111,95 @@ jobs:
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
           scratch="$GITHUB_WORKSPACE/native-cargo"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir "$source/.codex-tmp" "$scratch/reproduction"
           docker run --rm --pull=never --platform linux/amd64 --network none \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
             --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
             --mount "type=bind,src=$source,dst=/workspace,readonly" \
             --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
-            --mount "type=bind,src=$scratch/target,dst=/target" \
+            --mount "type=bind,src=$scratch/reproduction,dst=/workspace/.codex-tmp" \
             --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
             HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
-            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
+            CARGO_HOME=/cargo-home CARGO_NET_OFFLINE=true \
             RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
             RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
             LANG=C LC_ALL=C TZ=UTC \
-            cargo build --locked --offline --workspace --bins
-          echo 'Diagnostic native build completed; no guest image or release was approved.'
+            sh -ceu '
+              command -v python3
+              python3 -I scripts/reproduce-release.py \
+                --revision "$1" \
+                --output-directory "/workspace/.codex-tmp/release-$1"
+              python3 -I tools/gcp-guest/export_rust_inputs.py \
+                --bundle "/workspace/.codex-tmp/release-$1" \
+                --revision "$1" \
+                --output "/workspace/.codex-tmp/rust-inputs-$1"
+            ' sh "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
+
+      - name: Package and verify the matched-build bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/native-cargo"
+          release="$scratch/reproduction/release-$GITHUB_SHA"
+          bundle="$scratch/review-bundle"
+          mkdir "$bundle"
+          python3 -I - "$source" "$release" "$bundle" "$scratch/reproduction/rust-inputs-$GITHUB_SHA" "$GITHUB_SHA" <<'PY'
+          import importlib.util
+          import json
+          from pathlib import Path
+          import shutil
+          import sys
+
+          source, release, bundle, guest_inputs = map(Path, sys.argv[1:5])
+          revision = sys.argv[5]
+          spec = importlib.util.spec_from_file_location(
+              "export_rust_inputs", source / "tools/gcp-guest/export_rust_inputs.py")
+          exporter = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(exporter)
+          exporter.inspect(release, revision)
+          manifest = json.loads((release / "manifest.json").read_text())
+          names = sorted(manifest["artifact_sha256"])
+          gates = bundle / "dependency-gates"
+          gates.mkdir()
+          for name, passed in (("registry-age.json", "registry_preflight_passed"),
+                               ("git-source-age.json", "git_source_metadata_preflight_passed"),
+                               ("git-object.json", "git_object_fetched_and_checked_locally")):
+              path = release.parents[1] / name
+              report = json.loads(path.read_text())
+              if report.get(passed) is not True or report.get("cargo_lock_sha256") != manifest["input_sha256"]["Cargo.lock"]:
+                  raise ValueError("dependency gate receipt differs from matched build")
+              shutil.copy2(path, gates / name)
+          for name in ("manifest.json", "SHA256SUMS", "source.tar"):
+              shutil.copy2(release / name, bundle / name)
+          for name in names:
+              for directory in ("artifacts", "build-a/target/release", "build-b/target/release"):
+                  target = bundle / directory / name
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(release / directory / name, target)
+          shutil.copytree(guest_inputs, bundle / "guest-inputs")
+          exporter.inspect(bundle, revision)
+          PY
+          tar -C "$bundle" -cf "$scratch/native-rust-$GITHUB_SHA.tar" .
+          (cd "$scratch" && sha256sum "native-rust-$GITHUB_SHA.tar" > "native-rust-$GITHUB_SHA.tar.sha256")
+
+      - name: Upload the reviewable unsigned receipt
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-rust-${{ github.sha }}
+          path: |
+            ${{ github.workspace }}/native-cargo/native-rust-${{ github.sha }}.tar
+            ${{ github.workspace }}/native-cargo/native-rust-${{ github.sha }}.tar.sha256
+          if-no-files-found: error
+
+      - name: Record uploaded receipt digests
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Source commit: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Bundle SHA-256: $(cut -d ' ' -f 1 "$GITHUB_WORKSPACE/native-cargo/native-rust-$GITHUB_SHA.tar.sha256")" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Artifact SHA-256: ${{ steps.upload.outputs.artifact-digest }}' >> "$GITHUB_STEP_SUMMARY"

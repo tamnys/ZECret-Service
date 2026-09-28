@@ -17,6 +17,17 @@ spec.loader.exec_module(reproduce_release)
 
 
 class GuestArtifactTests(unittest.TestCase):
+    def test_current_workspace_binaries_are_covered(self):
+        reproduce_release.check_project_artifacts(ROOT)
+
+    def test_omitting_a_non_guest_binary_fails(self):
+        artifacts = tuple(artifact for artifact in reproduce_release.ARTIFACTS
+                          if artifact[1] != "zrpc-uki-digest")
+        with mock.patch.object(reproduce_release, "ARTIFACTS", artifacts):
+            with self.assertRaisesRegex(reproduce_release.Refusal,
+                                        "project Rust binary inventory differs"):
+                reproduce_release.check_project_artifacts(ROOT)
+
     def test_current_guest_profile_is_covered(self):
         reproduce_release.check_guest_artifacts(ROOT)
 

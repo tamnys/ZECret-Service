@@ -26,8 +26,8 @@ class Refusal(Exception):
     pass
 
 
-# Keep the client and every guest-facing executable in one reviewed artifact
-# set. A matching pair of builds must account for all of them before delivery.
+# Keep every project executable in one reviewed artifact set. A matching pair
+# of builds must account for all of them before delivery.
 ARTIFACTS = (
     ("zrpc-cli", "zrpc"),
     ("zrpc-server", "zrpc-wrapper"),
@@ -37,7 +37,41 @@ ARTIFACTS = (
     ("zrpc-server", "zrpc-gcp-guard"),
     ("zrpc-server", "zrpc-gcp-cookie"),
     ("zrpc-server", "zrpc-gcp-early-init"),
+    ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),
+    ("zrpc-uki-digest", "zrpc-uki-digest"),
 )
+
+
+def check_project_artifacts(source):
+    """Refuse a new workspace binary until it joins the compared artifact set."""
+    workspace = tomllib.loads((source / "Cargo.toml").read_text())["workspace"]
+    found = set()
+    for member in workspace["members"]:
+        package_root = source / member
+        manifest = tomllib.loads((package_root / "Cargo.toml").read_text())
+        package = manifest["package"]
+        name = package["name"]
+        explicit = manifest.get("bin", [])
+        if not isinstance(explicit, list):
+            raise Refusal("project binary inventory requires review")
+        explicit_paths = set()
+        for binary in explicit:
+            if not isinstance(binary, dict) or not isinstance(binary.get("name"), str):
+                raise Refusal("project binary inventory requires review")
+            found.add((name, binary["name"]))
+            if "path" in binary:
+                explicit_paths.add(binary["path"])
+        if package.get("autobins", True) is not False:
+            if (package_root / "src/main.rs").is_file() and "src/main.rs" not in explicit_paths:
+                found.add((name, name))
+            bin_root = package_root / "src/bin"
+            if bin_root.is_dir():
+                found.update((name, path.stem) for path in bin_root.glob("*.rs")
+                             if path.relative_to(package_root).as_posix() not in explicit_paths)
+                found.update((name, path.parent.name) for path in bin_root.glob("*/main.rs")
+                             if path.relative_to(package_root).as_posix() not in explicit_paths)
+    if found != set(ARTIFACTS) or len(ARTIFACTS) != len(found):
+        raise Refusal("project Rust binary inventory differs from double build")
 
 
 def check_guest_artifacts(source):
@@ -110,9 +144,12 @@ def tool(name, cwd, env, *version_args):
 
 
 def base_environment():
-    # Retain managed/package/network policy. Clear only compilation controls;
-    # never dump the inherited environment into the report or build log.
+    # Retain managed/package/network policy. Clear caller Git redirection and
+    # compilation controls; never dump the inherited environment into the report.
     env = os.environ.copy()
+    for name in list(env):
+        if name.startswith("GIT_"):
+            del env[name]
     for name in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_BUILD_RUSTC_WRAPPER",
                  "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER"):
         if env.get(name):
@@ -135,6 +172,7 @@ def base_environment():
                 "RUSTC_WRAPPER": "", "RUSTC_WORKSPACE_WRAPPER": "",
                 "CCACHE_DISABLE": "1", "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_NO_REPLACE_OBJECTS": "1",
+                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
                 "GIT_TERMINAL_PROMPT": "0", "CARGO_TERM_COLOR": "never"})
     return env
 
@@ -226,12 +264,16 @@ def config_hashes(source, env):
 def reproduce(args):
     if platform.system() != "Linux":
         raise Refusal("build reproduction requires the reviewed Linux environment")
+    if platform.machine() != "x86_64":
+        raise Refusal("native x86_64 build host required")
     if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", args.revision):
         raise Refusal("revision must be an exact full lowercase Git commit object ID")
     env = base_environment()
     script = Path(__file__).resolve(strict=True)
     repository = Path(command(["git", "rev-parse", "--show-toplevel"],
                               cwd=script.parent, env=env)).resolve(strict=True)
+    if command(["git", "rev-parse", "HEAD"], cwd=repository, env=env) != args.revision:
+        raise Refusal("selected revision must be the exact checkout HEAD")
     output = output_path(args.output_directory, repository)
     if command(["git", "cat-file", "-t", args.revision], cwd=repository, env=env) != "commit":
         raise Refusal("revision must name a commit, not a tag or other object")
@@ -259,6 +301,8 @@ def reproduce(args):
     release = re.search(r"^release: (.+)$", tools["rustc"]["version"], re.MULTILINE)
     if release is None or release.group(1) != pin:
         raise Refusal("actual rustc release differs from the committed toolchain pin")
+    if re.search(r"^host: x86_64-unknown-linux-gnu$", tools["rustc"]["version"], re.MULTILINE) is None:
+        raise Refusal("installed Rust host must be native x86_64 Linux")
     if shutil.which("rustup", path=env["PATH"]):
         for name in ("rustc", "cargo"):
             installed_binary = Path(command(["rustup", "which", "--toolchain", selected_toolchain, name],
@@ -297,6 +341,7 @@ def reproduce(args):
             source, target, temporary = root / "source", root / "target", root / "tmp"
             extract_source(archive, source)
             require_source_script(source, manifest["script_sha256"], manifest)
+            check_project_artifacts(source)
             check_guest_artifacts(source)
             target.mkdir()
             temporary.mkdir()
@@ -338,6 +383,8 @@ def reproduce(args):
                 checksums.write(f"{value}  artifacts/{name}\n")
         manifest["reproducible"] = True
         manifest["artifact_sha256"] = first["artifact_sha256"]
+        if command(["git", "rev-parse", "HEAD"], cwd=repository, env=env) != args.revision:
+            raise Refusal("checkout HEAD changed during reproduction")
     except (Refusal, OSError, ValueError, tarfile.TarError, KeyboardInterrupt) as error:
         manifest["failure"] = str(error) if isinstance(error, Refusal) else type(error).__name__
         raise
