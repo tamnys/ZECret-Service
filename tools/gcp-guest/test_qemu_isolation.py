@@ -129,22 +129,29 @@ class QemuIsolationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "output is read-only"):
                 isolation.check_mounts(root, output, require_proc=True)
 
-    def test_new_network_requires_only_loopback_and_no_routes(self):
-        content = {"/proc/net/route": "Iface\tDestination\n",
-                   "/proc/net/ipv6_route": ""}
+    def test_new_network_allows_only_loopback_routes(self):
+        ipv4 = "Iface\tDestination\nlo\t0000007F\n"
+        ipv6 = "00000000000000000000000000000001 80 lo\n"
+        content = {"/proc/net/route": ipv4,
+                   "/proc/net/ipv6_route": ipv6}
         with (mock.patch.object(isolation.socket, "if_nameindex",
                                 return_value=[(1, "lo")]),
               mock.patch.object(Path, "read_text", autospec=True,
                                 side_effect=lambda path: content[str(path)])):
             isolation.no_network()
-            content["/proc/net/route"] += "eth0\t00000000\n"
-            with self.assertRaisesRegex(ValueError, "IPv4 routes"):
-                isolation.no_network()
             content["/proc/net/route"] = "Iface\tDestination\n"
-            content["/proc/net/ipv6_route"] = "route\n"
-            with self.assertRaisesRegex(ValueError, "IPv6 routes"):
-                isolation.no_network()
             content["/proc/net/ipv6_route"] = ""
+            isolation.no_network()
+            content["/proc/net/route"] = ipv4
+            content["/proc/net/ipv6_route"] = ipv6
+            content["/proc/net/route"] += "eth0\t00000000\n"
+            with self.assertRaisesRegex(ValueError, "non-loopback IPv4 routes"):
+                isolation.no_network()
+            content["/proc/net/route"] = ipv4
+            content["/proc/net/ipv6_route"] += "00000000000000000000000000000000 00 eth0\n"
+            with self.assertRaisesRegex(ValueError, "non-loopback IPv6 routes"):
+                isolation.no_network()
+            content["/proc/net/ipv6_route"] = ipv6
             with mock.patch.object(isolation.socket, "if_nameindex",
                                    return_value=[(1, "lo"), (2, "eth0")]):
                 with self.assertRaisesRegex(ValueError, "unexpected interface"):

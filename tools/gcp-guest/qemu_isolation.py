@@ -104,10 +104,17 @@ def no_network():
     if [name for _, name in socket.if_nameindex()] != ["lo"]:
         raise ValueError("network namespace has an unexpected interface")
     routes = Path("/proc/net/route").read_text().splitlines()
-    if not routes or routes[1:]:
-        raise ValueError("network namespace has IPv4 routes")
-    if Path("/proc/net/ipv6_route").read_text().strip():
-        raise ValueError("network namespace has IPv6 routes")
+    if not routes or not routes[0].split() or routes[0].split()[0] != "Iface":
+        raise ValueError("network namespace IPv4 route header is missing")
+    for row in routes[1:]:
+        fields = row.split()
+        if not fields or fields[0] != "lo":
+            raise ValueError("network namespace has non-loopback IPv4 routes")
+    routes6 = Path("/proc/net/ipv6_route").read_text().splitlines()
+    for row in routes6:
+        fields = row.split()
+        if not fields or fields[-1] != "lo":
+            raise ValueError("network namespace has non-loopback IPv6 routes")
 
 
 def actual_path(value, *, directory):
