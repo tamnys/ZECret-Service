@@ -382,5 +382,97 @@ class StagedBuilderTests(unittest.TestCase):
                 executed.assert_not_called()
 
 
+class PreflightTests(unittest.TestCase):
+    def args(self, root):
+        source, scratch, staged = (root / name for name in
+                                   ("source", "scratch", "staged"))
+        for directory in (source, scratch, staged):
+            directory.mkdir()
+        return types.SimpleNamespace(
+            workspace=root, source=source, scratch=scratch, staged=staged,
+            revision="a" * 40, user="user:[1]", mnt="mnt:[2]",
+            net="net:[3]", pid="pid:[4]")
+
+    def test_production_handoff_preflight_never_reads_key_or_runs_outer_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.args(Path(temporary))
+            original_stat = Path.stat
+
+            def mapped_root_stat(path, *arguments, **keywords):
+                if path == args.scratch / "apt-scratch/tmp":
+                    return types.SimpleNamespace(st_uid=0,
+                                                 st_mode=stat.S_IFDIR | 0o700)
+                return original_stat(path, *arguments, **keywords)
+
+            with (mock.patch.object(harness, "checked_layout",
+                                    return_value=(args.source / ".codex-tmp",
+                                                  args.scratch / "apt-scratch")) as layout,
+                  mock.patch.object(Path, "stat", mapped_root_stat),
+                  mock.patch.object(harness, "checked_bound_mounts") as mounts,
+                  mock.patch.object(harness, "checked_bound_sockets") as sockets,
+                  mock.patch.object(harness, "checked_source") as source,
+                  mock.patch.object(harness, "checked_namespace") as namespace,
+                  mock.patch.object(harness, "checked_staged_builder") as builder,
+                  mock.patch.object(harness, "checked_signing_mount") as signer,
+                  mock.patch.object(harness, "bind") as bound,
+                  mock.patch.object(harness, "mount") as mounted,
+                  mock.patch.object(harness, "run_in_builder") as executed):
+                report = harness.build(args, preflight_only=True)
+            self.assertEqual(report["status"],
+                             "diagnostic-production-harness-preflight-unapproved")
+            self.assertEqual(report["source_commit"], args.revision)
+            for field in ("signing_key_checked", "mkosi_executed",
+                          "network_egress_excluded", "image_built",
+                          "private_mode_approved"):
+                self.assertFalse(report[field])
+            self.assertTrue(report["signed_staged_builder_preflight_executed"])
+            layout.assert_called_once_with(
+                args.workspace, args.source, args.scratch, args.staged,
+                input_files=(), input_dirs=harness.PREFLIGHT_INPUT_DIRS)
+            self.assertEqual(mounts.call_count, 2)
+            self.assertEqual(sockets.call_count, 2)
+            source.assert_called_once_with(args.source, args.revision)
+            namespace.assert_called_once()
+            builder.assert_called_once_with(args.source, args.scratch, args.staged,
+                                            args.revision)
+            signer.assert_not_called()
+            self.assertEqual(executed.call_count, 1)
+            command = executed.call_args.args[1]
+            self.assertEqual(command[:4], ["/usr/bin/python3", "-I", "-B", "-c"])
+            self.assertIn("verify_execution_context", command[4])
+            self.assertNotIn("outer_image_runner", " ".join(map(str, command)))
+            self.assertFalse((args.staged / "run/zrpc-build-signing").exists())
+            self.assertFalse(any(str(harness.SIGNING_MOUNT) in str(call)
+                                 for call in bound.call_args_list))
+            self.assertEqual(mounted.call_args_list[0],
+                             mock.call("-t", "proc", "proc", args.staged / "proc"))
+            self.assertEqual(len(mounted.call_args_list), 7)
+            self.assertTrue(all(call.args[0] == "--bind"
+                                for call in mounted.call_args_list[1:]))
+
+    def test_changed_staged_builder_fails_before_mount_or_execution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            args = self.args(Path(temporary))
+            with (mock.patch.object(harness, "checked_layout",
+                                    return_value=(args.source / ".codex-tmp",
+                                                  args.scratch / "apt-scratch")),
+                  mock.patch.object(harness, "checked_bound_mounts"),
+                  mock.patch.object(harness, "checked_bound_sockets"),
+                  mock.patch.object(harness, "checked_source"),
+                  mock.patch.object(harness, "checked_namespace"),
+                  mock.patch.object(harness, "checked_staged_builder",
+                                    side_effect=ValueError("staged builder file differs")),
+                  mock.patch.object(harness, "checked_signing_mount") as signer,
+                  mock.patch.object(harness, "bind") as bound,
+                  mock.patch.object(harness, "mount") as mounted,
+                  mock.patch.object(harness, "run_in_builder") as executed):
+                with self.assertRaisesRegex(ValueError, "staged builder file differs"):
+                    harness.build(args, preflight_only=True)
+                signer.assert_not_called()
+                bound.assert_not_called()
+                mounted.assert_not_called()
+                executed.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
