@@ -18,6 +18,9 @@ import shutil
 import subprocess
 import sys
 
+# The native workflow invokes this exact-commit, read-only script with -I.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import fetch_guest_closure as guest
 import inspect_raw_esp as esp
 import inspect_raw_gpt as gpt
