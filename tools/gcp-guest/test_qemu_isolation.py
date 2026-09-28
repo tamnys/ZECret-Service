@@ -142,6 +142,11 @@ class QemuIsolationTests(unittest.TestCase):
             content["/proc/net/route"] = "Iface\tDestination\n"
             content["/proc/net/ipv6_route"] = ""
             isolation.no_network()
+            content["/proc/net/route"] = ""
+            isolation.no_network()
+            content["/proc/net/route"] = "unexpected\tDestination\n"
+            with self.assertRaisesRegex(ValueError, "IPv4 route header"):
+                isolation.no_network()
             content["/proc/net/route"] = ipv4
             content["/proc/net/ipv6_route"] = ipv6
             content["/proc/net/route"] += "eth0\t00000000\n"

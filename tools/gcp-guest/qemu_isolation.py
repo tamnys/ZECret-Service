@@ -104,7 +104,8 @@ def no_network():
     if [name for _, name in socket.if_nameindex()] != ["lo"]:
         raise ValueError("network namespace has an unexpected interface")
     routes = Path("/proc/net/route").read_text().splitlines()
-    if not routes or not routes[0].split() or routes[0].split()[0] != "Iface":
+    # A fresh netns can have no IPv4 main table, so proc emits no header.
+    if routes and routes[0].split()[:1] != ["Iface"]:
         raise ValueError("network namespace IPv4 route header is missing")
     for row in routes[1:]:
         fields = row.split()
