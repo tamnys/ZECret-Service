@@ -467,14 +467,20 @@ def build_disk(metadata, archives, artifact, account_artifact, source,
         raise ValueError("mkosi changed verified disk profile inputs")
     descriptor = os.open(output, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size == 0:
             raise ValueError("mkosi did not emit a regular raw disk")
-        digest = hashlib.file_digest(os.fdopen(descriptor, "rb", closefd=False), "sha256")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            digest = hashlib.file_digest(stream, "sha256")
+        raw_after = os.fstat(descriptor)
+        identity = lambda item: (item.st_dev, item.st_ino, item.st_size,
+                                 item.st_mtime_ns, item.st_ctime_ns)
+        if identity(before) != identity(raw_after):
+            raise ValueError("mkosi raw disk changed during hashing")
     finally:
         os.close(descriptor)
     return {**after, "status": BUILT_STATUS, "disk_image_built": True,
-            "raw_disk_sha256": digest.hexdigest(), "raw_disk_bytes": info.st_size,
+            "raw_disk_sha256": digest.hexdigest(), "raw_disk_bytes": before.st_size,
             "builder_execution": execution,
             "gpt_checked": False, "verity_userspace_verified": False,
             "production_image_built": False}
