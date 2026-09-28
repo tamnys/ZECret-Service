@@ -8,12 +8,14 @@ import lzma
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import tomllib
 import unittest
 import uuid
+from types import SimpleNamespace
 from unittest import mock
 
 spec = importlib.util.spec_from_file_location("prepare", Path(__file__).with_name("prepare.py"))
@@ -294,6 +296,8 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "rootfs/run/zrpc-build-signing").exists())
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)
+        self.assertEqual(config.count("RemoveFiles="), 1)
+        self.assertIn("RemoveFiles=" + ",".join(prepare.ROOT_REMOVE_FILES) + "\n", config)
         self.assertEqual(config.count("FinalizeScripts=seal-shadow.py,audit-rootfs.py\n"), 1)
         self.assertIn("\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n", config)
         self.assertEqual(config.count("\nBuildSources=\n"), 1)
@@ -350,6 +354,7 @@ class CandidateTests(unittest.TestCase):
         self.assertNotIn("linux-image", initrd)
         esp = (output / "repart/30-esp.conf").read_text()
         self.assertIn("CopyFiles=/efi:/", esp)
+        self.assertIn("Minimize=guess", esp)
         self.assertNotIn("CopyFiles=/boot:/", esp)
         self.assertEqual((output / "rootfs/etc/systemd/system/ssh.service").readlink(), Path("/dev/null"))
         self.assertEqual((output / "rootfs/etc/systemd/system/systemd-sysusers.service").readlink(), Path("/dev/null"))
@@ -384,6 +389,7 @@ class CandidateTests(unittest.TestCase):
         prepare.validate_boot_profile(profile)
         changes = (
             ("repart/30-esp.conf", "CopyFiles=/efi:/", "CopyFiles=/boot:/"),
+            ("repart/30-esp.conf", "Minimize=guess", "Minimize=off"),
             ("repart/10-root.conf", "Verity=data", "Verity=off"),
             ("repart/10-root.conf", "Minimize=guess", "Minimize=best"),
             ("repart/20-root-verity.conf", "Verity=hash", "Verity=off"),
@@ -400,6 +406,7 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.conf", "Dependencies=initrd", "Dependencies="),
             ("mkosi.conf", "Bootloader=uki", "Bootloader=systemd-boot"),
             ("mkosi.conf", "ExtraTrees=rootfs", "ExtraTrees=rootfs\nPostOutputScripts=unreviewed.sh"),
+            ("mkosi.conf", "RemoveFiles=/usr/sbin/unix_chkpwd,", "RemoveFiles="),
             ("mkosi.images/initrd/mkosi.conf", "MakeInitrd=yes", "MakeInitrd=no"),
             ("mkosi.images/initrd/mkosi.conf", "Ssh=no", "Ssh=yes"),
             ("mkosi.images/initrd/mkosi.conf", "rescue.target,", ""),
@@ -720,7 +727,7 @@ class CandidateTests(unittest.TestCase):
             "zrpc-node:x:101:101::/nonexistent:/usr/sbin/nologin\n"
             "zrpc-wrapper:x:102:102::/nonexistent:/usr/sbin/nologin\n")
         (root / "etc/shadow").write_text(
-            "root:!:0:0:0:0:0:0:\n"
+            "root:!*:0:0:0:0:0:0:\n"
             "systemd-network:!:0:0:0:0:0:0:\n"
             "systemd-resolve:!:0:0:0:0:0:0:\n"
             "zrpc-node:!:0:0:0:0:0:0:\n"
@@ -814,6 +821,38 @@ class CandidateTests(unittest.TestCase):
                 audit_rootfs.audit(root)
             path.unlink()
         audit_rootfs.audit(root)
+
+    def test_rootfs_audit_requires_privileged_package_files_absent(self):
+        root = self.synthetic_guest_root("-privileged-package-files")
+        audit_rootfs.audit(root)
+        for relative in prepare.ROOT_REMOVE_FILES:
+            with self.subTest(relative=relative):
+                path = root / relative.lstrip("/")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"SYNTHETIC")
+                with self.assertRaisesRegex(ValueError, "administrative binary present"):
+                    audit_rootfs.audit(root)
+                path.unlink()
+        privileged = {
+            root / "usr/bin/unreviewed-setuid": stat.S_ISUID,
+            root / "usr/bin/unreviewed-setgid": stat.S_ISGID,
+        }
+        for path in privileged:
+            path.write_bytes(b"SYNTHETIC")
+        original_lstat = Path.lstat
+
+        def privileged_lstat(candidate):
+            info = original_lstat(candidate)
+            if candidate in privileged:
+                return SimpleNamespace(st_mode=info.st_mode | privileged[candidate])
+            return info
+
+        with mock.patch.object(Path, "lstat", privileged_lstat):
+            with self.assertRaises(ValueError) as caught:
+                audit_rootfs.audit(root)
+        self.assertEqual(str(caught.exception),
+                         "setuid/setgid executable remains: "
+                         "['usr/bin/unreviewed-setgid', 'usr/bin/unreviewed-setuid']")
 
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
         self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))

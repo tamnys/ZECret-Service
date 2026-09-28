@@ -1,0 +1,190 @@
+name: GCP unsigned synthetic full-disk diagnostic
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/gcp-unsigned-full-disk-probe.yml
+      - deploy/gcp/guest/**
+      - tools/gcp-guest/**
+
+permissions: {}
+
+jobs:
+  diagnostic:
+    name: Native x86_64 full disk, no boot or private approval
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Fetch exact public source and signed snapshot inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/full-disk"
+          mkdir "$source" "$scratch" "$scratch/builder-archives" \
+            "$scratch/guest-archives" "$scratch/metadata"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+          cd "$source"
+          ZRPC_SCRATCH="$scratch" python3 -I -B - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import fetch_builder_closure as builder
+          import fetch_guest_closure as guest
+
+          scratch = Path(os.environ["ZRPC_SCRATCH"])
+          lock, _, _ = builder.reviewed_lock(builder.closure.LOCK)
+          descriptor = os.open(scratch / "builder-archives", os.O_RDONLY |
+                               os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              for package in lock["packages"]:
+                  builder.download_one(descriptor, package, lock["snapshot"])
+                  if not builder.verify_cached(descriptor, package):
+                      raise ValueError("reviewed builder archive changed")
+          finally:
+              os.close(descriptor)
+          builder.fetch_reviewed_metadata(scratch / "metadata")
+          guest.prefetch_archives(scratch / "guest-archives")
+          print(json.dumps({"status": "diagnostic-locked-inputs-fetched-unbuilt",
+                            "builder_archives": len(lock["packages"]),
+                            "private_mode_approved": False}, sort_keys=True))
+          PY
+          CODEX_WORKSPACE_DIR="$GITHUB_WORKSPACE" \
+            python3 -B tools/gcp-guest/stage_builder_toolchain.py \
+              --archives "$scratch/builder-archives" --output "$scratch/staged"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Build and inspect unsigned synthetic full disk in no-route namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/full-disk"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+          root_stage="/var/tmp/zrpc-full-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$root_stage"
+          sudo -n install -d -m 0700 "$root_stage"
+          sudo -n cp -a -- "$source" "$scratch" "$root_stage/"
+          sudo -n chown -hR 0:0 -- "$root_stage"
+          source="$root_stage/source"
+          scratch="$root_stage/full-disk"
+          staged="$scratch/staged"
+          test "$(sudo -n git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(sudo -n git -C "$source" status --porcelain --untracked-files=all --ignored)"
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          parent_pid_ns="$(readlink /proc/self/ns/pid)"
+          chroot_command="$(command -v chroot)"
+          sudo -n /usr/bin/python3 -I -B \
+            "$source/tools/gcp-guest/probe_builder_owner_map.py" \
+            --scratch "/var/tmp/zrpc-owner-map-full-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -- /usr/bin/bash -c '
+            set -euo pipefail
+            if test "$#" -ne 10; then
+              echo "namespace handoff argument count differs" >&2
+              exit 1
+            fi
+            staged=$1
+            source=$7
+            scratch=$8
+            chroot_command=${10}
+            test "$staged" = "$scratch/staged"
+            test "$(readlink /proc/self/ns/user)" != "$2"
+            test "$(readlink /proc/self/ns/mnt)" != "$3"
+            test "$(readlink /proc/self/ns/net)" != "$4"
+            test "$(readlink /proc/self/ns/pid)" != "$5"
+            test "$(readlink /proc/1/ns/pid)" = "$(readlink /proc/self/ns/pid)"
+            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/uid_map)" = "0 0 1"
+            test "$(awk '\''{print $1 " " $2 " " $3}'\'' /proc/self/gid_map | sort -n)" = "$(printf "0 0 1\\n42 42 1")"
+            test "$(cat /proc/self/setgroups)" = deny
+            test "$(ip -o link show | wc -l)" -eq 1
+            test -z "$(ip -4 route show)"
+            test -z "$(ip -6 route show)"
+            for fd in /proc/$$/fd/*; do
+              target=$(readlink "$fd") || exit 1
+              case "$target" in socket:*) exit 1;; esac
+            done
+            test ! -L "$staged"
+            mount --bind "$staged" "$staged"
+            mountpoint -q "$staged"
+            mkdir -m 0700 "$scratch/apt-scratch" "$scratch/diagnostic-work" \
+              "$scratch/guest-payload"
+            mkdir -m 0700 "$source/.codex-tmp" "$scratch/guest-payload/source"
+            for directory in workspace zrpc-archives zrpc-metadata zrpc-guest-archives \
+                             zrpc-apt-scratch proc dev; do
+              test ! -L "$staged/$directory"
+              mkdir -p "$staged/$directory"
+            done
+            mount --bind "$scratch/apt-scratch" "$staged/zrpc-apt-scratch"
+            mkdir -m 0700 "$staged/zrpc-apt-scratch/tmp"
+            mount --bind "$scratch/guest-payload" "$staged/workspace"
+            mount --bind "$source" "$staged/workspace/source"
+            mount -o remount,bind,ro "$staged/workspace/source"
+            mount --bind "$scratch/diagnostic-work" \
+              "$staged/workspace/source/.codex-tmp"
+            for pair in "$scratch/builder-archives:zrpc-archives" \
+                        "$scratch/metadata:zrpc-metadata" \
+                        "$scratch/guest-archives:zrpc-guest-archives"; do
+              origin=${pair%%:*}
+              target=${pair#*:}
+              mount --bind "$origin" "$staged/$target"
+              mount -o remount,bind,ro "$staged/$target"
+            done
+            mount -t proc proc "$staged/proc"
+            for device in null zero full random urandom tty; do
+              test -c "/dev/$device"
+              test ! -e "$staged/dev/$device"
+              touch "$staged/dev/$device"
+              mount --bind "/dev/$device" "$staged/dev/$device"
+            done
+            mount -o remount,bind,ro "$staged"
+            for readable in "$staged" "$staged/workspace/source"; do
+              case ",$(findmnt -n -o OPTIONS --target "$readable")," in
+                *,ro,*) ;;
+                *) exit 1 ;;
+              esac
+            done
+            for writable in zrpc-apt-scratch workspace workspace/source/.codex-tmp; do
+              case ",$(findmnt -n -o OPTIONS --target "$staged/$writable")," in
+                *,rw,*) ;;
+                *) exit 1 ;;
+              esac
+            done
+            run_staged() {
+              /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent LC_ALL=C \
+                PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+                TMPDIR=/zrpc-apt-scratch/tmp \
+                "$chroot_command" "$staged" "$@"
+            }
+            tool=/workspace/source/tools/gcp-guest/diagnostic_full_disk.py
+            prefix=(--metadata /zrpc-metadata \
+                    --guest-archives /zrpc-guest-archives \
+                    --inputs /workspace/source/.codex-tmp/inputs \
+                    --lock /workspace/source/.codex-tmp/inputs.lock.json)
+            run_staged /usr/bin/python3 -I -B "$tool" create-inputs "${prefix[@]}"
+            run_staged /usr/bin/python3 -I -B "$tool" build "${prefix[@]}" \
+              --stage /workspace/source/.codex-tmp/stage \
+              --builder-archives /zrpc-archives --workspace /workspace \
+              --apt-scratch /zrpc-apt-scratch \
+              --parent-net-ns "$4" --parent-user-ns "$2" --parent-pid-ns "$5"
+            echo "::warning::Unsigned synthetic disk is diagnostic only; not booted, signed, or approved for private mode."
+          ' _ "$staged" "$parent_user_ns" "$parent_mount_ns" \
+            "$parent_net_ns" "$parent_pid_ns" \
+            "$root_stage" "$source" "$scratch" \
+            "$ZRPC_SOURCE_SHA" "$chroot_command"
+          echo "Exact source: $ZRPC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Result: unsigned synthetic full-disk diagnostic only; no boot or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"

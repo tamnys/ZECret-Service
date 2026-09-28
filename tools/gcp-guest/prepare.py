@@ -45,6 +45,10 @@ ROLES = set(BINARIES) | {EARLY_INIT_ROLE, "secure_boot_certificate", "package_ma
 # or treats this reference as evidence of a signed image.
 EXTERNAL_SECURE_BOOT_KEY = "/run/zrpc-build-signing/secure-boot.key"
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
+ROOT_REMOVE_FILES = (
+    "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount", "/usr/bin/su",
+    "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
+)
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
     "/usr/lib/systemd/system/rescue.target",
@@ -145,7 +149,7 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
         "Distribution": {"Distribution": "debian", "Release": "trixie", "Architecture": "x86-64", "RepositoryKeyCheck": "yes", "RepositoryKeyFetch": "no"},
         "Output": {"Format": "disk", "Output": "zrpc-gcp", "ManifestFormat": "json", "RepartDirectories": "repart", "SectorSize": "512"},
         "Config": {"Dependencies": "initrd"},
-        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": FIXED_KERNEL_CMDLINE, "ExtraTrees": "rootfs"},
+        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": FIXED_KERNEL_CMDLINE, "ExtraTrees": "rootfs", "RemoveFiles": ",".join(ROOT_REMOVE_FILES)},
         "Validation": {"SecureBoot": "yes", "SecureBootAutoEnroll": "no", "SignExpectedPcr": "no", "Checksum": "yes"},
         "Build": {"WithNetwork": "no", "CacheOnly": "always", "Incremental": "no"},
     }
@@ -188,7 +192,7 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
     definitions = {
         "10-root.conf": ("[Partition]", "Type=root-x86-64", "Format=ext4", "CopyFiles=/", "Minimize=guess", "ReadOnly=yes", "Verity=data", "VerityMatchKey=root"),
         "20-root-verity.conf": ("[Partition]", "Type=root-x86-64-verity", "Verity=hash", "VerityMatchKey=root", "Minimize=best"),
-        "30-esp.conf": ("[Partition]", "Type=esp", "Format=vfat", "CopyFiles=/efi:/"),
+        "30-esp.conf": ("[Partition]", "Type=esp", "Format=vfat", "CopyFiles=/efi:/", "Minimize=guess"),
     }
     for name, expected_lines in definitions.items():
         path = repart / name

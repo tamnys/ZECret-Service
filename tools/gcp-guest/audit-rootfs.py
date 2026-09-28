@@ -6,7 +6,7 @@ from pathlib import Path
 import stat
 import sys
 
-FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec")
+FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/unix_chkpwd", "usr/bin/mount", "usr/bin/umount", "usr/bin/su", "usr/lib/dbus-1.0/dbus-daemon-launch-helper")
 MASKED_UNITS = (
     "ssh.service", "sshd.service", "ssh.socket",
     "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service",
@@ -148,7 +148,10 @@ def audit_accounts(root):
     shadow = account_file(root, "shadow", 9)
     groups = account_file(root, "group", 4)
     if passwd.keys() != shadow.keys():
-        raise ValueError("guest passwd and shadow accounts differ")
+        raise ValueError(
+            "guest passwd and shadow accounts differ: "
+            f"passwd_only={sorted(passwd.keys() - shadow.keys())!r}, "
+            f"shadow_only={sorted(shadow.keys() - passwd.keys())!r}")
     for name, entry in passwd.items():
         if entry[1] != "x" or not shadow[name][1].startswith(("!", "*")):
             raise ValueError("guest account missing or unlocked")
@@ -187,6 +190,8 @@ def audit_accounts(root):
             or not password[1].startswith(("!", "*"))
         ):
             raise ValueError("guest account missing or unlocked")
+        if name == "root" and (entry[6] != "/usr/sbin/nologin" or password[1] != "!*"):
+            raise ValueError("guest root login policy differs")
         try:
             uid, gid = int(entry[2]), int(entry[3])
         except ValueError as error:
@@ -279,17 +284,20 @@ def audit(root):
             raise ValueError("administrative unit unmasked")
     audit_appliance_units(root)
     audit_accounts(root)
+    privileged = []
     for path in root.rglob("*"):
         relative = path.relative_to(root)
         mode = path.lstat().st_mode
         if stat.S_ISREG(mode) and mode & (stat.S_ISUID | stat.S_ISGID):
-            raise ValueError("setuid/setgid executable remains")
+            privileged.append(relative.as_posix())
         if path.name.endswith((".addon.efi", ".cred", ".raw")) and ("boot" in relative.parts or "credstore" in relative.parts):
             raise ValueError("unapproved boot companion or credential")
         if path.name.endswith(".extra.d") or relative.parts[:2] == ("etc", "extensions") or relative.parts[:3] == ("usr", "lib", "extensions"):
             raise ValueError("boot extension input remains")
         if path.is_file() and not path.is_symlink() and ("credstore" in relative.parts or "credstore.encrypted" in relative.parts):
             raise ValueError("guest credential store must be empty")
+    if privileged:
+        raise ValueError("setuid/setgid executable remains: " + repr(sorted(privileged)))
     for name in ("zrpc-node-wrapper", "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-cookie", "zebrad"):
         path = root / "usr/lib/zrpc" / name
         if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o022:
