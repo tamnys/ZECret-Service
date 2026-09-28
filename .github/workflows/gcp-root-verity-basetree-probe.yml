@@ -318,6 +318,14 @@ jobs:
                          for item, raw in zip(deltas["difference_evidence"],
                                               deltas["differences"]))):
               raise ValueError("root delta evidence does not match differences")
+          unreviewed_preset_links = {
+              "etc/systemd/system/multi-user.target.wants/" + unit
+              for unit in ("e2scrub_reap.service", "remote-cryptsetup.target",
+                           "remote-fs.target", "remote-veritysetup.target")
+          } | {"etc/systemd/system/timers.target.wants/e2scrub_all.timer"}
+          if any(item["path"] in unreviewed_preset_links
+                 for item in deltas["differences"]):
+              raise ValueError("unreviewed guest maintenance or remote preset survived")
           for difference in deltas["difference_evidence"]:
               print(json.dumps({"unreviewed_root_delta": difference}, sort_keys=True))
           print(json.dumps({"status": deltas["status"],

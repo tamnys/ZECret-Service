@@ -86,6 +86,13 @@ class CandidateTests(unittest.TestCase):
         zebra_config = tomllib.loads((output / "rootfs/etc/zrpc/zebra.toml").read_text())
         self.assertIs(zebra_config["network"]["cache_dir"], False)
         self.assertEqual(zebra_config["state"]["cache_dir"], "/var/lib/zebra")
+        preset = output / "rootfs/etc/systemd/system-preset/00-zrpc.preset"
+        self.assertEqual(
+            [line for line in preset.read_text().splitlines() if line and not line.startswith("#")],
+            ["disable e2scrub_reap.service", "disable e2scrub_all.timer",
+             "disable remote-cryptsetup.target",
+             "disable remote-fs.target", "disable remote-veritysetup.target"],
+        )
         recorded_sha = report["manifest_sha256"]
         recorded_bytes = report["manifest_bytes"]
         manifest = output / "candidate-manifest.json"
