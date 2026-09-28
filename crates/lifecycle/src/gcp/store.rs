@@ -100,6 +100,38 @@ fn sync(path: &Path) -> Result<()> {
 fn encode(j: &Journal) -> Result<Vec<u8>> {
     serde_json::to_vec(j).map_err(|_| Error("journal encode failed"))
 }
+fn ensure_no_pending(directory: &Path) -> Result<()> {
+    match fs::symlink_metadata(directory.join("pending.json")) {
+        Ok(_) => Err(Error(
+            "journal has pending commit; explicit recover required",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Error("journal pending state unavailable")),
+    }
+}
+fn snapshot_files(directory: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(directory).map_err(|_| Error("journal enumeration failed"))? {
+        let entry = entry.map_err(|_| Error("journal enumeration failed"))?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or(Error("journal entry name is not UTF-8"))?;
+        if matches!(name, "package.json" | "writer.lock" | "pending.json") {
+            continue;
+        }
+        let bytes = name.as_bytes();
+        if bytes.len() != 25
+            || &bytes[20..] != b".json"
+            || !bytes[..20].iter().all(u8::is_ascii_digit)
+        {
+            return Err(Error("unexpected journal directory entry"));
+        }
+        files.push(name.to_owned());
+    }
+    files.sort();
+    Ok(files)
+}
 
 impl Store {
     pub fn initialize(directory: &Path, package: &Package) -> Result<()> {
@@ -148,11 +180,7 @@ impl Store {
         }
         lock.try_lock()
             .map_err(|_| Error("another lifecycle invocation owns the journal"))?;
-        if directory.join("pending.json").exists() {
-            return Err(Error(
-                "journal has pending commit; explicit recover required",
-            ));
-        }
+        ensure_no_pending(directory)?;
         Self::load(directory, lock)
     }
     fn load(directory: &Path, lock: File) -> Result<Self> {
@@ -160,15 +188,7 @@ impl Store {
         let package: Package = serde_json::from_slice(&package_bytes)
             .map_err(|_| Error("invalid original package"))?;
         let package_hash = digest(&package_bytes);
-        let mut files = fs::read_dir(directory)
-            .map_err(|_| Error("journal enumeration failed"))?
-            .filter_map(|entry| entry.ok().map(|e| e.file_name()))
-            .filter_map(|n| n.to_str().map(str::to_owned))
-            .filter(|n| {
-                n.len() == 25 && n.ends_with(".json") && n[..20].bytes().all(|b| b.is_ascii_digit())
-            })
-            .collect::<Vec<_>>();
-        files.sort();
+        let files = snapshot_files(directory)?;
         let mut last: Option<Journal> = None;
         let mut hash = None;
         for (i, file) in files.iter().enumerate() {
@@ -312,6 +332,9 @@ impl Store {
         sync(directory)
     }
 }
+
+#[cfg(test)]
+mod tests;
 fn validate_transition(previous: &Journal, next: &Journal) -> Result<()> {
     if previous.package_sha256 != next.package_sha256
         || previous.original_start != next.original_start
