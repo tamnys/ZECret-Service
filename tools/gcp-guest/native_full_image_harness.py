@@ -4,11 +4,12 @@
 Run under probe_builder_owner_map on a native x86_64 builder. The selected
 source, staged signed builder, and scratch must be separate siblings on the
 workspace volume. This does not fetch inputs, create keys, deploy, or approve
-an image. The caller supplies the independently reviewed inputs and an
-already-mounted, private tmpfs signing key.
+an image. The full-build caller supplies the independently reviewed inputs and
+an already-mounted, private tmpfs signing key.
 Before handoff, the bound trees are checked for nested mounts and AF_UNIX
-socket paths. This does not establish that network egress is excluded after
-the builder starts.
+socket paths. The explicit --preflight-only diagnostic exercises the same
+signed builder handoff without reading a signing key or starting mkosi. Neither
+path establishes that network egress is excluded after the builder starts.
 """
 
 import argparse
@@ -32,6 +33,7 @@ SOURCE_IN_GUEST = Path("/workspace")
 SCRATCH_IN_GUEST = SOURCE_IN_GUEST / ".codex-tmp"
 INPUT_FILES = ("inputs.lock.json", "zebra-provenance.json")
 INPUT_DIRS = ("inputs", "rust-bundle", "metadata", "builder-archives")
+PREFLIGHT_INPUT_DIRS = ("metadata", "builder-archives")
 STAGED_MOUNT_TARGETS = frozenset({"proc", "dev", "workspace", "zrpc-apt-scratch"})
 MOUNT_PATH_ESCAPES = {"040": " ", "011": "\t", "012": "\n", "134": "\\"}
 ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C",
@@ -45,7 +47,8 @@ def real_directory(path, label):
     return path
 
 
-def checked_layout(workspace, source, scratch, staged):
+def checked_layout(workspace, source, scratch, staged, *,
+                   input_files=INPUT_FILES, input_dirs=INPUT_DIRS):
     workspace = real_directory(workspace, "workspace volume")
     for path, label in ((source, "selected source"), (scratch, "image scratch"),
                         (staged, "staged builder")):
@@ -68,11 +71,11 @@ def checked_layout(workspace, source, scratch, staged):
             raise ValueError("source scratch overlay target must be empty")
     if (scratch / "candidate-stage").exists() or (scratch / "candidate-stage").is_symlink():
         raise ValueError("candidate stage must be fresh")
-    for name in INPUT_FILES:
+    for name in input_files:
         path = scratch / name
         if path.is_symlink() or not path.is_file() or path.resolve(strict=True) != path:
             raise ValueError(f"missing real image input: {name}")
-    for name in INPUT_DIRS:
+    for name in input_dirs:
         real_directory(scratch / name, f"image input {name}")
     apt = scratch / "apt-scratch"
     if apt.exists() or apt.is_symlink():
@@ -393,14 +396,22 @@ def run_in_builder(staged, arguments):
                    stdin=subprocess.DEVNULL, env=ENV)
 
 
-def build(args):
-    overlay, apt = checked_layout(args.workspace, args.source, args.scratch, args.staged)
+def build(args, *, preflight_only=False):
+    if preflight_only:
+        input_files, input_dirs = (), PREFLIGHT_INPUT_DIRS
+        overlay, apt = checked_layout(args.workspace, args.source, args.scratch,
+                                      args.staged, input_files=input_files,
+                                      input_dirs=input_dirs)
+    else:
+        input_files, input_dirs = INPUT_FILES, INPUT_DIRS
+        overlay, apt = checked_layout(args.workspace, args.source, args.scratch, args.staged)
     checked_bound_mounts(args.source, args.scratch, args.staged)
     checked_bound_sockets(args.source, args.scratch, args.staged)
     checked_source(args.source, args.revision)
     checked_namespace(vars(args))
     checked_staged_builder(args.source, args.scratch, args.staged, args.revision)
-    checked_signing_mount()
+    if not preflight_only:
+        checked_signing_mount()
     if not overlay.exists():
         overlay.mkdir(mode=0o700)
     if not apt.exists():
@@ -418,7 +429,7 @@ def build(args):
     bind(args.source, staged / SOURCE_IN_GUEST.relative_to("/"), readonly=True)
     bind(args.scratch, staged / SCRATCH_IN_GUEST.relative_to("/"), readonly=False)
     bind(apt, staged / "zrpc-apt-scratch", readonly=False)
-    for name in INPUT_FILES + INPUT_DIRS:
+    for name in input_files + input_dirs:
         path = staged / SCRATCH_IN_GUEST.relative_to("/") / name
         bind(path, path, readonly=True)
     mount("-t", "proc", "proc", staged / "proc")
@@ -438,6 +449,13 @@ if result["status"]!="diagnostic-signed-staged-builder-no-route" or result["priv
 print(json.dumps(result,sort_keys=True))'''
     run_in_builder(staged, ["/usr/bin/python3", "-I", "-B", "-c", preflight,
                             args.net, args.user, args.pid])
+    if preflight_only:
+        return {"status": "diagnostic-production-harness-preflight-unapproved",
+                "source_commit": args.revision,
+                "signed_staged_builder_preflight_executed": True,
+                "signing_key_checked": False, "mkosi_executed": False,
+                "network_egress_excluded": False,
+                "image_built": False, "private_mode_approved": False}
     signing_target = staged / "run" / "zrpc-build-signing"
     real_directory(signing_target.parent, "signed builder run directory")
     if signing_target.exists() or signing_target.is_symlink():
@@ -476,9 +494,14 @@ def main(argv=None):
     parser.add_argument("--revision", required=True)
     for name in ("user", "mnt", "net", "pid"):
         parser.add_argument("--parent-" + name + "-namespace", dest=name, required=True)
+    parser.add_argument("--preflight-only", action="store_true",
+                        help="diagnostic signed-builder handoff; no signing key or image build")
     args = parser.parse_args(argv)
     try:
-        build(args)
+        if args.preflight_only:
+            print(json.dumps(build(args, preflight_only=True), sort_keys=True))
+        else:
+            build(args)
     except (OSError, ValueError, lzma.LZMAError, tarfile.TarError,
             subprocess.SubprocessError) as error:
         print(json.dumps({"status": "blocked", "reason": str(error),

@@ -1,0 +1,128 @@
+name: GCP production-harness preflight diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: Exact-head signed-builder handoff, no key or image
+    runs-on: ubuntu-24.04
+    env:
+      ZRPC_SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: Fetch exact selected public source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$ZRPC_SOURCE_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$ZRPC_SOURCE_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Fetch locked Debian builder bytes and stage without package scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/scratch"
+          mkdir "$scratch" "$scratch/builder-archives" "$scratch/metadata"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          cd "$source"
+          ZRPC_SCRATCH="$scratch" python3 -I -B - <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, str(Path.cwd() / "tools/gcp-guest"))
+          import fetch_builder_closure as builder
+
+          scratch = Path(os.environ["ZRPC_SCRATCH"])
+          lock, _, _ = builder.reviewed_lock(builder.closure.LOCK)
+          directory = os.open(scratch / "builder-archives", os.O_RDONLY |
+                              os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              for entry in lock["packages"]:
+                  builder.download_one(directory, entry, lock["snapshot"])
+                  if not builder.verify_cached(directory, entry):
+                      raise ValueError("reviewed builder archive missing after download")
+          finally:
+              os.close(directory)
+          builder.fetch_reviewed_metadata(scratch / "metadata")
+          PY
+          CODEX_WORKSPACE_DIR="$GITHUB_WORKSPACE" \
+            python3 -B tools/gcp-guest/stage_builder_toolchain.py \
+              --archives "$scratch/builder-archives" \
+              --output "$GITHUB_WORKSPACE/staged"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+      - name: Exercise the source-checked production harness without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/scratch"
+          staged="$GITHUB_WORKSPACE/staged"
+          test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
+
+          # The public runner cannot map its nonroot UID to the exact package
+          # owners. Keep the copied inputs root-owned and private, as in the
+          # native package-backed diagnostic, then recheck signed bytes inside
+          # the separate user/mount/network/PID namespaces.
+          root_stage="/var/tmp/zrpc-harness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$root_stage"
+          sudo -n install -d -m 0700 "$root_stage"
+          trap 'sudo -n rm -rf -- "$root_stage"' EXIT
+          sudo -n cp -a -- "$source" "$scratch" "$staged" "$root_stage/"
+          sudo -n chown -hR 0:0 -- "$root_stage"
+          sudo -n chmod 0700 "$root_stage/scratch"
+          test "$(sudo -n git -C "$root_stage/source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
+          test -z "$(sudo -n git -C "$root_stage/source" status --porcelain --untracked-files=all --ignored)"
+
+          parent_user_ns="$(readlink /proc/self/ns/user)"
+          parent_mount_ns="$(readlink /proc/self/ns/mnt)"
+          parent_net_ns="$(readlink /proc/self/ns/net)"
+          parent_pid_ns="$(readlink /proc/self/ns/pid)"
+          report="$GITHUB_WORKSPACE/harness-preflight.log"
+          sudo -n /usr/bin/python3 -I -B \
+            "$root_stage/source/tools/gcp-guest/probe_builder_owner_map.py" \
+            --scratch "/var/tmp/zrpc-owner-map-harness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -- /usr/bin/bash -c '
+            set -euo pipefail
+            exec /usr/bin/python3 -I -B "$1/source/tools/gcp-guest/native_full_image_harness.py" \
+              --preflight-only --workspace "$1" --source "$1/source" \
+              --scratch "$1/scratch" --staged "$1/staged" --revision "$2" \
+              --parent-user-namespace "$3" --parent-mount-namespace "$4" \
+              --parent-network-namespace "$5" --parent-pid-namespace "$6"
+          ' _ "$root_stage" "$ZRPC_SOURCE_SHA" "$parent_user_ns" \
+            "$parent_mount_ns" "$parent_net_ns" "$parent_pid_ns" | tee "$report"
+
+          python3 -I -B - "$report" "$ZRPC_SOURCE_SHA" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          lines = Path(sys.argv[1]).read_text().splitlines()
+          if len(lines) != 2:
+              raise ValueError("production harness preflight output count differs")
+          signed, handoff = map(json.loads, lines)
+          if (signed.get("status") != "diagnostic-signed-staged-builder-no-route"
+                  or signed.get("private_mode_approved") is not False
+                  or handoff.get("status") !=
+                     "diagnostic-production-harness-preflight-unapproved"
+                  or handoff.get("source_commit") != sys.argv[2]
+                  or handoff.get("signed_staged_builder_preflight_executed") is not True
+                  or any(handoff.get(field) is not False for field in (
+                      "signing_key_checked", "mkosi_executed",
+                      "network_egress_excluded", "image_built",
+                      "private_mode_approved"))):
+              raise ValueError("production harness diagnostic changed acceptance state")
+          print(json.dumps(handoff, sort_keys=True))
+          PY
