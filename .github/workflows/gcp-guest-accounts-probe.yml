@@ -165,13 +165,17 @@ jobs:
                       or any(byte != 10 and not 32 <= byte <= 126 for byte in data)):
                   raise ValueError("account review bytes differ from prior native diagnostics")
               checked[name] = data
-          for line in checked["shadow"].splitlines():
+          for line_index, line in enumerate(checked["shadow"].splitlines()):
               fields = line.split(b":")
-              if (len(fields) != 9
-                      or not re.fullmatch(rb"[a-z_][a-z0-9_-]*", fields[0])
-                      or not re.fullmatch(rb"[!*]+", fields[1])
-                      or any(field and not field.isdigit() for field in fields[2:])):
-                  raise ValueError("shadow contains a non-sentinel password field or unsafe data")
+              if len(fields) != 9:
+                  raise ValueError(f"shadow line {line_index} has {len(fields)} fields")
+              if not re.fullmatch(rb"[a-z_][a-z0-9_-]*", fields[0]):
+                  raise ValueError(f"shadow line {line_index} username shape differs; length {len(fields[0])}")
+              if not re.fullmatch(rb"[!*]+", fields[1]):
+                  raise ValueError(f"shadow line {line_index} password is not a lock sentinel; length {len(fields[1])}")
+              for field_index, field in enumerate(fields[2:], start=2):
+                  if field and not field.isdigit():
+                      raise ValueError(f"shadow line {line_index} aging field {field_index} shape differs; length {len(field)}")
           for name in ("passwd", "group", "shadow"):
               print("Reviewed diagnostic " + name + ":")
               print(checked[name].decode("ascii"), end="")
