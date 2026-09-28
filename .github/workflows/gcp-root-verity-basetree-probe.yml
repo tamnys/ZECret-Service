@@ -6,11 +6,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/gcp-root-verity-basetree-probe.yml
-      - tools/gcp-guest/prepare_guest_disk_basetree_profile.py
-      - tools/gcp-guest/test_prepare_guest_disk_basetree_profile.py
-      - tools/gcp-guest/inspect_basetree_disk.py
-      - tools/gcp-guest/test_inspect_basetree_disk.py
-      - tools/gcp-guest/probe_builder_owner_map.py
+      - deploy/gcp/guest/**
+      - tools/gcp-guest/**
 
 permissions: {}
 
