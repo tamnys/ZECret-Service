@@ -127,6 +127,11 @@ class CandidateTests(unittest.TestCase):
             mask.unlink()
             mask.symlink_to("/usr/lib/systemd/system/systemd-udev-load-credentials.service")
 
+        def replace_generator_mask(candidate):
+            mask = candidate / "rootfs/etc/systemd/system/systemd-network-generator.service"
+            mask.unlink()
+            mask.symlink_to("/usr/lib/systemd/system/systemd-network-generator.service")
+
         def add_hook(candidate):
             override = candidate / "mkosi.conf.d"
             override.mkdir()
@@ -147,6 +152,10 @@ class CandidateTests(unittest.TestCase):
             ("hook", add_hook),
             ("binary", lambda candidate: (candidate / "artifacts/wrapper").write_bytes(b"different guest binary")),
             ("mask", replace_mask),
+            ("network-generator-mask", replace_generator_mask),
+            ("resolved-credential-override", lambda candidate: (
+                candidate / "rootfs/etc/systemd/system/systemd-resolved.service.d/10-no-credentials.conf"
+            ).write_text("[Service]\nImportCredential=network.dns\n")),
             ("mode", change_mode),
             ("missing", lambda candidate: (candidate / "audit-rootfs.py").unlink()),
             ("seal", lambda candidate: (candidate / "seal-shadow.py").unlink()),
@@ -274,8 +283,12 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("real TDX acceptance", report["remaining_gates"])
         self.assertTrue(any("operator-owned signing key" in gate for gate in report["remaining_gates"]))
         for unit in ("systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service",
-                     "systemd-udev-load-credentials.service"):
+                     "systemd-udev-load-credentials.service", "systemd-network-generator.service"):
             self.assertEqual((output / "rootfs/etc/systemd/system" / unit).readlink(), Path("/dev/null"))
+        self.assertEqual(
+            (output / "rootfs/etc/systemd/system/systemd-resolved.service.d/10-no-credentials.conf").read_bytes(),
+            audit_rootfs.RESOLVED_CREDENTIAL_DROPIN_BYTES,
+        )
         units = output / "rootfs/usr/lib/systemd/system"
         wrapper = (units / "zrpc-wrapper.service").read_text()
         self.assertIn("--platform gcp-tdx", wrapper)
@@ -731,6 +744,15 @@ class CandidateTests(unittest.TestCase):
             (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
         for unit in audit_rootfs.MASKED_UNITS:
             (root / "etc/systemd/system" / unit).symlink_to("/dev/null")
+        resolved_dropins = root / "etc/systemd/system/systemd-resolved.service.d"
+        resolved_dropins.mkdir()
+        shutil.copyfile(
+            prepare.PROFILE / "rootfs/etc/systemd/system/systemd-resolved.service.d"
+            / audit_rootfs.RESOLVED_CREDENTIAL_DROPIN,
+            resolved_dropins / audit_rootfs.RESOLVED_CREDENTIAL_DROPIN,
+        )
+        (root / "etc/systemd/system/dbus-org.freedesktop.resolve1.service").symlink_to(
+            "/usr/lib/systemd/system/systemd-resolved.service")
         (root / "etc/passwd").write_text(
             "root:x:0:0::/:/usr/sbin/nologin\n"
             "systemd-network:x:998:998::/:/usr/sbin/nologin\n"
@@ -868,12 +890,13 @@ class CandidateTests(unittest.TestCase):
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
         self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
         root = self.synthetic_guest_root()
-        # Debian's udev post-install step may enable this vendor service in
-        # sysinit.target. The immutable same-name mask must still win.
+        # Debian's post-install steps may enable these vendor services in
+        # sysinit.target. The immutable same-name masks must still win.
         wants = root / "etc/systemd/system/sysinit.target.wants"
         wants.mkdir()
-        (wants / "systemd-udev-load-credentials.service").symlink_to(
-            "/usr/lib/systemd/system/systemd-udev-load-credentials.service")
+        for unit in ("systemd-udev-load-credentials.service",
+                     "systemd-network-generator.service"):
+            (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
         audit_rootfs.audit(root)
         group = root / "etc/group"
         good_group = group.read_text()
@@ -898,7 +921,8 @@ class CandidateTests(unittest.TestCase):
             audit_rootfs.audit(root)
         update_mask.symlink_to("/dev/null")
         for unit in ("systemd-sysext.socket", "systemd-sysext@.service",
-                     "systemd-udev-load-credentials.service"):
+                     "systemd-udev-load-credentials.service",
+                     "systemd-network-generator.service"):
             mask = root / "etc/systemd/system" / unit
             mask.unlink()
             with self.assertRaisesRegex(ValueError, "administrative unit unmasked"):
@@ -917,6 +941,35 @@ class CandidateTests(unittest.TestCase):
         (root / "etc/systemd/system/ssh.service").unlink()
         with self.assertRaises(ValueError):
             audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_resolved_credential_override_drift(self):
+        dropin = "etc/systemd/system/systemd-resolved.service.d/10-no-credentials.conf"
+        root = self.synthetic_guest_root("-resolved-missing")
+        (root / dropin).unlink()
+        with self.assertRaisesRegex(ValueError, "resolved credential override differs"):
+            audit_rootfs.audit(root)
+
+        root = self.synthetic_guest_root("-resolved-substituted")
+        (root / dropin).write_text("[Service]\nImportCredential=network.dns\n")
+        with self.assertRaisesRegex(ValueError, "resolved credential override differs"):
+            audit_rootfs.audit(root)
+
+        for index, relative in enumerate((
+            "etc/systemd/system/systemd-resolved.service.d/99-restore.conf",
+            "run/systemd/system.control/systemd-resolved.service.d/99-restore.conf",
+            "run/systemd/system/dbus-org.freedesktop.resolve1.service.d/99-restore.conf",
+            "usr/local/lib/systemd/system/systemd-resolved.service",
+        )):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-resolved-override-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("[Service]\nImportCredential=network.dns\n")
+                with self.assertRaisesRegex(
+                    ValueError, "resolved credential override differs|"
+                                "appliance unit override or dependency|appliance unit replaced"
+                ):
+                    audit_rootfs.audit(root)
 
     def test_rootfs_audit_rejects_missing_or_privileged_network_accounts(self):
         cases = (
