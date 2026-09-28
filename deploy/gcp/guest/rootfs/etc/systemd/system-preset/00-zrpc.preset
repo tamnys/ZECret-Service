@@ -1,5 +1,6 @@
 # Keep unreviewed Debian maintenance and remote targets out of multi-user.target.
 disable e2scrub_reap.service
+disable e2scrub_all.timer
 disable remote-cryptsetup.target
 disable remote-fs.target
 disable remote-veritysetup.target

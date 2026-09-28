@@ -89,7 +89,8 @@ class CandidateTests(unittest.TestCase):
         preset = output / "rootfs/etc/systemd/system-preset/00-zrpc.preset"
         self.assertEqual(
             [line for line in preset.read_text().splitlines() if line and not line.startswith("#")],
-            ["disable e2scrub_reap.service", "disable remote-cryptsetup.target",
+            ["disable e2scrub_reap.service", "disable e2scrub_all.timer",
+             "disable remote-cryptsetup.target",
              "disable remote-fs.target", "disable remote-veritysetup.target"],
         )
         recorded_sha = report["manifest_sha256"]
