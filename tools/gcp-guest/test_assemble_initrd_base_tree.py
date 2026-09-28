@@ -97,6 +97,10 @@ class InitrdInputAssemblyTests(unittest.TestCase):
             candidate.selected_source_plan(authenticated,
                 selected_files=("usr/bin/missing",), mount_directories=(),
                 elf_entrypoints=())
+        with self.assertRaisesRegex(ValueError, "required initrd package data absent"):
+            candidate.selected_source_plan(authenticated,
+                selected_files=("usr/lib/udev/rules.d/60-persistent-storage.rules",),
+                mount_directories=(), elf_entrypoints=())
         with self.assertRaisesRegex(ValueError, "selected link target absent"):
             candidate.selected_source_plan(authenticated,
                 selected_files=("usr/bin/tool-link",), mount_directories=(),
@@ -191,10 +195,14 @@ class InitrdInputAssemblyTests(unittest.TestCase):
     def test_static_allowlist_excludes_administration_and_scripts(self):
         paths = set(candidate.SELECTED_FILES)
         self.assertEqual(len(paths), len(candidate.SELECTED_FILES))
+        self.assertEqual(
+            {path for path in paths if path.startswith("usr/lib/udev/rules.d/")},
+            {"usr/lib/udev/rules.d/60-persistent-storage.rules"},
+        )
         self.assertNotIn("usr/bin/bash", paths)
         self.assertNotIn("usr/lib/systemd/systemd-sulogin-shell", paths)
         self.assertFalse(any(path.endswith((".sh", ".py")) for path in paths))
-        self.assertFalse(any(path.startswith(("etc/ssh/", "usr/lib/udev/rules.d/",
+        self.assertFalse(any(path.startswith(("etc/ssh/",
                                                "usr/lib/systemd/system-generators/systemd-debug-"))
                              for path in paths))
 
