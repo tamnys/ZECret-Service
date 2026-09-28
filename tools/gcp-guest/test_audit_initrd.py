@@ -48,6 +48,13 @@ class InitrdAuditTests(unittest.TestCase):
     def test_synthetic_minimum_passes(self):
         audit_initrd.audit(self.root, self.init_sha256)
 
+    def test_generated_getty_default_instance_alias_rejected(self):
+        alias = self.root / "etc/systemd/system/getty.target.wants/getty@tty1.service"
+        alias.parent.mkdir(parents=True)
+        alias.symlink_to("/usr/lib/systemd/system/getty@.service")
+        with self.assertRaisesRegex(ValueError, "administrative unit remains"):
+            audit_initrd.audit(self.root, self.init_sha256)
+
     def test_required_boot_components_and_ownership_fail_closed(self):
         for relative in audit_initrd.REQUIRED_EXECUTABLES:
             with self.subTest(relative=relative):
