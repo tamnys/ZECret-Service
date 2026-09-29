@@ -10,6 +10,7 @@ use zrpc_lifecycle::{DeploymentManifest, PlanInput};
 use zrpc_protocol::{Backend, ErrorCode, SafeError};
 
 mod ledger;
+mod payments;
 mod provider_deletion;
 mod provider_observation;
 mod provider_schedule;
@@ -23,6 +24,7 @@ zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_
 zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query --stdin [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
+zrpc payments balance --ticket-store ABSOLUTE_PRIVATE_DIR
 zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
 zrpc demo [--no-open]
 zrpc plan --input FILE
@@ -119,6 +121,7 @@ async fn run() -> Result<(), String> {
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
         "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"tor":"not_checked; inspection uses explicit SOCKS, private sessions require a selected local Tor executable","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-endpoint"=>inspect_endpoint_command(args).await,
+        "payments"=>payments::run(args),
         "lifecycle"=>provider_observation::run(args).await,
         "inspect-quote"=>{
             let quote_path=required(&mut args,"--quote")?;

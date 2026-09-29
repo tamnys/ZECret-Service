@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest"]
+members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest", "crates/payments"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +9,7 @@ rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.149", features = ["raw_value"] }
 axum = { version = "=0.8.6", default-features = false, features = ["http1", "tokio", "json"] }

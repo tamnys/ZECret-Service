@@ -311,6 +311,14 @@ Collect only coarse operational counters needed to run the demo. Do not publish 
 | Test diagnostics | Synthetic data only; intentional export of real local query output is customer-controlled. |
 | Payment/entitlement state | Absent in v1. |
 
+### Testnet payment POC amendment (separate from v1)
+
+The separately approved CLI-first payment POC uses prepaid, unlinkable request tickets with simulated settlement. It adds no real ZEC settlement, account, subscription, production credential, or website checkout. The client and operator-controlled issuer exchange private files, without a public minting endpoint. An explicit operator-authorized quantity permits one idempotent batch of blinded Privacy Pass type-2 signatures. The issuer sees purchase references and blinded requests but never the finalized tickets. Tickets share one reviewed testnet issuer key and challenge; they contain no purchase identifier, customer key, personalized expiry, or account metadata.
+
+The native client keeps purchase and blinding state in its own private store, then selects a finalized ticket only after the existing release, Tor, hardware, workload, freshness, and TLS-binding checks pass. A verified RPC request carries the ticket in the `Authorization: PrivateToken` header on that same connection. The protected server validates the ticket and allowed request locally, atomically records its issuer-scoped spent marker, and only then forwards to the loopback Zebra adapter. A node error or lost response after admission may consume the credit. The issuer is not contacted during redemption. A ticket-required profile and the existing free demonstration profile are explicit; failure to load the payment configuration or spent state must not select free access.
+
+The only permitted persistent payment records are specified in `config/retention-policy.md`. In particular, the protected redeemer retains marker pairs only, with no query history or purchase linkage. This amendment requires reviewed measured inputs before a paid listener is enabled and does not itself approve a private deployment. Ordinary restart recovery is in scope; malicious disk rollback and restoration of old backups remain a production requirement.
+
 The test suite should insert synthetic markers and search permitted diagnostic outputs for leakage. An absence-of-marker test is useful evidence, not a proof that malicious infrastructure retains nothing.
 
 ## 13. Budget and lifecycle
