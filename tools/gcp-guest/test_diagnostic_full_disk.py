@@ -69,8 +69,10 @@ class DiagnosticDiskTests(unittest.TestCase):
         second_stage = self.make_comparable_output(second, "second")
         report = diagnostic.compare_root_rebuilds(first_stage, second_stage)
         self.assertEqual(report["status"], diagnostic.REBUILD_STATUS)
+        self.assertEqual(report["first_difference_kind"], "byte")
         self.assertEqual(report["first_difference_root_offset_bytes"], 123)
-        self.assertEqual(report["first_difference_disk_offset_bytes"], offset)
+        self.assertEqual(report["first_difference_first_disk_offset_bytes"], offset)
+        self.assertEqual(report["first_difference_second_disk_offset_bytes"], offset)
         self.assertFalse(report["root_partition_byte_identical"])
         self.assertFalse(report["production_image"])
         self.assertFalse(report["hardware_verified"])
@@ -90,11 +92,33 @@ class DiagnosticDiskTests(unittest.TestCase):
         second_stage = self.make_comparable_output(second, "second")
         report = diagnostic.compare_root_rebuilds(first_stage, second_stage)
         self.assertTrue(report["root_partition_byte_identical"])
+        self.assertIsNone(report["first_difference_kind"])
         self.assertIsNone(report["first_difference_root_offset_bytes"])
         raw = second_stage / "output/zrpc-gcp.raw"
         raw.write_bytes(raw.read_bytes() + b"tamper")
         with self.assertRaises(ValueError):
             diagnostic.compare_root_rebuilds(first_stage, second_stage)
+
+    def test_rebuild_comparison_reports_root_extent_drift(self):
+        disk = gpt_fixture.synthetic_disk()
+        first_stage = self.make_comparable_output(disk, "first")
+        second_stage = self.make_comparable_output(disk, "second")
+        raw = first_stage / "output/zrpc-gcp.raw"
+        layout = diagnostic.gpt.inspect(raw, diagnostic.sha256(disk),
+                                        len(disk), gpt_fixture.SECTOR)
+        shorter = json.loads(json.dumps(layout))
+        root = next(item for item in shorter["partitions"]
+                    if item["type"] == "root-x86-64")
+        root["last_lba"] -= 1
+        with mock.patch.object(diagnostic.gpt, "inspect", side_effect=(layout, shorter)):
+            report = diagnostic.compare_root_rebuilds(first_stage, second_stage)
+        self.assertFalse(report["root_partition_byte_identical"])
+        self.assertFalse(report["root_partition_layout_identical"])
+        self.assertEqual(report["first_difference_kind"], "length")
+        self.assertEqual(report["first_root_partition_bytes"] -
+                         report["second_root_partition_bytes"], gpt_fixture.SECTOR)
+        self.assertIsNone(report["first_difference_root_offset_bytes"])
+        self.assertFalse(report["private_mode_approved"])
 
     def boot_receipt(self):
         bundle = self.root / "native-rust"

@@ -360,10 +360,12 @@ def compare_root_rebuilds(first_stage, second_stage):
                     if partition["type"] == "root-x86-64")
         disks.append((raw, size, expected_sha, root, layout["sector_size"]))
     first, second = disks
-    if (first[3] != second[3] or first[4] != second[4]):
-        raise ValueError("rebuild root partition identity or extent differs")
-    start = first[3]["first_lba"] * first[4]
-    length = (first[3]["last_lba"] - first[3]["first_lba"] + 1) * first[4]
+    if first[4] != second[4]:
+        raise ValueError("rebuild disk sector sizes differ")
+    starts = [item[3]["first_lba"] * item[4] for item in disks]
+    lengths = [(item[3]["last_lba"] - item[3]["first_lba"] + 1) * item[4]
+               for item in disks]
+    overlap = min(lengths)
     descriptors = []
     try:
         for raw, size, _, _, _ in disks:
@@ -377,10 +379,10 @@ def compare_root_rebuilds(first_stage, second_stage):
             raise ValueError("rebuilds refer to the same disk file")
         first_difference = None
         offset = 0
-        while offset < length:
-            count = min(1024 * 1024, length - offset)
-            left = gpt.read_at(descriptors[0], start + offset, count)
-            right = gpt.read_at(descriptors[1], start + offset, count)
+        while offset < overlap:
+            count = min(1024 * 1024, overlap - offset)
+            left = gpt.read_at(descriptors[0], starts[0] + offset, count)
+            right = gpt.read_at(descriptors[1], starts[1] + offset, count)
             if left != right:
                 first_difference = offset + next(index for index, pair in enumerate(zip(left, right))
                                                  if pair[0] != pair[1])
@@ -394,10 +396,17 @@ def compare_root_rebuilds(first_stage, second_stage):
             os.close(fd)
     return {"status": REBUILD_STATUS,
             "source_manifest_sha256": sha256(manifest),
-            "root_partition_bytes": length,
-            "root_partition_byte_identical": first_difference is None,
+            "first_root_partition": first[3],
+            "second_root_partition": second[3],
+            "root_partition_layout_identical": first[3] == second[3],
+            "first_root_partition_bytes": lengths[0],
+            "second_root_partition_bytes": lengths[1],
+            "root_partition_byte_identical": first_difference is None and lengths[0] == lengths[1],
+            "first_difference_kind": "byte" if first_difference is not None else
+                                     "length" if lengths[0] != lengths[1] else None,
             "first_difference_root_offset_bytes": first_difference,
-            "first_difference_disk_offset_bytes": None if first_difference is None else start + first_difference,
+            "first_difference_first_disk_offset_bytes": None if first_difference is None else starts[0] + first_difference,
+            "first_difference_second_disk_offset_bytes": None if first_difference is None else starts[1] + first_difference,
             "production_image": False, "hardware_verified": False,
             "private_mode_approved": False}
 
