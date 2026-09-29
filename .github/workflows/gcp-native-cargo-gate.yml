@@ -316,6 +316,17 @@ jobs:
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           git -C "$source" diff --quiet
 
+      - name: Upload the separate static-producer diagnostic
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-static-probe-${{ github.sha }}
+          path: |
+            ${{ github.workspace }}/native-cargo/static-producer-probe/producer
+            ${{ github.workspace }}/native-cargo/static-producer-probe/diagnostic.json
+            ${{ github.workspace }}/native-cargo/static-producer-probe/static-libraries.sha256
+            ${{ github.workspace }}/native-cargo/static-producer-probe/smoke/receipt.json
+          if-no-files-found: error
+
       - name: Package and verify the matched-build bundle
         shell: bash
         run: |
@@ -358,11 +369,6 @@ jobs:
                   target = bundle / directory / name
                   target.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(release / directory / name, target)
-          probe = release.parents[1] / "static-producer-probe"
-          diagnostic = bundle / "diagnostic-static-producer"
-          diagnostic.mkdir()
-          for name in ("producer", "diagnostic.json", "static-libraries.sha256"):
-              shutil.copy2(probe / name, diagnostic / name)
           shutil.copytree(guest_inputs, bundle / "guest-inputs")
           exporter.inspect(bundle, revision)
           PY
