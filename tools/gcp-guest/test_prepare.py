@@ -373,7 +373,12 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(config.count("RemoveFiles="), 1)
         self.assertIn("RemoveFiles=" + ",".join(prepare.ROOT_REMOVE_FILES) + "\n", config)
         self.assertEqual(config.count("FinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\n"), 1)
-        self.assertIn("\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n", config)
+        self.assertIn(
+            "\n[Build]\nBuildSources=\nWorkspaceDirectory=work\n"
+            "PackageCacheDirectory=package-cache\n"
+            f"Environment=SYSTEMD_REPART_MKFS_OPTIONS_EXT4=-Ehash_seed={report['repart_seed']}\n",
+            config,
+        )
         self.assertEqual(config.count("\nBuildSources=\n"), 1)
         for script in (output / "seal-shadow.py", output / "sanitize-mount.py",
                        output / "audit-rootfs.py",
