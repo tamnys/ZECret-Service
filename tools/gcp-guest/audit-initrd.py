@@ -21,6 +21,8 @@ import sys
 # prepare.py replaces this marker with the hash of the separately pinned
 # x86_64 Rust PID1 artifact. Running an unstaged audit fails closed.
 EXPECTED_INIT_SHA256 = "__STAGED_INIT_SHA256__"
+# The retained mount(8) must match the hash-verified signed package ELF.
+EXPECTED_MOUNT_SHA256 = "__STAGED_MOUNT_SHA256__"
 REQUIRED_EXECUTABLES = (
     "usr/lib/systemd/systemd",
     "usr/lib/systemd/systemd-modules-load",
@@ -52,6 +54,7 @@ FORBIDDEN_EXECUTABLES = (
     "usr/bin/bash", "usr/bin/dash", "usr/bin/sh", "usr/bin/perl",
     "usr/bin/perl5.40.1", "usr/bin/login",
     "usr/bin/su", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/sshd",
+    "usr/bin/umount", "usr/sbin/losetup", "usr/sbin/swapon", "usr/sbin/swapoff",
     "bin/bash", "bin/dash", "bin/sh", "bin/login", "bin/su", "sbin/sulogin",
 )
 FORBIDDEN_TREES = (
@@ -95,11 +98,14 @@ def exact_symlink(root, relative, target):
         raise ValueError(f"initrd entry missing or redirected: {relative}")
 
 
-def audit(root, expected_init_sha256=EXPECTED_INIT_SHA256):
+def audit(root, expected_init_sha256=EXPECTED_INIT_SHA256,
+          expected_mount_sha256=EXPECTED_MOUNT_SHA256):
     if root.is_symlink() or not root.is_dir() or root.resolve() == Path("/"):
         raise ValueError("explicit initrd build root required")
     if not re.fullmatch(r"[0-9a-f]{64}", expected_init_sha256):
         raise ValueError("early init artifact identity absent")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_mount_sha256):
+        raise ValueError("initrd mount artifact identity absent")
     for relative in ("proc", "etc", "usr", "usr/bin", "usr/lib", "usr/lib/systemd",
                      "usr/lib/systemd/system", "usr/lib/systemd/system-generators",
                      "usr/sbin"):
@@ -116,6 +122,21 @@ def audit(root, expected_init_sha256=EXPECTED_INIT_SHA256):
     regular(root, "usr/lib/os-release")
     for relative in REQUIRED_EXECUTABLES:
         regular(root, relative, executable=True)
+    # systemd's sysroot.mount executes mount(8) in the initrd. Keep the
+    # signed-package ELF, but never its package-default setuid privilege.
+    mount = root / "usr/bin/mount"
+    try:
+        descriptor = os.open(mount, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as error:
+        raise ValueError("initrd required file missing or redirected: usr/bin/mount") from error
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("initrd required file missing or redirected: usr/bin/mount")
+        if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o555:
+            raise ValueError("initrd mount ownership or permissions differ")
+        if hashlib.file_digest(stream, "sha256").hexdigest() != expected_mount_sha256:
+            raise ValueError("initrd mount differs from pinned package artifact")
     for relative in REQUIRED_UNITS:
         regular(root, relative)
     exact_symlink(root, "usr/lib/systemd/systemd-udevd", "../../bin/udevadm")

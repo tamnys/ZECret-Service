@@ -75,13 +75,13 @@ class OuterImageRunnerTest(unittest.TestCase):
 
     def test_production_workspace_requires_empty_build_sources(self):
         config = (b"SectorSize=512\nOutputDirectory=output\n"
-                  b"FinalizeScripts=seal-shadow.py,audit-rootfs.py\n[Build]\n"
+                  b"FinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\n[Build]\n"
                   b"BuildSources=\nWorkspaceDirectory=work\n"
                   b"PackageCacheDirectory=package-cache\n")
         runner.checked_mkosi_recipe(config)
         for changed in (config.replace(b"BuildSources=\n", b""),
                         config.replace(b"BuildSources=\n", b"BuildSources=.\n"),
-                        config.replace(b"FinalizeScripts=seal-shadow.py,audit-rootfs.py\n", b"FinalizeScripts=audit-rootfs.py\n"),
+                        config.replace(b"FinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\n", b"FinalizeScripts=audit-rootfs.py\n"),
                         config.replace(b"WorkspaceDirectory=work\n", b"WorkspaceDirectory=other\n")):
             with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "source layout"):
                 runner.checked_mkosi_recipe(changed)

@@ -66,9 +66,10 @@ ROLES = set(BINARIES) | set(DISK_TOOL_PACKAGES) | {EARLY_INIT_ROLE, "secure_boot
 # from a memory-backed mount. Staging never checks that mount, copies the key,
 # or treats this reference as evidence of a signed image.
 EXTERNAL_SECURE_BOOT_KEY = "/run/zrpc-build-signing/secure-boot.key"
-INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod"}
+INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod", "mount"}
 ROOT_REMOVE_FILES = (
-    "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount", "/usr/bin/su",
+    "/usr/sbin/unix_chkpwd", "/usr/bin/umount", "/usr/bin/su",
+    "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
     "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
 )
 INITRD_REMOVE_FILES = (
@@ -106,7 +107,8 @@ INITRD_REMOVE_FILES = (
     "/var/mail",
     "/etc/ssh",
     "/usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
-    "/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",
+    "/usr/sbin/unix_chkpwd", "/usr/bin/umount",
+    "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
     "/usr/bin/bash", "/usr/bin/dash", "/usr/bin/sh",
     "/usr/bin/perl", "/usr/bin/perl5.40.1",
     "/usr/sbin/sulogin", "/usr/bin/login", "/usr/bin/su",
@@ -486,6 +488,35 @@ def disk_tool_member(archive_bytes, member_path, expected_size, expected_sha256)
         raise ValueError("public-disk tool ELF differs from reviewed signed archive")
     return found
 
+def mount_package_identity(manifest, packages):
+    """Bind mount(8) to the signed, locked Debian package before chmod."""
+    entries = [entry for entry in manifest
+               if entry["name"] == "mount" and entry["architecture"] == "amd64"]
+    if len(entries) != 1:
+        raise ValueError("one locked amd64 mount package required")
+    entry = entries[0]
+    path = packages[(entry["name"], entry["version"], entry["architecture"])]
+    archive_bytes = path.read_bytes()
+    if len(archive_bytes) != entry["size"] or hashlib.sha256(archive_bytes).hexdigest() != entry["sha256"]:
+        raise ValueError("signed mount package archive changed")
+    payload = verify_builder_closure.deb_data_tar(archive_bytes)
+    mount = None
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as contents:
+        for member in contents:
+            if member.name in ("usr/bin/mount", "./usr/bin/mount"):
+                if (mount is not None or not member.isfile()
+                        or (member.uid, member.gid) != (0, 0)
+                        or member.size <= 0 or member.mode & 0o022):
+                    raise ValueError("signed mount package ELF metadata differs")
+                with contents.extractfile(member) as stream:
+                    mount = stream.read(member.size + 1)
+                if len(mount) != member.size:
+                    raise ValueError("signed mount package ELF size differs")
+    if (mount is None or mount[:6] != b"\x7fELF\x02\x01"
+            or mount[18:20] != b"\x3e\x00"):
+        raise ValueError("signed mount package has no x86_64 ELF")
+    return len(mount), hashlib.sha256(mount).hexdigest()
+
 def stage_disk_tool(rootfs, artifacts):
     """Copy only four reviewed ELF members into the authenticated root tree."""
     archives = {}
@@ -575,6 +606,7 @@ def stage(lock_path, source, destination):
     lock_bytes = lock_path.read_bytes()
     lock = json.loads(lock_bytes, object_pairs_hook=unique_object)
     paths, package_manifest, snapshot, packages = validate_lock(lock, source)
+    mount_size, mount_sha256 = mount_package_identity(package_manifest, packages)
     source_fd = open_stage_directory(PROFILE)
     try:
         source_entries = staged_inventory(source_fd)
@@ -609,8 +641,23 @@ def stage(lock_path, source, destination):
     (destination / "rootfs/etc/shadow").chmod(ACCOUNT_OUTPUTS["shadow"][3])
     shutil.copyfile(Path(__file__).with_name("seal-shadow.py"), destination / "seal-shadow.py")
     (destination / "seal-shadow.py").chmod(0o555)
-    shutil.copyfile(Path(__file__).with_name("audit-rootfs.py"), destination / "audit-rootfs.py")
-    (destination / "audit-rootfs.py").chmod(0o555)
+    mount_template = Path(__file__).with_name("sanitize-mount.py").read_text()
+    for marker, value in (("__STAGED_MOUNT_SHA256__", mount_sha256),
+                          ("__STAGED_MOUNT_SIZE__", str(mount_size))):
+        if mount_template.count(marker) != 1:
+            raise ValueError("mount finalizer template differs")
+        mount_template = mount_template.replace(marker, value)
+    for script in (destination / "sanitize-mount.py",
+                   destination / "mkosi.images/initrd/sanitize-mount.py"):
+        script.write_text(mount_template)
+        script.chmod(0o555)
+    root_audit_template = Path(__file__).with_name("audit-rootfs.py").read_text()
+    marker = "__STAGED_MOUNT_SHA256__"
+    if root_audit_template.count(marker) != 1:
+        raise ValueError("rootfs mount audit template differs")
+    root_audit = destination / "audit-rootfs.py"
+    root_audit.write_text(root_audit_template.replace(marker, mount_sha256))
+    root_audit.chmod(0o555)
     artifacts = destination / "artifacts"
     artifacts.mkdir()
     for role, path in paths.items():
@@ -629,8 +676,12 @@ def stage(lock_path, source, destination):
     marker = "__STAGED_INIT_SHA256__"
     if audit_template.count(marker) != 1:
         raise ValueError("early init audit template differs")
+    audit_template = audit_template.replace(marker, lock["artifacts"][EARLY_INIT_ROLE]["sha256"])
+    marker = "__STAGED_MOUNT_SHA256__"
+    if audit_template.count(marker) != 1:
+        raise ValueError("initrd mount audit template differs")
     initrd_audit = destination / "mkosi.images/initrd/audit-initrd.py"
-    initrd_audit.write_text(audit_template.replace(marker, lock["artifacts"][EARLY_INIT_ROLE]["sha256"]))
+    initrd_audit.write_text(audit_template.replace(marker, mount_sha256))
     initrd_audit.chmod(0o555)
     package_directory = destination / "packages"
     package_directory.mkdir()
@@ -663,11 +714,11 @@ def stage(lock_path, source, destination):
     install_boot_overrides(rootfs)
     with (destination / "mkosi.conf").open("a") as stream:
         pinned_packages = ",".join(sorted(f'{package["name"]}={package["version"]}' for package in package_manifest))
-        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=seal-shadow.py,audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
+        stream.write(f'\n[Distribution]\nMirror={lock["snapshot"]}\n[Content]\nPackages={pinned_packages}\nPackageDirectories=packages\nInitrds=output/initrd.cpio.zst\nFinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\nSourceDateEpoch={lock["source_date_epoch"]}\n[Validation]\nSecureBootCertificate=artifacts/secure_boot_certificate\nSecureBootKey={EXTERNAL_SECURE_BOOT_KEY}\n[Output]\nOutputDirectory=output\nSeed={seed}\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n')
     with (destination / "mkosi.images/initrd/mkosi.conf").open("a") as stream:
         versions = {package["name"]: package["version"] for package in package_manifest}
         initrd_packages = ",".join(f"{name}={versions[name]}" for name in sorted(INITRD_PACKAGES))
-        stream.write(f"\nPackages={initrd_packages}\nExtraTrees=rootfs\nFinalizeScripts=audit-initrd.py\n")
+        stream.write(f"\nPackages={initrd_packages}\nExtraTrees=rootfs\nFinalizeScripts=sanitize-mount.py,audit-initrd.py\n")
     (destination / "inputs.lock.json").write_bytes(lock_bytes)
     root_fd = open_stage_directory(destination)
     try:

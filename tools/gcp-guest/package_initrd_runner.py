@@ -33,7 +33,8 @@ STATUS = "diagnostic-package-installed-initrd-cpio-unapproved"
 PROFILE_STATUS = "diagnostic-production-initrd-subimage-profile-unbuilt"
 FULL_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
-PROFILE_FILES = {"mkosi.conf", "audit-initrd.py", "profile-manifest.json", "rootfs", "packages"}
+PROFILE_FILES = {"mkosi.conf", "sanitize-mount.py", "audit-initrd.py",
+                 "profile-manifest.json", "rootfs", "packages"}
 ARCHIVE_PATH = re.compile(r"[A-Za-z0-9_./-]+\Z")
 
 
@@ -182,13 +183,53 @@ def config_bytes(source, selected, profile, packages):
         f"RepositoryKeyCheck=yes\nRepositoryKeyFetch=no\n"
         f"\n[Output]\nOutputDirectory={profile.parent / (profile.name + '-output')}\n"
         f"\n[Content]\nPackages={selected}\nPackageDirectories={profile / 'packages'}\n"
-        f"ExtraTrees={profile / 'rootfs'}\nFinalizeScripts={profile / 'audit-initrd.py'}\n"
+        f"ExtraTrees={profile / 'rootfs'}\n"
+        f"FinalizeScripts={profile / 'sanitize-mount.py'},{profile / 'audit-initrd.py'}\n"
         f"SourceDateEpoch={epoch}\n"
         f"\n[Build]\nWithNetwork=no\nCacheOnly=always\nIncremental=no\n"
         f"WorkspaceDirectory={profile.parent / (profile.name + '-work')}\n"
         f"PackageCacheDirectory={profile.parent / (profile.name + '-package-cache')}\n"
     ).encode()
     return static + extension, sha256(static)
+
+
+def finalize_scripts(source, selected, revision, early_sha256, packages, archives):
+    """Bind both finalizers to selected source and the signed mount archive."""
+    archive_paths = {}
+    for entry in packages:
+        identity = (entry["name"], entry["version"], entry["architecture"])
+        if identity in archive_paths:
+            raise ValueError("duplicate signed Debian package identity")
+        archive_paths[identity] = Path(archives) / (entry["sha256"] + ".deb")
+    mount_size, mount_sha256 = source.guest.prepare.mount_package_identity(
+        packages, archive_paths)
+    if (type(mount_size) is not int or mount_size <= 0
+            or not isinstance(mount_sha256, str) or not HEX.fullmatch(mount_sha256)):
+        raise ValueError("signed mount ELF identity differs")
+
+    audit_template = source.rust_inputs.regular_bytes(MODULE_DIR / "audit-initrd.py")
+    if (audit_template != selected.output(
+            ["show", f"{revision}:tools/gcp-guest/audit-initrd.py"])
+            or audit_template.count(b"__STAGED_INIT_SHA256__") != 1
+            or audit_template.count(b"__STAGED_MOUNT_SHA256__") != 1
+            or not audit_template.startswith(b"#!/usr/bin/env python3\n")):
+        raise ValueError("initrd audit differs from selected HEAD")
+    audit = audit_template.replace(b"#!/usr/bin/env python3\n", b"#!/usr/bin/python3 -I\n", 1)
+    audit = audit.replace(b"__STAGED_INIT_SHA256__", early_sha256.encode())
+    audit = audit.replace(b"__STAGED_MOUNT_SHA256__", mount_sha256.encode())
+
+    sanitizer_template = source.rust_inputs.regular_bytes(MODULE_DIR / "sanitize-mount.py")
+    if (sanitizer_template != selected.output(
+            ["show", f"{revision}:tools/gcp-guest/sanitize-mount.py"])
+            or sanitizer_template.count(b"__STAGED_MOUNT_SHA256__") != 1
+            or sanitizer_template.count(b"__STAGED_MOUNT_SIZE__") != 1
+            or not sanitizer_template.startswith(b"#!/usr/bin/env python3\n")):
+        raise ValueError("mount sanitizer differs from selected HEAD")
+    sanitizer = sanitizer_template.replace(
+        b"#!/usr/bin/env python3\n", b"#!/usr/bin/python3 -I\n", 1)
+    sanitizer = sanitizer.replace(b"__STAGED_MOUNT_SHA256__", mount_sha256.encode())
+    sanitizer = sanitizer.replace(b"__STAGED_MOUNT_SIZE__", str(mount_size).encode())
+    return audit, sanitizer, mount_size, mount_sha256
 
 
 def inputs(source, selected, metadata, archives, rust_bundle, revision, workspace):
@@ -210,14 +251,6 @@ def inputs(source, selected, metadata, archives, rust_bundle, revision, workspac
     binary = source.rust_inputs.regular_bytes(rust_bundle / "artifacts/zrpc-gcp-early-init")
     if sha256(binary) != early["sha256"] or not source.rust_inputs.x86_64_elf(binary):
         raise ValueError("/init differs from double-built x86_64 Rust receipt")
-    audit_template = source.rust_inputs.regular_bytes(MODULE_DIR / "audit-initrd.py")
-    if (audit_template != selected.output(
-            ["show", f"{revision}:tools/gcp-guest/audit-initrd.py"])
-            or audit_template.count(b"__STAGED_INIT_SHA256__") != 1
-            or not audit_template.startswith(b"#!/usr/bin/env python3\n")):
-        raise ValueError("initrd audit differs from selected HEAD")
-    audit = audit_template.replace(b"#!/usr/bin/env python3\n", b"#!/usr/bin/python3 -I\n", 1)
-    audit = audit.replace(b"__STAGED_INIT_SHA256__", early["sha256"].encode())
     preflight = {"rust_source_commit": revision,
                  "mkosi_source_commit": source.guest.prepare.SOURCE_COMMIT,
                  "rust_receipt_sha256": receipt["reproduction_manifest_sha256"],
@@ -227,14 +260,17 @@ def inputs(source, selected, metadata, archives, rust_bundle, revision, workspac
             or signed["archive_bytes_checked"] is not True):
         raise ValueError("signed Debian guest archive verification incomplete")
     packages = source.guest.authenticated_packages(metadata)
-    return preflight, binary, audit, packages
+    audit, sanitizer, mount_size, mount_sha256 = finalize_scripts(
+        source, selected, revision, early["sha256"], packages, archives)
+    preflight.update(mount_elf_size=mount_size, mount_elf_sha256=mount_sha256)
+    return preflight, binary, audit, sanitizer, packages
 
 
 def checked_profile(profile, workspace, source):
     return source.checked_profile_path(Path(profile), Path(workspace))
 
 
-def manifest_for(source, preflight, packages, config, static_sha256, audit):
+def manifest_for(source, preflight, packages, config, static_sha256, audit, sanitizer):
     return {
         "schema_version": 1, "status": PROFILE_STATUS,
         "source_commit": preflight["rust_source_commit"],
@@ -245,9 +281,12 @@ def manifest_for(source, preflight, packages, config, static_sha256, audit):
         "signed_packages_index_sha256": source.guest.PACKAGES_SHA256,
         "rust_receipt_sha256": preflight["rust_receipt_sha256"],
         "early_init_sha256": preflight["early_init_sha256"],
+        "mount_elf_size": preflight["mount_elf_size"],
+        "mount_elf_sha256": preflight["mount_elf_sha256"],
         "production_subimage_source_sha256": static_sha256,
         "effective_config_sha256": sha256(config),
         "initrd_audit_sha256": sha256(audit),
+        "mount_sanitizer_sha256": sha256(sanitizer),
         "packages": [{key: row[key] for key in ("name", "version", "architecture", "size", "sha256")}
                      for row in packages],
         "signed_snapshot_rechecked": True,
@@ -270,11 +309,12 @@ def regular(path, *, mode=None):
 
 def prepare_profile(source, selected, metadata, archives, rust_bundle, revision,
                     profile, workspace):
-    preflight, binary, audit, packages = inputs(
+    preflight, binary, audit, sanitizer, packages = inputs(
         source, selected, metadata, archives, rust_bundle, revision, workspace)
     profile = checked_profile(profile, workspace, source)
     config, static_sha256 = config_bytes(source, selected, profile, packages)
-    expected = manifest_for(source, preflight, packages, config, static_sha256, audit)
+    expected = manifest_for(source, preflight, packages, config, static_sha256,
+                            audit, sanitizer)
     parent_fd = source.builder.output_parent(Path(workspace), profile)
     try:
         os.mkdir(profile.name, mode=0o700, dir_fd=parent_fd)
@@ -285,6 +325,7 @@ def prepare_profile(source, selected, metadata, archives, rust_bundle, revision,
     root = source.guest.open_directory(profile, "package initrd profile")
     try:
         source.write_file(root, "mkosi.conf", config)
+        source.write_file(root, "sanitize-mount.py", sanitizer, mode=0o500)
         source.write_file(root, "audit-initrd.py", audit, mode=0o500)
         source.write_file(root, "profile-manifest.json", canonical(expected))
     finally:
@@ -310,15 +351,18 @@ def prepare_profile(source, selected, metadata, archives, rust_bundle, revision,
 
 def verify_profile(source, selected, metadata, archives, rust_bundle, revision,
                    profile, workspace):
-    preflight, binary, audit, packages = inputs(
+    preflight, binary, audit, sanitizer, packages = inputs(
         source, selected, metadata, archives, rust_bundle, revision, workspace)
     profile = checked_profile(profile, workspace, source)
     config, static_sha256 = config_bytes(source, selected, profile, packages)
-    expected = manifest_for(source, preflight, packages, config, static_sha256, audit)
+    expected = manifest_for(source, preflight, packages, config, static_sha256,
+                            audit, sanitizer)
     if profile.is_symlink() or stat.S_IMODE(profile.stat().st_mode) != 0o700 or set(os.listdir(profile)) != PROFILE_FILES:
         raise ValueError("package initrd profile contains unreviewed inputs")
     if regular(profile / "mkosi.conf", mode=0o400) != config:
         raise ValueError("package initrd config differs from selected source")
+    if regular(profile / "sanitize-mount.py", mode=0o500) != sanitizer:
+        raise ValueError("package initrd mount sanitizer differs from selected source")
     if regular(profile / "audit-initrd.py", mode=0o500) != audit:
         raise ValueError("package initrd audit differs from selected source")
     if regular(profile / "profile-manifest.json", mode=0o400) != canonical(expected):

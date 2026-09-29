@@ -46,7 +46,7 @@ class CandidateTests(unittest.TestCase):
                 (self.inputs / "debs" / (self.synthetic_deb_sha + ".deb")).write_bytes(self.synthetic_deb)
                 # The reviewed kernel identity has deliberately synthetic archive bytes.
                 packages = []
-                for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "dmsetup", "kmod", "libc6", "libjson-c5", "libssl3t64", prepare.KERNEL_PACKAGE):
+                for name in ("systemd", "systemd-boot-efi", "systemd-cryptsetup", "systemd-resolved", "udev", "e2fsprogs", "dmsetup", "kmod", "mount", "libc6", "libjson-c5", "libssl3t64", prepare.KERNEL_PACKAGE):
                     version = prepare.KERNEL_PACKAGE_VERSION if name == prepare.KERNEL_PACKAGE else "1.0~synthetic"
                     packages.append({"name": name, "version": version, "architecture": "amd64", "filename": f"pool/main/s/{name}/{name}_{version}_amd64.deb", "size": len(self.synthetic_deb), "sha256": self.synthetic_deb_sha, "path": f"debs/{self.synthetic_deb_sha}.deb"})
                 data = json.dumps(packages).encode()
@@ -72,6 +72,17 @@ class CandidateTests(unittest.TestCase):
         self.disk_stage_patch = mock.patch.object(prepare, "stage_disk_tool",
                                             side_effect=self.synthetic_disk_tool)
         self.disk_stage_patch.start()
+        self.mount_identity_patch = mock.patch.object(
+            prepare, "mount_package_identity",
+            return_value=(len(b"SYNTHETIC"), hashlib.sha256(b"SYNTHETIC").hexdigest()),
+        )
+        self.mount_identity_patch.start()
+        self.audit_mount_hash_patch = mock.patch.object(
+            audit_rootfs, "EXPECTED_MOUNT_SHA256", hashlib.sha256(b"SYNTHETIC").hexdigest())
+        self.audit_mount_hash_patch.start()
+        self.audit_mount_owner_patch = mock.patch.object(
+            audit_rootfs, "MOUNT_OWNER", (os.getuid(), os.getgid()))
+        self.audit_mount_owner_patch.start()
         self.audit_disk_elf_patch = mock.patch.dict(
             audit_rootfs.SIGNED_DISK_ELFS,
             {name: (len(b"SYNTHETIC"), hashlib.sha256(b"SYNTHETIC").hexdigest(), mode)
@@ -88,6 +99,9 @@ class CandidateTests(unittest.TestCase):
             path.chmod(mode)
 
     def tearDown(self):
+        self.audit_mount_owner_patch.stop()
+        self.audit_mount_hash_patch.stop()
+        self.mount_identity_patch.stop()
         self.audit_disk_elf_patch.stop()
         self.disk_stage_patch.stop()
         self.disk_verify_patch.stop()
@@ -358,13 +372,19 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("PackageCacheDirectory=package-cache", config)
         self.assertEqual(config.count("RemoveFiles="), 1)
         self.assertIn("RemoveFiles=" + ",".join(prepare.ROOT_REMOVE_FILES) + "\n", config)
-        self.assertEqual(config.count("FinalizeScripts=seal-shadow.py,audit-rootfs.py\n"), 1)
+        self.assertEqual(config.count("FinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\n"), 1)
         self.assertIn("\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n", config)
         self.assertEqual(config.count("\nBuildSources=\n"), 1)
-        for script in (output / "seal-shadow.py", output / "audit-rootfs.py",
+        for script in (output / "seal-shadow.py", output / "sanitize-mount.py",
+                       output / "audit-rootfs.py",
+                       output / "mkosi.images/initrd/sanitize-mount.py",
                        output / "mkosi.images/initrd/audit-initrd.py"):
             self.assertNotIn("SRCDIR", script.read_text())
             self.assertNotIn("/work/src", script.read_text())
+        for script in (output / "sanitize-mount.py", output / "audit-rootfs.py",
+                       output / "mkosi.images/initrd/sanitize-mount.py",
+                       output / "mkosi.images/initrd/audit-initrd.py"):
+            self.assertIn(hashlib.sha256(b"SYNTHETIC").hexdigest(), script.read_text())
         self.assertEqual((output / "seal-shadow.py").stat().st_mode & 0o777, 0o555)
         for name, (size, expected_sha, source_mode, staged_mode) in prepare.ACCOUNT_OUTPUTS.items():
             source = prepare.PROFILE / "rootfs/etc" / name
@@ -381,7 +401,7 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "artifacts/kernel").exists())
         self.assertFalse((output / "artifacts/initrd").exists())
         self.assertFalse((output / "rootfs/usr/lib/modules").exists())
-        self.assertIn("Packages=dmsetup=1.0~synthetic,e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,libc6=1.0~synthetic,libjson-c5=1.0~synthetic,libssl3t64=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
+        self.assertIn("Packages=dmsetup=1.0~synthetic,e2fsprogs=1.0~synthetic,kmod=1.0~synthetic,libc6=1.0~synthetic,libjson-c5=1.0~synthetic,libssl3t64=1.0~synthetic,linux-image-6.12.107+deb13-cloud-amd64=6.12.107-1,mount=1.0~synthetic,systemd-boot-efi=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,systemd-resolved=1.0~synthetic,systemd=1.0~synthetic,udev=1.0~synthetic", config)
         self.assertIn("Initrds=output/initrd.cpio.zst", config)
         self.assertIn(f'Seed={report["repart_seed"]}', config)
         self.assertEqual((output / "inputs.lock.json").read_bytes(), lock_path.read_bytes())
@@ -393,10 +413,10 @@ class CandidateTests(unittest.TestCase):
         self.assertIn("rd.modules_load=dm-verity", config)
         initrd = (output / "mkosi.images/initrd/mkosi.conf").read_text()
         self.assertIn("MakeInitrd=yes", initrd)
-        self.assertIn("Packages=dmsetup=1.0~synthetic,kmod=1.0~synthetic,systemd=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,udev=1.0~synthetic", initrd)
+        self.assertIn("Packages=dmsetup=1.0~synthetic,kmod=1.0~synthetic,mount=1.0~synthetic,systemd=1.0~synthetic,systemd-cryptsetup=1.0~synthetic,udev=1.0~synthetic", initrd)
         self.assertIn("ExtraTrees=rootfs", initrd)
-        self.assertIn("FinalizeScripts=audit-initrd.py", initrd)
-        for relative in ("/usr/sbin/unix_chkpwd", "/usr/bin/mount", "/usr/bin/umount",
+        self.assertIn("FinalizeScripts=sanitize-mount.py,audit-initrd.py", initrd)
+        for relative in ("/usr/sbin/unix_chkpwd", "/usr/bin/umount",
                          "/usr/bin/perl", "/usr/bin/perl5.40.1",
                          "/var/log/journal", "/var/mail",
                          "/usr/lib/systemd/system/systemd-sysext.service",
@@ -496,7 +516,6 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.images/initrd/mkosi.conf", "etc/ssh,", ""),
             ("mkosi.images/initrd/mkosi.conf", "20-systemd-ssh-generator.conf,", ""),
             ("mkosi.images/initrd/mkosi.conf", "usr/sbin/unix_chkpwd,", ""),
-            ("mkosi.images/initrd/mkosi.conf", "usr/bin/mount,", ""),
             ("mkosi.images/initrd/mkosi.conf", "usr/bin/umount,", ""),
             ("mkosi.images/initrd/mkosi.conf", "usr/bin/perl,", ""),
             ("mkosi.images/initrd/mkosi.conf", "usr/bin/perl5.40.1,", ""),
@@ -779,6 +798,9 @@ class CandidateTests(unittest.TestCase):
         root = self.root / f"synthetic-root{suffix}"
         (root / "etc/systemd/system").mkdir(parents=True)
         (root / "usr/lib/zrpc").mkdir(parents=True)
+        (root / "usr/bin").mkdir(parents=True)
+        (root / "usr/bin/mount").write_bytes(b"SYNTHETIC")
+        (root / "usr/bin/mount").chmod(0o555)
         units = root / "usr/lib/systemd/system"
         units.mkdir(parents=True)
         source_units = prepare.PROFILE / "rootfs/usr/lib/systemd/system"
@@ -933,6 +955,25 @@ class CandidateTests(unittest.TestCase):
         nvme.write_bytes(b"TAMPERED")
         nvme.chmod(0o555)
         with self.assertRaisesRegex(ValueError, "public-disk tool ELF differs"):
+            audit_rootfs.audit(root)
+
+    def test_rootfs_audit_requires_exact_non_privileged_mount_helper(self):
+        root = self.synthetic_guest_root("-mount")
+        audit_rootfs.audit(root)
+        mount = root / "usr/bin/mount"
+        mount.chmod(0o755)
+        mount.write_bytes(b"TAMPERED")
+        mount.chmod(0o555)
+        with self.assertRaisesRegex(ValueError, "non-privileged signed mount ELF differs"):
+            audit_rootfs.audit(root)
+        mount.chmod(0o755)
+        mount.write_bytes(b"SYNTHETIC")
+        mount.chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "non-privileged signed mount ELF differs"):
+            audit_rootfs.audit(root)
+        mount.unlink()
+        mount.symlink_to("/var/lib/zebra/mount")
+        with self.assertRaisesRegex(ValueError, "non-privileged signed mount ELF differs"):
             audit_rootfs.audit(root)
 
     def test_rootfs_audit_requires_privileged_package_files_absent(self):

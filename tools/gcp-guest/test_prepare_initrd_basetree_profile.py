@@ -50,8 +50,11 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
         self.bundle = self.workspace / "rust-bundle"
         (self.bundle / "artifacts").mkdir(parents=True)
         self.binary = synthetic_elf()
+        self.mount = synthetic_elf() + b"signed mount bytes"
+        self.mount_mode = 0o4755
         self.early_init = self.bundle / "artifacts/zrpc-gcp-early-init"
         self.early_init.write_bytes(self.binary)
+        self.mount_identity = self.write_mount_package(self.mount, self.mount_mode)
         self.output = self.workspace / "profile"
         self.revision = "a" * 40
         self.preflight = {
@@ -75,21 +78,51 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
         def committed_source(_revision, path):
             return (Path(profile.__file__).read_bytes() if path.endswith(
                 "prepare_initrd_basetree_profile.py") else
-                Path(profile.__file__).with_name("audit-initrd.py").read_bytes())
+                Path(profile.__file__).with_name(Path(path).name).read_bytes())
         patch_source = mock.patch.object(profile.rust_inputs, "git_bytes",
                                          side_effect=committed_source)
         patch_binding = mock.patch.object(profile, "bind_selected_modules",
                                           return_value=None)
         patch_bound_script = mock.patch.object(
             profile, "_BOUND_SCRIPT", Path(profile.__file__).read_bytes())
+        patch_packages = mock.patch.object(profile.guest, "authenticated_packages",
+                                           side_effect=lambda _: [self.mount_identity])
+        patch_mount_sha = mock.patch.object(
+            profile, "MOUNT_ELF_SHA256", hashlib.sha256(self.mount).hexdigest())
+        patch_mount_size = mock.patch.object(profile, "MOUNT_ELF_SIZE", len(self.mount))
         patch_preflight.start()
         patch_source.start()
         patch_binding.start()
         patch_bound_script.start()
+        patch_packages.start()
+        patch_mount_sha.start()
+        patch_mount_size.start()
         self.addCleanup(patch_preflight.stop)
         self.addCleanup(patch_source.stop)
         self.addCleanup(patch_binding.stop)
         self.addCleanup(patch_bound_script.stop)
+        self.addCleanup(patch_packages.stop)
+        self.addCleanup(patch_mount_sha.stop)
+        self.addCleanup(patch_mount_size.stop)
+
+    def write_mount_package(self, mount, mode):
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:xz") as archive:
+            member = tarfile.TarInfo("./usr/bin/mount")
+            member.uid = member.gid = 0
+            member.mode = mode
+            member.size = len(mount)
+            archive.addfile(member, io.BytesIO(mount))
+        data = payload.getvalue()
+        header = (b"data.tar.xz/".ljust(16) + b"0".ljust(12) + b"0".ljust(6)
+                  + b"0".ljust(6) + b"100644  " + str(len(data)).encode().ljust(10)
+                  + b"`\n")
+        package = b"!<arch>\n" + header + data + (b"\n" if len(data) & 1 else b"")
+        digest = hashlib.sha256(package).hexdigest()
+        (self.workspace / (digest + ".deb")).write_bytes(package)
+        return {"name": "mount", "version": "synthetic", "architecture": "amd64",
+                "filename": "pool/synthetic/mount.deb", "size": len(package),
+                "sha256": digest, "path": "debs/" + digest + ".deb"}
 
     def prepare(self):
         return profile.prepare_profile(self.workspace, self.workspace,
@@ -125,30 +158,46 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
             self.assertIn(line + "\n", config)
         self.assertIn("BaseTrees=" + str(self.output / profile.INPUT) + "\n", config)
         self.assertIn("ExtraTrees=" + str(self.output / profile.INIT_TREE) + "\n", config)
-        self.assertIn("FinalizeScripts=" + str(self.output / profile.AUDIT) + "\n", config)
+        self.assertIn("FinalizeScripts=" + str(self.output / profile.SANITIZER)
+                      + "," + str(self.output / profile.AUDIT) + "\n", config)
         for forbidden in ("PackageDirectories=", "PostInstallationScripts=",
                           "BuildScripts=", "Initrds="):
             self.assertNotIn(forbidden, config)
         self.assertEqual({item.name for item in self.output.iterdir()},
-                         {"input", profile.INIT_TREE, profile.AUDIT,
+                         {"input", profile.INIT_TREE, profile.SANITIZER, profile.AUDIT,
                           profile.CONFIG, profile.MANIFEST})
         self.assertEqual((self.output / profile.INPUT).read_bytes(), self.archive.read_bytes())
         with tarfile.open(self.output / profile.INIT_TREE) as archive:
             members = archive.getmembers()
-            self.assertEqual(len(members), 1)
-            self.assertEqual(members[0].name, "init")
+            self.assertEqual([member.name for member in members],
+                             ["init", "usr/bin/mount"])
             self.assertEqual((members[0].uid, members[0].gid, members[0].mode),
                              (0, 0, 0o555))
             self.assertEqual(archive.extractfile(members[0]).read(), self.binary)
+            self.assertEqual((members[1].uid, members[1].gid, members[1].mode),
+                             (0, 0, self.mount_mode))
+            self.assertEqual(archive.extractfile(members[1]).read(), self.mount)
         manifest = json.loads((self.output / profile.MANIFEST).read_bytes())
         self.assertEqual(manifest["early_init_sha256"],
                          hashlib.sha256(self.binary).hexdigest())
+        self.assertEqual(manifest["mount_elf_sha256"],
+                         hashlib.sha256(self.mount).hexdigest())
+        self.assertEqual(manifest["mount_elf_size"], len(self.mount))
         self.assertEqual(manifest["source_bound_archive_size"], len(self.archive.read_bytes()))
         audit = (self.output / profile.AUDIT).read_bytes()
         self.assertIn(self.preflight["early_init_sha256"].encode(), audit)
+        self.assertIn(hashlib.sha256(self.mount).hexdigest().encode(), audit)
         self.assertNotIn(b"__STAGED_INIT_SHA256__", audit)
+        self.assertNotIn(b"__STAGED_MOUNT_SHA256__", audit)
         self.assertEqual(manifest["initrd_audit_sha256"],
                          hashlib.sha256(audit).hexdigest())
+        sanitizer = (self.output / profile.SANITIZER).read_bytes()
+        self.assertIn(hashlib.sha256(self.mount).hexdigest().encode(), sanitizer)
+        self.assertIn(str(len(self.mount)).encode(), sanitizer)
+        self.assertNotIn(b"__STAGED_MOUNT_SHA256__", sanitizer)
+        self.assertNotIn(b"__STAGED_MOUNT_SIZE__", sanitizer)
+        self.assertEqual(manifest["mount_sanitizer_sha256"],
+                         hashlib.sha256(sanitizer).hexdigest())
         self.assertFalse(manifest["boot_verified"])
         self.assertFalse(manifest["private_mode_approved"])
 
@@ -164,7 +213,26 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.preflight["private_mode_approved"] = False
         with mock.patch.object(profile.rust_inputs, "git_bytes", return_value=b"changed"):
-            with self.assertRaisesRegex(ValueError, "audit differs"):
+            with self.assertRaisesRegex(ValueError, "sanitize-mount.py differs"):
+                self.prepare()
+        self.assertFalse(self.output.exists())
+
+    def test_mount_archive_or_runtime_change_rejects_before_staging(self):
+        archive = self.workspace / (self.mount_identity["sha256"] + ".deb")
+        archive.write_bytes(archive.read_bytes() + b"changed")
+        with self.assertRaisesRegex(ValueError, "builder archive size differs"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+        self.mount_identity = self.write_mount_package(self.mount, 0o755)
+        with self.assertRaisesRegex(ValueError, "signed mount ELF differs"):
+            self.prepare()
+        self.assertFalse(self.output.exists())
+        self.mount_identity = self.write_mount_package(self.mount, self.mount_mode)
+        without_mount_library = tuple(
+            path for path in profile.initrd_input.ELF_RUNTIME
+            if not path.endswith("/libmount.so.1"))
+        with mock.patch.object(profile.initrd_input, "ELF_RUNTIME", without_mount_library):
+            with self.assertRaisesRegex(ValueError, "runtime dependency absent"):
                 self.prepare()
         self.assertFalse(self.output.exists())
 
@@ -210,6 +278,7 @@ class InitrdBaseTreeProfileTests(unittest.TestCase):
         for path, replacement, message in (
             (self.output / profile.INPUT, b"changed", "archive differs"),
             (self.output / profile.INIT_TREE, b"changed", "/init tree differs"),
+            (self.output / profile.SANITIZER, b"changed", "mount sanitizer differs"),
             (self.output / profile.AUDIT, b"changed", "audit differs"),
             (self.output / profile.CONFIG,
              (self.output / profile.CONFIG).read_bytes().replace(b"Packages=\n",

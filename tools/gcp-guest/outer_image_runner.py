@@ -49,7 +49,9 @@ ADDITIONAL_SCRIPTS = (
 )
 STATIC_SOURCE_FILES = (
     "tools/gcp-guest/audit-rootfs.py",
+    "tools/gcp-guest/audit-initrd.py",
     "tools/gcp-guest/seal-shadow.py",
+    "tools/gcp-guest/sanitize-mount.py",
     "deploy/gcp/builder-closure.lock.json",
     "deploy/gcp/builder-direct-packages.lock.json",
     "deploy/gcp/zebra-release.lock.json",
@@ -354,11 +356,11 @@ def checked_signing_key(certificate, key):
 
 def checked_mkosi_recipe(config):
     # Pinned mkosi 25.3 otherwise mounts --directory as its default build
-    # source and rejects a workspace beneath it. Neither finalize audit needs
+    # source and rejects a workspace beneath it. No finalize script needs
     # /work/src, so the staged recipe must explicitly reset that default.
     if (config.count(b"SectorSize=512\n") != 1
             or b"OutputDirectory=output\n" not in config
-            or config.count(b"FinalizeScripts=seal-shadow.py,audit-rootfs.py\n") != 1
+            or config.count(b"FinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\n") != 1
             or config.count(b"\nBuildSources=\n") != 1
             or b"\n[Build]\nBuildSources=\nWorkspaceDirectory=work\nPackageCacheDirectory=package-cache\n" not in config):
         raise ValueError("staged production sector, output, or source layout differs")
