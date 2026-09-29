@@ -204,6 +204,21 @@ class InitrdAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "forbidden file remains: usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf"):
             self.audit()
 
+    def test_generated_package_cache_and_log_rejected(self):
+        for relative in ("var/cache/ldconfig/aux-cache", "var/log/alternatives.log"):
+            with self.subTest(relative=relative):
+                path = self.root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"synthetic generated data")
+                with self.assertRaisesRegex(ValueError, "forbidden file remains: " + relative):
+                    self.audit()
+                path.unlink()
+                path.symlink_to("/var/lib/zebra/redirect")
+                with self.assertRaisesRegex(ValueError, "forbidden file remains: " + relative):
+                    self.audit()
+                path.unlink()
+                self.audit()
+
     def test_generated_journal_and_mail_directories_rejected_even_when_empty(self):
         for relative, mode in (("var/log/journal", 0o2755),
                                ("var/mail", 0o2775)):

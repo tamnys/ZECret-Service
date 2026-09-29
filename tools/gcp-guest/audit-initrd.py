@@ -63,6 +63,8 @@ FORBIDDEN_TREES = (
 )
 FORBIDDEN_FILES = (
     "usr/lib/tmpfiles.d/20-systemd-ssh-generator.conf",
+    "var/cache/ldconfig/aux-cache",
+    "var/log/alternatives.log",
 )
 FORBIDDEN_DIRECTORIES = (
     "var/log/journal", "var/mail",
