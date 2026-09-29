@@ -322,6 +322,31 @@ jobs:
                 TMPDIR=/zrpc-apt-scratch/tmp \
                 "$chroot_command" "$staged" "$@"
             }
+            run_staged /usr/bin/python3 -I -B - <<"PY"
+          import json
+          from pathlib import Path
+          import sys
+          import types
+
+          sys.path.insert(0, "/workspace/source/tools/gcp-guest")
+          import fetch_guest_closure as guest
+          import outer_image_runner as outer
+          import prepare_import_disk as importer
+
+          context = types.SimpleNamespace(
+              source=types.SimpleNamespace(guest=guest), import_disk=importer)
+          checked = outer.checked_sfdisk_package(
+              context, Path("/zrpc-metadata"), Path("/zrpc-archives"),
+              Path("/usr/sbin/sfdisk"))
+          if checked != {
+                  "sfdisk_sha256": importer.SFDISK_SHA256,
+                  "sfdisk_package_archive_sha256": importer.SFDISK_PACKAGE_SHA256,
+                  "sfdisk_archive_membership_rechecked": True,
+                  "sfdisk_dynamic_runtime_authenticated": False}:
+              raise ValueError("signed sfdisk package diagnostic changed")
+          print(json.dumps({"status": "diagnostic-signed-sfdisk-package-matched-unapproved",
+                            **checked, "private_mode_approved": False}, sort_keys=True))
+          PY
             tool=/workspace/source/tools/gcp-guest/diagnostic_full_disk.py
             prefix=(--metadata /zrpc-metadata \
                     --guest-archives /zrpc-guest-archives \
