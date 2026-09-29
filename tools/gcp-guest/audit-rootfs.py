@@ -97,6 +97,11 @@ REMOVED_LDCONFIG_PATHS = (
     "usr/lib/systemd/system/ldconfig.service",
     "usr/lib/systemd/system/sysinit.target.wants/ldconfig.service",
 )
+REMOVED_HWDB_PATHS = (
+    "usr/lib/udev/hwdb.bin",
+    "usr/lib/systemd/system/systemd-hwdb-update.service",
+    "usr/lib/systemd/system/sysinit.target.wants/systemd-hwdb-update.service",
+)
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
 # units must also be checked on the exact booted image; they do not exist in a
 # finalized rootfs and this audit does not claim to check their later output.
@@ -398,6 +403,9 @@ def audit(root):
     for name in REMOVED_LDCONFIG_PATHS:
         if present(root / name):
             raise ValueError("ldconfig cache or boot activation remains: " + name)
+    for name in REMOVED_HWDB_PATHS:
+        if present(root / name):
+            raise ValueError("generated hwdb or boot activation remains: " + name)
     machine_id = root / "etc/machine-id"
     if (machine_id.is_symlink() or not machine_id.is_file()
             or machine_id.stat().st_nlink != 1

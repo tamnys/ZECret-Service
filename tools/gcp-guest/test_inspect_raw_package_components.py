@@ -85,6 +85,10 @@ def baseline():
         "udev": [
             ("file", "usr/bin/udevadm", b"signed udevadm", 0o755),
             ("symlink", "usr/lib/systemd/systemd-udevd", "../../bin/udevadm", 0o777),
+            ("file", "usr/lib/systemd/system/systemd-hwdb-update.service",
+             b"signed updater unit", 0o644),
+            ("symlink", "usr/lib/systemd/system/sysinit.target.wants/systemd-hwdb-update.service",
+             "../systemd-hwdb-update.service", 0o777),
         ],
         components.prepare.KERNEL_PACKAGE: [
             ("file", "boot/vmlinuz-" + components.prepare.KERNEL_VERSION,
@@ -302,6 +306,17 @@ class PackageComponentsTests(unittest.TestCase):
             path = relative.removeprefix("/")
             with self.subTest(path=path):
                 self.assertIn(path, self.plan["removed"])
+                self.actual[path] = {"type": "regular"}
+                with self.assertRaisesRegex(ValueError, "removed package path remains"):
+                    self.inspect()
+                del self.actual[path]
+
+    def test_hwdb_and_updater_cannot_survive(self):
+        for relative in components.prepare.REMOVED_HWDB_PATHS:
+            path = relative.removeprefix("/")
+            with self.subTest(path=path):
+                self.assertIn(path, self.plan["removed"])
+                self.assertNotIn(path, self.plan["entries"])
                 self.actual[path] = {"type": "regular"}
                 with self.assertRaisesRegex(ValueError, "removed package path remains"):
                     self.inspect()

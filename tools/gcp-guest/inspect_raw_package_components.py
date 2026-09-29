@@ -71,6 +71,9 @@ REVIEWED_REMOVALS = frozenset({
     "etc/ld.so.cache",
     "usr/lib/systemd/system/ldconfig.service",
     "usr/lib/systemd/system/sysinit.target.wants/ldconfig.service",
+    "usr/lib/udev/hwdb.bin",
+    "usr/lib/systemd/system/systemd-hwdb-update.service",
+    "usr/lib/systemd/system/sysinit.target.wants/systemd-hwdb-update.service",
 })
 PACKAGE_METADATA_ROOTS = ("var/lib/dpkg", "var/lib/apt", "var/cache/apt")
 # These source-bound overlay paths may replace Debian package members. The

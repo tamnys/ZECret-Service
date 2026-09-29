@@ -1022,7 +1022,8 @@ class CandidateTests(unittest.TestCase):
                             *prepare.REMOVED_GENERATED_UNIT_LINKS,
                             *prepare.REMOVED_ALTERNATIVES_PATHS,
                             *prepare.REMOVED_GENERATED_ETC_PATHS,
-                            *prepare.REMOVED_LDCONFIG_PATHS):
+                            *prepare.REMOVED_LDCONFIG_PATHS,
+                            *prepare.REMOVED_HWDB_PATHS):
                 continue
             with self.subTest(relative=relative):
                 path = root / relative.lstrip("/")
@@ -1142,6 +1143,20 @@ class CandidateTests(unittest.TestCase):
                 path.write_bytes(b"generated cache or active unit")
                 with self.assertRaisesRegex(
                         ValueError, "ldconfig cache or boot activation remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_requires_hwdb_and_updater_absent(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_HWDB_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_HWDB_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-hwdb-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"generated database or signed updater")
+                with self.assertRaisesRegex(
+                        ValueError, "generated hwdb or boot activation remains: " + relative):
                     audit_rootfs.audit(root)
 
     def test_machine_id_source_and_final_root_must_be_empty(self):

@@ -109,6 +109,13 @@ REMOVED_LDCONFIG_PATHS = (
     "/usr/lib/systemd/system/ldconfig.service",
     "/usr/lib/systemd/system/sysinit.target.wants/ldconfig.service",
 )
+REMOVED_HWDB_PATHS = (
+    # mkosi compiles this database after extraction. The signed udev updater
+    # must also be absent so boot cannot regenerate it from writable state.
+    "/usr/lib/udev/hwdb.bin",
+    "/usr/lib/systemd/system/systemd-hwdb-update.service",
+    "/usr/lib/systemd/system/sysinit.target.wants/systemd-hwdb-update.service",
+)
 ROOT_REMOVE_FILES = (
     "/usr/sbin/unix_chkpwd", "/usr/bin/umount", "/usr/bin/su",
     "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
@@ -127,6 +134,7 @@ ROOT_REMOVE_FILES = (
     *REMOVED_ALTERNATIVES_PATHS,
     *REMOVED_GENERATED_ETC_PATHS,
     *REMOVED_LDCONFIG_PATHS,
+    *REMOVED_HWDB_PATHS,
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
