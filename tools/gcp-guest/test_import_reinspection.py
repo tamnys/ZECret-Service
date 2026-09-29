@@ -120,6 +120,11 @@ class ReinspectImportTests(unittest.TestCase):
                 "uki_sha256": self.uki_sha, "roothash": self.roothash,
                 "raw_rootfs_audit": {"root_partition_sha256": self.root_sha}}),
             mock.patch.object(runner, "checked_zebra"),
+            mock.patch.object(runner, "checked_sfdisk_package", return_value={
+                "sfdisk_sha256": "e" * 64,
+                "sfdisk_package_archive_sha256": "f" * 64,
+                "sfdisk_archive_membership_rechecked": True,
+                "sfdisk_dynamic_runtime_authenticated": False}),
             mock.patch.object(runner, "inspected_uki_digest", return_value=self.uki_digest),
             mock.patch.object(runner, "require_unchanged_outputs"),
         ]
@@ -159,6 +164,8 @@ class ReinspectImportTests(unittest.TestCase):
         self.assertEqual(report["raw_disk_sha256"], self.final_sha)
         self.assertEqual(report["raw_disk_bytes"], len(self.final_bytes))
         self.assertEqual(report["sfdisk_sha256"], "e" * 64)
+        self.assertTrue(report["sfdisk_archive_membership_rechecked"])
+        self.assertFalse(report["sfdisk_dynamic_runtime_authenticated"])
         self.assertEqual(report["input_lock_sha256"],
                          sha((self.stage / "inputs.lock.json").read_bytes()))
         self.assertEqual(report["native_rust_manifest_sha256"],
@@ -182,6 +189,14 @@ class ReinspectImportTests(unittest.TestCase):
     def test_wrong_source_identity_stops_before_conversion(self):
         with self.assertRaisesRegex(ValueError, "recorded exact identity"):
             self.run_import(source_sha="0" * 64)
+        self.context.import_disk._prepare.assert_not_called()
+        self.assertFalse(self.import_directory.exists())
+
+    def test_unsigned_sfdisk_package_stops_before_conversion(self):
+        runner.checked_sfdisk_package.side_effect = ValueError(
+            "sfdisk executable differs from signed fdisk package")
+        with self.assertRaisesRegex(ValueError, "sfdisk executable differs"):
+            self.run_import()
         self.context.import_disk._prepare.assert_not_called()
         self.assertFalse(self.import_directory.exists())
 

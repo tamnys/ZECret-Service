@@ -335,7 +335,7 @@ fn verify_operator_handoff(spec: &DeploymentSpec, verify_disk: bool) -> Result<(
         || handoff.raw_disk_bytes != spec.raw_disk_bytes
         || handoff.disk_raw != directory.join("disk.raw")
         || handoff.reinspection_receipt.path != directory.join("reinspection.json")
-        || handoff.sfdisk_archive_membership_rechecked
+        || !handoff.sfdisk_archive_membership_rechecked
         || handoff.sfdisk_dynamic_runtime_authenticated
         || handoff.import_archive_created
         || handoff.import_package_ready
@@ -365,7 +365,7 @@ fn verify_operator_handoff(spec: &DeploymentSpec, verify_disk: bool) -> Result<(
         || receipt.raw_disk_bytes != handoff.raw_disk_bytes
         || receipt.sfdisk_sha256 != handoff.sfdisk_sha256
         || receipt.sfdisk_package_archive_sha256 != handoff.sfdisk_package_archive_sha256
-        || receipt.sfdisk_archive_membership_rechecked
+        || !receipt.sfdisk_archive_membership_rechecked
         || receipt.sfdisk_dynamic_runtime_authenticated
         || receipt.import_archive_created
         || receipt.import_package_ready

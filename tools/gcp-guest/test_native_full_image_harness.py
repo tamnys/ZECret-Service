@@ -592,7 +592,7 @@ class ImportHandoffTests(unittest.TestCase):
             "raw_disk_bytes": 1024 ** 3,
             "sfdisk_sha256": "3" * 64,
             "sfdisk_package_archive_sha256": "4" * 64,
-            "sfdisk_archive_membership_rechecked": False,
+            "sfdisk_archive_membership_rechecked": True,
             "sfdisk_dynamic_runtime_authenticated": False,
             "disk_raw": str(harness.SCRATCH_IN_GUEST / "import-disk/disk.raw"),
             "reports": reports,

@@ -646,6 +646,58 @@ def inspected_uki_digest(context, rust_bundle, output, boot):
     return report
 
 
+def checked_sfdisk_package(context, metadata, builder_archives, sfdisk):
+    """Reconstruct the exact sfdisk executable from the signed builder deb."""
+    import debian_snapshot
+    import verify_builder_closure as closure
+
+    guest = context.source.guest
+    lock_bytes = regular_bytes(closure.LOCK)
+    if (len(lock_bytes) != closure.LOCK_BYTES
+            or sha256(lock_bytes) != closure.LOCK_SHA256):
+        raise ValueError("builder closure lock differs from selected source")
+    lock = json.loads(lock_bytes, object_pairs_hook=guest.prepare.unique_object)
+    if lock.get("snapshot") != guest.SNAPSHOT:
+        raise ValueError("sfdisk package uses another Debian snapshot")
+    epoch, (index_hash, index_size), index_bytes = (
+        debian_snapshot.authenticated_index_bytes(
+            metadata / "InRelease", metadata / "Packages.xz",
+            guest.INRELEASE_SHA256))
+    if (epoch != guest.SIGNED_RELEASE_EPOCH
+            or index_hash != guest.PACKAGES_SHA256
+            or index_size != guest.PACKAGES_SIZE):
+        raise ValueError("sfdisk package index differs from signed guest snapshot")
+    records = debian_snapshot.package_records(io.BytesIO(index_bytes))
+    selected = [entry for entry in lock["packages"] if entry["name"] == "fdisk"]
+    if (len(selected) != 1
+            or selected[0]["sha256"] != context.import_disk.SFDISK_PACKAGE_SHA256):
+        raise ValueError("sfdisk package identity differs from builder closure")
+    entry = selected[0]
+    record = records.get(("fdisk", entry["version"], entry["architecture"]))
+    archive = closure.indexed_archive(entry, record, builder_archives, keep_bytes=True)
+    executable = None
+    with tarfile.open(fileobj=io.BytesIO(closure.deb_data_tar(archive)), mode="r:xz") as members:
+        for member in members:
+            if member.name not in {"./usr/sbin/sfdisk", "usr/sbin/sfdisk"}:
+                continue
+            if executable is not None or not member.isfile() or not member.mode & 0o111:
+                raise ValueError("signed fdisk archive has no unique executable sfdisk")
+            source = members.extractfile(member)
+            if source is None:
+                raise ValueError("signed sfdisk executable cannot be read")
+            executable = source.read()
+            if len(executable) != member.size or source.read(1):
+                raise ValueError("signed sfdisk executable size differs")
+    if (executable is None or not executable.startswith(b"\x7fELF")
+            or sha256(executable) != context.import_disk.SFDISK_SHA256
+            or hash_regular(sfdisk)[1] != context.import_disk.SFDISK_SHA256):
+        raise ValueError("sfdisk executable differs from signed fdisk package")
+    return {"sfdisk_sha256": context.import_disk.SFDISK_SHA256,
+            "sfdisk_package_archive_sha256": entry["sha256"],
+            "sfdisk_archive_membership_rechecked": True,
+            "sfdisk_dynamic_runtime_authenticated": False}
+
+
 def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_archives,
                      workspace, import_directory, sfdisk, source_sha256,
                      source_bytes, expected_rust_manifest_sha256, zebra_receipt,
@@ -695,6 +747,8 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
         if lock["artifacts"][role]["sha256"] != rust["artifacts"][role]["sha256"]:
             raise ValueError("import source guest role differs from native Rust receipt")
     checked_zebra(context, lock, inputs, zebra_receipt)
+    sfdisk_membership = checked_sfdisk_package(
+        context, metadata, builder_archives, sfdisk)
     namespace = context.package.check_loopback_only_ip_state(
         parent_network_namespace, parent_mount_namespace)
     output = stage / "output"
@@ -714,6 +768,11 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
             or sizing.get("sfdisk_sha256") != context.import_disk.SFDISK_SHA256
             or sizing.get("sfdisk_package_archive_sha256") !=
                context.import_disk.SFDISK_PACKAGE_SHA256
+            or sfdisk_membership["sfdisk_sha256"] != sizing.get("sfdisk_sha256")
+            or sfdisk_membership["sfdisk_package_archive_sha256"] !=
+               sizing.get("sfdisk_package_archive_sha256")
+            or sfdisk_membership["sfdisk_archive_membership_rechecked"] is not True
+            or sfdisk_membership["sfdisk_dynamic_runtime_authenticated"] is not False
             or sizing.get("sfdisk_archive_membership_rechecked") is not False
             or sizing.get("sfdisk_dynamic_runtime_authenticated") is not False
             or sizing.get("import_package_ready") is not False
@@ -774,10 +833,7 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
         "mkosi_disk_bytes": source_bytes,
         "raw_disk_sha256": final_sha256,
         "raw_disk_bytes": final_bytes,
-        "sfdisk_sha256": sizing["sfdisk_sha256"],
-        "sfdisk_package_archive_sha256": sizing["sfdisk_package_archive_sha256"],
-        "sfdisk_archive_membership_rechecked": False,
-        "sfdisk_dynamic_runtime_authenticated": False,
+        **sfdisk_membership,
         "disk_raw": str(raw),
         "reports": reports,
         "package_diagnostics": {

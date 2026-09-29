@@ -535,7 +535,7 @@ def postbuild_import(staged, args):
             or not re.fullmatch(r"[0-9a-f]{64}", finished["sfdisk_sha256"])
             or type(finished.get("sfdisk_package_archive_sha256")) is not str
             or not re.fullmatch(r"[0-9a-f]{64}", finished["sfdisk_package_archive_sha256"])
-            or finished.get("sfdisk_archive_membership_rechecked") is not False
+            or finished.get("sfdisk_archive_membership_rechecked") is not True
             or finished.get("sfdisk_dynamic_runtime_authenticated") is not False
             or finished.get("disk_raw") != str(import_guest / "disk.raw")
             or type(reports) is not dict or set(reports) != expected_reports
@@ -598,7 +598,7 @@ def postbuild_import(staged, args):
         "raw_disk_bytes": raw_bytes,
         "sfdisk_sha256": finished["sfdisk_sha256"],
         "sfdisk_package_archive_sha256": finished["sfdisk_package_archive_sha256"],
-        "sfdisk_archive_membership_rechecked": False,
+        "sfdisk_archive_membership_rechecked": finished["sfdisk_archive_membership_rechecked"],
         "sfdisk_dynamic_runtime_authenticated": False,
         "disk_raw": str(import_host / "disk.raw"),
         "reinspection_receipt": {"path": str(import_host / "reinspection.json"),
