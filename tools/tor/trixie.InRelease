@@ -1,0 +1,51 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: TorProject
+Suite: stable
+Codename: trixie
+Date: Fri, 25 Sep 2026 11:28:01 UTC
+Valid-Until: Wed, 04 Nov 2026 11:28:01 UTC
+Architectures: amd64 arm64
+Components: main
+MD5Sum:
+ ed868b47f08657d9a29d852038c92291 5155 main/binary-amd64/Packages
+ 0cc520bf4907eb9fa113e13a9f0653a5 2441 main/binary-amd64/Packages.gz
+ 5a232710573bca3aae4b577c16ece1c1 71 main/binary-amd64/Release
+ fc93c5b5dd128dfcd1a4e25715539cc1 5123 main/binary-arm64/Packages
+ 96b25457b3e538481f7bffc0f4cdd6c4 2435 main/binary-arm64/Packages.gz
+ 132565cf1e259a93a021e651e2ab3cd4 71 main/binary-arm64/Release
+ 5541e87a5571141bf743e56b84a01c38 2983 main/source/Sources
+ 1034bf2e308f43f5191cdb3178bcf017 1263 main/source/Sources.gz
+ 94aa68972888c3c4340efb5dd97b195e 72 main/source/Release
+SHA1:
+ 5b5434551e9910e6a88b336aa550af0eab9495ba 5155 main/binary-amd64/Packages
+ 0a1687bd192d99b043bad24cbdf1bd9310a560a9 2441 main/binary-amd64/Packages.gz
+ 0f979d666f966c427fab567771f55d6f9b963b79 71 main/binary-amd64/Release
+ c6635009563aa798013aeab4f4691f1c7927df83 5123 main/binary-arm64/Packages
+ 314cdba5734b1eda9d1ddb97070927ecd6fe69ce 2435 main/binary-arm64/Packages.gz
+ 88b92baad3148570453a1ca4df4ac8f6c8b33c94 71 main/binary-arm64/Release
+ ae7cbcafdd20ad2cc3e0231ed837ff6c3f10f875 2983 main/source/Sources
+ 10fa7a762c0f050da60b983a904b411277e11c99 1263 main/source/Sources.gz
+ e495ccf6037e86ba98915df00c0fce0839703634 72 main/source/Release
+SHA256:
+ 93bd885a8b9178bdc2f0b5eecab8e179cd85302a3670ebf8f4e8eb6d991cf095 5155 main/binary-amd64/Packages
+ 1fdbffbd9ce6afd62c12c23c4e1cdfe89180720ce13f1d32e2d40b2a507df7cf 2441 main/binary-amd64/Packages.gz
+ 679b22e05826dc8eea366e3d9cc42471a9dbd03f95656d3a9541dfafcd82dc00 71 main/binary-amd64/Release
+ a5b413f63d2347997a45499aacd54e947658bfc04ebed0bee627903e1d66dd69 5123 main/binary-arm64/Packages
+ 7793e7963acc97c9fe0e08d77d2391004736bccd34c0d57825d03eed5662765a 2435 main/binary-arm64/Packages.gz
+ ffd961c4598ade54f231c2679cd0b7e8c346b66aa94cac0752d10deea94ee1d9 71 main/binary-arm64/Release
+ f984a581abe16231823e04dfe0a54f4b836d2d88de3f1bdb7cb3449d38f4b877 2983 main/source/Sources
+ 8d9da8733c7859937e887148a024f6baab6b79de756140884b5f1ed0e1053efb 1263 main/source/Sources.gz
+ d8476d69da595bd80bfaef1aca6d58129be6ab51257f8d1873a5b85ff1398f49 72 main/source/Release
+-----BEGIN PGP SIGNATURE-----
+
+iQEzBAEBCAAdFiEEImXrTLK/iNkAro0bdKlBuiGeyBAFAmq2WsEACgkQdKlBuiGe
+yBBQsAf/SibiLEMMnIvAppeiSGe4p3KS7YJQ7j5DE0PIvukKtRKzPNlNTsQ9xGFG
+rtlmWcK4t9hUF+CGKpGFC9BwozDLy7Udx6Rd7F/CmA9cCXemAThQEE53ZyvyhcgX
+YToRzWNb8EMS5rlPDrfeF4btFw9PWg+SFydqjiiWk8wcM1ABuBVX4ZrXRMXXxAyc
+N/ZjONLGCJ+kOvptOxhsh0FJRCMFP3rGUdZKQaKu57x8n7hZhZ5JnA7jvKSIxvlr
+m7p4i11LIKKkiHu2KDWZdkIu0TiaLkrlSQnWuqS3wjd29Dz+VMo7YXL0jniuh5L5
++pCFO1QxKfo/QwJMuA4kAzpVZN61Jw==
+=1GQO
+-----END PGP SIGNATURE-----

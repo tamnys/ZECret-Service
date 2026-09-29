@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "distribution": "Debian trixie",
+  "architecture": "arm64",
+  "package": "tor",
+  "version": "0.4.9.13-1~d13.trixie+1",
+  "tor_version": "0.4.9.13",
+  "repository_url": "https://deb.torproject.org/torproject.org/",
+  "repository_signing_key_primary_fingerprint": "A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89",
+  "repository_signing_key_sha256": "3a17ae045c544aecc065cf401a4ed96dfc99b6081c8b8989716772773c4f2d1d",
+  "inrelease_sha256": "6a48dfbf45c22b94898676ba314659ebad982cf1cc2f5eb6a7c8f16d24f8a80e",
+  "packages_gz_sha256": "7793e7963acc97c9fe0e08d77d2391004736bccd34c0d57825d03eed5662765a",
+  "package_path": "pool/main/t/tor/tor_0.4.9.13-1~d13.trixie+1_arm64.deb",
+  "package_size": 2013276,
+  "package_sha256": "1ab170dd9123416ad7812ef17e661eda4da277a58187a48fce790f7804388289",
+  "package_last_modified_utc": "2026-09-23T19:26:42Z",
+  "minimum_age_days": 7
+}

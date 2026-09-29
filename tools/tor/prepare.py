@@ -1,30 +1,37 @@
 #!/usr/bin/env python3
-"""Verify and stage a pinned local Tor executable; never deploy or start Tor."""
+"""Verify and stage pinned Tor Project Debian Tor without installing it."""
 
 from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+import gzip
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+import platform
 import shutil
 import subprocess
-import tarfile
 import tempfile
 from urllib.request import urlopen
 
 
 HERE = Path(__file__).resolve().parent
-LOCK = json.loads((HERE / "bundle.lock.json").read_text(encoding="utf-8"))
+LOCK = json.loads((HERE / "package.lock.json").read_text(encoding="utf-8"))
+SIGNING_KEY = HERE / "tor-debian-signing-key.asc"
+INRELEASE = HERE / "trixie.InRelease"
+PACKAGES = HERE / "trixie-arm64-Packages.gz"
 
 
 def require_release_age(now: datetime | None = None) -> None:
-    observed = datetime.fromisoformat(LOCK["signature_last_modified_utc"].replace("Z", "+00:00"))
-    eligible = observed + timedelta(days=LOCK["minimum_age_days"])
+    published = datetime.fromisoformat(
+        LOCK["package_last_modified_utc"].replace("Z", "+00:00")
+    )
+    eligible = published + timedelta(days=LOCK["minimum_age_days"])
     if (now or datetime.now(timezone.utc)) < eligible:
-        raise ValueError(f"pinned Tor signature is inside the release hold until {eligible.isoformat()}")
+        raise ValueError(f"pinned Tor package is inside the release hold until {eligible.isoformat()}")
 
 
 def file_sha256(path: Path) -> str:
@@ -40,139 +47,189 @@ def require_hash(path: Path, expected: str) -> None:
         raise ValueError(f"pinned SHA-256 mismatch: {path.name}")
 
 
+def verify_signed_release(scratch: Path) -> str:
+    require_hash(SIGNING_KEY, LOCK["repository_signing_key_sha256"])
+    require_hash(INRELEASE, LOCK["inrelease_sha256"])
+    home = scratch / "gnupg"
+    home.mkdir(mode=0o700)
+    key = subprocess.run(
+        ["gpg", "--homedir", str(home), "--batch", "--with-colons", "--fingerprint",
+         "--show-keys", str(SIGNING_KEY)],
+        capture_output=True, text=True, check=False,
+    )
+    if key.returncode:
+        raise ValueError("pinned Tor Debian signing key could not be inspected")
+    primary_fingerprints = []
+    expecting_primary = False
+    for line in key.stdout.splitlines():
+        fields = line.split(":")
+        if fields[0] == "pub":
+            expecting_primary = True
+        elif fields[0] == "fpr" and expecting_primary:
+            primary_fingerprints.append(fields[9])
+            expecting_primary = False
+    fingerprint = LOCK["repository_signing_key_primary_fingerprint"]
+    if primary_fingerprints != [fingerprint]:
+        raise ValueError("Tor Debian signing key has the wrong primary fingerprint")
+    imported = subprocess.run(
+        ["gpg", "--homedir", str(home), "--batch", "--import", str(SIGNING_KEY)],
+        capture_output=True, text=True, check=False,
+    )
+    if imported.returncode:
+        raise ValueError("pinned Tor Debian signing key could not be imported")
+    verified = subprocess.run(
+        ["gpg", "--homedir", str(home), "--batch", "--no-auto-key-retrieve",
+         "--status-fd", "2", "--decrypt", str(INRELEASE)],
+        capture_output=True, text=True, check=False,
+    )
+    signatures = [
+        line.split()
+        for line in verified.stderr.splitlines()
+        if line.startswith("[GNUPG:] VALIDSIG ")
+    ]
+    if (verified.returncode or len(signatures) != 1
+            or fingerprint not in (signatures[0][2], signatures[0][-1])):
+        raise ValueError("Tor Debian InRelease signature did not validate")
+    return verified.stdout
+
+
+def signed_index_identity(release: str, now: datetime | None = None) -> tuple[str, int]:
+    if "Origin: TorProject\n" not in release or "Codename: trixie\n" not in release:
+        raise ValueError("signed Tor Debian release has the wrong origin or suite")
+    valid_until = [line.partition(": ")[2] for line in release.splitlines()
+                   if line.startswith("Valid-Until: ")]
+    if len(valid_until) != 1 or (now or datetime.now(timezone.utc)) > parsedate_to_datetime(valid_until[0]):
+        raise ValueError("signed Tor Debian release is expired or has no validity bound")
+    matches = []
+    in_sha256 = False
+    for line in release.splitlines():
+        if line == "SHA256:":
+            in_sha256 = True
+            continue
+        if in_sha256 and not line.startswith(" "):
+            break
+        if in_sha256:
+            fields = line.split()
+            if len(fields) == 3 and fields[2] == "main/binary-arm64/Packages.gz":
+                matches.append((fields[0], int(fields[1])))
+    if len(matches) != 1:
+        raise ValueError("signed Tor Debian release does not identify one arm64 package index")
+    return matches[0]
+
+
+def package_stanza(index: str) -> dict[str, str]:
+    matches = []
+    for paragraph in index.split("\n\n"):
+        fields = {}
+        for line in paragraph.splitlines():
+            if line.startswith((" ", "\t")) or ": " not in line:
+                continue
+            name, value = line.split(": ", 1)
+            if name in fields:
+                raise ValueError("Tor Debian package index has a duplicate field")
+            fields[name] = value
+        if fields.get("Package") == LOCK["package"]:
+            matches.append(fields)
+    if len(matches) != 1:
+        raise ValueError("Tor Debian package index does not identify one Tor package")
+    return matches[0]
+
+
+def verify_metadata(scratch: Path, now: datetime | None = None) -> None:
+    release = verify_signed_release(scratch)
+    signed_hash, signed_size = signed_index_identity(release, now)
+    require_hash(PACKAGES, LOCK["packages_gz_sha256"])
+    if PACKAGES.stat().st_size != signed_size or file_sha256(PACKAGES) != signed_hash:
+        raise ValueError("Tor Debian package index does not match signed InRelease")
+    fields = package_stanza(gzip.decompress(PACKAGES.read_bytes()).decode("utf-8"))
+    expected = {
+        "Package": LOCK["package"],
+        "Version": LOCK["version"],
+        "Architecture": LOCK["architecture"],
+        "Filename": LOCK["package_path"],
+        "Size": str(LOCK["package_size"]),
+        "SHA256": LOCK["package_sha256"],
+    }
+    if any(fields.get(name) != value for name, value in expected.items()):
+        raise ValueError("signed Tor Debian package identity differs from the pin")
+
+
 def copy_pinned(source, destination: Path, expected_size: int) -> None:
     with destination.open("xb") as target:
         remaining = expected_size
         while remaining:
             chunk = source.read(min(1024 * 1024, remaining))
             if not chunk:
-                raise ValueError("pinned Tor download ended early")
+                raise ValueError("pinned Tor package download ended early")
             target.write(chunk)
             remaining -= len(chunk)
         if source.read(1):
-            raise ValueError("pinned Tor download exceeded its recorded size")
+            raise ValueError("pinned Tor package download exceeded its recorded size")
 
 
-def download(url: str, destination: Path, expected_size: int) -> None:
-    with urlopen(url) as source:
-        copy_pinned(source, destination, expected_size)
+def require_tor_version(stdout: str, returncode: int) -> None:
+    first_line = stdout.splitlines()[0] if stdout else ""
+    reported_version = first_line.removeprefix("Tor version ").split(" ", 1)[0].removesuffix(".")
+    if returncode or not first_line.startswith("Tor version ") or reported_version != LOCK["tor_version"]:
+        raise ValueError("verified Tor binary did not run at its pinned version")
 
 
-def verify_signature(archive: Path, signature: Path, scratch: Path) -> None:
-    key = HERE / "tor-browser-signing-key.asc"
-    require_hash(key, LOCK["signing_key_sha256"])
-    home = scratch / "gnupg"
-    home.mkdir(mode=0o700)
-    imported = subprocess.run(
-        ["gpg", "--homedir", str(home), "--batch", "--import", str(key)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if imported.returncode:
-        raise ValueError("pinned Tor signing key could not be imported")
-    verified = subprocess.run(
-        [
-            "gpg", "--homedir", str(home), "--batch", "--status-fd", "1",
-            "--verify", str(signature), str(archive),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    valid = [
-        line.split()
-        for line in verified.stdout.splitlines()
-        if line.startswith("[GNUPG:] VALIDSIG ")
-    ]
-    fingerprint = LOCK["signing_key_primary_fingerprint"]
-    if verified.returncode or len(valid) != 1 or fingerprint not in (valid[0][2], valid[0][-1]):
-        raise ValueError("Tor bundle signature did not validate against the pinned signing key")
-
-
-def checked_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
-    members = archive.getmembers()
-    names: set[str] = set()
-    for member in members:
-        path = PurePosixPath(member.name)
-        if path.is_absolute() or not path.parts or ".." in path.parts:
-            raise ValueError("unsafe Tor bundle archive path")
-        if not (member.isfile() or member.isdir()):
-            raise ValueError("Tor bundle contains a link or special file")
-        if member.name in names:
-            raise ValueError("Tor bundle contains a duplicate path")
-        names.add(member.name)
-    return members
-
-
-def unpack_checked(archive_path: Path, destination: Path) -> None:
-    with tarfile.open(archive_path, "r:gz") as archive:
-        members = checked_members(archive)
-        for member in members:
-            target = destination.joinpath(*PurePosixPath(member.name).parts)
-            if member.isdir():
-                target.mkdir(parents=True, exist_ok=True, mode=0o755)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
-            source = archive.extractfile(member)
-            if source is None:
-                raise ValueError("Tor bundle member is unreadable")
-            with source, target.open("xb") as output:
-                shutil.copyfileobj(source, output)
-            target.chmod(0o755 if member.mode & 0o111 else 0o644)
-
-
-def stage(output: Path, archive: Path | None, signature: Path | None) -> dict[str, str]:
+def stage(output: Path, package: Path | None) -> dict[str, str]:
     require_release_age()
-    if output.exists():
+    if platform.system() != "Linux" or platform.machine() not in ("aarch64", "arm64"):
+        raise ValueError("pinned Tor Debian package requires Linux arm64")
+    if output.exists() or output.is_symlink():
         raise ValueError("output already exists; refusing to replace a local Tor installation")
     if not output.is_absolute() or not output.parent.is_dir():
         raise ValueError("--output must be absolute with an existing parent directory")
-    if (archive is None) != (signature is None):
-        raise ValueError("--archive and --signature must be supplied together")
     with tempfile.TemporaryDirectory(prefix=".tor-prepare-", dir=output.parent) as temporary:
         scratch = Path(temporary)
-        archive_path = scratch / LOCK["bundle"]
-        signature_path = scratch / (LOCK["bundle"] + ".asc")
-        if archive is None:
-            download(LOCK["bundle_url"], archive_path, LOCK["bundle_size"])
-            download(LOCK["signature_url"], signature_path, LOCK["signature_size"])
+        verify_metadata(scratch)
+        deb = scratch / "tor.deb"
+        if package is None:
+            with urlopen(LOCK["repository_url"] + LOCK["package_path"]) as source:
+                copy_pinned(source, deb, LOCK["package_size"])
         else:
-            if archive.stat().st_size != LOCK["bundle_size"] or signature.stat().st_size != LOCK["signature_size"]:
-                raise ValueError("local Tor archive or signature has the wrong size")
-            shutil.copyfile(archive, archive_path)
-            shutil.copyfile(signature, signature_path)
-        require_hash(archive_path, LOCK["bundle_sha256"])
-        require_hash(signature_path, LOCK["signature_sha256"])
-        verify_signature(archive_path, signature_path, scratch)
+            if package.stat().st_size != LOCK["package_size"]:
+                raise ValueError("local Tor package has the wrong size")
+            shutil.copyfile(package, deb)
+        require_hash(deb, LOCK["package_sha256"])
         payload = scratch / "payload"
-        payload.mkdir(mode=0o755)
-        unpack_checked(archive_path, payload)
-        executable = payload / "tor" / "tor"
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise ValueError("verified bundle has no executable Tor binary")
+        extracted = subprocess.run(
+            ["dpkg-deb", "--extract", str(deb), str(payload)],
+            capture_output=True, text=True, check=False,
+        )
+        if extracted.returncode:
+            raise ValueError("verified Tor Debian package could not be extracted")
+        binary = payload / "usr" / "bin" / "tor"
+        if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
+            raise ValueError("verified Tor Debian package has no executable Tor binary")
+        staged = scratch / "staged"
+        staged.mkdir(mode=0o755)
+        bin_dir = staged / "bin"
+        bin_dir.mkdir(mode=0o755)
+        executable = bin_dir / "tor"
+        shutil.copyfile(binary, executable)
+        executable.chmod(0o755)
         version = subprocess.run(
             [str(executable), "--version"], capture_output=True, text=True, check=False,
         )
-        if version.returncode or f"Tor version {LOCK['tor_version']} " not in version.stdout:
-            raise ValueError("verified Tor binary did not run at its pinned version")
-        payload.rename(output)
+        require_tor_version(version.stdout, version.returncode)
+        staged.rename(output)
     return {
-        "tor_executable": str(output / "tor" / "tor"),
-        "bundle_sha256": LOCK["bundle_sha256"],
-        "signing_key_primary_fingerprint": LOCK["signing_key_primary_fingerprint"],
+        "tor_executable": str(output / "bin" / "tor"),
+        "package_sha256": LOCK["package_sha256"],
+        "repository_signing_key_primary_fingerprint": LOCK["repository_signing_key_primary_fingerprint"],
         "tor_version": LOCK["tor_version"],
-        "distribution_channel": LOCK["distribution_channel"],
     }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--archive", type=Path)
-    parser.add_argument("--signature", type=Path)
+    parser.add_argument("--package", type=Path)
     args = parser.parse_args()
-    print(json.dumps(stage(args.output, args.archive, args.signature), indent=2))
+    print(json.dumps(stage(args.output, args.package), indent=2))
 
 
 if __name__ == "__main__":
