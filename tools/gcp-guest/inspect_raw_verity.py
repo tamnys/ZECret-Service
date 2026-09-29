@@ -100,7 +100,7 @@ def authenticated_toolchain(inrelease, packages_index, archives):
     return program, loader, libraries, identities
 
 
-def run_verity(toolchain, arguments, scratch):
+def run_verity(toolchain, arguments, scratch, *, expect_verify_rejection=False):
     """Run one reviewed command with no ambient initial ELF loader objects."""
     program_bytes, loader_bytes, libraries, _ = toolchain
     if scratch.is_symlink() or not scratch.is_dir():
@@ -128,9 +128,33 @@ def run_verity(toolchain, arguments, scratch):
             [*prefix, str(program), *arguments], pass_fds=descriptors,
             env=environment, capture_output=True, text=True, check=False,
         )
+    if expect_verify_rejection:
+        if arguments[0] != "verify" or result.returncode <= 0:
+            raise ValueError("one-byte root change was not rejected by signed veritysetup")
+        return result.stdout
     if result.returncode != 0 or result.stderr.strip():
         raise ValueError("signed veritysetup operation failed")
     return result.stdout
+
+
+def check_one_byte_root_change(toolchain, data_image, data_bytes, hash_image,
+                               roothash, scratch):
+    """Challenge the verified, disposable root copy; never mutate the raw disk."""
+    descriptor = os.open(data_image, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(descriptor)
+        first = os.pread(descriptor, 1, 0)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != data_bytes or len(first) != 1:
+            raise ValueError("copied root data changed before negative verification")
+        if os.pwrite(descriptor, bytes((first[0] ^ 1,)), 0) != 1:
+            raise ValueError("copied root data could not be changed")
+        if os.fstat(descriptor).st_size != data_bytes:
+            raise ValueError("copied root data size changed")
+    finally:
+        os.close(descriptor)
+    run_verity(toolchain, ["verify", str(data_image), str(hash_image), roothash],
+               scratch, expect_verify_rejection=True)
+    return True
 
 
 def partition_images(raw_disk, layout, expected_sha256, expected_bytes,
@@ -222,6 +246,8 @@ def inspect(raw_disk, expected_sha256, expected_bytes, sector_size,
             run_verity(toolchain, ["dump", str(hash_image)], root), data_bytes,
         )
         run_verity(toolchain, ["verify", str(data_image), str(hash_image), roothash], root)
+        tamper_rejected = check_one_byte_root_change(
+            toolchain, data_image, data_bytes, hash_image, roothash, root)
         with hash_image.open("rb") as stream:
             hash_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     return {
@@ -237,6 +263,7 @@ def inspect(raw_disk, expected_sha256, expected_bytes, sector_size,
         "verity_partition_sha256": hash_sha256,
         "verity_header": header,
         "verity_userspace_verified": True,
+        "one_byte_root_change_rejected": tamper_rejected,
         "signed_tool_archives_sha256": toolchain[3],
         "complete_builder_toolchain": False,
         "signed_uki_checked": False,

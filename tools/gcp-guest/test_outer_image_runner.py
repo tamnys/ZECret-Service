@@ -374,7 +374,8 @@ class OuterImageRunnerTest(unittest.TestCase):
             esp = {"uki_sha256": files["zrpc-gcp.efi"][1], "uki_sections": {
                 ".linux": {"sha256": files["zrpc-gcp.vmlinuz"][1]},
                 ".initrd": {"sha256": files["zrpc-gcp.initrd"][1]}}}
-            verity_report = {"status": "verity", "root_partition_guid": "root-guid"}
+            verity_report = {"status": "verity", "root_partition_guid": "root-guid",
+                             "one_byte_root_change_rejected": True}
             rootfs_report = {"status": "diagnostic-rootfs-test-only",
                              "raw_disk_sha256": files["zrpc-gcp.raw"][1],
                              "raw_disk_bytes": files["zrpc-gcp.raw"][0],
@@ -436,6 +437,11 @@ class OuterImageRunnerTest(unittest.TestCase):
             self.assertEqual(result["final_initrd_audit"]["final_initrd_sha256"],
                              files["zrpc-gcp.initrd"][1])
             self.assertFalse(result["gcp_import_package_size_eligible"])
+            verity_report["one_byte_root_change_rejected"] = False
+            with self.assertRaisesRegex(ValueError, "signed verity negative check"):
+                runner.inspect_outputs(context, stage, rust, metadata, archives,
+                                       workspace, {}, files, {})
+            verity_report["one_byte_root_change_rejected"] = True
             rootfs_inspect.side_effect = ValueError("raw rootfs file bytes differ")
             with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
                     "signature must not run on altered raw rootfs")):

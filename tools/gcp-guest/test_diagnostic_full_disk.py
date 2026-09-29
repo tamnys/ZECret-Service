@@ -280,7 +280,8 @@ class DiagnosticDiskTests(unittest.TestCase):
                     ".initrd": {"sha256": diagnostic.sha256(
                         (output / "zrpc-gcp.initrd").read_bytes())}}}
         hashes = {"root_partition_guid": "root-guid",
-                  "verity_partition_sha256": "a" * 64}
+                  "verity_partition_sha256": "a" * 64,
+                  "one_byte_root_change_rejected": True}
         workload = {"status": diagnostic.rootfs.STATUS,
                     "raw_disk_sha256": diagnostic.sha256((output / "zrpc-gcp.raw").read_bytes()),
                     "root_partition_guid": "root-guid",
@@ -305,6 +306,7 @@ class DiagnosticDiskTests(unittest.TestCase):
             for field in diagnostic.rootfs.SUPER_FIELDS.values():
                 self.assertEqual(report[field], workload[field])
             self.assertEqual(report["verity_partition_sha256"], "a" * 64)
+            self.assertTrue(report["one_byte_root_change_rejected"])
             self.assertTrue(report["gpt_esp_verity_uki_inspected"])
             for source, field in ((workload, "root_partition_sha256"),
                                   (hashes, "verity_partition_sha256")):
@@ -314,6 +316,10 @@ class DiagnosticDiskTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "synthetic workload bytes"):
                         diagnostic.inspect(stage, self.root, self.root, self.root, {})
                     source[field] = original
+            hashes["one_byte_root_change_rejected"] = False
+            with self.assertRaisesRegex(ValueError, "synthetic workload bytes"):
+                diagnostic.inspect(stage, self.root, self.root, self.root, {})
+            hashes["one_byte_root_change_rejected"] = True
             for field in diagnostic.rootfs.SUPER_FIELDS.values():
                 with self.subTest(field=field):
                     original = workload.pop(field)
