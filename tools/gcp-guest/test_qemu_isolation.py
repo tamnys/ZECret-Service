@@ -6,6 +6,7 @@ import socket
 import stat
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -15,6 +16,19 @@ import qemu_isolation as isolation
 
 
 class QemuIsolationTests(unittest.TestCase):
+    def test_tamper_selection_reaches_only_explicit_observer_invocation(self):
+        args = types.SimpleNamespace(
+            toolchain_root=Path("/stage"), toolchain_report=Path("/stage.json"),
+            disk=Path("/disk.raw"), disk_report=Path("/disk.json"),
+            output=Path("/stage/observe"), memory_mib=2048, vcpus=1,
+            deadline_seconds=90, qemu_uid=1000, qemu_gid=1000,
+            capture_at_seconds=[25], tamper_root_data=False)
+        self.assertNotIn("--tamper-root-data", isolation.observer_argv(args, "net:[1]"))
+        args.tamper_root_data = True
+        command = isolation.observer_argv(args, "net:[1]")
+        self.assertEqual(command.count("--tamper-root-data"), 1)
+        self.assertIn("--capture-at-seconds", command)
+
     def test_explicit_positive_inputs_have_no_implicit_budget(self):
         for value in ("", "0", "-1", "01", "1.0", "+1"):
             with self.assertRaises(Exception):

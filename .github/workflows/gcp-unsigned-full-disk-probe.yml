@@ -13,6 +13,11 @@ on:
         required: true
         default: false
         type: boolean
+      tamper_root_data:
+        description: Boot a disposable one-byte root-data mutation; synthetic negative only
+        required: true
+        default: false
+        type: boolean
       compare_rebuild:
         description: Build twice and report root and full-disk byte differences
         required: true
@@ -65,6 +70,7 @@ jobs:
       ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ZRPC_PREPARE_BOOT_DIAGNOSTIC: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_boot_diagnostic || false }}
       ZRPC_OBSERVE_BOOT: ${{ github.event_name == 'workflow_dispatch' && inputs.observe_boot || false }}
+      ZRPC_TAMPER_ROOT_DATA: ${{ github.event_name == 'workflow_dispatch' && inputs.tamper_root_data || false }}
       ZRPC_COMPARE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.compare_rebuild || false }}
       ZRPC_QEMU_MEMORY_MIB: ${{ inputs.qemu_memory_mib }}
       ZRPC_QEMU_VCPUS: ${{ inputs.qemu_vcpus }}
@@ -100,15 +106,19 @@ jobs:
 
           prepare = os.environ["ZRPC_PREPARE_BOOT_DIAGNOSTIC"]
           observe = os.environ["ZRPC_OBSERVE_BOOT"]
+          tamper = os.environ["ZRPC_TAMPER_ROOT_DATA"]
           compare = os.environ["ZRPC_COMPARE_REBUILD"]
           values = (os.environ["ZRPC_QEMU_MEMORY_MIB"],
                     os.environ["ZRPC_QEMU_VCPUS"],
                     os.environ["ZRPC_QEMU_DEADLINE_SECONDS"])
           captures = os.environ["ZRPC_QEMU_CAPTURE_SECONDS"]
-          if any(value not in ("true", "false") for value in (prepare, observe, compare)):
+          if any(value not in ("true", "false") for value in (prepare, observe,
+                                                              tamper, compare)):
               raise ValueError("diagnostic selection is malformed")
           if compare == "true" and prepare != "false":
               raise ValueError("root rebuild comparison requires the synthetic non-boot disk")
+          if tamper == "true" and observe != "true":
+              raise ValueError("root-data tamper requires QEMU observation")
           if observe == "true":
               if prepare != "true" or any(re.fullmatch(r"[1-9][0-9]*", value) is None
                                           for value in values):
@@ -465,6 +475,10 @@ jobs:
               capture_args+=(--capture-at-seconds "$offset")
             done
           fi
+          tamper_args=()
+          if test "$ZRPC_TAMPER_ROOT_DATA" = true; then
+            tamper_args+=(--tamper-root-data)
+          fi
           set +e
           sudo -n /usr/bin/python3 -I -B "$observer" run \
             --toolchain-root "$toolchain" \
@@ -477,6 +491,7 @@ jobs:
             --deadline-seconds "$ZRPC_QEMU_DEADLINE_SECONDS" \
             --qemu-uid "$runner_uid" --qemu-gid "$runner_gid" \
             "${capture_args[@]}" \
+            "${tamper_args[@]}" \
             | tee "$evidence/observer.stdout.jsonl"
           statuses=("${PIPESTATUS[@]}")
           set -e
