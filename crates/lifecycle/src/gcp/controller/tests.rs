@@ -90,6 +90,32 @@ impl Fixture {
             sha256: digest(b"SYNTHETIC - NOT A BOOTABLE IMAGE"),
         };
         let (image_bytes, raw_disk_sha256, receipt_bytes) = synthetic_import_archive();
+        let producer_receipt: Value = serde_json::from_slice(&receipt_bytes).unwrap();
+        let producer_sha256 = producer_receipt["producer_executable_sha256"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let producer_binary = Artifact {
+            path: std::env::current_exe().unwrap(),
+            sha256: producer_sha256.clone(),
+        };
+        let native_rust_manifest = diagnostic_artifact(
+            &root,
+            "native-rust-manifest.json",
+            &json!({
+                "schema_version":1,
+                "artifact_kind":"unsigned_native_scaffold",
+                "source_commit":"a".repeat(40),
+                "reproducible":true,
+                "approved_release":false,
+                "private_accepted":false,
+                "deployment_enabled":false,
+                "published":false,
+                "signed":false,
+                "selected_binaries":[{"package":"zrpc-lifecycle","name":"zrpc-gcp-lifecycle"}],
+                "artifact_sha256":{"zrpc-gcp-lifecycle":producer_sha256}
+            }),
+        );
         let disk_raw = root.join("disk.raw");
         fs::File::create(&disk_raw)
             .unwrap()
@@ -200,7 +226,7 @@ impl Fixture {
                 "schema_version":1,"status":"diagnostic-import-disk-reinspected-unapproved",
                 "source_commit":"a".repeat(40),"stage_manifest_sha256":"b".repeat(64),
                 "input_lock_sha256":"d".repeat(64),
-                "native_rust_manifest_sha256":"e".repeat(64),
+                "native_rust_manifest_sha256":native_rust_manifest.sha256,
                 "mkosi_disk_sha256":mkosi_sha256,"mkosi_disk_bytes":1024 * 1024 * 1024,
                 "raw_disk_sha256":raw_disk_sha256,"raw_disk_bytes":1024 * 1024 * 1024,
                 "sfdisk_sha256":sfdisk_sha256,
@@ -223,7 +249,7 @@ impl Fixture {
                 "schema_version":1,"status":"diagnostic-operator-import-handoff-unapproved",
                 "source_commit":"a".repeat(40),"stage_manifest_sha256":"b".repeat(64),
                 "input_lock_sha256":"d".repeat(64),
-                "native_rust_manifest_sha256":"e".repeat(64),
+                "native_rust_manifest_sha256":native_rust_manifest.sha256,
                 "mkosi_disk_sha256":mkosi_sha256,"mkosi_disk_bytes":1024 * 1024 * 1024,
                 "raw_disk_sha256":raw_disk_sha256,"raw_disk_bytes":1024 * 1024 * 1024,
                 "sfdisk_sha256":sfdisk_sha256,
@@ -271,7 +297,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 8,
+            schema_version: 9,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -288,6 +314,8 @@ impl Fixture {
             raw_disk_sha256: raw_disk_sha256.clone(),
             raw_disk_bytes: 1024 * 1024 * 1024,
             import_receipt,
+            native_rust_manifest,
+            producer_binary,
             operator_handoff,
             release_manifest: a.clone(),
             boot_policy: a.clone(),
@@ -697,6 +725,14 @@ fn import_receipt_binds_candidate_media_with_native_validation_without_approval(
     let mut missing = serde_json::to_value(&f.package.spec).unwrap();
     missing.as_object_mut().unwrap().remove("import_receipt");
     assert!(serde_json::from_value::<DeploymentSpec>(missing).is_err());
+    for field in ["native_rust_manifest", "producer_binary"] {
+        let mut missing = serde_json::to_value(&f.package.spec).unwrap();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<DeploymentSpec>(missing).is_err(),
+            "{field}"
+        );
+    }
     let mut unexpected_verifier = serde_json::to_value(&f.package.spec).unwrap();
     unexpected_verifier.as_object_mut().unwrap().insert(
         "import_verifier_python".into(),
@@ -724,13 +760,20 @@ fn import_receipt_binds_candidate_media_with_native_validation_without_approval(
     let changed_claim =
         f.spec_with_receipt_edit(|receipt| receipt["oldgnu_single_member_checked"] = json!(false));
     assert!(Package::prepare(changed_claim, 1000).is_err());
-    // Producer self-description is diagnostic, not independent approval.
+    // A self-reported executable identity must match the hash-checked binary
+    // and the native build manifest; none of these records proves execution.
     let different_producer = f.spec_with_receipt_edit(|receipt| {
         for field in ["producer_executable_sha256"] {
             receipt[field] = json!("0".repeat(64));
         }
     });
-    assert!(Package::prepare(different_producer, 1000).is_ok());
+    assert!(Package::prepare(different_producer, 1000).is_err());
+    let mut wrong_binary = f.package.spec.clone();
+    wrong_binary.producer_binary.sha256 = "0".repeat(64);
+    assert!(Package::prepare(wrong_binary, 1000).is_err());
+    let mut wrong_manifest = f.package.spec.clone();
+    wrong_manifest.native_rust_manifest.sha256 = "0".repeat(64);
+    assert!(Package::prepare(wrong_manifest, 1000).is_err());
     let wrong_producer = f.spec_with_receipt_edit(|receipt| receipt["producer"] = json!("other"));
     assert!(Package::prepare(wrong_producer, 1000).is_err());
     let stale_hash = f.package.spec.clone();

@@ -13,7 +13,7 @@ Run build and test commands through the project's managed container.
 
 ## Prepare a package
 
-Supply a `DeploymentSpec` JSON object with `schema_version: 8`, matching
+Supply a `DeploymentSpec` JSON object with `schema_version: 9`, matching
 `crates/lifecycle/src/gcp/package.rs`. Its artifact fields are objects containing
 an absolute `path` and lowercase `sha256`. Required inputs include the raw disk
 archive, release manifest, boot policy, memory measurements, reproducibility
@@ -50,10 +50,14 @@ zrpc-gcp-lifecycle pack-import \
   > /workspace/evaluation/import-receipt.json
 ```
 
-Supply the JSON output as the `import_receipt` artifact. Input and output must
-be on `/workspace`, and the archive path must be new. Package preparation checks
-the archive and its expanded `disk.raw` with the native Rust verifier. The
-receipt describes the archive producer; it does not authorize the archive.
+Supply the JSON output as the `import_receipt` artifact, the matched-build
+`manifest.json` as `native_rust_manifest`, and the exact
+`zrpc-gcp-lifecycle` executable from that build as `producer_binary`. The
+manifest digest must match the final disk builder's handoff. Input and output
+must be on `/workspace`, and the archive path must be new. Package preparation
+checks the archive and its expanded `disk.raw` with the native Rust verifier,
+then compares the three producer identities. These records do not authenticate
+which code ran or the operator host's dynamic libraries.
 
 Specify the project, C3 machine type, region/zone, boot/data disk capacities,
 private subnet CIDR, wrapper port, and an existing private staging bucket.
