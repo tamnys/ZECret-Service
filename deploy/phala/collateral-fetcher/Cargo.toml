@@ -1,0 +1,24 @@
+[package]
+name = "phala-collateral-fetcher"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Keep the PCCS client outside the zrpc workspace. Cargo features are additive,
+# so building this package in the zrpc workspace would enable dcap-qvl's HTTP
+# feature in the native offline verifier as well.
+[workspace]
+
+[dependencies]
+dcap-qvl = { version = "=0.6.3", default-features = false, features = ["std", "ring", "default-x509", "report"] }
+serde_json = "=1.0.149"
+tokio = { version = "=1.48.0", default-features = false, features = ["rt-multi-thread", "macros"] }
+
+# The report client's transitive WASM graph uses matching exact versions.
+# These pins keep the separately locked graph within the repository's
+# seven-day release hold even when building only the Linux operator tool.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "=0.3.105"
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "=0.4.78"
+web-sys = "=0.3.105"

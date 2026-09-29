@@ -1,0 +1,13 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ENV PYTHONDONTWRITEBYTECODE=1
+COPY --chmod=0555 supervisor.py /opt/zrpc/supervisor.py
+COPY --chmod=0555 bin/zrpc-quote-proxy /opt/zrpc/bin/zrpc-quote-proxy
+COPY --chmod=0555 bin/zrpc-node-wrapper /opt/zrpc/bin/zrpc-node-wrapper
+COPY --chmod=0555 bin/zebrad /opt/zrpc/bin/zebrad
+COPY --chmod=0444 zebra.toml /opt/zrpc/zebra.toml
+USER 0:0
+RUN mkdir -p /var/lib/zebra && chown 10001:0 /var/lib/zebra && chmod 0700 /var/lib/zebra
+COPY --chown=10001:0 --chmod=0600 state/.keep /var/lib/zebra/.keep
+USER 10001:0
+ENTRYPOINT ["python3", "/opt/zrpc/supervisor.py"]
