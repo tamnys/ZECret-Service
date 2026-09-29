@@ -77,6 +77,30 @@ class RawForbiddenTests(unittest.TestCase):
         bound = self.image.stat().st_size * 8 + 1
         self.assertEqual(limits, [(forbidden.resource.RLIMIT_FSIZE, (bound, bound))])
 
+    def test_deleted_ext4_slots_are_ignored_only_with_zero_metadata(self):
+        dots = ["/2/040755/0/0/.//", "/2/040755/0/0/..//"]
+        live = "/13/100644/0/0/config/1/"
+        for empty in ("/0/000000/0/0//0/", "/0/000000/0/0/old-name/0/"):
+            with self.subTest(empty=empty), mock.patch.object(
+                    forbidden.subprocess, "run", side_effect=self.fake_run({
+                        "ls -p <2>": (listing(*dots, empty, live),
+                                      forbidden.READER_BANNER),
+                    })[1]):
+                observed = forbidden.list_directory(
+                    self.reader, self.image, 2, 2,
+                    self.scratch, self.image.stat().st_size)
+                self.assertEqual(set(observed), {".", "..", "config"})
+        for malformed in ("/0/000755/0/0//0/", "/0/000000/1/0//0/",
+                          "/0/000000/0/0//1/", "/0/000000/0/0/bad\rname/0/"):
+            with self.subTest(malformed=malformed), mock.patch.object(
+                    forbidden.subprocess, "run", side_effect=self.fake_run({
+                        "ls -p <2>": (listing(*dots, malformed),
+                                      forbidden.READER_BANNER),
+                    })[1]):
+                with self.assertRaisesRegex(ValueError, "listing is malformed"):
+                    forbidden.list_directory(self.reader, self.image, 2, 2,
+                                             self.scratch, self.image.stat().st_size)
+
     def test_listing_rejects_malformed_duplicate_control_and_extra_output(self):
         base = ["/2/040755/0/0/.//", "/2/040755/0/0/..//"]
         bad = (

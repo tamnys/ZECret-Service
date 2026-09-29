@@ -29,6 +29,12 @@ ENTRY = re.compile(
     rb"(0|[1-9][0-9]{0,9})/([^/\x00-\x1f\x7f]{1,255})/"
     rb"([0-9]{0,20})/\n\Z"
 )
+# debugfs 1.47.2 includes deleted ext4 directory slots in `ls -p` output.
+# They have no live inode and may retain a former name. Accept only its exact
+# zero-metadata row; all other inode-zero rows remain malformed.
+EMPTY_ENTRY = re.compile(
+    rb"/0/000000/0/0/([^/\x00-\x1f\x7f]{0,255})/0/\n\Z"
+)
 FAST_LINK = re.compile(rb'^Fast link dest: "([^"\r\n]*)"\n\Z')
 STAT_HEADER = re.compile(
     rb"Inode: ([1-9][0-9]*) +Type: symlink +Mode: +([0-7]{4}) +Flags: 0x[0-9a-f]+\n\Z"
@@ -172,6 +178,9 @@ def list_directory(reader, image, inode, parent_inode, scratch, image_bytes,
                 raise ValueError("signed debugfs directory listing lacks terminator")
             if len(line) > ENTRY_LINE_BYTES:
                 raise ValueError("signed debugfs directory row exceeds ext4 format")
+            if empty := EMPTY_ENTRY.fullmatch(line):
+                _clean_name(empty.group(1))
+                continue
             try:
                 name, entry = _parse_entry(line)
             except ValueError as error:
