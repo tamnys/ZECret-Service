@@ -2,7 +2,7 @@
 use super::*;
 use crate::gcp::{
     digest,
-    package::{Artifact, DeploymentSpec, Pricing},
+    package::{Artifact, DeploymentSpec, Pricing, verify_static_import_elf},
     store::Journal,
     watchdog::{Controls, WatchdogBinding},
 };
@@ -31,6 +31,68 @@ fn exact_sha256_esl(image_hash: &str) -> Vec<u8> {
     db.extend_from_slice(&[0xa5; 16]); // Synthetic SignatureOwner GUID.
     db.extend_from_slice(&hex::decode(image_hash).unwrap());
     db
+}
+
+fn synthetic_static_producer_elf() -> Vec<u8> {
+    // Header and one PT_LOAD only. This is parser input, never executable code.
+    let mut bytes = vec![0u8; 64 + 56];
+    bytes[..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2; // ELFCLASS64
+    bytes[5] = 1; // ELFDATA2LSB
+    bytes[6] = 1; // EV_CURRENT
+    bytes[16..18].copy_from_slice(&object::elf::ET_EXEC.to_le_bytes());
+    bytes[18..20].copy_from_slice(&object::elf::EM_X86_64.to_le_bytes());
+    bytes[20..24].copy_from_slice(&1u32.to_le_bytes());
+    bytes[32..40].copy_from_slice(&64u64.to_le_bytes());
+    bytes[52..54].copy_from_slice(&64u16.to_le_bytes());
+    bytes[54..56].copy_from_slice(&56u16.to_le_bytes());
+    bytes[56..58].copy_from_slice(&1u16.to_le_bytes());
+    bytes[64..68].copy_from_slice(&object::elf::PT_LOAD.to_le_bytes());
+    bytes[68..72].copy_from_slice(&5u32.to_le_bytes()); // PF_R | PF_X
+    bytes[80..88].copy_from_slice(&0x400000u64.to_le_bytes());
+    bytes[88..96].copy_from_slice(&0x400000u64.to_le_bytes());
+    let size = bytes.len() as u64;
+    bytes[96..104].copy_from_slice(&size.to_le_bytes());
+    bytes[104..112].copy_from_slice(&size.to_le_bytes());
+    bytes[112..120].copy_from_slice(&4096u64.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn import_producer_elf_check_rejects_dynamic_or_wrong_architecture() {
+    let static_elf = synthetic_static_producer_elf();
+    assert!(verify_static_import_elf(&static_elf).is_ok());
+    let mut interpreter = static_elf.clone();
+    interpreter[64..68].copy_from_slice(&object::elf::PT_INTERP.to_le_bytes());
+    assert_eq!(
+        verify_static_import_elf(&interpreter).unwrap_err().0,
+        "import producer retains an ELF interpreter"
+    );
+    let mut static_pie = static_elf.clone();
+    static_pie.resize(64 + 2 * 56 + 32, 0);
+    static_pie[56..58].copy_from_slice(&2u16.to_le_bytes());
+    let size = static_pie.len() as u64;
+    static_pie[96..104].copy_from_slice(&size.to_le_bytes());
+    static_pie[104..112].copy_from_slice(&size.to_le_bytes());
+    static_pie[120..124].copy_from_slice(&object::elf::PT_DYNAMIC.to_le_bytes());
+    static_pie[124..128].copy_from_slice(&4u32.to_le_bytes()); // PF_R
+    static_pie[128..136].copy_from_slice(&176u64.to_le_bytes());
+    static_pie[136..144].copy_from_slice(&0x4000b0u64.to_le_bytes());
+    static_pie[144..152].copy_from_slice(&0x4000b0u64.to_le_bytes());
+    static_pie[152..160].copy_from_slice(&32u64.to_le_bytes());
+    static_pie[160..168].copy_from_slice(&32u64.to_le_bytes());
+    static_pie[168..176].copy_from_slice(&8u64.to_le_bytes());
+    assert!(verify_static_import_elf(&static_pie).is_ok());
+    static_pie[176..184].copy_from_slice(&object::elf::DT_NEEDED.to_le_bytes());
+    assert_eq!(
+        verify_static_import_elf(&static_pie).unwrap_err().0,
+        "import producer retains a shared-library dependency"
+    );
+    let mut wrong_architecture = static_elf;
+    wrong_architecture[18..20].copy_from_slice(&object::elf::EM_AARCH64.to_le_bytes());
+    assert!(verify_static_import_elf(&wrong_architecture).is_err());
+    let dynamic_test_binary = fs::read(std::env::current_exe().unwrap()).unwrap();
+    assert!(verify_static_import_elf(&dynamic_test_binary).is_err());
 }
 
 fn synthetic_import_archive() -> &'static (Vec<u8>, String, Vec<u8>) {
@@ -90,13 +152,15 @@ impl Fixture {
             sha256: digest(b"SYNTHETIC - NOT A BOOTABLE IMAGE"),
         };
         let (image_bytes, raw_disk_sha256, receipt_bytes) = synthetic_import_archive();
-        let producer_receipt: Value = serde_json::from_slice(&receipt_bytes).unwrap();
-        let producer_sha256 = producer_receipt["producer_executable_sha256"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let mut producer_receipt: Value = serde_json::from_slice(receipt_bytes).unwrap();
+        let producer_bytes = synthetic_static_producer_elf();
+        let producer_sha256 = digest(&producer_bytes);
+        producer_receipt["producer_executable_sha256"] = json!(producer_sha256);
+        let receipt_bytes = serde_json::to_vec(&producer_receipt).unwrap();
+        let producer_path = root.join("synthetic-static-producer.elf");
+        fs::write(&producer_path, producer_bytes).unwrap();
         let producer_binary = Artifact {
-            path: std::env::current_exe().unwrap(),
+            path: producer_path,
             sha256: producer_sha256.clone(),
         };
         let native_rust_manifest = diagnostic_artifact(
@@ -287,10 +351,10 @@ impl Fixture {
             sha256: digest(image_bytes),
         };
         let import_receipt_path = root.join("import-receipt.json");
-        fs::write(&import_receipt_path, receipt_bytes).unwrap();
+        fs::write(&import_receipt_path, &receipt_bytes).unwrap();
         let import_receipt = Artifact {
             path: import_receipt_path,
-            sha256: digest(receipt_bytes),
+            sha256: digest(&receipt_bytes),
         };
         let components = [
             "compute",

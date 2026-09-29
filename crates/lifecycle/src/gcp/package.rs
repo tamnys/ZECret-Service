@@ -2,6 +2,11 @@
 use super::{Error, Result, digest, read_regular, valid_digest};
 use crate::MAX_LIFETIME_SECONDS;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use object::{
+    elf,
+    endian::Endianness,
+    read::elf::{Dyn, ElfFile64, FileHeader, ProgramHeader},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -629,8 +634,56 @@ fn verify_import_receipt(
             "native Rust producer build records differ from candidate",
         ));
     }
+    let producer = read_regular(&spec.producer_binary.path)?;
+    if digest(&producer) != spec.producer_binary.sha256 {
+        return Err(Error("import producer executable SHA-256 mismatch"));
+    }
+    verify_static_import_elf(&producer)?;
     // Matching self-reported and build-recorded bytes does not authenticate
     // producer execution or the operator host's execution policy.
+    Ok(())
+}
+
+pub(crate) fn verify_static_import_elf(bytes: &[u8]) -> Result<()> {
+    let file: ElfFile64<'_, Endianness> =
+        ElfFile64::parse(bytes).map_err(|_| Error("invalid import producer ELF"))?;
+    let endian = file.endian();
+    let header = file.elf_header();
+    if endian != Endianness::Little
+        || header.e_machine(endian) != elf::EM_X86_64
+        || !matches!(header.e_type(endian), elf::ET_EXEC | elf::ET_DYN)
+    {
+        return Err(Error("import producer requires an x86_64 executable ELF"));
+    }
+    let mut has_load = false;
+    for segment in file.elf_program_headers() {
+        match segment.p_type(endian) {
+            elf::PT_LOAD => has_load = true,
+            elf::PT_INTERP => return Err(Error("import producer retains an ELF interpreter")),
+            elf::PT_DYNAMIC => {
+                let entries = segment
+                    .dynamic(endian, bytes)
+                    .map_err(|_| Error("invalid import producer dynamic segment"))?
+                    .ok_or(Error("invalid import producer dynamic segment"))?;
+                if !entries
+                    .iter()
+                    .any(|entry| entry.tag(endian) == elf::DT_NULL)
+                {
+                    return Err(Error("unterminated import producer dynamic segment"));
+                }
+                if entries
+                    .iter()
+                    .any(|entry| entry.tag(endian) == elf::DT_NEEDED)
+                {
+                    return Err(Error("import producer retains a shared-library dependency"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !has_load {
+        return Err(Error("import producer lacks a loadable ELF segment"));
+    }
     Ok(())
 }
 
