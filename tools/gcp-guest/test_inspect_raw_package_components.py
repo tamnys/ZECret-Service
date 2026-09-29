@@ -191,13 +191,22 @@ class PackageComponentsTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.inventory[path] = {"type": "file", "mode": 0o644}
                 with self.assertRaisesRegex(ValueError,
-                                            "unplanned security-sensitive raw rootfs entry"):
+                                            "unplanned security-sensitive raw rootfs entries"):
                     self.inspect()
                 del self.inventory[path]
         self.inventory["usr/lib/systemd/system/multi-user.target.wants/evil.service"] = {
             "type": "symlink", "mode": 0o777}
         with self.assertRaisesRegex(ValueError, "unplanned security-sensitive"):
             self.inspect()
+
+    def test_unplanned_diagnostic_reports_all_paths(self):
+        self.inventory["opt"] = {"type": "directory", "mode": 0o755}
+        self.inventory["etc/opt"] = {"type": "directory", "mode": 0o755}
+        with self.assertRaisesRegex(ValueError,
+                                    "unplanned security-sensitive raw rootfs entries") as error:
+            self.inspect()
+        self.assertIn("'etc/opt'", str(error.exception))
+        self.assertIn("'opt'", str(error.exception))
 
     def test_executable_outside_component_prefix_rejects_but_inert_data_does_not(self):
         path = "var/cache/payload"

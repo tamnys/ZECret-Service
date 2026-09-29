@@ -44,6 +44,7 @@ REVIEWED_REMOVALS = frozenset({
     "usr/sbin/losetup", "usr/sbin/swapon", "usr/sbin/swapoff",
     "usr/lib/dbus-1.0/dbus-daemon-launch-helper",
     "var/cache/ldconfig/aux-cache", "var/log/alternatives.log",
+    "opt", "usr/local", "etc/opt",
 })
 # These source-bound overlay paths may replace Debian package members. The
 # caller must pass inspect_raw_rootfs.checked_overlay's verified inventory;
@@ -173,6 +174,7 @@ def inspect_components(plan, verified_overlay, inventory, lookup_inode,
     planned = plan["entries"].keys() | verified_overlay.keys()
     if not planned <= inventory.keys():
         raise ValueError("raw inventory is missing an authenticated component or overlay")
+    unplanned = []
     for path, entry in inventory.items():
         if (type(path) is not str or type(entry) is not dict
                 or type(entry.get("type")) is not str
@@ -181,7 +183,10 @@ def inspect_components(plan, verified_overlay, inventory, lookup_inode,
         if ((_sensitive_path(path)
              or (entry["type"] == "file" and bool(entry["mode"] & 0o111)))
                 and path not in planned):
-            raise ValueError("unplanned security-sensitive raw rootfs entry: " + path)
+            unplanned.append(path)
+    if unplanned:
+        raise ValueError("unplanned security-sensitive raw rootfs entries: "
+                         + repr(sorted(unplanned)))
     checked = {"regular": 0, "directory": 0, "symlink": 0, "removed": 0}
     for path in plan["removed"]:
         if lookup_inode(path) is not None:

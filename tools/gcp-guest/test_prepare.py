@@ -891,7 +891,7 @@ class CandidateTests(unittest.TestCase):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(contents)
-                with self.assertRaisesRegex(ValueError, "appliance unit override or dependency|appliance boot dependencies|appliance unit replaced"):
+                with self.assertRaisesRegex(ValueError, "appliance unit override or dependency|appliance boot dependencies|appliance unit replaced|postinst-generated path remains"):
                     audit_rootfs.audit(root)
 
         root = self.synthetic_guest_root("-replacement")
@@ -922,7 +922,7 @@ class CandidateTests(unittest.TestCase):
         root = self.synthetic_guest_root("-redirected-parent")
         (root / "usr/local/lib").mkdir(parents=True)
         (root / "usr/local/lib/systemd").symlink_to("/var/lib/zebra")
-        with self.assertRaisesRegex(ValueError, "system unit load path redirected"):
+        with self.assertRaisesRegex(ValueError, "postinst-generated path remains"):
             audit_rootfs.audit(root)
 
     def test_rootfs_audit_rejects_base_tree_kernel_cmdline(self):
@@ -990,13 +990,22 @@ class CandidateTests(unittest.TestCase):
             with self.subTest(relative=relative):
                 path = root / relative.lstrip("/")
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"SYNTHETIC")
-                expected = ("build-generated file remains: " + relative.lstrip("/")
+                generated_directory = relative in ("/opt", "/usr/local", "/etc/opt")
+                if generated_directory:
+                    path.mkdir()
+                else:
+                    path.write_bytes(b"SYNTHETIC")
+                expected = ("postinst-generated path remains: " + relative.lstrip("/")
+                            if generated_directory else
+                            "build-generated file remains: " + relative.lstrip("/")
                             if relative in ("/var/cache/ldconfig/aux-cache", "/var/log/alternatives.log")
                             else "administrative binary present")
                 with self.assertRaisesRegex(ValueError, expected):
                     audit_rootfs.audit(root)
-                path.unlink()
+                if generated_directory:
+                    path.rmdir()
+                else:
+                    path.unlink()
         cache = root / "var/cache/ldconfig/aux-cache"
         cache.symlink_to("/var/lib/zebra/aux-cache")
         with self.assertRaisesRegex(ValueError, "build-generated file remains: var/cache/ldconfig/aux-cache"):
@@ -1102,7 +1111,7 @@ class CandidateTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("[Service]\nImportCredential=network.dns\n")
                 with self.assertRaisesRegex(
-                    ValueError, "resolved credential override differs|"
+                    ValueError, "postinst-generated path remains|resolved credential override differs|"
                                 "appliance unit override or dependency|appliance unit replaced"
                 ):
                     audit_rootfs.audit(root)

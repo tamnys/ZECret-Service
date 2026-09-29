@@ -326,6 +326,9 @@ def audit(root):
         generated = root / name
         if generated.exists() or generated.is_symlink():
             raise ValueError("build-generated file remains: " + name)
+    for name in ("opt", "usr/local", "etc/opt"):
+        if present(root / name):
+            raise ValueError("postinst-generated path remains: " + name)
     if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
         raise ValueError("signed mount ELF identity absent")
     mount = root / "usr/bin/mount"

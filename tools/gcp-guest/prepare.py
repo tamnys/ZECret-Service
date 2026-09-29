@@ -73,6 +73,9 @@ ROOT_REMOVE_FILES = (
     "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
     "/var/cache/ldconfig/aux-cache",
     "/var/log/alternatives.log",
+    # Signed base-files postinst creates these otherwise empty roots after
+    # package extraction; remove them before sealing the guest image.
+    "/opt", "/usr/local", "/etc/opt",
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
