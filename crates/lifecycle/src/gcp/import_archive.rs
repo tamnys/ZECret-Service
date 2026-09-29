@@ -6,18 +6,202 @@
 
 use super::{Artifact, Error, Result};
 use flate2::bufread::GzDecoder;
+use flate2::{Compression, GzBuilder};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
-    fs::OpenOptions,
-    io::{self, BufRead, BufReader, Read},
-    os::unix::fs::OpenOptionsExt,
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::Path,
     sync::{Mutex, OnceLock},
 };
 
 const BLOCK: u64 = 512;
 const GNU_MAGIC: &[u8; 8] = b"ustar  \0";
 const DISK_NAME: &[u8] = b"disk.raw";
+const IMPORT_GIB: u64 = 1024 * 1024 * 1024;
+const MAX_IMPORT_GIB: u64 = 2048;
+
+/// A producer record is diagnostic. The operator still needs an independent
+/// review of the packaged executable and its complete execution environment.
+#[derive(Debug, Serialize)]
+pub(super) struct NativeImportReceipt {
+    schema_version: u8,
+    producer: &'static str,
+    producer_executable_sha256: String,
+    archive_sha256: String,
+    raw_disk_sha256: String,
+    raw_disk_bytes: u64,
+    oldgnu_single_member_checked: bool,
+    private_mode_approved: bool,
+    toolchain_reviewed: bool,
+}
+
+fn file_digest(file: &mut File) -> Result<String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| Error("import file seek failed"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let size = file
+            .read(&mut buffer)
+            .map_err(|_| Error("import file read failed"))?;
+        if size == 0 {
+            break;
+        }
+        digest.update(&buffer[..size]);
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| Error("import file seek failed"))?;
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn same_identity(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    (
+        a.dev(),
+        a.ino(),
+        a.mode(),
+        a.nlink(),
+        a.len(),
+        a.mtime(),
+        a.mtime_nsec(),
+        a.ctime(),
+        a.ctime_nsec(),
+    ) == (
+        b.dev(),
+        b.ino(),
+        b.mode(),
+        b.nlink(),
+        b.len(),
+        b.mtime(),
+        b.mtime_nsec(),
+        b.ctime(),
+        b.ctime_nsec(),
+    )
+}
+
+/// Create a single-member oldgnu sparse archive on the managed workspace
+/// volume. This makes no network or provider calls and grants no approval.
+pub(super) fn pack_import_archive(
+    raw_path: &Path,
+    archive_path: &Path,
+) -> Result<NativeImportReceipt> {
+    if !raw_path.is_absolute()
+        || !archive_path.is_absolute()
+        || raw_path.file_name().is_none_or(|name| name != "disk.raw")
+        || !archive_path.to_string_lossy().ends_with(".tar.gz")
+        || archive_path.exists()
+        || archive_path.is_symlink()
+    {
+        return Err(Error(
+            "import paths must be absolute disk.raw and new .tar.gz",
+        ));
+    }
+    let raw_canonical = fs::canonicalize(raw_path).map_err(|_| Error("import disk unavailable"))?;
+    let parent = fs::canonicalize(
+        archive_path
+            .parent()
+            .ok_or(Error("archive parent missing"))?,
+    )
+    .map_err(|_| Error("archive parent unavailable"))?;
+    if !raw_canonical.starts_with("/workspace") || !parent.starts_with("/workspace") {
+        return Err(Error("import input and output must be on /workspace"));
+    }
+    let mut raw = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(raw_path)
+        .map_err(|_| Error("import disk cannot be opened"))?;
+    let before = raw
+        .metadata()
+        .map_err(|_| Error("import disk metadata unavailable"))?;
+    if !before.is_file()
+        || before.nlink() != 1
+        || before.len() == 0
+        || before.len() % IMPORT_GIB != 0
+        || before.len() / IMPORT_GIB > MAX_IMPORT_GIB
+    {
+        return Err(Error(
+            "import disk must be a regular whole-GiB disk within Google size limits",
+        ));
+    }
+    let raw_sha256 = file_digest(&mut raw)?;
+    let executable =
+        std::env::current_exe().map_err(|_| Error("producer executable unavailable"))?;
+    let mut executable = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(executable)
+        .map_err(|_| Error("producer executable cannot be opened"))?;
+    if !executable
+        .metadata()
+        .map_err(|_| Error("producer metadata unavailable"))?
+        .is_file()
+    {
+        return Err(Error("producer executable is not regular"));
+    }
+    let producer_executable_sha256 = file_digest(&mut executable)?;
+    let temporary = parent.join(format!(".disk-import-{}.tar.gz", crate::gcp::uuid()?));
+    let result = (|| {
+        let output = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|_| Error("import archive temporary file cannot be created"))?;
+        let gzip = GzBuilder::new()
+            .mtime(0)
+            .write(output, Compression::default());
+        let mut tar = tar::Builder::new(gzip);
+        tar.mode(tar::HeaderMode::Deterministic);
+        tar.append_file("disk.raw", &mut raw)
+            .map_err(|_| Error("import TAR creation failed"))?;
+        let gzip = tar
+            .into_inner()
+            .map_err(|_| Error("import TAR finish failed"))?;
+        let mut output = gzip
+            .finish()
+            .map_err(|_| Error("import gzip finish failed"))?;
+        output
+            .sync_all()
+            .map_err(|_| Error("import archive sync failed"))?;
+        let archive_sha256 = file_digest(&mut output)?;
+        if !same_identity(
+            &before,
+            &raw.metadata()
+                .map_err(|_| Error("import disk metadata unavailable"))?,
+        ) || file_digest(&mut raw)? != raw_sha256
+        {
+            return Err(Error("import disk changed during archive creation"));
+        }
+        let archive = Artifact {
+            path: temporary.clone(),
+            sha256: archive_sha256.clone(),
+        };
+        verify_import_archive(&archive, &raw_sha256, before.len())?;
+        fs::hard_link(&temporary, archive_path)
+            .map_err(|_| Error("new import archive cannot be published"))?;
+        File::open(&parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| Error("import archive directory sync failed"))?;
+        Ok(NativeImportReceipt {
+            schema_version: 2,
+            producer: "zrpc-gcp-lifecycle-rust",
+            producer_executable_sha256,
+            archive_sha256,
+            raw_disk_sha256: raw_sha256,
+            raw_disk_bytes: before.len(),
+            oldgnu_single_member_checked: true,
+            private_mode_approved: false,
+            toolchain_reviewed: false,
+        })
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
+}
 
 struct Counted<R> {
     inner: R,
@@ -178,6 +362,27 @@ mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
     use std::io::{Cursor, Seek, SeekFrom, Write};
+
+    #[test]
+    fn producer_rejects_non_import_disks_and_existing_outputs() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("CODEX_TMP_DIR").expect("managed workspace scratch required"),
+        )
+        .join(format!(
+            "import-producer-negative-{}",
+            crate::gcp::uuid().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let raw = root.join("disk.raw");
+        let archive = root.join("disk.tar.gz");
+        fs::write(&raw, b"not a whole GiB").unwrap();
+        assert!(pack_import_archive(&raw, &archive).is_err());
+        assert!(!archive.exists());
+        fs::write(&archive, b"preserve existing output").unwrap();
+        assert!(pack_import_archive(&raw, &archive).is_err());
+        assert_eq!(fs::read(&archive).unwrap(), b"preserve existing output");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn tar_bytes(members: &[(&str, &[u8])]) -> Vec<u8> {
         let mut writer = tar::Builder::new(Vec::new());

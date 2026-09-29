@@ -41,10 +41,19 @@ archive. Later validation checks the archive's expanded disk identity without
 requiring the loose disk. The handoff remains diagnostic and does not grant
 private-mode approval.
 
-Save the JSON output of the offline `gcp_import_archive.py pack` command and
-supply it as the `import_receipt` artifact. Package preparation checks the
-archive and its expanded `disk.raw` with the native Rust verifier. The receipt
-describes the archive producer; it does not authorize the archive.
+Run the offline native archive producer on the managed Linux builder:
+
+```sh
+zrpc-gcp-lifecycle pack-import \
+  --raw /workspace/evaluation/disk.raw \
+  --archive /workspace/evaluation/disk.tar.gz \
+  > /workspace/evaluation/import-receipt.json
+```
+
+Supply the JSON output as the `import_receipt` artifact. Input and output must
+be on `/workspace`, and the archive path must be new. Package preparation checks
+the archive and its expanded `disk.raw` with the native Rust verifier. The
+receipt describes the archive producer; it does not authorize the archive.
 
 Specify the project, C3 machine type, region/zone, boot/data disk capacities,
 private subnet CIDR, wrapper port, and an existing private staging bucket.

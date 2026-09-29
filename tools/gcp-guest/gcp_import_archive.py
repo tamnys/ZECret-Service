@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build and check the exact, offline disk.raw archive used by images.insert.
+"""Legacy offline archive probe and synthetic fixture producer.
 
-This checks import media, not boot integrity, hardware evidence, or private-mode
-approval. Run it in the reviewed Linux builder; it makes no network calls.
+The operator package accepts only the native Rust producer receipt. This tool
+remains for independent archive-format regression checks; its receipt cannot
+enter the production package. It makes no network calls and grants no boot,
+hardware, or private-mode approval.
 Google's manual import contract requires disk.raw, whole-GB raw size, and a
 gzip-compressed GNU oldgnu TAR archive:
 https://docs.cloud.google.com/compute/docs/import/import-existing-image
@@ -153,8 +155,8 @@ def pack(raw_path, archive_path, *, allow_non_workspace_paths=False):
         raw_bytes = os.fstat(raw.fileno()).st_size
         _identity("0" * 64, raw_bytes)
         raw_sha256 = _hash(raw)
-        # The canonical producer is maintained GNU tar, using Google's oldgnu
-        # sparse format with stable header metadata. It never extracts input.
+        # This diagnostic producer uses GNU tar's oldgnu sparse format with
+        # stable header metadata. It never extracts input.
         # Do not let an inherited PATH, loader hook, or tar option select code
         # from the workspace. Keep both executables open through their use:
         # hashing a pathname before and after exec leaves a replacement race.
