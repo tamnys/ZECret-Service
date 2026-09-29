@@ -224,12 +224,35 @@ struct VerityDiagnostic {
     raw_disk_bytes: u64,
     uki_sha256: String,
     uki_cmdline_for_review: String,
+    root_partition_guid: String,
     verity_userspace_verified: bool,
+    one_byte_root_change_rejected: bool,
     complete_builder_toolchain: bool,
     signed_uki_checked: bool,
     cmdline_approved: bool,
     dm_verity_boot_checked: bool,
     image_built: bool,
+    private_mode_approved: bool,
+}
+
+/// Safety-relevant fields from the signed-reader raw-root inspection. Other
+/// superblock metadata remains diagnostic; these checks cannot approve boot.
+#[derive(Debug, Deserialize)]
+struct RootfsDiagnostic {
+    status: String,
+    raw_disk_sha256: String,
+    raw_disk_bytes: u64,
+    root_partition_guid: String,
+    root_partition_sha256: String,
+    overlay_entries_checked: BTreeMap<String, u64>,
+    raw_root_inventory_entries: u64,
+    authenticated_package_components_checked: BTreeMap<String, u64>,
+    forbidden_surfaces_checked: bool,
+    staged_builder_debugfs_sha256: String,
+    signed_e2fsprogs_archive_sha256: String,
+    reader_executable_matches_signed_package: bool,
+    reader_dynamic_runtime_independently_sealed: bool,
+    boot_verified: bool,
     private_mode_approved: bool,
 }
 
@@ -306,6 +329,46 @@ fn verify_source_disk(path: &Path, expected_sha256: &str, expected_bytes: u64) -
         .map_err(|_| Error("final import disk metadata unavailable"))?;
     if !same_file_identity(&before, &after) || hex::encode(hasher.finalize()) != expected_sha256 {
         return Err(Error("final import disk differs from operator handoff"));
+    }
+    Ok(())
+}
+
+fn verify_rootfs_diagnostic(spec: &DeploymentSpec, artifact: &Artifact) -> Result<()> {
+    let rootfs: RootfsDiagnostic = serde_json::from_slice(&read_hashed_diagnostic(artifact)?)
+        .map_err(|_| Error("invalid typed raw rootfs diagnostic"))?;
+    let verity: VerityDiagnostic =
+        serde_json::from_slice(&read_hashed_diagnostic(&spec.verity_diagnostic)?)
+            .map_err(|_| Error("invalid typed root/verity diagnostic"))?;
+    let overlay = &rootfs.overlay_entries_checked;
+    let components = &rootfs.authenticated_package_components_checked;
+    if rootfs.status != "diagnostic-raw-root-overlay-bytes-matched-unapproved"
+        || rootfs.raw_disk_sha256 != spec.raw_disk_sha256
+        || rootfs.raw_disk_bytes != spec.raw_disk_bytes
+        || rootfs.root_partition_guid.is_empty()
+        || rootfs.root_partition_guid != verity.root_partition_guid
+        || !valid_digest(&rootfs.root_partition_sha256)
+        || overlay.len() != 3
+        || !["file", "directory", "symlink"]
+            .iter()
+            .all(|key| overlay.contains_key(*key))
+        || overlay.get("file").copied() == Some(0)
+        || rootfs.raw_root_inventory_entries == 0
+        || components.len() != 4
+        || !["regular", "directory", "symlink", "removed"]
+            .iter()
+            .all(|key| components.contains_key(*key))
+        || components.get("regular").copied() == Some(0)
+        || !rootfs.forbidden_surfaces_checked
+        || !valid_digest(&rootfs.staged_builder_debugfs_sha256)
+        || !valid_digest(&rootfs.signed_e2fsprogs_archive_sha256)
+        || !rootfs.reader_executable_matches_signed_package
+        || rootfs.reader_dynamic_runtime_independently_sealed
+        || rootfs.boot_verified
+        || rootfs.private_mode_approved
+    {
+        return Err(Error(
+            "raw rootfs diagnostic lacks reviewed package and surface checks",
+        ));
     }
     Ok(())
 }
@@ -425,6 +488,7 @@ fn verify_operator_handoff(spec: &DeploymentSpec, verify_disk: bool) -> Result<(
             return Err(Error("import sizing report differs from operator handoff"));
         }
     }
+    verify_rootfs_diagnostic(spec, &handoff.review_reports.rootfs)?;
     if verify_disk {
         verify_source_disk(
             &handoff.disk_raw,
@@ -502,6 +566,8 @@ fn verify_exact_uki_db(spec: &DeploymentSpec) -> Result<()> {
         || verity.uki_sha256 != esp.uki_sha256
         || verity.uki_cmdline_for_review != esp.uki_cmdline_for_review
         || !verity.verity_userspace_verified
+        || !verity.one_byte_root_change_rejected
+        || verity.root_partition_guid.is_empty()
         || verity.complete_builder_toolchain
         || verity.signed_uki_checked
         || verity.cmdline_approved

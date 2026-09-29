@@ -227,7 +227,9 @@ impl Fixture {
                 "raw_disk_bytes":1024 * 1024 * 1024,
                 "uki_sha256":uki_sha256,
                 "uki_cmdline_for_review":uki_cmdline,
+                "root_partition_guid":"synthetic-root-guid",
                 "verity_userspace_verified":true,
+                "one_byte_root_change_rejected":true,
                 "complete_builder_toolchain":false,
                 "signed_uki_checked":false,
                 "cmdline_approved":false,
@@ -272,9 +274,27 @@ impl Fixture {
         };
         let gpt = extra_report("gpt", "diagnostic-gpt-only-unapproved");
         let roothash = extra_report("roothash", "diagnostic-uki-roothash-gpt-match-unapproved");
-        let rootfs = extra_report(
-            "rootfs",
-            "diagnostic-raw-root-overlay-bytes-matched-unapproved",
+        let rootfs = diagnostic_artifact(
+            &root,
+            "rootfs.json",
+            &json!({
+                "status":"diagnostic-raw-root-overlay-bytes-matched-unapproved",
+                "raw_disk_sha256":raw_disk_sha256,
+                "raw_disk_bytes":1024 * 1024 * 1024,
+                "root_partition_guid":"synthetic-root-guid",
+                "root_partition_sha256":"e".repeat(64),
+                "overlay_entries_checked":{"file":2,"directory":1,"symlink":0},
+                "raw_root_inventory_entries":100,
+                "authenticated_package_components_checked":{
+                    "regular":1,"directory":1,"symlink":0,"removed":1},
+                "forbidden_surfaces_checked":true,
+                "staged_builder_debugfs_sha256":"f".repeat(64),
+                "signed_e2fsprogs_archive_sha256":"1".repeat(64),
+                "reader_executable_matches_signed_package":true,
+                "reader_dynamic_runtime_independently_sealed":false,
+                "boot_verified":false,
+                "private_mode_approved":false
+            }),
         );
         let host_reports = json!({"sizing":sizing,"gpt":gpt,"esp":esp_diagnostic,
             "verity":verity_diagnostic,"roothash":roothash,"rootfs":rootfs,
@@ -501,6 +521,33 @@ impl Fixture {
         spec.operator_handoff = diagnostic_artifact(
             &self.root,
             &format!("edited-handoff-{}.json", uuid().unwrap()),
+            &handoff,
+        );
+        spec
+    }
+    fn spec_with_rootfs_edit(&self, edit: impl FnOnce(&mut Value)) -> DeploymentSpec {
+        let mut spec = self.package.spec.clone();
+        let rootfs_path = self.root.join("rootfs.json");
+        let mut rootfs: Value = serde_json::from_slice(&fs::read(&rootfs_path).unwrap()).unwrap();
+        edit(&mut rootfs);
+        let rootfs_bytes = serde_json::to_vec(&rootfs).unwrap();
+        fs::write(&rootfs_path, &rootfs_bytes).unwrap();
+        let rootfs_sha256 = digest(&rootfs_bytes);
+
+        let reinspection_path = self.root.join("reinspection.json");
+        let mut reinspection: Value =
+            serde_json::from_slice(&fs::read(&reinspection_path).unwrap()).unwrap();
+        reinspection["reports"]["rootfs"]["sha256"] = json!(rootfs_sha256.clone());
+        let receipt_bytes = serde_json::to_vec(&reinspection).unwrap();
+        fs::write(&reinspection_path, &receipt_bytes).unwrap();
+
+        let mut handoff: Value =
+            serde_json::from_slice(&fs::read(&spec.operator_handoff.path).unwrap()).unwrap();
+        handoff["review_reports"]["rootfs"]["sha256"] = json!(rootfs_sha256);
+        handoff["reinspection_receipt"]["sha256"] = json!(digest(&receipt_bytes));
+        spec.operator_handoff = diagnostic_artifact(
+            &self.root,
+            &format!("edited-rootfs-handoff-{}.json", uuid().unwrap()),
             &handoff,
         );
         spec
@@ -925,6 +972,33 @@ fn operator_handoff_rejects_rehashed_reinspection_and_report_tampering() {
         handoff["review_reports"]["gpt"]["sha256"] = json!(gpt_sha256);
     });
     assert!(Package::prepare(wrong_report, 1000).is_err());
+}
+
+#[test]
+fn operator_handoff_rejects_rehashed_raw_rootfs_without_required_checks() {
+    for field in [
+        "forbidden_surfaces_checked",
+        "reader_executable_matches_signed_package",
+    ] {
+        let f = Fixture::new();
+        let spec = f.spec_with_rootfs_edit(|rootfs| rootfs[field] = json!(false));
+        assert_eq!(
+            Package::prepare(spec, 1000).unwrap_err().to_string(),
+            "raw rootfs diagnostic lacks reviewed package and surface checks",
+            "field {field}"
+        );
+    }
+    let f = Fixture::new();
+    let spec = f.spec_with_rootfs_edit(|rootfs| {
+        rootfs
+            .as_object_mut()
+            .unwrap()
+            .remove("authenticated_package_components_checked");
+    });
+    assert_eq!(
+        Package::prepare(spec, 1000).unwrap_err().to_string(),
+        "invalid typed raw rootfs diagnostic"
+    );
 }
 
 struct Mock {
