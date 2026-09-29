@@ -60,6 +60,15 @@ class DiagnosticDiskTests(unittest.TestCase):
         (stage / "candidate-manifest.json").write_text('{"synthetic":true}\n')
         return stage
 
+    def replace_material_output(self, stage, name, contents):
+        output = stage / "output"
+        (output / name).write_bytes(contents)
+        checked = ("zrpc-gcp.raw", "zrpc-gcp.efi", "zrpc-gcp.vmlinuz",
+                   "zrpc-gcp.initrd")
+        (output / "zrpc-gcp.SHA256SUMS").write_text("".join(
+            f"{diagnostic.sha256((output / item).read_bytes())} *{item}\n"
+            for item in checked))
+
     def test_rebuild_comparison_reports_first_root_byte_and_stays_unapproved(self):
         first = gpt_fixture.synthetic_disk()
         second = first.copy()
@@ -137,6 +146,21 @@ class DiagnosticDiskTests(unittest.TestCase):
         self.assertEqual(report["first_disk_difference_offset_bytes"], 100)
         self.assertEqual(report["first_disk_difference_regions"],
                          {"first": "outside-partitions", "second": "outside-partitions"})
+
+    def test_rebuild_comparison_isolates_uki_packaging_difference(self):
+        disk = gpt_fixture.synthetic_disk()
+        first = self.make_comparable_output(disk, "first")
+        second = self.make_comparable_output(disk, "second")
+        self.replace_material_output(second, "zrpc-gcp.efi", b"zrpc-gcp.efI")
+        report = diagnostic.compare_root_rebuilds(first, second)
+        self.assertTrue(report["disk_byte_identical"])
+        materials = report["material_outputs"]
+        self.assertFalse(materials["zrpc-gcp.efi"]["byte_identical"])
+        self.assertEqual(materials["zrpc-gcp.efi"]["first_difference_offset_bytes"], 11)
+        for name in ("initrd.cpio.zst", "zrpc-gcp.vmlinuz", "zrpc-gcp.initrd"):
+            self.assertTrue(materials[name]["byte_identical"])
+            self.assertIsNone(materials[name]["first_difference_kind"])
+        self.assertFalse(report["private_mode_approved"])
 
     def test_rebuild_comparison_reports_root_extent_drift(self):
         disk = gpt_fixture.synthetic_disk()
