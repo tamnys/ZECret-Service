@@ -138,6 +138,75 @@ jobs:
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
 
+      - name: Exercise the exact native import producer on synthetic media
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/native-cargo"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test ! -e "$scratch/reproduction/import-smoke"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/reproduction,dst=/workspace/.codex-tmp" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/nonexistent PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            sh -ceu '
+              ulimit -c 0
+              smoke=/workspace/.codex-tmp/import-smoke
+              release="/workspace/.codex-tmp/release-$1"
+              mkdir "$smoke"
+              cp "$release/artifacts/zrpc-gcp-lifecycle" "$smoke/producer"
+              chmod 0500 "$smoke/producer"
+              # The import contract requires a whole-GiB disk; this one is only zeros.
+              truncate -s 1073741824 "$smoke/disk.raw"
+              "$smoke/producer" pack-import \
+                --raw "$smoke/disk.raw" --archive "$smoke/disk.tar.gz" \
+                > "$smoke/receipt.json"
+            ' sh "$GITHUB_SHA"
+          python3 -I - "$scratch/reproduction/release-$GITHUB_SHA/manifest.json" \
+            "$scratch/reproduction/import-smoke" "$GITHUB_SHA" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          manifest_path, smoke = map(Path, sys.argv[1:3])
+          revision = sys.argv[3]
+          def digest(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+          manifest = json.loads(manifest_path.read_bytes())
+          receipt = json.loads((smoke / "receipt.json").read_bytes())
+          binary_sha256 = digest(smoke / "producer")
+          if (manifest.get("source_commit") != revision
+                  or manifest.get("reproducible") is not True
+                  or manifest.get("artifact_sha256", {}).get("zrpc-gcp-lifecycle") != binary_sha256):
+              raise ValueError("native import producer differs from matched build")
+          expected = {
+              "schema_version": 2,
+              "producer": "zrpc-gcp-lifecycle-rust",
+              "producer_executable_sha256": binary_sha256,
+              "archive_sha256": digest(smoke / "disk.tar.gz"),
+              "raw_disk_sha256": digest(smoke / "disk.raw"),
+              "raw_disk_bytes": 1073741824,
+              "oldgnu_single_member_checked": True,
+              "private_mode_approved": False,
+              "toolchain_reviewed": False,
+          }
+          if receipt != expected:
+              raise ValueError("native import receipt differs from synthetic media or binary")
+          print(json.dumps({"status": "diagnostic-native-import-producer-exercised",
+                            "source_commit": revision, "producer_sha256": binary_sha256,
+                            "private_mode_approved": False}, sort_keys=True))
+          PY
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$source" diff --quiet
+
       - name: Package and verify the matched-build bundle
         shell: bash
         run: |
