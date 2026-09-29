@@ -113,7 +113,13 @@ jobs:
             RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
             RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
             LANG=C LC_ALL=C TZ=UTC \
-            cargo test --locked --offline -p zrpc-lifecycle gcp::
+            sh -ceu '
+              ulimit -c 0
+              cargo test --locked --offline -p zrpc-lifecycle gcp::
+              cargo test --locked --offline -p zrpc-lifecycle --lib \
+                gcp::package::import_archive::tests::producer_receipt_hashes_running_inode_after_path_replacement \
+                -- --ignored --exact
+            '
           test "$(git -C "$source" rev-parse HEAD)" = "$ZRPC_SOURCE_SHA"
           git -C "$source" diff --quiet
           echo 'Local GCP lifecycle tests only; no provider call, deployment, or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"

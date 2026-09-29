@@ -82,6 +82,32 @@ fn same_identity(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     )
 }
 
+#[cfg(target_os = "linux")]
+fn running_executable_digest() -> Result<String> {
+    // current_exe() resolves to a pathname. Another process can rename and
+    // replace that pathname after exec, making a receipt describe different
+    // bytes from the code that produced the archive. Procfs opens the mapped
+    // executable inode even if its original name has since been replaced.
+    let mut executable = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open("/proc/self/exe")
+        .map_err(|_| Error("running producer executable cannot be opened"))?;
+    if !executable
+        .metadata()
+        .map_err(|_| Error("producer metadata unavailable"))?
+        .is_file()
+    {
+        return Err(Error("running producer executable is not regular"));
+    }
+    file_digest(&mut executable)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_executable_digest() -> Result<String> {
+    Err(Error("native import producer requires Linux procfs"))
+}
+
 /// Create a single-member oldgnu sparse archive on the managed workspace
 /// volume. This makes no network or provider calls and grants no approval.
 pub(super) fn pack_import_archive(
@@ -128,21 +154,7 @@ pub(super) fn pack_import_archive(
         ));
     }
     let raw_sha256 = file_digest(&mut raw)?;
-    let executable =
-        std::env::current_exe().map_err(|_| Error("producer executable unavailable"))?;
-    let mut executable = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(executable)
-        .map_err(|_| Error("producer executable cannot be opened"))?;
-    if !executable
-        .metadata()
-        .map_err(|_| Error("producer metadata unavailable"))?
-        .is_file()
-    {
-        return Err(Error("producer executable is not regular"));
-    }
-    let producer_executable_sha256 = file_digest(&mut executable)?;
+    let producer_executable_sha256 = running_executable_digest()?;
     let temporary = parent.join(format!(".disk-import-{}.tar.gz", crate::gcp::uuid()?));
     let result = (|| {
         let output = OpenOptions::new()
@@ -362,6 +374,75 @@ mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
     use std::io::{Cursor, Seek, SeekFrom, Write};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires native Linux procfs; QEMU user mode cannot open /proc/self/exe"]
+    fn producer_receipt_hashes_running_inode_after_path_replacement() {
+        use std::{
+            io::Read,
+            os::unix::net::{UnixListener, UnixStream},
+            process::Command,
+        };
+
+        const SOCKET_ENV: &str = "ZRPC_RUNNING_IMAGE_TEST_SOCKET";
+        if let Some(socket) = std::env::var_os(SOCKET_ENV) {
+            let mut channel = UnixStream::connect(socket).unwrap();
+            channel.write_all(b"ready").unwrap();
+            let mut go = [0u8; 1];
+            channel.read_exact(&mut go).unwrap();
+            assert_eq!(go, *b"G");
+            channel
+                .write_all(running_executable_digest().unwrap().as_bytes())
+                .unwrap();
+            return;
+        }
+
+        let root = std::path::PathBuf::from(
+            std::env::var_os("CODEX_TMP_DIR").expect("managed workspace scratch required"),
+        )
+        .join(format!("e-{}", crate::gcp::uuid().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let running = root.join("running");
+        fs::copy(std::env::current_exe().unwrap(), &running).unwrap();
+        let mut original = File::open(&running).unwrap();
+        let expected = file_digest(&mut original).unwrap();
+        let listener = UnixListener::bind(root.join("s")).unwrap();
+        let mut child = Command::new(&running)
+            .arg("--exact")
+            .arg("gcp::package::import_archive::tests::producer_receipt_hashes_running_inode_after_path_replacement")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env(SOCKET_ENV, root.join("s"))
+            .spawn()
+            .unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (mut channel, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        child.try_wait().unwrap().is_none(),
+                        "native replacement child exited before connecting"
+                    );
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("native replacement socket failed: {error}"),
+            }
+        };
+        let mut ready = [0u8; 5];
+        channel.read_exact(&mut ready).unwrap();
+        assert_eq!(&ready, b"ready");
+
+        fs::rename(&running, root.join("old")).unwrap();
+        fs::write(&running, b"replacement pathname contents").unwrap();
+        channel.write_all(b"G").unwrap();
+        let mut observed = [0u8; 64];
+        channel.read_exact(&mut observed).unwrap();
+        assert_eq!(std::str::from_utf8(&observed).unwrap(), expected);
+        assert!(child.wait().unwrap().success());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn producer_rejects_non_import_disks_and_existing_outputs() {
