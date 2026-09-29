@@ -77,6 +77,14 @@ class DiagnosticDiskTests(unittest.TestCase):
         self.assertFalse(report["production_image"])
         self.assertFalse(report["hardware_verified"])
         self.assertFalse(report["private_mode_approved"])
+        with mock.patch.object(diagnostic, "signed_block_owners", return_value=[
+                {"block": 0, "inode": 8, "paths": []},
+                {"block": 0, "inode": 8, "paths": []}]) as owners:
+            mapped = diagnostic.compare_root_rebuilds(
+                first_stage, second_stage, metadata=self.root,
+                builder_archives=self.root, workspace=self.root)
+        self.assertEqual(mapped["first_changed_block_owners"][0]["inode"], 8)
+        owners.assert_called_once()
 
         (second_stage / "candidate-manifest.json").write_text('{"other":true}\n')
         with self.assertRaisesRegex(ValueError, "identical staged inputs"):
@@ -119,6 +127,35 @@ class DiagnosticDiskTests(unittest.TestCase):
                          report["second_root_partition_bytes"], gpt_fixture.SECTOR)
         self.assertIsNone(report["first_difference_root_offset_bytes"])
         self.assertFalse(report["private_mode_approved"])
+
+    def test_signed_debugfs_block_owner_parsing(self):
+        stats = "Filesystem UUID: value\nBlock size:               4096\n"
+        with mock.patch.object(diagnostic, "debugfs_output", side_effect=(
+                stats, "Block\tInode number\n57623\t42\n",
+                "Inode\tPathname\n42\t/usr/lib/zrpc/zebrad\n")):
+            owner = diagnostic.describe_changed_block(
+                Path("/root.img"), Path("/root.img"), 57623 * 4096 + 32, 4)
+        self.assertEqual(owner, {"block_size": 4096, "block": 57623,
+                                 "inode": 42, "paths": ["/usr/lib/zrpc/zebrad"],
+                                 "byte_offset_in_block": 32})
+        with mock.patch.object(diagnostic, "debugfs_output", side_effect=(
+                stats, "Block\tInode number\n57623\t<block not found>\n")):
+            owner = diagnostic.describe_changed_block(
+                Path("/root.img"), Path("/root.img"), 57623 * 4096 + 32, 4)
+        self.assertIsNone(owner["inode"])
+        with mock.patch.object(diagnostic, "debugfs_output", side_effect=(
+                stats, "Block\tInode number\n57623\t42\n",
+                "Inode\tPathname\n42\t../../other\n")):
+            with self.assertRaisesRegex(ValueError, "inode path report"):
+                diagnostic.describe_changed_block(
+                    Path("/root.img"), Path("/root.img"), 57623 * 4096 + 32, 4)
+
+    def test_signed_debugfs_query_rejects_nonbanner_output(self):
+        bad = SimpleNamespace(returncode=0, stderr=b"warning\n", stdout=b"Block\tInode number\n")
+        with mock.patch.object(diagnostic.subprocess, "run", return_value=bad):
+            with self.assertRaisesRegex(ValueError, "signed debugfs block ownership query failed"):
+                diagnostic.debugfs_output(Path("/proc/self/fd/4"), Path("/root.img"),
+                                          "icheck 42", 4)
 
     def boot_receipt(self):
         bundle = self.root / "native-rust"
