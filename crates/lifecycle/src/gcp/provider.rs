@@ -144,6 +144,7 @@ pub trait Provider {
         package: &Package,
         resource: &ResourcePlan,
         request_id: &str,
+        deletion_trigger: u64,
     ) -> Result<Mutation>;
     async fn delete(
         &mut self,
@@ -289,6 +290,7 @@ impl GoogleClient {
         method: Method,
         body: RequestBody,
         content_type: String,
+        creation_cutoff: Option<u64>,
     ) -> Result<(StatusCode, Vec<u8>)> {
         tokio::time::timeout_at(self.deadline, async {
             let socket = TcpStream::connect((host, 443))
@@ -319,6 +321,15 @@ impl GoogleClient {
             let request = builder
                 .body(body)
                 .map_err(|_| Error("Google request encoding failed"))?;
+            // TCP, TLS and HTTP setup can outlast the controller's earlier
+            // check. Refresh immediately before the creation POST is sent.
+            if let Some(trigger) = creation_cutoff {
+                if super::now()? >= trigger {
+                    return Err(Error(
+                        "creation window has reached the original deletion trigger",
+                    ));
+                }
+            }
             let response = sender
                 .send_request(request)
                 .await
@@ -351,13 +362,31 @@ impl GoogleClient {
         method: Method,
         body: Option<&Value>,
     ) -> Result<Option<Value>> {
+        self.json_with_creation_cutoff(host, path, method, body, None)
+            .await
+    }
+    async fn json_with_creation_cutoff(
+        &self,
+        host: &'static str,
+        path: String,
+        method: Method,
+        body: Option<&Value>,
+        creation_cutoff: Option<u64>,
+    ) -> Result<Option<Value>> {
         let bytes = body
             .map(serde_json::to_vec)
             .transpose()
             .map_err(|_| Error("request JSON failed"))?
             .unwrap_or_default();
         let (status, bytes) = self
-            .exchange(host, path, method, full(bytes), "application/json".into())
+            .exchange(
+                host,
+                path,
+                method,
+                full(bytes),
+                "application/json".into(),
+                creation_cutoff,
+            )
             .await?;
         if status == StatusCode::NOT_FOUND {
             return Ok(None);
@@ -545,6 +574,7 @@ impl Provider for GoogleClient {
         package: &Package,
         resource: &ResourcePlan,
         request_id: &str,
+        deletion_trigger: u64,
     ) -> Result<Mutation> {
         super::ensure_live_creation_ready()?;
         if resource.kind == ResourceKind::StagingObject {
@@ -581,6 +611,7 @@ impl Provider for GoogleClient {
                     Method::POST,
                     body.boxed_unsync(),
                     format!("multipart/related; boundary={boundary}"),
+                    Some(deletion_trigger),
                 )
                 .await?;
             if !status.is_success() {
@@ -602,11 +633,12 @@ impl Provider for GoogleClient {
             .ok_or(Error("invalid resource path"))?
             .0;
         let value = self
-            .json(
+            .json_with_creation_cutoff(
                 "compute.googleapis.com",
                 format!("/compute/v1/{collection}?requestId={request_id}"),
                 Method::POST,
                 Some(&resource.create_body),
+                Some(deletion_trigger),
             )
             .await?
             .ok_or(Error("Google creation endpoint missing"))?;

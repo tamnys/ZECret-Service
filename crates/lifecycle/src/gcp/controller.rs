@@ -198,27 +198,47 @@ async fn poll<P: Provider>(
     Ok(())
 }
 
-/// Runs only after live external-control admission. Does not interpret an
-/// arbitrary file or readiness Boolean as approval to create cloud resources.
-pub async fn deploy_once<P: Provider>(
-    store: &mut Store,
-    provider: &mut P,
-    at: u64,
-) -> Result<Progress> {
-    let package = store.package()?;
-    package.validate(at)?;
-    if store.journal().watchdog.is_none() {
-        return Err(Error(
-            "deployment requires durably admitted watchdog controls",
-        ));
-    }
-    if at < store.journal().original_start || store.journal().teardown_started {
+/// Checks the original, durably admitted creation window. A current controls
+/// file cannot extend this trigger after admission.
+pub fn ensure_creation_window(store: &Store, at: u64) -> Result<u64> {
+    let journal = store.journal();
+    let watchdog = journal.watchdog.as_ref().ok_or(Error(
+        "deployment requires durably admitted watchdog controls",
+    ))?;
+    if at < journal.original_start || journal.teardown_started {
         return Err(Error(
             "deployment outside original window or teardown already started",
         ));
     }
+    if at >= watchdog.deletion_start_unix_seconds || at >= journal.original_deadline {
+        return Err(Error(
+            "creation window has reached the original deletion trigger",
+        ));
+    }
+    Ok(watchdog.deletion_start_unix_seconds)
+}
+
+/// Runs only after live external-control admission. Does not interpret an
+/// arbitrary file or readiness Boolean as approval to create cloud resources.
+pub async fn deploy_once<P: Provider>(store: &mut Store, provider: &mut P) -> Result<Progress> {
+    deploy_once_with_clock(store, provider, super::now).await
+}
+
+async fn deploy_once_with_clock<P: Provider>(
+    store: &mut Store,
+    provider: &mut P,
+    mut clock: impl FnMut() -> Result<u64>,
+) -> Result<Progress> {
+    let at = clock()?;
+    ensure_creation_window(store, at)?;
+    let package = store.package()?;
+    package.validate(at)?;
+    ensure_creation_window(store, clock()?)?;
     provider.preflight(&package).await?;
+    ensure_creation_window(store, clock()?)?;
     for (index, resource) in package.resources.iter().enumerate() {
+        let at = clock()?;
+        ensure_creation_window(store, at)?;
         poll(store, provider, &package, index, false).await?;
         if store.journal().resources[index]
             .create
@@ -255,6 +275,8 @@ pub async fn deploy_once<P: Provider>(
             }
         }
         if state.create.is_none() {
+            let at = clock()?;
+            ensure_creation_window(store, at)?;
             let mut next = store.journal().clone();
             next.resources[index].create = Some(intent(at)?);
             store.commit(next)?;
@@ -266,7 +288,11 @@ pub async fn deploy_once<P: Provider>(
             .request_id
             .clone();
         // The fsync above is complete before this first mutation request.
-        match provider.create(&package, resource, &request_id).await? {
+        let deletion_trigger = ensure_creation_window(store, clock()?)?;
+        match provider
+            .create(&package, resource, &request_id, deletion_trigger)
+            .await?
+        {
             Mutation::Operation(operation) => {
                 accept_operation(store, index, resource, operation, false)?
             }

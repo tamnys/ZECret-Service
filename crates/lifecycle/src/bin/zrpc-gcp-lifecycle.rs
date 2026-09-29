@@ -169,6 +169,9 @@ async fn run() -> Result<()> {
             &controls_bytes,
             &package,
         )?)?;
+        // External-control checks may block long enough for the original
+        // cleanup window to begin. Reject before OAuth or any provider call.
+        controller::ensure_creation_window(&store, gcp::now()?)?;
     } else {
         // Every cloud command uses the original fsynced admission. Controls
         // changes never supply a later cleanup trigger after a restart.
@@ -192,8 +195,22 @@ async fn run() -> Result<()> {
     }
     // No OAuth/network operation occurs before all applicable admission above.
     let mut provider = GoogleClient::authenticate(&runtime, &package.spec.project).await?;
+    if command == "watchdog-once" && !due {
+        // Authentication or controls-file verification can cross the original
+        // deletion trigger. Recheck against the journal before dispatch.
+        let original = store
+            .journal()
+            .watchdog
+            .as_ref()
+            .ok_or(Error("cloud command requires admitted watchdog controls"))?;
+        due = original.due(
+            &path(&options, "--controls")?,
+            gcp::now()?,
+            store.journal().teardown_started,
+        )? || gcp::now()? >= original.deletion_start_unix_seconds;
+    }
     match command.as_str() {
-        "deploy" => print(&controller::deploy_once(&mut store, &mut provider, at).await?),
+        "deploy" => print(&controller::deploy_once(&mut store, &mut provider).await?),
         "teardown" => print(&controller::teardown_once(&mut store, &mut provider, at).await?),
         "watchdog-once" if due => {
             print(&controller::teardown_once(&mut store, &mut provider, at).await?)
