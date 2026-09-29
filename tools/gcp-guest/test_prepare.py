@@ -345,6 +345,12 @@ class CandidateTests(unittest.TestCase):
         for unit in ("systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service",
                      "systemd-udev-load-credentials.service", "systemd-network-generator.service"):
             self.assertEqual((output / "rootfs/etc/systemd/system" / unit).readlink(), Path("/dev/null"))
+        self.assertEqual(set(prepare.RETAINED_UNIT_LINKS), set(audit_rootfs.RETAINED_UNIT_LINKS))
+        for relative, target in prepare.RETAINED_UNIT_LINKS.items():
+            self.assertEqual((output / "rootfs/etc/systemd/system" / relative).readlink(),
+                             Path("/usr/lib/systemd/system") / target)
+        self.assertEqual((output / "rootfs/etc/systemd/system/ctrl-alt-del.target").readlink(),
+                         Path("/dev/null"))
         self.assertEqual(
             (output / "rootfs/etc/systemd/system/systemd-resolved.service.d/10-no-credentials.conf").read_bytes(),
             audit_rootfs.RESOLVED_CREDENTIAL_DROPIN_BYTES,
@@ -370,6 +376,7 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "rootfs/run/zrpc-build-signing").exists())
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)
+        self.assertEqual(config.count("CleanPackageMetadata=yes\n"), 1)
         self.assertEqual(config.count("RemoveFiles="), 1)
         self.assertIn("RemoveFiles=" + ",".join(prepare.ROOT_REMOVE_FILES) + "\n", config)
         self.assertEqual(config.count("FinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\n"), 1)
@@ -510,6 +517,7 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.conf", "Dependencies=initrd", "Dependencies="),
             ("mkosi.conf", "Bootloader=uki", "Bootloader=systemd-boot"),
             ("mkosi.conf", "ExtraTrees=rootfs", "ExtraTrees=rootfs\nPostOutputScripts=unreviewed.sh"),
+            ("mkosi.conf", "CleanPackageMetadata=yes", "CleanPackageMetadata=auto"),
             ("mkosi.conf", "RemoveFiles=/usr/sbin/unix_chkpwd,", "RemoveFiles="),
             ("mkosi.images/initrd/mkosi.conf", "MakeInitrd=yes", "MakeInitrd=no"),
             ("mkosi.images/initrd/mkosi.conf", "Ssh=no", "Ssh=yes"),
@@ -824,6 +832,10 @@ class CandidateTests(unittest.TestCase):
         wants.mkdir()
         for unit in ("systemd-networkd.service", "systemd-resolved.service"):
             (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
+        for relative, target in audit_rootfs.RETAINED_UNIT_LINKS.items():
+            path = root / "etc/systemd/system" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to("/usr/lib/systemd/system/" + target)
         for unit in audit_rootfs.MASKED_UNITS:
             (root / "etc/systemd/system" / unit).symlink_to("/dev/null")
         resolved_dropins = root / "etc/systemd/system/systemd-resolved.service.d"
@@ -833,8 +845,6 @@ class CandidateTests(unittest.TestCase):
             / audit_rootfs.RESOLVED_CREDENTIAL_DROPIN,
             resolved_dropins / audit_rootfs.RESOLVED_CREDENTIAL_DROPIN,
         )
-        (root / "etc/systemd/system/dbus-org.freedesktop.resolve1.service").symlink_to(
-            "/usr/lib/systemd/system/systemd-resolved.service")
         (root / "etc/passwd").write_text(
             "root:x:0:0::/:/usr/sbin/nologin\n"
             "systemd-network:x:998:998::/:/usr/sbin/nologin\n"
@@ -925,6 +935,21 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "postinst-generated path remains"):
             audit_rootfs.audit(root)
 
+    def test_rootfs_audit_rejects_retained_link_substitution(self):
+        for index, relative in enumerate(audit_rootfs.RETAINED_UNIT_LINKS):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-retained-link-{index}")
+                path = root / "etc/systemd/system" / relative
+                path.unlink()
+                path.symlink_to("/usr/lib/systemd/system/rogue.service")
+                with self.assertRaisesRegex(ValueError, "retained system unit link differs"):
+                    audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-retained-extra")
+        (root / "etc/systemd/system/sockets.target.wants/rogue.socket").symlink_to(
+            "/usr/lib/systemd/system/rogue.socket")
+        with self.assertRaisesRegex(ValueError, "retained system unit wants differ"):
+            audit_rootfs.audit(root)
+
     def test_rootfs_audit_rejects_base_tree_kernel_cmdline(self):
         root = self.synthetic_guest_root()
         audit_rootfs.audit(root)
@@ -987,6 +1012,9 @@ class CandidateTests(unittest.TestCase):
         root = self.synthetic_guest_root("-privileged-package-files")
         audit_rootfs.audit(root)
         for relative in prepare.ROOT_REMOVE_FILES:
+            if relative in (*prepare.REMOVED_GENERATED_UNIT_DIRECTORIES,
+                            *prepare.REMOVED_GENERATED_UNIT_LINKS):
+                continue
             with self.subTest(relative=relative):
                 path = root / relative.lstrip("/")
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1010,6 +1038,7 @@ class CandidateTests(unittest.TestCase):
         cache.symlink_to("/var/lib/zebra/aux-cache")
         with self.assertRaisesRegex(ValueError, "build-generated file remains: var/cache/ldconfig/aux-cache"):
             audit_rootfs.audit(root)
+
         cache.unlink()
         privileged = {
             root / "usr/bin/unreviewed-setuid": stat.S_ISUID,
@@ -1032,16 +1061,38 @@ class CandidateTests(unittest.TestCase):
                          "setuid/setgid executable remains: "
                          "['usr/bin/unreviewed-setgid', 'usr/bin/unreviewed-setuid']")
 
+    def test_rootfs_audit_requires_package_manager_metadata_absent(self):
+        for name in ("var/lib/dpkg", "var/lib/apt", "var/cache/apt"):
+            with self.subTest(name=name):
+                root = self.synthetic_guest_root("-package-metadata-" + name.replace("/", "-"))
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.mkdir()
+                with self.assertRaisesRegex(ValueError, "package-manager metadata remains: " + name):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_generated_unit_paths(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         (*prepare.REMOVED_GENERATED_UNIT_DIRECTORIES,
+                          *prepare.REMOVED_GENERATED_UNIT_LINKS))
+        directories = {path.removeprefix("/") for path in
+                       prepare.REMOVED_GENERATED_UNIT_DIRECTORIES}
+        self.assertEqual(expected, audit_rootfs.REMOVED_GENERATED_UNIT_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-generated-unit-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if relative in directories:
+                    path.mkdir()
+                else:
+                    path.symlink_to("/usr/lib/systemd/system/rogue.socket")
+                with self.assertRaisesRegex(ValueError, "generated startup path remains: " + relative):
+                    audit_rootfs.audit(root)
+
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
         self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
         root = self.synthetic_guest_root()
-        # Debian's post-install steps may enable these vendor services in
-        # sysinit.target. The immutable same-name masks must still win.
-        wants = root / "etc/systemd/system/sysinit.target.wants"
-        wants.mkdir()
-        for unit in ("systemd-udev-load-credentials.service",
-                     "systemd-network-generator.service"):
-            (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
         audit_rootfs.audit(root)
         group = root / "etc/group"
         good_group = group.read_text()

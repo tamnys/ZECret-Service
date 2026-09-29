@@ -208,6 +208,15 @@ class PackageComponentsTests(unittest.TestCase):
         self.assertIn("'etc/opt'", str(error.exception))
         self.assertIn("'opt'", str(error.exception))
 
+    def test_package_manager_metadata_cannot_survive_raw_sealing(self):
+        for path in ("var/lib/dpkg", "var/lib/dpkg/info/apt.postinst",
+                     "var/lib/apt", "var/cache/apt"):
+            with self.subTest(path=path):
+                self.inventory[path] = {"type": "directory", "mode": 0o755}
+                with self.assertRaisesRegex(ValueError, "package-manager metadata remains"):
+                    self.inspect()
+                del self.inventory[path]
+
     def test_executable_outside_component_prefix_rejects_but_inert_data_does_not(self):
         path = "var/cache/payload"
         self.inventory[path] = {"type": "file", "mode": 0o755}

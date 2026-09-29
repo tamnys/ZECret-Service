@@ -45,7 +45,15 @@ REVIEWED_REMOVALS = frozenset({
     "usr/lib/dbus-1.0/dbus-daemon-launch-helper",
     "var/cache/ldconfig/aux-cache", "var/log/alternatives.log",
     "opt", "usr/local", "etc/opt",
+    "etc/systemd/system/getty.target.wants",
+    "etc/systemd/system/sysinit.target.wants",
+    "etc/systemd/system/systemd-journald.service.wants",
+    "etc/systemd/system/timers.target.wants",
+    "etc/systemd/user",
+    "etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
+    "etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
 })
+PACKAGE_METADATA_ROOTS = ("var/lib/dpkg", "var/lib/apt", "var/cache/apt")
 # These source-bound overlay paths may replace Debian package members. The
 # caller must pass inspect_raw_rootfs.checked_overlay's verified inventory;
 # that inspector separately compares their final raw-ext4 identities.
@@ -174,6 +182,9 @@ def inspect_components(plan, verified_overlay, inventory, lookup_inode,
     planned = plan["entries"].keys() | verified_overlay.keys()
     if not planned <= inventory.keys():
         raise ValueError("raw inventory is missing an authenticated component or overlay")
+    for root in PACKAGE_METADATA_ROOTS:
+        if any(path == root or path.startswith(root + "/") for path in inventory):
+            raise ValueError("package-manager metadata remains in raw rootfs: " + root)
     unplanned = []
     for path, entry in inventory.items():
         if (type(path) is not str or type(entry) is not dict

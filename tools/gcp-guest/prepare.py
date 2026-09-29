@@ -67,6 +67,17 @@ ROLES = set(BINARIES) | set(DISK_TOOL_PACKAGES) | {EARLY_INIT_ROLE, "secure_boot
 # or treats this reference as evidence of a signed image.
 EXTERNAL_SECURE_BOOT_KEY = "/run/zrpc-build-signing/secure-boot.key"
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod", "mount"}
+REMOVED_GENERATED_UNIT_DIRECTORIES = (
+    "/etc/systemd/system/getty.target.wants",
+    "/etc/systemd/system/sysinit.target.wants",
+    "/etc/systemd/system/systemd-journald.service.wants",
+    "/etc/systemd/system/timers.target.wants",
+    "/etc/systemd/user",
+)
+REMOVED_GENERATED_UNIT_LINKS = (
+    "/etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
+    "/etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
+)
 ROOT_REMOVE_FILES = (
     "/usr/sbin/unix_chkpwd", "/usr/bin/umount", "/usr/bin/su",
     "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
@@ -76,6 +87,10 @@ ROOT_REMOVE_FILES = (
     # Signed base-files postinst creates these otherwise empty roots after
     # package extraction; remove them before sealing the guest image.
     "/opt", "/usr/local", "/etc/opt",
+    # Pinned package postinst and mkosi preset-all create these after the
+    # source overlay. None belongs to the appliance's required unit graph.
+    *REMOVED_GENERATED_UNIT_DIRECTORIES,
+    *REMOVED_GENERATED_UNIT_LINKS,
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
@@ -165,7 +180,15 @@ REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-se
 # In the pinned kernel, pstore_register() rejects every backend except the
 # selected name; no shipped backend is named "none".
 FIXED_KERNEL_CMDLINE = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service pstore.backend=none panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality"
-MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service", "systemd-network-generator.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
+MASKS = ("ssh.service", "sshd.service", "ssh.socket", "ctrl-alt-del.target", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service", "systemd-network-generator.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
+RETAINED_UNIT_LINKS = {
+    "dbus-org.freedesktop.network1.service": "systemd-networkd.service",
+    "dbus-org.freedesktop.resolve1.service": "systemd-resolved.service",
+    "sockets.target.wants/systemd-networkd.socket": "systemd-networkd.socket",
+    "network-online.target.wants/systemd-networkd-wait-online.service":
+        "systemd-networkd-wait-online.service",
+    "local-fs.target.wants/run-lock.mount": "run-lock.mount",
+}
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd", "nvme-cli", "libnvme1t64", "libkeyutils1", "uuid-runtime", "adduser", "passwd"}
 
 def install_boot_overrides(rootfs):
@@ -178,6 +201,10 @@ def install_boot_overrides(rootfs):
     (masks / "multi-user.target.wants").mkdir()
     for name in ("systemd-networkd.service", "systemd-resolved.service"):
         (masks / "multi-user.target.wants" / name).symlink_to("/usr/lib/systemd/system/" + name)
+    for relative, target in RETAINED_UNIT_LINKS.items():
+        path = masks / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to("/usr/lib/systemd/system/" + target)
     (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
 
 def validate_boot_profile(profile=PROFILE, staged_copy=False):
@@ -197,7 +224,7 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
         "Distribution": {"Distribution": "debian", "Release": "trixie", "Architecture": "x86-64", "RepositoryKeyCheck": "yes", "RepositoryKeyFetch": "no"},
         "Output": {"Format": "disk", "Output": "zrpc-gcp", "ManifestFormat": "json", "RepartDirectories": "repart", "SectorSize": "512"},
         "Config": {"Dependencies": "initrd"},
-        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": FIXED_KERNEL_CMDLINE, "ExtraTrees": "rootfs", "RemoveFiles": ",".join(ROOT_REMOVE_FILES)},
+        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": FIXED_KERNEL_CMDLINE, "ExtraTrees": "rootfs", "CleanPackageMetadata": "yes", "RemoveFiles": ",".join(ROOT_REMOVE_FILES)},
         "Validation": {"SecureBoot": "yes", "SecureBootAutoEnroll": "no", "SignExpectedPcr": "no", "Checksum": "yes"},
         "Build": {"WithNetwork": "no", "CacheOnly": "always", "Incremental": "no"},
     }

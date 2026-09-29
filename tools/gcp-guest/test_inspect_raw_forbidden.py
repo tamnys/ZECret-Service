@@ -242,7 +242,66 @@ class RawForbiddenTests(unittest.TestCase):
         for index, unit in enumerate(forbidden.MASKED_UNITS, 100):
             data[forbidden.CONFIGURED_UNITS + "/" + unit] = entry(
                 index, "symlink", 0o777, size=9, target="/dev/null")
+        for index, name in enumerate(forbidden.RETAINED_WANTS, 200):
+            data.setdefault(forbidden.CONFIGURED_UNITS + "/" + name, entry(index))
+        for index, (path, target) in enumerate(forbidden.RETAINED_UNIT_LINKS.items(), 210):
+            data.setdefault(path, entry(index, "symlink", 0o777,
+                                        size=len(target), target=target))
         return data
+
+    def test_retained_unit_links_require_exact_targets_and_complete_wants(self):
+        baseline = self.baseline_inventory()
+        forbidden._check_surfaces(baseline)
+        for path in forbidden.RETAINED_UNIT_LINKS:
+            with self.subTest(path=path, changed="target"):
+                altered = {**baseline, path: {**baseline[path], "target": "/dev/null"}}
+                with self.assertRaisesRegex(ValueError, "appliance unit symlink differs"):
+                    forbidden._check_surfaces(altered)
+            with self.subTest(path=path, changed="missing"):
+                altered = dict(baseline)
+                altered.pop(path)
+                with self.assertRaisesRegex(ValueError, "appliance boot dependencies differ|appliance unit symlink differs"):
+                    forbidden._check_surfaces(altered)
+        for name in forbidden.RETAINED_WANTS:
+            parent = forbidden.CONFIGURED_UNITS + "/" + name
+            with self.subTest(path=parent, changed="extra"):
+                altered = {**baseline, parent + "/unexpected.service":
+                           entry(250, "symlink", 0o777, size=36,
+                                 target="/usr/lib/systemd/system/rogue.service")}
+                with self.assertRaisesRegex(ValueError, "appliance boot dependencies differ"):
+                    forbidden._check_surfaces(altered)
+
+    def test_nested_retained_link_target_is_read_by_inode(self):
+        target = forbidden.RETAINED_UNIT_LINKS[
+            forbidden.CONFIGURED_UNITS +
+            "/network-online.target.wants/systemd-networkd-wait-online.service"]
+        outputs = {
+            "ls -p <2>": (listing("/2/040755/0/0/.//", "/2/040755/0/0/..//",
+                                  "/13/040755/0/0/etc//"), forbidden.READER_BANNER),
+            "ls -p <13>": (listing("/13/040755/0/0/.//", "/2/040755/0/0/..//",
+                                   "/14/040755/0/0/systemd//"), forbidden.READER_BANNER),
+            "ls -p <14>": (listing("/14/040755/0/0/.//", "/13/040755/0/0/..//",
+                                   "/15/040755/0/0/system//"), forbidden.READER_BANNER),
+            "ls -p <15>": (listing("/15/040755/0/0/.//", "/14/040755/0/0/..//",
+                                   "/16/040755/0/0/network-online.target.wants//"),
+                            forbidden.READER_BANNER),
+            "ls -p <16>": (listing("/16/040755/0/0/.//", "/15/040755/0/0/..//",
+                                   "/80/120777/0/0/systemd-networkd-wait-online.service/"
+                                   + str(len(target)) + "/"), forbidden.READER_BANNER),
+            "stat <80>": (b"Inode: 80   Type: symlink    Mode:  0777   Flags: 0x0\n"
+                          + b"User: 0   Group: 0   Project: 0   Size: "
+                          + str(len(target)).encode() + b"\nFast link dest: \""
+                          + target.encode() + b"\"\n", forbidden.READER_BANNER),
+        }
+        calls, run = self.fake_run(outputs)
+        with mock.patch.object(forbidden.subprocess, "run", side_effect=run), \
+                mock.patch.object(forbidden, "_check_surfaces"), \
+                mock.patch.object(forbidden, "reject_xattrs"):
+            inventory = forbidden.inspect(self.reader, self.image, self.scratch)
+        path = (forbidden.CONFIGURED_UNITS +
+                "/network-online.target.wants/systemd-networkd-wait-online.service")
+        self.assertEqual(inventory[path]["target"], target)
+        self.assertIn("stat <80>", calls)
 
     def test_raw_policy_rejects_administrative_boot_credentials_and_setuid(self):
         data = self.baseline_inventory()

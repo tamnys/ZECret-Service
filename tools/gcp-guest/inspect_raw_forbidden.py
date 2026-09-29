@@ -77,6 +77,7 @@ APPLIANCE_UNITS = (
 )
 MASKED_UNITS = (
     "ssh.service", "sshd.service", "ssh.socket",
+    "ctrl-alt-del.target",
     "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service",
     "container-getty@.service", "debug-shell.service", "rescue.service",
     "rescue.target", "emergency.service", "emergency.target",
@@ -103,6 +104,29 @@ UNIT_DIRS = (
 )
 VENDOR_UNITS = "usr/lib/systemd/system"
 CONFIGURED_UNITS = "etc/systemd/system"
+RETAINED_UNIT_LINKS = {
+    CONFIGURED_UNITS + "/default.target": "/usr/lib/systemd/system/zrpc.target",
+    CONFIGURED_UNITS + "/multi-user.target.wants/systemd-networkd.service":
+        "/usr/lib/systemd/system/systemd-networkd.service",
+    CONFIGURED_UNITS + "/multi-user.target.wants/systemd-resolved.service":
+        "/usr/lib/systemd/system/systemd-resolved.service",
+    CONFIGURED_UNITS + "/dbus-org.freedesktop.network1.service":
+        "/usr/lib/systemd/system/systemd-networkd.service",
+    CONFIGURED_UNITS + "/dbus-org.freedesktop.resolve1.service":
+        "/usr/lib/systemd/system/systemd-resolved.service",
+    CONFIGURED_UNITS + "/sockets.target.wants/systemd-networkd.socket":
+        "/usr/lib/systemd/system/systemd-networkd.socket",
+    CONFIGURED_UNITS + "/network-online.target.wants/systemd-networkd-wait-online.service":
+        "/usr/lib/systemd/system/systemd-networkd-wait-online.service",
+    CONFIGURED_UNITS + "/local-fs.target.wants/run-lock.mount":
+        "/usr/lib/systemd/system/run-lock.mount",
+}
+RETAINED_WANTS = {
+    "multi-user.target.wants": {"systemd-networkd.service", "systemd-resolved.service"},
+    "sockets.target.wants": {"systemd-networkd.socket"},
+    "network-online.target.wants": {"systemd-networkd-wait-online.service"},
+    "local-fs.target.wants": {"run-lock.mount"},
+}
 
 
 def _clean_name(raw):
@@ -275,19 +299,12 @@ def _check_units(inventory):
     dropin = inventory[CONFIGURED_UNITS + "/systemd-resolved.service.d/10-no-credentials.conf"]
     if dropin["type"] != "file" or dropin["mode"] != 0o644:
         raise ValueError("resolved credential override differs")
-    wants = configured.get("multi-user.target.wants", {})
-    if (wants.get("type") != "directory"
-            or set(_children(inventory, CONFIGURED_UNITS + "/multi-user.target.wants"))
-            != {"systemd-networkd.service", "systemd-resolved.service"}):
-        raise ValueError("appliance boot dependencies differ")
-    expected_links = {
-        CONFIGURED_UNITS + "/default.target": "/usr/lib/systemd/system/zrpc.target",
-        CONFIGURED_UNITS + "/multi-user.target.wants/systemd-networkd.service":
-            "/usr/lib/systemd/system/systemd-networkd.service",
-        CONFIGURED_UNITS + "/multi-user.target.wants/systemd-resolved.service":
-            "/usr/lib/systemd/system/systemd-resolved.service",
-    }
-    for path, target in expected_links.items():
+    for name, expected in RETAINED_WANTS.items():
+        path = CONFIGURED_UNITS + "/" + name
+        if (configured.get(name, {}).get("type") != "directory"
+                or set(_children(inventory, path)) != expected):
+            raise ValueError("appliance boot dependencies differ: " + path)
+    for path, target in RETAINED_UNIT_LINKS.items():
         if inventory.get(path, {}).get("type") != "symlink" or inventory[path].get("target") != target:
             raise ValueError("appliance unit symlink differs: " + path)
     for unit in MASKED_UNITS:
@@ -404,10 +421,7 @@ def inspect(reader, image, scratch, *, env=ENV, pass_fds=()):
                 pending.append((child, entry["inode"], inode))
             elif entry["type"] == "symlink":
                 parent = child.rsplit("/", 1)[0] if "/" in child else ""
-                if parent in UNIT_DIRS or child in {
-                    CONFIGURED_UNITS + "/multi-user.target.wants/systemd-networkd.service",
-                    CONFIGURED_UNITS + "/multi-user.target.wants/systemd-resolved.service",
-                }:
+                if parent in UNIT_DIRS or child in RETAINED_UNIT_LINKS:
                     entry["target"] = _unit_target(
                         reader, image, entry, scratch, image_stat.st_size,
                         env=env, pass_fds=pass_fds)

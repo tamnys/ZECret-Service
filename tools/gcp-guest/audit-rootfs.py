@@ -36,7 +36,7 @@ SIGNED_DISK_ELFS = {
     "usr/lib/x86_64-linux-gnu/libkeyutils.so.1": (22448, "e5d5a7450d08eff7d4bbcaac75ef2b94d3447c81a1b2ddf3ab85d2de4709a9a8", 0o444),
 }
 MASKED_UNITS = (
-    "ssh.service", "sshd.service", "ssh.socket",
+    "ssh.service", "sshd.service", "ssh.socket", "ctrl-alt-del.target",
     "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service",
     "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target",
     "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service",
@@ -54,6 +54,23 @@ APPLIANCE_UNITS = (
 PROTECTED_UNITS = (*APPLIANCE_UNITS, "var-lib-zebra.mount", "multi-user.target", "systemd-resolved.service")
 RESOLVED_CREDENTIAL_DROPIN = "10-no-credentials.conf"
 RESOLVED_CREDENTIAL_DROPIN_BYTES = b"[Service]\nImportCredential=\n"
+RETAINED_UNIT_LINKS = {
+    "dbus-org.freedesktop.network1.service": "systemd-networkd.service",
+    "dbus-org.freedesktop.resolve1.service": "systemd-resolved.service",
+    "sockets.target.wants/systemd-networkd.socket": "systemd-networkd.socket",
+    "network-online.target.wants/systemd-networkd-wait-online.service":
+        "systemd-networkd-wait-online.service",
+    "local-fs.target.wants/run-lock.mount": "run-lock.mount",
+}
+REMOVED_GENERATED_UNIT_PATHS = (
+    "etc/systemd/system/getty.target.wants",
+    "etc/systemd/system/sysinit.target.wants",
+    "etc/systemd/system/systemd-journald.service.wants",
+    "etc/systemd/system/timers.target.wants",
+    "etc/systemd/user",
+    "etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
+    "etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
+)
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
 # units must also be checked on the exact booted image; they do not exist in a
 # finalized rootfs and this audit does not claim to check their later output.
@@ -143,6 +160,17 @@ def audit_appliance_units(root):
         path = wants / unit
         if not path.is_symlink() or path.readlink() != Path("/usr/lib/systemd/system") / unit:
             raise ValueError("appliance network dependency differs")
+    for relative, target in RETAINED_UNIT_LINKS.items():
+        path = configured / relative
+        if not path.is_symlink() or path.readlink() != Path("/usr/lib/systemd/system") / target:
+            raise ValueError("retained system unit link differs: " + relative)
+    for directory in ("sockets.target.wants", "network-online.target.wants",
+                      "local-fs.target.wants"):
+        wanted = {Path(relative).name for relative in RETAINED_UNIT_LINKS
+                  if relative.startswith(directory + "/")}
+        path = configured / directory
+        if path.is_symlink() or not path.is_dir() or {child.name for child in path.iterdir()} != wanted:
+            raise ValueError("retained system unit wants differ: " + directory)
 
     additions = protected_unit_additions(protected_aliases(root))
     for relative in UNIT_DIRS:
@@ -329,6 +357,12 @@ def audit(root):
     for name in ("opt", "usr/local", "etc/opt"):
         if present(root / name):
             raise ValueError("postinst-generated path remains: " + name)
+    for name in ("var/lib/dpkg", "var/lib/apt", "var/cache/apt"):
+        if present(root / name):
+            raise ValueError("package-manager metadata remains: " + name)
+    for name in REMOVED_GENERATED_UNIT_PATHS:
+        if present(root / name):
+            raise ValueError("generated startup path remains: " + name)
     if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
         raise ValueError("signed mount ELF identity absent")
     mount = root / "usr/bin/mount"
