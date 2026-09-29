@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "status": "observed-stock-candidate-unapproved",
+  "observed_on": "2026-09-25",
+  "node": "prod9",
+  "region": "US-WEST-1",
+  "os_image": "dstack-0.5.9-bd369a8c",
+  "os_image_sha256": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+  "os_source_commit": "e3655d1390feee3736476f4bda35c4354b4a12fc",
+  "dstack_source_commit": "282eeb27d22d8f091ad0fa5a90e638f85cf68751",
+  "kms_catalog_name": "phala-prod9",
+  "kms_catalog_id": "kms_opjg1KBD",
+  "kms_endpoint": "https://kms.dstack-pha-prod9.phala.network",
+  "kms_reported_version": "v0.6.0-rc0 (git:cb4c3736c5f9323440a3)",
+  "zebra_release_lock_sha256": "2dd2f2d12b9b17e5c00781da6f8bb78b85127329e26a4325b371d0439260c0ae",
+  "private_accepted": false,
+  "deployment_enabled": false
+}

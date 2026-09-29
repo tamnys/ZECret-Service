@@ -1,0 +1,15 @@
+[network]
+network = "Testnet"
+listen_addr = "127.0.0.1:18233"
+cache_dir = false
+
+[state]
+cache_dir = "/var/lib/zebra"
+
+[rpc]
+listen_addr = "127.0.0.1:18232"
+cookie_dir = "/run/zrpc-node"
+enable_cookie_auth = true
+
+[tracing]
+filter = "off"
