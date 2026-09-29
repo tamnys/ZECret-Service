@@ -207,6 +207,126 @@ jobs:
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           git -C "$source" diff --quiet
 
+      - name: Probe a static native import producer in an empty-root container
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/native-cargo"
+          probe="$scratch/static-producer-probe"
+          mkdir "$probe" "$scratch/static-target" "$probe/smoke"
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/static-target,dst=/target" \
+            --mount "type=bind,src=$probe,dst=/output" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            sh -ceu '
+              ulimit -c 0
+              test -f /usr/lib/x86_64-linux-gnu/libc.a
+              test -f /usr/lib/x86_64-linux-gnu/libm.a
+              cargo rustc --locked --offline --release -p zrpc-lifecycle \
+                --bin zrpc-gcp-lifecycle -- -C target-feature=+crt-static
+              cp /target/release/zrpc-gcp-lifecycle /output/producer
+              chmod 0555 /output/producer
+              if readelf -l /output/producer | grep -q INTERP; then
+                echo "static producer retained an ELF interpreter" >&2; exit 1
+              fi
+              if readelf -d /output/producer | grep -q NEEDED; then
+                echo "static producer retained a shared-library dependency" >&2; exit 1
+              fi
+              sha256sum /usr/lib/x86_64-linux-gnu/libc.a \
+                /usr/lib/x86_64-linux-gnu/libm.a > /output/static-libraries.sha256
+            '
+          cat > "$probe/Dockerfile" <<'EOF'
+          FROM scratch
+          COPY producer /producer
+          ENTRYPOINT ["/producer"]
+          EOF
+          image="zrpc-static-import-probe:$GITHUB_SHA"
+          docker build --network none --pull=false -q -t "$image" "$probe"
+          truncate -s 1073741824 "$probe/smoke/disk.raw"
+          docker run --rm --pull=never --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$probe/smoke,dst=/workspace" \
+            --workdir /workspace "$image" pack-import \
+              --raw /workspace/disk.raw --archive /workspace/disk.tar.gz \
+              > "$probe/smoke/receipt.json"
+          python3 -I - "$probe" "$GITHUB_SHA" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+
+          probe = Path(sys.argv[1])
+          revision = sys.argv[2]
+          def digest(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+          receipt = json.loads((probe / "smoke/receipt.json").read_bytes())
+          producer = digest(probe / "producer")
+          expected = {
+              "schema_version": 2,
+              "producer": "zrpc-gcp-lifecycle-rust",
+              "producer_executable_sha256": producer,
+              "archive_sha256": digest(probe / "smoke/disk.tar.gz"),
+              "raw_disk_sha256": digest(probe / "smoke/disk.raw"),
+              "raw_disk_bytes": 1073741824,
+              "oldgnu_single_member_checked": True,
+              "private_mode_approved": False,
+              "toolchain_reviewed": False,
+          }
+          if receipt != expected:
+              raise ValueError("static producer receipt differs from synthetic media or binary")
+          libraries = {}
+          for line in (probe / "static-libraries.sha256").read_text().splitlines():
+              value, path = line.split(maxsplit=1)
+              if path not in ("/usr/lib/x86_64-linux-gnu/libc.a",
+                              "/usr/lib/x86_64-linux-gnu/libm.a"):
+                  raise ValueError("unexpected static library identity")
+              libraries[path] = value
+          if len(libraries) != 2:
+              raise ValueError("static library identities are incomplete")
+          report = {
+              "schema_version": 1,
+              "status": "diagnostic-static-import-producer-probe",
+              "source_commit": revision,
+              "producer_sha256": producer,
+              "static_library_sha256": libraries,
+              "no_elf_interpreter": True,
+              "no_shared_library_dependency": True,
+              "empty_root_pack_import_passed": True,
+              "reproducible": False,
+              "private_mode_approved": False,
+          }
+          (probe / "diagnostic.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+          print(json.dumps(report, sort_keys=True))
+          PY
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$source" diff --quiet
+
+      - name: Upload the separate static-producer diagnostic
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-static-probe-${{ github.sha }}
+          path: |
+            ${{ github.workspace }}/native-cargo/static-producer-probe/producer
+            ${{ github.workspace }}/native-cargo/static-producer-probe/diagnostic.json
+            ${{ github.workspace }}/native-cargo/static-producer-probe/static-libraries.sha256
+            ${{ github.workspace }}/native-cargo/static-producer-probe/smoke/receipt.json
+          if-no-files-found: error
+
       - name: Package and verify the matched-build bundle
         shell: bash
         run: |
