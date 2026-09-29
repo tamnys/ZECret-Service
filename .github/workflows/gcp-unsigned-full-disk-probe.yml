@@ -14,7 +14,7 @@ on:
         default: false
         type: boolean
       compare_rebuild:
-        description: Build the same unsigned synthetic disk twice and report the first changed root byte
+        description: Build twice and report root and full-disk byte differences
         required: true
         default: false
         type: boolean
