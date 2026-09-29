@@ -113,6 +113,46 @@ class DiagnosticDiskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "output set differs"):
             diagnostic.inspect(stage, self.root, self.root, self.root, {})
 
+    def test_report_exposes_verified_root_and_hash_partition_digests(self):
+        stage = self.make_output(gpt_fixture.synthetic_disk())
+        output = stage / "output"
+        boot = {"uki_sha256": diagnostic.sha256((output / "zrpc-gcp.efi").read_bytes()),
+                "uki_sections": {
+                    ".linux": {"sha256": diagnostic.sha256(
+                        (output / "zrpc-gcp.vmlinuz").read_bytes())},
+                    ".initrd": {"sha256": diagnostic.sha256(
+                        (output / "zrpc-gcp.initrd").read_bytes())}}}
+        hashes = {"root_partition_guid": "root-guid",
+                  "verity_partition_sha256": "a" * 64}
+        workload = {"status": diagnostic.rootfs.STATUS,
+                    "raw_disk_sha256": diagnostic.sha256((output / "zrpc-gcp.raw").read_bytes()),
+                    "root_partition_guid": "root-guid",
+                    "root_partition_sha256": "b" * 64,
+                    "reader_executable_matches_signed_package": True,
+                    "private_mode_approved": False,
+                    "overlay_entries_checked": {"file": 2}}
+        with (mock.patch.object(diagnostic.gpt, "inspect"),
+              mock.patch.object(diagnostic.esp, "inspect", return_value=boot),
+              mock.patch.object(diagnostic.verity, "inspect", return_value=hashes),
+              mock.patch.object(diagnostic.roothash, "inspect",
+                                return_value={"roothash": "c" * 64}),
+              mock.patch.object(diagnostic.rootfs, "inspect", return_value=workload),
+              mock.patch.object(diagnostic.packages, "verify", return_value={
+                  "status": "diagnostic_supplied_package_lists_match_only"}),
+              mock.patch.object(diagnostic.outer, "checked_split_initrd")):
+            report = diagnostic.inspect(stage, self.root, self.root, self.root, {})
+            self.assertEqual(report["root_partition_sha256"], "b" * 64)
+            self.assertEqual(report["verity_partition_sha256"], "a" * 64)
+            self.assertTrue(report["gpt_esp_verity_uki_inspected"])
+            for source, field in ((workload, "root_partition_sha256"),
+                                  (hashes, "verity_partition_sha256")):
+                with self.subTest(field=field):
+                    original = source[field]
+                    source[field] = "not-a-digest"
+                    with self.assertRaisesRegex(ValueError, "synthetic workload bytes"):
+                        diagnostic.inspect(stage, self.root, self.root, self.root, {})
+                    source[field] = original
+
     def test_changed_workload_with_recomputed_hash_is_still_refused(self):
         inputs = self.root / "inputs"
         inputs.mkdir()

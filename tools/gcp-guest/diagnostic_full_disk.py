@@ -244,6 +244,10 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
     if (workload.get("status") != rootfs.STATUS
             or workload.get("raw_disk_sha256") != raw_sha
             or workload.get("root_partition_guid") != hashes.get("root_partition_guid")
+            or type(workload.get("root_partition_sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", workload["root_partition_sha256"])
+            or type(hashes.get("verity_partition_sha256")) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", hashes["verity_partition_sha256"])
             or workload.get("reader_executable_matches_signed_package") is not True
             or workload.get("private_mode_approved") is not False):
         raise ValueError("synthetic workload bytes did not match the raw root")
@@ -261,6 +265,8 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
     outer.require_unchanged_outputs(output, files)
     return {"raw_disk_sha256": raw_sha, "raw_disk_bytes": raw_size,
             "uki_sha256": boot["uki_sha256"], "roothash": binding["roothash"],
+            "root_partition_sha256": workload["root_partition_sha256"],
+            "verity_partition_sha256": hashes["verity_partition_sha256"],
             "synthetic_workload_files_checked": workload["overlay_entries_checked"]["file"],
             "gpt_esp_verity_uki_inspected": True,
             "installed_package_lists_matched": True,

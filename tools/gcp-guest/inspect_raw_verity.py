@@ -222,6 +222,8 @@ def inspect(raw_disk, expected_sha256, expected_bytes, sector_size,
             run_verity(toolchain, ["dump", str(hash_image)], root), data_bytes,
         )
         run_verity(toolchain, ["verify", str(data_image), str(hash_image), roothash], root)
+        with hash_image.open("rb") as stream:
+            hash_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     return {
         "status": "diagnostic-raw-root-verity-unapproved",
         "raw_disk_sha256": expected_sha256,
@@ -232,6 +234,7 @@ def inspect(raw_disk, expected_sha256, expected_bytes, sector_size,
         "root_partition_bytes": data_bytes,
         "verity_partition_guid": hash_guid,
         "verity_partition_bytes": hash_bytes,
+        "verity_partition_sha256": hash_sha256,
         "verity_header": header,
         "verity_userspace_verified": True,
         "signed_tool_archives_sha256": toolchain[3],
