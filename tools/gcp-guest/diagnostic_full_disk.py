@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -45,6 +46,7 @@ _package_spec.loader.exec_module(packages)
 
 STATUS = "diagnostic-unsigned-synthetic-full-disk-unapproved"
 BOOT_STATUS = "diagnostic-unsigned-early-init-boot-disk-unapproved"
+REBUILD_STATUS = "diagnostic-root-rebuild-comparison-unapproved"
 SYNTHETIC_MARKER = b"ZRPC_SYNTHETIC_UNEXECUTABLE_FULL_DISK_REHEARSAL"
 # The header satisfies the staging architecture check, but this is not a
 # runnable ELF: it has no entry point, program header, or loadable segments.
@@ -341,6 +343,74 @@ def build_boot(lock_path, inputs, stage, metadata, guest_archives,
                  boot_receipt=(rust_bundle, revision))
 
 
+def compare_root_rebuilds(first_stage, second_stage):
+    """Locate the first changed root byte in two source-identical diagnostics."""
+    if first_stage.resolve() == second_stage.resolve():
+        raise ValueError("two distinct rehearsal stages required")
+    manifest = outer.regular_bytes(first_stage / "candidate-manifest.json")
+    if manifest != outer.regular_bytes(second_stage / "candidate-manifest.json"):
+        raise ValueError("rebuilds do not have identical staged inputs")
+    disks = []
+    for stage in (first_stage, second_stage):
+        output = stage / "output"
+        raw = output / "zrpc-gcp.raw"
+        size, expected_sha = outer.checked_outputs(output)["zrpc-gcp.raw"]
+        layout = gpt.inspect(raw, expected_sha, size, outer.SECTOR_SIZE)
+        root = next(partition for partition in layout["partitions"]
+                    if partition["type"] == "root-x86-64")
+        disks.append((raw, size, expected_sha, root, layout["sector_size"]))
+    first, second = disks
+    if first[4] != second[4]:
+        raise ValueError("rebuild disk sector sizes differ")
+    starts = [item[3]["first_lba"] * item[4] for item in disks]
+    lengths = [(item[3]["last_lba"] - item[3]["first_lba"] + 1) * item[4]
+               for item in disks]
+    overlap = min(lengths)
+    descriptors = []
+    try:
+        for raw, size, _, _, _ in disks:
+            fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            descriptors.append(fd)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                raise ValueError("rebuild disk changed before comparison")
+        left_info, right_info = (os.fstat(fd) for fd in descriptors)
+        if (left_info.st_dev, left_info.st_ino) == (right_info.st_dev, right_info.st_ino):
+            raise ValueError("rebuilds refer to the same disk file")
+        first_difference = None
+        offset = 0
+        while offset < overlap:
+            count = min(1024 * 1024, overlap - offset)
+            left = gpt.read_at(descriptors[0], starts[0] + offset, count)
+            right = gpt.read_at(descriptors[1], starts[1] + offset, count)
+            if left != right:
+                first_difference = offset + next(index for index, pair in enumerate(zip(left, right))
+                                                 if pair[0] != pair[1])
+                break
+            offset += count
+        for fd, (_, size, expected_sha, _, _) in zip(descriptors, disks):
+            if os.fstat(fd).st_size != size or gpt.digest(fd, size) != expected_sha:
+                raise ValueError("rebuild disk changed during comparison")
+    finally:
+        for fd in descriptors:
+            os.close(fd)
+    return {"status": REBUILD_STATUS,
+            "source_manifest_sha256": sha256(manifest),
+            "first_root_partition": first[3],
+            "second_root_partition": second[3],
+            "root_partition_layout_identical": first[3] == second[3],
+            "first_root_partition_bytes": lengths[0],
+            "second_root_partition_bytes": lengths[1],
+            "root_partition_byte_identical": first_difference is None and lengths[0] == lengths[1],
+            "first_difference_kind": "byte" if first_difference is not None else
+                                     "length" if lengths[0] != lengths[1] else None,
+            "first_difference_root_offset_bytes": first_difference,
+            "first_difference_first_disk_offset_bytes": None if first_difference is None else starts[0] + first_difference,
+            "first_difference_second_disk_offset_bytes": None if first_difference is None else starts[1] + first_difference,
+            "production_image": False, "hardware_verified": False,
+            "private_mode_approved": False}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -361,9 +431,14 @@ def main(argv=None):
         if name == "build-boot":
             run.add_argument("--rust-bundle", required=True, type=Path)
             run.add_argument("--revision", required=True)
+    compare = sub.add_parser("compare-roots")
+    compare.add_argument("--first-stage", required=True, type=Path)
+    compare.add_argument("--second-stage", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.command == "create-inputs":
+        if args.command == "compare-roots":
+            report = compare_root_rebuilds(args.first_stage, args.second_stage)
+        elif args.command == "create-inputs":
             report = create_inputs(args.metadata, args.guest_archives,
                                    args.inputs, args.lock)
         elif args.command == "create-boot-inputs":
