@@ -18,8 +18,8 @@ use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
 
 mod attestation;
 pub use attestation::{
-    EndpointInspection, EndpointInspectionIssue, UnverifiedGcpEvidence, UnverifiedPublicEvidence,
-    VerifiedRpcSession,
+    EndpointInspection, EndpointInspectionIssue, PreviewRpcSession, PublicTestnetPreview,
+    UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
 };
 
 type BootstrapStream = TlsStream<Socks5Stream<RequirePassword<ProxySocket>>>;

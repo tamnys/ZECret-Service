@@ -14,6 +14,51 @@ pub const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 pub const EXECUTING_QUERIES: usize = 2;
 pub const QUEUED_QUERIES: usize = 4;
 pub const BACKEND_TIMEOUT_SECONDS: u64 = 15;
+/// Public Zebra testnet fixture shown as the preview's initial example.
+pub const PREVIEW_TESTNET_ADDRESS: &str = "tmTc6trRhbv96kGfA99i7vrFwb5p7BVFwc3";
+
+/// A checksum-validated Zcash testnet transparent P2PKH or P2SH address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestnetTransparentAddress(String);
+
+struct TransparentReceiver;
+
+impl zcash_address::TryFromAddress for TransparentReceiver {
+    type Error = ();
+
+    fn try_from_transparent_p2pkh(
+        _network: zcash_protocol::consensus::NetworkType,
+        _data: [u8; 20],
+    ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
+        Ok(Self)
+    }
+
+    fn try_from_transparent_p2sh(
+        _network: zcash_protocol::consensus::NetworkType,
+        _data: [u8; 20],
+    ) -> Result<Self, zcash_address::ConversionError<Self::Error>> {
+        Ok(Self)
+    }
+}
+
+impl TestnetTransparentAddress {
+    pub fn parse(value: &str) -> Result<Self, ProtocolError> {
+        let address = zcash_address::ZcashAddress::try_from_encoded(value)
+            .map_err(|_| invalid_parameters())?;
+        address
+            .clone()
+            .convert_if_network::<TransparentReceiver>(zcash_protocol::consensus::NetworkType::Test)
+            .map_err(|_| invalid_parameters())?;
+        if address.encode() != value {
+            return Err(invalid_parameters());
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,6 +182,9 @@ pub enum Method {
         txid: Hash32,
         verbosity: Verbosity,
     },
+    GetPreviewAddressBalance {
+        address: TestnetTransparentAddress,
+    },
 }
 
 impl Method {
@@ -147,6 +195,7 @@ impl Method {
             Self::GetBlockHash { .. } => "getblockhash",
             Self::GetBlockHeader { .. } => "getblockheader",
             Self::GetRawTransaction { .. } => "getrawtransaction",
+            Self::GetPreviewAddressBalance { .. } => "getaddressbalance",
         }
     }
 }
@@ -183,6 +232,25 @@ struct WireRequest {
     method: String,
     #[serde(default)]
     params: Vec<Value>,
+}
+
+/// Keep duplicate nested keys visible for the single transparent address selector.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddressBalanceWireRequest {
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
+    #[serde(rename = "id")]
+    _id: RequestId,
+    #[serde(rename = "method")]
+    _method: String,
+    params: [AddressBalanceSelection; 1],
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddressBalanceSelection {
+    addresses: [String; 1],
 }
 
 fn invalid_parameters() -> ProtocolError {
@@ -243,6 +311,13 @@ pub fn parse_request(bytes: &[u8]) -> Result<Request, ProtocolError> {
             txid: Hash32::parse(txid)?,
             verbosity: Verbosity::parse(verbosity)?,
         },
+        ("getaddressbalance", _) => {
+            let strict: AddressBalanceWireRequest =
+                serde_json::from_slice(bytes).map_err(|_| invalid_parameters())?;
+            Method::GetPreviewAddressBalance {
+                address: TestnetTransparentAddress::parse(&strict.params[0].addresses[0])?,
+            }
+        }
         (
             "getblockchaininfo" | "getblockcount" | "getblockhash" | "getblockheader"
             | "getrawtransaction",
@@ -351,5 +426,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn address_balance_accepts_only_one_valid_testnet_transparent_address() {
+        let request = |params: Value| {
+            serde_json::to_vec(&json!({
+                "jsonrpc": "2.0", "id": 1, "method": "getaddressbalance", "params": params
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            parse_request(&request(json!([{"addresses": [PREVIEW_TESTNET_ADDRESS]}])))
+                .unwrap()
+                .method(),
+            &Method::GetPreviewAddressBalance {
+                address: TestnetTransparentAddress::parse(PREVIEW_TESTNET_ADDRESS).unwrap(),
+            }
+        );
+        for address in [
+            "tm9iMLAuYMzJ6jtFLcA7rzUmfreGuKvr7Ma",
+            "t26YoyZ1iPgiMEWL4zGUm74eVWfhyDMXzY2",
+        ] {
+            assert_eq!(
+                parse_request(&request(json!([{"addresses": [address]}])))
+                    .unwrap()
+                    .method(),
+                &Method::GetPreviewAddressBalance {
+                    address: TestnetTransparentAddress::parse(address).unwrap(),
+                }
+            );
+        }
+        for params in [
+            json!([]),
+            json!([{"addresses": ["tmArbitraryAddress"]}]),
+            json!([{"addresses": ["t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs"]}]),
+            json!([{"addresses": ["zs1z7rejlpsa98s2rrrfkwmaxu53e4ue0ulcrw0h4x5g8jl04tak0d3mm47vdtahatqrlkngh9slya"]}]),
+            json!([{"addresses": [PREVIEW_TESTNET_ADDRESS, PREVIEW_TESTNET_ADDRESS]}]),
+            json!([{"addresses": [PREVIEW_TESTNET_ADDRESS], "extra": true}]),
+            json!([[PREVIEW_TESTNET_ADDRESS]]),
+        ] {
+            assert_eq!(
+                parse_request(&request(params)).unwrap_err().code,
+                ErrorCode::InvalidParameters
+            );
+        }
+        let duplicate_address_key = br#"{"jsonrpc":"2.0","id":1,"method":"getaddressbalance","params":[{"addresses":["tmArbitraryAddress"],"addresses":["tmTc6trRhbv96kGfA99i7vrFwb5p7BVFwc3"]}]}"#;
+        assert_eq!(
+            parse_request(duplicate_address_key).unwrap_err().code,
+            ErrorCode::InvalidParameters
+        );
     }
 }

@@ -32,6 +32,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 # Maintained header/transaction decoding and identifier calculation only.
 zcash_primitives = { version = "=0.30.1", default-features = false }
 zcash_protocol = { version = "=0.10.5", default-features = false }
+zcash_address = { version = "=0.13.0", default-features = false }
 
 # Maintained dstack runtime-event encoding/replay, pinned to the catalog OS source.
 cc-eventlog = { git = "https://github.com/Dstack-TEE/dstack", rev = "282eeb27d22d8f091ad0fa5a90e638f85cf68751", version = "=0.5.9" }

@@ -78,6 +78,8 @@ impl FixtureServer {
                     Verbosity::Verbose => fixture["transaction"].clone(),
                 }
             }
+            // This route is synthetic; only LocalNode queries the real Zebra node.
+            Method::GetPreviewAddressBalance { .. } => json!({"balance": 0, "received": 0}),
         };
         let response = json!({"jsonrpc":"2.0","id":request.id(),"result":result});
         check_response_bound(&response)?;
@@ -129,6 +131,19 @@ mod tests {
             assert_eq!(response["id"], request["id"]);
             assert!(response.get("result").is_some());
         }
+    }
+
+    #[test]
+    fn fixed_address_balance_fixture_is_synthetic() {
+        let bytes = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getaddressbalance",
+            "params": [{"addresses": [zrpc_protocol::PREVIEW_TESTNET_ADDRESS]}],
+        }))
+        .unwrap();
+        let response = FixtureServer::handle(&bytes, NodeState::FixtureAvailable).unwrap();
+        assert_eq!(response["result"], json!({"balance": 0, "received": 0}));
     }
 
     #[test]

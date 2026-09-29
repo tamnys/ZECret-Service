@@ -276,6 +276,9 @@ fn params(method: &Method) -> Value {
         Method::GetRawTransaction { txid, verbosity } => {
             json!([txid.as_str(), u8::from(*verbosity == Verbosity::Verbose)])
         }
+        Method::GetPreviewAddressBalance { address } => {
+            json!([{"addresses": [address.as_str()]}])
+        }
     }
 }
 
@@ -320,6 +323,12 @@ fn validate_result(method: &Method, result: &Value) -> Result<(), SafeError> {
         }
         Method::GetBlockCount => result.as_u64().is_some_and(|n| n <= u32::MAX as u64),
         Method::GetBlockHash { .. } => is_hash(result),
+        Method::GetPreviewAddressBalance { .. } => {
+            result.get("balance").and_then(Value::as_u64).is_some()
+                && result
+                    .get("received")
+                    .is_none_or(|received| received.as_u64().is_some())
+        }
         Method::GetBlockHeader {
             hash,
             verbosity: Verbosity::Verbose,
@@ -503,6 +512,7 @@ mod tests {
                                         } else { chain() },
                                         "getblockcount" => json!(42),
                                         "getblockhash" => json!("ab".repeat(32)),
+                                        "getaddressbalance" => json!({"balance": 7, "received": 11}),
                                         "getblockheader" if params[1] == true => serde_json::from_str(HEADER_JSON).unwrap(),
                                         "getrawtransaction" if params[1] == 1 => json!({"txid":TX_ID, "hex":TX.trim()}),
                                         "getblockheader" => json!(HEADER.trim()),
@@ -579,6 +589,80 @@ mod tests {
         }
         assert!(!format!("{:?}", auth()).contains("SYNTHETIC_COOKIE_ONLY"));
         assert!(CookieAuth::from_cookie(b"__cookie__:fixture\r\n").is_ok());
+    }
+
+    #[tokio::test]
+    async fn address_balance_forwards_only_validated_testnet_transparent_selection() {
+        let fake = fake(Mode::Good).await;
+        let exact = json!([{"addresses": [zrpc_protocol::PREVIEW_TESTNET_ADDRESS]}]);
+        let response = fake
+            .node
+            .handle(&request("getaddressbalance", exact.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response["id"], MARKER);
+        assert_eq!(response["result"], json!({"balance": 7, "received": 11}));
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].body["method"], "getblockchaininfo");
+        assert_eq!(seen[1].body["method"], "getaddressbalance");
+        assert_eq!(seen[1].body["params"], exact);
+        assert_eq!(seen[0].connection, seen[1].connection);
+        drop(seen);
+
+        let second = "tm9iMLAuYMzJ6jtFLcA7rzUmfreGuKvr7Ma";
+        let second_params = json!([{"addresses": [second]}]);
+        fake.node
+            .handle(&request("getaddressbalance", second_params.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            fake.seen.lock().unwrap().last().unwrap().body["params"],
+            second_params
+        );
+
+        for selection in [
+            json!([{"addresses": ["tmArbitraryAddress"]}]),
+            json!([{"addresses": ["t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs"]}]),
+            json!([{"addresses": [zrpc_protocol::PREVIEW_TESTNET_ADDRESS, "tmArbitraryAddress"]}]),
+        ] {
+            assert_eq!(
+                fake.node
+                    .handle(&request("getaddressbalance", selection))
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidParameters
+            );
+        }
+        assert_eq!(fake.seen.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn address_balance_requires_unsigned_integer_amounts() {
+        let method = Method::GetPreviewAddressBalance {
+            address: zrpc_protocol::TestnetTransparentAddress::parse(
+                zrpc_protocol::PREVIEW_TESTNET_ADDRESS,
+            )
+            .unwrap(),
+        };
+        for valid in [json!({"balance": 0}), json!({"balance": 7, "received": 11})] {
+            assert!(validate_result(&method, &valid).is_ok());
+        }
+        for invalid in [
+            json!(7),
+            json!({"received": 11}),
+            json!({"balance": -1}),
+            json!({"balance": 0.5}),
+            json!({"balance": "7"}),
+            json!({"balance": 7, "received": null}),
+            json!({"balance": 7, "received": "11"}),
+        ] {
+            assert_eq!(
+                validate_result(&method, &invalid).unwrap_err().code,
+                ErrorCode::InvalidBackendResponse
+            );
+        }
     }
 
     #[tokio::test]

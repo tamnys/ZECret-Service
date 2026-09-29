@@ -155,6 +155,50 @@ async fn synthetic_peer_report_data_never_authenticates_or_leaks_into_diagnostic
     peer.await.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn public_preview_rejects_synthetic_quote_before_any_rpc() {
+    let (mut evidence, close, peer) = received_fixture().await;
+    let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+    evidence._session.origin = TransportOrigin::Managed(tor);
+    let (report, session) = evidence.inspect_for_public_preview(b"{}").unwrap();
+    assert!(session.is_none());
+    assert!(!report.public_preview_passed());
+    assert_eq!(report.freshness, InspectionStatus::NotChecked);
+    assert_eq!(report.live_key_binding, InspectionStatus::NotChecked);
+    assert_eq!(
+        report
+            .hardware_evidence
+            .unwrap()
+            .quote
+            .hardware_authenticity,
+        InspectionStatus::Rejected
+    );
+    assert!(!report.private_accepted && !report.query_sent);
+    drop(close);
+    peer.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn public_preview_rejects_challenge_mismatch_before_quote_and_rpc() {
+    let (mut evidence, close, peer) = received_fixture().await;
+    let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+    evidence._session.origin = TransportOrigin::Managed(tor);
+    evidence.nonce[0] ^= 1;
+    let (report, session) = evidence.inspect_for_public_preview(b"{}").unwrap();
+    assert!(session.is_none());
+    assert_eq!(
+        report.issue,
+        Some(EndpointInspectionIssue::ChallengeMismatch)
+    );
+    assert_eq!(report.freshness, InspectionStatus::Rejected);
+    assert!(report.hardware_evidence.is_none());
+    assert!(!report.public_preview_passed());
+    drop(close);
+    peer.await.unwrap();
+}
+
 #[tokio::test]
 async fn expired_retained_session_rejects_before_quote_inspection() {
     let (mut evidence, close, peer) = received_fixture().await;

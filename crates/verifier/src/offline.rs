@@ -54,6 +54,15 @@ pub struct OfflineInspection {
     pub issue: Option<InspectionIssue>,
 }
 
+/// Strict hardware and live-key diagnostic only. It carries no workload
+/// identity comparison or private-query authority.
+#[derive(Debug, Serialize)]
+pub struct BoundQuoteInspection {
+    #[serde(flatten)]
+    pub quote: OfflineInspection,
+    pub authenticated_report_data_match: InspectionStatus,
+}
+
 impl OfflineInspection {
     fn new(now: Option<u64>, time_source: &'static str) -> Self {
         Self {
@@ -84,6 +93,54 @@ impl OfflineInspection {
 /// Collateral is untrusted signed input; no PCCS or other HTTP call is available.
 pub fn inspect_quote(quote: &[u8], collateral_json: &[u8]) -> OfflineInspection {
     inspect_quote_with_claims(quote, collateral_json, |_| {})
+}
+
+/// Compare signed TDX REPORTDATA only after the production-root QVL and strict
+/// current-time TDX security policy pass. The expected bytes must come from
+/// the caller's private TLS exporter; this function cannot attest that origin.
+pub fn inspect_quote_and_report_data(
+    quote: &[u8],
+    collateral_json: &[u8],
+    expected_report_data: &[u8; 64],
+) -> BoundQuoteInspection {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(now) => inspect_quote_and_report_data_at(
+            quote,
+            collateral_json,
+            expected_report_data,
+            now.as_secs(),
+            "system_clock",
+        ),
+        Err(_) => BoundQuoteInspection {
+            quote: inspect_quote(quote, collateral_json),
+            authenticated_report_data_match: InspectionStatus::NotChecked,
+        },
+    }
+}
+
+fn inspect_quote_and_report_data_at(
+    quote: &[u8],
+    collateral_json: &[u8],
+    expected_report_data: &[u8; 64],
+    now: u64,
+    time_source: &'static str,
+) -> BoundQuoteInspection {
+    let mut binding = InspectionStatus::NotChecked;
+    let quote = inspect_at_with_claims(quote, collateral_json, now, time_source, |claims| {
+        binding = if claims
+            .report
+            .as_td10()
+            .is_some_and(|td| td.report_data == *expected_report_data)
+        {
+            InspectionStatus::Verified
+        } else {
+            InspectionStatus::Rejected
+        };
+    });
+    BoundQuoteInspection {
+        quote,
+        authenticated_report_data_match: binding,
+    }
 }
 
 // The callback receives an immutable borrow only after hardware and strict
@@ -271,6 +328,59 @@ mod tests {
         assert_eq!(result.tcb_status.as_deref(), Some("UpToDate"));
         assert_no_private_authority(&result);
         assert!(!serde_json::to_string(&result).unwrap().contains("ppid"));
+    }
+    #[test]
+    fn bound_quote_keeps_report_data_unchecked_when_strict_qvl_rejects() {
+        let parsed = Quote::parse(QUOTE).unwrap();
+        let expected = parsed.report.as_td10().unwrap().report_data;
+        let rejected = inspect_quote_and_report_data_at(
+            QUOTE,
+            COLLATERAL,
+            &expected,
+            FIXTURE_TIME,
+            "historical_upstream_fixture_test",
+        );
+        assert_eq!(
+            rejected.quote.hardware_authenticity,
+            InspectionStatus::Verified
+        );
+        assert_eq!(rejected.quote.security_policy, InspectionStatus::Rejected);
+        assert_eq!(
+            rejected.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+        assert_eq!(rejected.quote.workload_policy, InspectionStatus::NotChecked);
+        assert!(!rejected.quote.private_accepted);
+
+        let mut wrong = expected;
+        wrong[0] ^= 1;
+        let mismatch = inspect_quote_and_report_data_at(
+            QUOTE,
+            COLLATERAL,
+            &wrong,
+            FIXTURE_TIME,
+            "historical_upstream_fixture_test",
+        );
+        assert_eq!(
+            mismatch.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+
+        let expired = inspect_quote_and_report_data_at(
+            QUOTE,
+            COLLATERAL,
+            &expected,
+            FIXTURE_TIME + 2,
+            "historical_upstream_fixture_test",
+        );
+        assert_eq!(
+            expired.quote.hardware_authenticity,
+            InspectionStatus::Rejected
+        );
+        assert_eq!(
+            expired.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
     }
     #[test]
     fn expired_and_not_yet_valid_collateral_fail() {

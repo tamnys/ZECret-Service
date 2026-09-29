@@ -13,6 +13,41 @@ struct SocketPaths {
     proxy: PathBuf,
 }
 
+#[test]
+fn stock_preview_socket_exception_is_exact_and_private_path_stays_strict() {
+    let stock = Path::new(STOCK_DSTACK_SOCKET_PATH);
+    assert!(backend_permissions_ok(
+        stock,
+        0o777,
+        0,
+        BackendAccess::StockPreview
+    ));
+    assert!(!backend_permissions_ok(
+        stock,
+        0o777,
+        0,
+        BackendAccess::Private
+    ));
+    assert!(!backend_permissions_ok(
+        stock,
+        0o777,
+        10002,
+        BackendAccess::StockPreview
+    ));
+    assert!(!backend_permissions_ok(
+        Path::new("/run/other.sock"),
+        0o777,
+        0,
+        BackendAccess::StockPreview
+    ));
+    assert!(backend_permissions_ok(
+        stock,
+        0o600,
+        0,
+        BackendAccess::Private
+    ));
+}
+
 impl SocketPaths {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
