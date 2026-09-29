@@ -521,6 +521,8 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
                               inrelease, index, builder_archives, workspace)
     verity = context.verity.inspect(raw, raw_sha256, raw_bytes, SECTOR_SIZE,
                                     inrelease, index, builder_archives, workspace)
+    if verity.get("one_byte_root_change_rejected") is not True:
+        raise ValueError("raw root did not pass the signed verity negative check")
     binding = context.roothash.inspect(gpt, esp, verity, raw_sha256, raw_bytes)
     rootfs = context.rootfs.inspect(raw, raw_sha256, raw_bytes, SECTOR_SIZE,
                                     gpt, verity, inrelease, index, builder_archives,

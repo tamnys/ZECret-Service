@@ -95,9 +95,13 @@ class RawVerityInspectorTests(unittest.TestCase):
                     self.assertEqual(report["verity_partition_sha256"],
                                      hashlib.sha256(disk[hash_start:hash_end]).hexdigest())
                     self.assertTrue(report["verity_userspace_verified"])
+                    self.assertTrue(report["one_byte_root_change_rejected"])
                     self.assertIs(report["private_mode_approved"], False)
             self.assertEqual([call.args[1][0] for call in run.call_args_list],
-                             ["dump", "verify", "dump", "verify"])
+                             ["dump", "verify", "verify",
+                              "dump", "verify", "verify"])
+            self.assertTrue(run.call_args_list[2].kwargs["expect_verify_rejection"])
+            self.assertTrue(run.call_args_list[5].kwargs["expect_verify_rejection"])
 
     def signed_verity_partition_pair(self):
         inrelease, index, archives = self.signed_inputs()
@@ -135,6 +139,7 @@ class RawVerityInspectorTests(unittest.TestCase):
         report = verity.inspect(*args)
         self.assertEqual(report["status"], "diagnostic-raw-root-verity-unapproved")
         self.assertTrue(report["verity_userspace_verified"])
+        self.assertTrue(report["one_byte_root_change_rejected"])
         self.assertEqual(report["verity_header"]["data_blocks"], 5)
         self.assertEqual(report["verity_partition_sha256"],
                          hashlib.sha256(hashes).hexdigest())

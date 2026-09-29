@@ -251,6 +251,7 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
             or not re.fullmatch(r"[0-9a-f]{64}", workload["root_partition_sha256"])
             or type(hashes.get("verity_partition_sha256")) is not str
             or not re.fullmatch(r"[0-9a-f]{64}", hashes["verity_partition_sha256"])
+            or hashes.get("one_byte_root_change_rejected") is not True
             or workload.get("reader_executable_matches_signed_package") is not True
             or workload.get("private_mode_approved") is not False):
         raise ValueError("synthetic workload bytes did not match the raw root")
@@ -272,6 +273,7 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
             "root_partition_sha256": workload["root_partition_sha256"],
             **superblock,
             "verity_partition_sha256": hashes["verity_partition_sha256"],
+            "one_byte_root_change_rejected": True,
             "synthetic_workload_files_checked": workload["overlay_entries_checked"]["file"],
             "gpt_esp_verity_uki_inspected": True,
             "installed_package_lists_matched": True,
