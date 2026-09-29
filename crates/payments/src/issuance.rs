@@ -38,9 +38,9 @@ impl std::error::Error for IssuanceError {}
 /// The same issuer key and challenge must be configured for every purchaser
 /// and redeemer in this testnet POC. Neither value varies by purchase.
 pub struct IssuerPublic {
-    spki: Vec<u8>,
-    key_id: [u8; 32],
-    challenge: CommonChallenge,
+    pub(crate) spki: Vec<u8>,
+    pub(crate) key_id: [u8; 32],
+    pub(crate) challenge: CommonChallenge,
 }
 
 impl IssuerPublic {
@@ -56,7 +56,7 @@ impl IssuerPublic {
         Self::new(canonical.expose().to_vec(), issuer_name)
     }
 
-    pub fn new(spki: Vec<u8>, issuer_name: &str) -> Result<Self, IssuanceError> {
+    pub(crate) fn new(spki: Vec<u8>, issuer_name: &str) -> Result<Self, IssuanceError> {
         if spki.is_empty() || u16::try_from(spki.len()).is_err() {
             return Err(IssuanceError);
         }

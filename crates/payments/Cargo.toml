@@ -12,4 +12,5 @@ libc.workspace = true
 rusqlite.workspace = true
 rustix.workspace = true
 sha2.workspace = true
+tokio = { workspace = true, features = ["process"] }
 zeroize.workspace = true

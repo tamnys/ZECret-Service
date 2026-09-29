@@ -179,6 +179,10 @@ impl UnverifiedToken {
     pub(crate) fn authenticator(&self) -> &[u8] {
         &self.0[TOKEN_INPUT_LEN..]
     }
+
+    pub(crate) fn marker(&self) -> [u8; 32] {
+        Sha256::digest(&self.0).into()
+    }
 }
 
 impl fmt::Debug for UnverifiedToken {

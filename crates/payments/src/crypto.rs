@@ -9,6 +9,7 @@ use std::{
     path::Path,
     process::{Command, Stdio},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zeroize::Zeroize;
 
 use crate::store::SecretBytes;
@@ -198,6 +199,62 @@ pub(crate) fn invoke_cli(
     if outcome.is_err() {
         let _ = child.kill();
         let _ = child.wait();
+    }
+    outcome
+}
+
+/// Deadline-bound helper operation for an RPC connection. Dropping the future
+/// kills the child, so an expired verification cannot later admit a ticket.
+pub(crate) async fn invoke_rpc(
+    helper: &Path,
+    frame: &CryptoFrame,
+) -> Result<SecretBytes, CryptoFrameError> {
+    if !helper.is_absolute() {
+        return Err(CryptoFrameError);
+    }
+    let metadata = fs::symlink_metadata(helper).map_err(|_| CryptoFrameError)?;
+    let owner = rustix::process::geteuid().as_raw();
+    if !metadata.is_file()
+        || (metadata.uid() != owner && metadata.uid() != 0)
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(CryptoFrameError);
+    }
+    let mut child = tokio::process::Command::new(helper)
+        .env_clear()
+        .current_dir("/")
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| CryptoFrameError)?;
+    let outcome = async {
+        child
+            .stdin
+            .take()
+            .ok_or(CryptoFrameError)?
+            .write_all(frame.as_bytes())
+            .await
+            .map_err(|_| CryptoFrameError)?;
+        let mut output = Vec::new();
+        child
+            .stdout
+            .take()
+            .ok_or(CryptoFrameError)?
+            .take((frame.expected_response_len() + 1) as u64)
+            .read_to_end(&mut output)
+            .await
+            .map_err(|_| CryptoFrameError)?;
+        if output.len() != frame.expected_response_len() {
+            return Err(CryptoFrameError);
+        }
+        let status = child.wait().await.map_err(|_| CryptoFrameError)?;
+        frame.accept_response(status.success(), output)
+    }
+    .await;
+    if outcome.is_err() {
+        let _ = child.kill().await;
     }
     outcome
 }
