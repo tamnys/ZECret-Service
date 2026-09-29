@@ -7,6 +7,7 @@
 //! traffic until then.
 
 mod challenge;
+mod crypto;
 mod exchange;
 mod http;
 mod store;

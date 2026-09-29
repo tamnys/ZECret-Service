@@ -76,7 +76,8 @@ fn rfc9578_public_token_vector_one_verifies() {
     ));
     let valid = helper_call(1, &spki, &token, &[]);
     assert!(valid.status.success());
-    assert!(valid.stdout.is_empty() && valid.stderr.is_empty());
+    assert_eq!(valid.stdout, [1]);
+    assert!(valid.stderr.is_empty());
 
     let mut changed_input = token[..98].to_vec();
     changed_input[34] ^= 1;
@@ -185,7 +186,8 @@ fn blind_sign_finalize_round_trip_and_wrong_key_rejection() {
     token.extend_from_slice(&finalized.stdout);
     let redeemed = helper_call(1, &spki, &token, &[]);
     assert!(redeemed.status.success());
-    assert!(redeemed.stdout.is_empty() && redeemed.stderr.is_empty());
+    assert_eq!(redeemed.stdout, [1]);
+    assert!(redeemed.stderr.is_empty());
     let mut wrong_signature = finalize_payload;
     *wrong_signature.last_mut().unwrap() ^= 1;
     let failed = helper_call(4, &spki, &wrong_signature, &[]);

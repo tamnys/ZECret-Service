@@ -45,7 +45,7 @@ fn run() -> io::Result<Option<Vec<u8>>> {
             let token_input = read_fixed::<TOKEN_INPUT_LEN>(&mut input)?;
             let authenticator = read_fixed::<AUTHENTICATOR_LEN>(&mut input)?;
             if eof(&mut input)? && verify_authenticator(&spki, &token_input, &authenticator) {
-                Some(Vec::new())
+                Some(vec![1])
             } else {
                 None
             }
