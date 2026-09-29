@@ -637,6 +637,13 @@ class DiagnosticDiskTests(unittest.TestCase):
 
         signature = {"status": "diagnostic-supplied-signer-signature-verified-unapproved",
                      "signed_uki_checked": True, "private_mode_approved": False}
+        signature_evidence = {
+            "status": "diagnostic-signed-kernel-negative-check-unapproved",
+            "signature": signature, "source_uki_sha256": "d" * 64,
+            "changed_uki_sha256": "e" * 64,
+            "changed_kernel_byte_offset": 1,
+            "signed_kernel_byte_mutation_rejected": True,
+            "private_mode_approved": False}
         with (mock.patch.object(diagnostic, "checked_boot_receipt",
                                 return_value=(binary, "b" * 64)),
               mock.patch.object(diagnostic.outer, "checked_signing_key",
@@ -657,13 +664,15 @@ class DiagnosticDiskTests(unittest.TestCase):
                                 return_value={"uki_sha256": "d" * 64,
                                               "private_mode_approved": False}),
               mock.patch.object(diagnostic, "verify_diagnostic_signature",
-                                return_value=signature)):
+                                return_value=signature_evidence)):
             report = diagnostic.build_signed_boot(
                 lock_path, inputs, stage, self.root, self.root, self.root,
                 self.root, self.root, "net:[0]", "user:[0]", "pid:[0]",
                 bundle, revision)
         self.assertEqual(report["status"], diagnostic.SIGNED_BOOT_STATUS)
         self.assertTrue(report["secure_boot_signature_checked"])
+        self.assertTrue(report["signed_kernel_byte_mutation_rejected"])
+        self.assertEqual(report["changed_kernel_uki_sha256"], "e" * 64)
         self.assertIsNone(report["secure_boot_override"])
         self.assertFalse(report["production_image"])
         self.assertFalse(report["private_mode_approved"])
@@ -703,12 +712,18 @@ class DiagnosticDiskTests(unittest.TestCase):
                     "signed_uki_checked": True, "uki_sha256": uki_sha256,
                     "signer_certificate_sha256": signer_sha256,
                     "private_mode_approved": False}
+        evidence = {"status": "diagnostic-signed-kernel-negative-check-unapproved",
+                    "signature": accepted, "source_uki_sha256": uki_sha256,
+                    "changed_uki_sha256": "f" * 64,
+                    "changed_kernel_byte_offset": 1,
+                    "signed_kernel_byte_mutation_rejected": True,
+                    "private_mode_approved": False}
         with mock.patch.object(diagnostic.subprocess, "run",
                                return_value=SimpleNamespace(returncode=0,
-                                 stdout=json.dumps(accepted).encode())) as run:
+                                 stdout=json.dumps(evidence).encode())) as run:
             observed = diagnostic.verify_diagnostic_signature(
                 stage, self.root, self.root, bundle, "a" * 40, uki_sha256)
-            self.assertEqual(observed, accepted)
+            self.assertEqual(observed, evidence)
             self.assertEqual(run.call_args.args[0][:3],
                              ["/usr/bin/python3", "-I", "-B"])
             self.assertIn("diagnostic-verify-uki", run.call_args.args[0])
@@ -727,10 +742,13 @@ class DiagnosticDiskTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no bounded verifier reason"):
                 diagnostic.verify_diagnostic_signature(
                     stage, self.root, self.root, bundle, "a" * 40, uki_sha256)
-        for changed in ({**accepted, "signed_uki_checked": False},
-                        {**accepted, "uki_sha256": "0" * 64},
-                        {**accepted, "signer_certificate_sha256": "0" * 64},
-                        {**accepted, "private_mode_approved": True}):
+        for changed in ({**evidence, "signed_kernel_byte_mutation_rejected": False},
+                        {**evidence, "changed_uki_sha256": uki_sha256},
+                        {**evidence, "signature": {**accepted, "signed_uki_checked": False}},
+                        {**evidence, "signature": {**accepted, "uki_sha256": "0" * 64}},
+                        {**evidence, "signature": {**accepted,
+                                                   "signer_certificate_sha256": "0" * 64}},
+                        {**evidence, "private_mode_approved": True}):
             with self.subTest(changed=changed):
                 with mock.patch.object(diagnostic.subprocess, "run",
                                        return_value=SimpleNamespace(

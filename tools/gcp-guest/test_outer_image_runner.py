@@ -19,6 +19,107 @@ SPEC.loader.exec_module(runner)
 
 
 class OuterImageRunnerTest(unittest.TestCase):
+    def test_signed_kernel_mutation_changes_only_one_pinned_payload_byte(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            output.mkdir()
+            kernel = b"unique-kernel-payload"
+            uki = b"MZ-test-prefix" + kernel + b"-signature-trailer"
+            (output / "zrpc-gcp.efi").write_bytes(uki)
+            (output / "zrpc-gcp.vmlinuz").write_bytes(kernel)
+            files = {
+                "zrpc-gcp.efi": (len(uki), runner.sha256(uki)),
+                "zrpc-gcp.vmlinuz": (len(kernel), runner.sha256(kernel)),
+            }
+            destination = root / "changed.efi"
+            digest, offset = runner.changed_kernel_uki(output, files, destination)
+            changed = destination.read_bytes()
+            self.assertEqual(digest, runner.sha256(changed))
+            self.assertEqual(offset, uki.index(kernel) + len(kernel) // 2)
+            self.assertEqual([index for index, (before, after) in
+                              enumerate(zip(uki, changed)) if before != after], [offset])
+            self.assertNotEqual(digest, files["zrpc-gcp.efi"][1])
+            with self.assertRaises(FileExistsError):
+                runner.changed_kernel_uki(output, files, destination)
+            (output / "zrpc-gcp.efi").write_bytes(uki + kernel)
+            files["zrpc-gcp.efi"] = (len(uki + kernel), runner.sha256(uki + kernel))
+            with self.assertRaisesRegex(ValueError, "no unique exact split kernel"):
+                runner.changed_kernel_uki(output, files, root / "duplicate.efi")
+
+    def test_signed_diagnostic_requires_actual_verifier_rejection_of_changed_kernel(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stage = root / "stage"
+            output = stage / "output"
+            artifacts = stage / "artifacts"
+            output.mkdir(parents=True)
+            artifacts.mkdir()
+            kernel = b"exact-split-kernel"
+            uki = b"MZ-header" + kernel + b"-signature"
+            (output / "zrpc-gcp.efi").write_bytes(uki)
+            (output / "zrpc-gcp.vmlinuz").write_bytes(kernel)
+            certificate = b"test-certificate"
+            (artifacts / "secure_boot_certificate").write_bytes(certificate)
+            bundle = root / "bundle"
+            (bundle / "artifacts").mkdir(parents=True)
+            verifier = b"test-verifier"
+            (bundle / "artifacts/zrpc-uki-digest").write_bytes(verifier)
+            (bundle / "manifest.json").write_text(json.dumps({
+                "artifact_sha256": {"zrpc-uki-digest": runner.sha256(verifier)}}))
+            files = {"zrpc-gcp.efi": (len(uki), runner.sha256(uki)),
+                     "zrpc-gcp.vmlinuz": (len(kernel), runner.sha256(kernel))}
+            signature = {
+                "status": "diagnostic-supplied-signer-signature-verified-unapproved",
+                "signed_uki_checked": True, "uki_sha256": runner.sha256(uki),
+                "signer_certificate_sha256": runner.sha256(certificate),
+                "private_mode_approved": False}
+            rejection = {
+                "schema_version": 2, "status": "blocked",
+                "reason": "UKI Authenticode signature rejected by reviewed sbverify binary",
+                "signed_uki_checked": False, "release_approved": False,
+                "private_mode_approved": False}
+            context = types.SimpleNamespace(
+                source=types.SimpleNamespace(guest=types.SimpleNamespace(
+                    prepare=types.SimpleNamespace(unique_object=dict))),
+                sbverify=types.SimpleNamespace(stage=lambda *_: {
+                    "status": "diagnostic-sbverify-objects-staged-unapproved"}))
+
+            calls = []
+            def verified_run(command, **_):
+                calls.append(command)
+                if len(calls) == 1:
+                    return types.SimpleNamespace(returncode=0, stdout=json.dumps(signature).encode(),
+                                                 stderr=b"")
+                changed = Path(command[2]).read_bytes()
+                self.assertEqual(command[3], runner.sha256(changed))
+                self.assertEqual(len(changed), len(uki))
+                self.assertEqual(sum(a != b for a, b in zip(uki, changed)), 1)
+                return types.SimpleNamespace(returncode=1, stdout=json.dumps(rejection).encode(),
+                                             stderr=b"")
+
+            with (mock.patch.object(runner, "source_context", return_value=context),
+                  mock.patch.object(runner, "checked_outputs", return_value=files),
+                  mock.patch.object(runner, "require_unchanged_outputs"),
+                  mock.patch.object(runner.subprocess, "run", side_effect=verified_run)):
+                report = runner.diagnostic_verify_uki(
+                    stage, root, root, bundle, "a" * 40, runner.sha256(uki))
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(report["signed_kernel_byte_mutation_rejected"])
+            self.assertFalse(report["private_mode_approved"])
+
+            calls.clear()
+            with (mock.patch.object(runner, "source_context", return_value=context),
+                  mock.patch.object(runner, "checked_outputs", return_value=files),
+                  mock.patch.object(runner.subprocess, "run", side_effect=[
+                      types.SimpleNamespace(returncode=0,
+                                            stdout=json.dumps(signature).encode(), stderr=b""),
+                      types.SimpleNamespace(returncode=0,
+                                            stdout=json.dumps(signature).encode(), stderr=b"")])):
+                with self.assertRaisesRegex(ValueError, "not rejected by pinned sbverify"):
+                    runner.diagnostic_verify_uki(
+                        stage, root, root, bundle, "a" * 40, runner.sha256(uki))
+
     def test_sfdisk_rejects_ambient_loader_object_before_disk_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
