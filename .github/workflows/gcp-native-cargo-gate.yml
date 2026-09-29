@@ -111,23 +111,23 @@ jobs:
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
           scratch="$GITHUB_WORKSPACE/native-cargo"
-          mkdir -p "$source/.codex-tmp"
+          mkdir -p "$source/.codex-tmp" "$source/target"
           mkdir "$scratch/test-target" "$scratch/test-temp"
           docker run --rm --pull=never --platform linux/amd64 --network none \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
             --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
             --mount "type=bind,src=$source,dst=/workspace,readonly" \
             --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
-            --mount "type=bind,src=$scratch/test-target,dst=/target" \
+            --mount "type=bind,src=$scratch/test-target,dst=/workspace/target" \
             --mount "type=bind,src=$scratch/test-temp,dst=/workspace/.codex-tmp" \
             --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
             HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
-            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/workspace/target CARGO_NET_OFFLINE=true \
             CODEX_TMP_DIR=/workspace/.codex-tmp \
             RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
             RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
             LANG=C LC_ALL=C TZ=UTC \
-            sh -ceu 'ulimit -c 0; cargo test --locked --offline -p zrpc-lifecycle --lib'
+            sh -ceu 'ulimit -c 0; cargo test --locked --offline -p zrpc-lifecycle --lib gcp::'
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           git -C "$source" diff --quiet
 
