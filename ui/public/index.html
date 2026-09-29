@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta name="description" content="Explore ZECret, an experimental native client for private Zcash testnet queries. Try synthetic examples and learn what the client verifies.">
-  <title>ZECret service · Experimental Zcash testnet RPC</title>
+  <meta name="description" content="End-to-end private ZCash queries. Learn how ZECret is designed to protect Zcash lookup privacy and try the public demo.">
+  <title>ZECret service · End-to-end private ZCash queries</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
@@ -27,24 +27,21 @@
   <main id="main">
     <section class="hero shell" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <p class="section-label">Experimental · Zcash testnet</p>
-        <h1 id="hero-title">An experimental path to private Zcash queries.</h1>
-        <p class="lede">ZECret is a native client for reading Zcash testnet data. It is designed to route requests through Tor and check the remote service before sending a query.</p>
+        <h1 id="hero-title">End-to-end private ZCash queries</h1>
+        <p class="lede">Fully shielded Zcash transactions hide payment details on-chain. A direct RPC connection can still reveal your IP address and the blocks or transaction IDs you request. ZECret is designed to route queries through Tor and verify the service first.</p>
         <div class="actions">
           <a class="button primary" href="#demo">Try the demo</a>
-          <a class="button secondary" href="#quickstart">Run the native client</a>
-          <a class="text-link" href="/privacy">Read the privacy model →</a>
         </div>
-        <p class="availability"><strong>Available here today:</strong> synthetic examples. There is no approved private release or live endpoint available from this site.</p>
+        <p class="availability"><strong>Available today:</strong> fixed demo examples. No private service is approved for use yet.</p>
       </div>
       <aside class="path" aria-labelledby="path-title">
-        <h2 id="path-title">How a private query is intended to work</h2>
+        <h2 id="path-title">How ZECret is designed to work</h2>
         <ol>
-          <li><strong>Route through Tor</strong><span>The native client connects without exposing its direct network address to the service.</span></li>
-          <li><strong>Check the service</strong><span>The client verifies an approved release, attestation evidence, and the live encrypted connection.</span></li>
-          <li><strong>Send one read-only query</strong><span>The measured RPC wrapper reads from a Zebra testnet node over loopback.</span></li>
+          <li><strong>Connect through Tor</strong><span>The service does not see your direct IP address.</span></li>
+          <li><strong>Verify the service</strong><span>The client checks its release, attestation, and connection.</span></li>
+          <li><strong>Make a read-only query</strong><span>The verified service handles one request.</span></li>
         </ol>
-        <p>This website illustrates the path. It cannot run or approve a private query.</p>
+        <p>The service still handles the query. This website only shows fixed examples.</p>
       </aside>
     </section>
 
@@ -133,6 +130,6 @@
     </section>
   </main>
 
-  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret service</strong><p>Experimental Zcash testnet research. Public examples are synthetic.</p></div><div><a href="/privacy">Privacy model</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
+  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret service</strong><p>Private Zcash query research. Public examples are synthetic.</p></div><div><a href="/privacy">Privacy model</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
 </body>
 </html>
