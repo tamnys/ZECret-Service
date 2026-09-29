@@ -13,6 +13,11 @@ on:
         required: true
         default: false
         type: boolean
+      compare_rebuild:
+        description: Build the same unsigned synthetic disk twice and report the first changed root byte
+        required: true
+        default: false
+        type: boolean
       qemu_memory_mib:
         description: Explicit guest RAM for optional QEMU observation, in MiB
         required: false
@@ -60,6 +65,7 @@ jobs:
       ZRPC_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ZRPC_PREPARE_BOOT_DIAGNOSTIC: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_boot_diagnostic || false }}
       ZRPC_OBSERVE_BOOT: ${{ github.event_name == 'workflow_dispatch' && inputs.observe_boot || false }}
+      ZRPC_COMPARE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.compare_rebuild || false }}
       ZRPC_QEMU_MEMORY_MIB: ${{ inputs.qemu_memory_mib }}
       ZRPC_QEMU_VCPUS: ${{ inputs.qemu_vcpus }}
       ZRPC_QEMU_DEADLINE_SECONDS: ${{ inputs.qemu_deadline_seconds }}
@@ -94,12 +100,15 @@ jobs:
 
           prepare = os.environ["ZRPC_PREPARE_BOOT_DIAGNOSTIC"]
           observe = os.environ["ZRPC_OBSERVE_BOOT"]
+          compare = os.environ["ZRPC_COMPARE_REBUILD"]
           values = (os.environ["ZRPC_QEMU_MEMORY_MIB"],
                     os.environ["ZRPC_QEMU_VCPUS"],
                     os.environ["ZRPC_QEMU_DEADLINE_SECONDS"])
           captures = os.environ["ZRPC_QEMU_CAPTURE_SECONDS"]
-          if prepare not in ("true", "false") or observe not in ("true", "false"):
+          if any(value not in ("true", "false") for value in (prepare, observe, compare)):
               raise ValueError("diagnostic selection is malformed")
+          if compare == "true" and prepare != "false":
+              raise ValueError("root rebuild comparison requires the synthetic non-boot disk")
           if observe == "true":
               if prepare != "true" or any(re.fullmatch(r"[1-9][0-9]*", value) is None
                                           for value in values):
@@ -217,7 +226,7 @@ jobs:
             --scratch "/var/tmp/zrpc-owner-map-full-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             -- /usr/bin/bash -c '
             set -euo pipefail
-            if test "$#" -ne 11; then
+            if test "$#" -ne 12; then
               echo "namespace handoff argument count differs" >&2
               exit 1
             fi
@@ -226,6 +235,7 @@ jobs:
             scratch=$8
             chroot_command=${10}
             boot_diagnostic=${11}
+            compare_rebuild=${12}
             test "$staged" = "$scratch/staged"
             test "$(readlink /proc/self/ns/user)" != "$2"
             test "$(readlink /proc/self/ns/mnt)" != "$3"
@@ -344,6 +354,18 @@ jobs:
             else
               run_staged "${build[@]}"
             fi
+            if test "$compare_rebuild" = true; then
+              test "$boot_diagnostic" = false
+              run_staged /usr/bin/python3 -I -B "$tool" build \
+                "${prefix[@]}" \
+                --stage /workspace/source/.codex-tmp/stage-repeat \
+                --builder-archives /zrpc-archives --workspace /workspace \
+                --apt-scratch /zrpc-apt-scratch \
+                --parent-net-ns "$4" --parent-user-ns "$2" --parent-pid-ns "$5"
+              run_staged /usr/bin/python3 -I -B "$tool" compare-roots \
+                --first-stage /workspace/source/.codex-tmp/stage \
+                --second-stage /workspace/source/.codex-tmp/stage-repeat
+            fi
             if test "$boot_diagnostic" = true; then
               mkdir -m 0700 "$staged/workspace/boot-apt-scratch"
               run_staged /usr/bin/python3 -I -B \
@@ -360,7 +382,8 @@ jobs:
           ' _ "$staged" "$parent_user_ns" "$parent_mount_ns" \
             "$parent_net_ns" "$parent_pid_ns" \
             "$root_stage" "$source" "$scratch" \
-            "$ZRPC_SOURCE_SHA" "$chroot_command" "$ZRPC_PREPARE_BOOT_DIAGNOSTIC"
+            "$ZRPC_SOURCE_SHA" "$chroot_command" "$ZRPC_PREPARE_BOOT_DIAGNOSTIC" \
+            "$ZRPC_COMPARE_REBUILD"
           echo "Exact source: $ZRPC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
           echo 'Result: unsigned synthetic-service full-disk diagnostic; optional QEMU observation is a separate step; no TDX or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
 

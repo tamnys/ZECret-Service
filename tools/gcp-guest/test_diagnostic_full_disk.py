@@ -39,8 +39,8 @@ class DiagnosticDiskTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
 
-    def make_output(self, disk):
-        stage = self.root / "stage"
+    def make_output(self, disk, name="stage"):
+        stage = self.root / name
         output = stage / "output"
         output.mkdir(parents=True)
         for name in diagnostic.outer.OUTPUT_FILES:
@@ -54,6 +54,47 @@ class DiagnosticDiskTests(unittest.TestCase):
             f"{diagnostic.sha256((output / name).read_bytes())} *{name}\n"
             for name in names))
         return stage
+
+    def make_comparable_output(self, disk, name):
+        stage = self.make_output(disk, name)
+        (stage / "candidate-manifest.json").write_text('{"synthetic":true}\n')
+        return stage
+
+    def test_rebuild_comparison_reports_first_root_byte_and_stays_unapproved(self):
+        first = gpt_fixture.synthetic_disk()
+        second = first.copy()
+        offset = 40 * gpt_fixture.SECTOR + 123
+        second[offset] = 0x42
+        first_stage = self.make_comparable_output(first, "first")
+        second_stage = self.make_comparable_output(second, "second")
+        report = diagnostic.compare_root_rebuilds(first_stage, second_stage)
+        self.assertEqual(report["status"], diagnostic.REBUILD_STATUS)
+        self.assertEqual(report["first_difference_root_offset_bytes"], 123)
+        self.assertEqual(report["first_difference_disk_offset_bytes"], offset)
+        self.assertFalse(report["root_partition_byte_identical"])
+        self.assertFalse(report["production_image"])
+        self.assertFalse(report["hardware_verified"])
+        self.assertFalse(report["private_mode_approved"])
+
+        (second_stage / "candidate-manifest.json").write_text('{"other":true}\n')
+        with self.assertRaisesRegex(ValueError, "identical staged inputs"):
+            diagnostic.compare_root_rebuilds(first_stage, second_stage)
+        with self.assertRaisesRegex(ValueError, "distinct rehearsal stages"):
+            diagnostic.compare_root_rebuilds(first_stage, first_stage)
+
+    def test_rebuild_comparison_ignores_esp_bytes_but_checks_raw_identity(self):
+        first = gpt_fixture.synthetic_disk()
+        second = first.copy()
+        second[120 * gpt_fixture.SECTOR + 7] = 0x42
+        first_stage = self.make_comparable_output(first, "first")
+        second_stage = self.make_comparable_output(second, "second")
+        report = diagnostic.compare_root_rebuilds(first_stage, second_stage)
+        self.assertTrue(report["root_partition_byte_identical"])
+        self.assertIsNone(report["first_difference_root_offset_bytes"])
+        raw = second_stage / "output/zrpc-gcp.raw"
+        raw.write_bytes(raw.read_bytes() + b"tamper")
+        with self.assertRaises(ValueError):
+            diagnostic.compare_root_rebuilds(first_stage, second_stage)
 
     def boot_receipt(self):
         bundle = self.root / "native-rust"
