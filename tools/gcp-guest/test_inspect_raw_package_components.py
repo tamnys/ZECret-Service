@@ -128,6 +128,8 @@ class PackageComponentsTests(unittest.TestCase):
                                  "uid": expected["uid"], "gid": expected["gid"],
                                  "size": expected.get("size", 4096),
                                  "link": expected.get("target")}
+            if "mtime_ns" in expected:
+                self.actual[path]["mtime_ns"] = expected["mtime_ns"]
         self.digests = {path: expected["sha256"]
                         for path, expected in self.plan["entries"].items()
                         if expected["type"] == "regular"}
@@ -321,6 +323,15 @@ class PackageComponentsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "removed package path remains"):
                     self.inspect()
                 del self.actual[path]
+
+    def test_generated_clock_requires_exact_source_epoch_mtime(self):
+        path = components.generated_usr.CLOCK_EPOCH
+        self.assertEqual(self.plan["entries"][path]["mtime_ns"],
+                         components.guest.SIGNED_RELEASE_EPOCH * 1_000_000_000)
+        self.inspect()
+        self.actual[path]["mtime_ns"] += 1
+        with self.assertRaisesRegex(ValueError, "generated component mtime differs"):
+            self.inspect()
 
     def test_executable_outside_component_prefix_rejects_but_inert_data_does_not(self):
         path = "var/cache/payload"

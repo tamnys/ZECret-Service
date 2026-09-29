@@ -12,8 +12,10 @@ from pathlib import PurePosixPath
 import re
 
 import assemble_guest_base_tree as base_tree
+import fetch_guest_closure as guest
 import inspect_raw_forbidden as forbidden
 import inspect_raw_generated_kernel as generated
+import inspect_raw_generated_usr as generated_usr
 import preflight_guest_base_tree as preflight
 import prepare
 
@@ -201,6 +203,12 @@ def expected_components(authenticated, verified_overlay, workspace):
             if expected.get(name, {}).get("type") != "directory":
                 raise ValueError("generated kernel parent is not an authenticated directory: " + name)
     expected.update(generated_entries)
+    clock_entries = generated_usr.expected_entries(
+        source_rows, verified_overlay, guest.SIGNED_RELEASE_EPOCH)
+    for path in clock_entries:
+        if path in source or path in verified_overlay or path in removals or path in expected:
+            raise ValueError("generated clock path collides with source inventory: " + path)
+    expected.update(clock_entries)
     return {"entries": expected, "removed": tuple(sorted(removals)),
             "overlaid": tuple(sorted(overlaid))}
 
@@ -255,6 +263,10 @@ def inspect_components(plan, verified_overlay, inventory, lookup_inode,
                 or (inode["mode"], inode["uid"], inode["gid"]) !=
                    (expected["mode"], expected["uid"], expected["gid"])):
             raise ValueError("raw package component type, mode, or owner differs: " + path)
+        if "mtime_ns" in expected:
+            if (type(inode.get("mtime_ns")) is not int
+                    or inode["mtime_ns"] != expected["mtime_ns"]):
+                raise ValueError("raw generated component mtime differs: " + path)
         if kind == "regular":
             if type(inode.get("size")) is not int or inode["size"] != expected["size"]:
                 raise ValueError("raw package component size differs: " + path)

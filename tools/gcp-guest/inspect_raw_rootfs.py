@@ -24,6 +24,7 @@ import tempfile
 
 import inspect_raw_verity as verity
 import inspect_raw_forbidden as forbidden
+import inspect_raw_generated_usr as generated_usr
 import inspect_raw_package_components as components
 
 
@@ -35,6 +36,7 @@ STAT_HEADER = re.compile(
     r"Inode: ([1-9][0-9]*) +Type: (regular|directory|symlink) +Mode: +([0-7]{4}) +Flags: 0x[0-9a-f]+"
 )
 STAT_OWNER_SIZE = re.compile(r"(?m)^User: +([0-9]+) +Group: +([0-9]+) +Project: +[0-9]+ +Size: ([0-9]+)$")
+STAT_MTIME = re.compile(r" ?mtime: 0x([0-9a-f]{8})(?::([0-9a-f]{8}))? -- .+\Z")
 FAST_LINK = re.compile(r'(?m)^Fast link dest: "([^"\n]*)"$')
 SAFE_PATH = re.compile(r"[A-Za-z0-9_./@+-]+\Z")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -218,7 +220,21 @@ def checked_reader(signed_bytes):
     return hashlib.sha256(signed_bytes).hexdigest()
 
 
-def run_stat(reader, image, relative, *, env=ENV, pass_fds=()):
+def clock_mtime_ns(lines):
+    """Decode the pinned debugfs raw ext4 mtime fields, not its local date."""
+    candidates = [line for line in lines if line.lstrip().startswith("mtime")]
+    match = STAT_MTIME.fullmatch(candidates[0]) if len(candidates) == 1 else None
+    if match is None:
+        raise ValueError("signed debugfs clock mtime report is absent or ambiguous")
+    extra = int(match[2], 16) if match[2] is not None else 0
+    nanoseconds = extra >> 2
+    if nanoseconds >= 1_000_000_000:
+        raise ValueError("signed debugfs clock mtime nanoseconds differ")
+    seconds = int(match[1], 16) + ((extra & 3) << 32)
+    return seconds * 1_000_000_000 + nanoseconds
+
+
+def run_stat(reader, image, relative, *, env=ENV, pass_fds=(), require_mtime=False):
     result = subprocess.run([str(reader), "-R", "stat /" + relative, str(image)],
                             stdin=subprocess.DEVNULL, capture_output=True, env=env,
                             pass_fds=pass_fds, check=False)
@@ -236,9 +252,12 @@ def run_stat(reader, image, relative, *, env=ENV, pass_fds=()):
     link = FAST_LINK.findall(output)
     if len(link) > 1:
         raise ValueError("signed debugfs symlink report is ambiguous")
-    return {"inode": int(header[1]), "type": header[2], "mode": int(header[3], 8),
+    result = {"inode": int(header[1]), "type": header[2], "mode": int(header[3], 8),
             "uid": int(owner_size[0][0]), "gid": int(owner_size[0][1]),
             "size": int(owner_size[0][2]), "link": link[0] if link else None}
+    if require_mtime:
+        result["mtime_ns"] = clock_mtime_ns(lines)
+    return result
 
 
 def checked_superblock_metadata(report):
@@ -382,12 +401,16 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
                     return None
                 observed = {**entry, "type": "regular" if entry["type"] == "file"
                             else entry["type"]}
-                if entry["type"] == "symlink":
-                    link = run_stat(reader, root, path, pass_fds=(descriptor,))
-                    if any(link[field] != observed[field] for field in
+                if entry["type"] == "symlink" or path == generated_usr.CLOCK_EPOCH:
+                    detail = run_stat(reader, root, path, pass_fds=(descriptor,),
+                                      require_mtime=path == generated_usr.CLOCK_EPOCH)
+                    if any(detail[field] != observed[field] for field in
                            ("inode", "type", "mode", "uid", "gid", "size")):
-                        raise ValueError("raw rootfs symlink inventory differs: " + path)
-                    observed["link"] = link["link"]
+                        raise ValueError("raw rootfs inode inventory differs: " + path)
+                    if entry["type"] == "symlink":
+                        observed["link"] = detail["link"]
+                    if path == generated_usr.CLOCK_EPOCH:
+                        observed["mtime_ns"] = detail["mtime_ns"]
                 return observed
 
             package = components.inspect_authenticated_components(

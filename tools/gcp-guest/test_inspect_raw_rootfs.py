@@ -10,6 +10,7 @@ import types
 import unittest
 from unittest import mock
 
+import fetch_guest_closure as guest
 import inspect_raw_rootfs as rootfs
 
 
@@ -111,6 +112,32 @@ class RawRootfsTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     rootfs.run_stat(Path("/synthetic/debugfs"), self.root,
                                     "usr/lib/zrpc/zebrad")
+
+    def test_signed_debugfs_clock_mtime_requires_exact_raw_fields(self):
+        epoch = guest.SIGNED_RELEASE_EPOCH
+        header = (b"Inode: 20   Type: regular    Mode:  0644   Flags: 0x80000\n"
+                  b"User: 0   Group: 0   Project: 0   Size: 0\n")
+        def read(record):
+            with mock.patch.object(rootfs.subprocess, "run", return_value=
+                    types.SimpleNamespace(returncode=0, stderr=rootfs.READER_BANNER,
+                                          stdout=record)):
+                return rootfs.run_stat(Path("/synthetic/debugfs"), self.root,
+                                       rootfs.generated_usr.CLOCK_EPOCH,
+                                       require_mtime=True)
+        for suffix in ("", ":00000000"):
+            with self.subTest(suffix=suffix):
+                line = f" mtime: 0x{epoch:08x}{suffix} -- synthetic date\n".encode()
+                self.assertEqual(read(header + line)["mtime_ns"],
+                                 epoch * 1_000_000_000)
+        nanos = f" mtime: 0x{epoch:08x}:00000004 -- synthetic date\n".encode()
+        self.assertEqual(read(header + nanos)["mtime_ns"],
+                         epoch * 1_000_000_000 + 1)
+        for tail in (b"", nanos + nanos,
+                     b" mtime: malformed\n",
+                     f" mtime: 0x{epoch:08x}:ee6b2800 -- synthetic date\n".encode()):
+            with self.subTest(tail=tail):
+                with self.assertRaisesRegex(ValueError, "clock mtime"):
+                    read(header + tail)
 
     def test_superblock_metadata_requires_three_unambiguous_valid_fields(self):
         lines = ["Filesystem UUID:          2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
