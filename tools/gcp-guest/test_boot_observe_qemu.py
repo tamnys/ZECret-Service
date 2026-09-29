@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -13,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import boot_observe_qemu as observe
+import test_inspect_raw_gpt as gpt_fixture
 
 
 def digest(data):
@@ -111,6 +113,40 @@ class ObserverTests(unittest.TestCase):
         report_path.write_text(json.dumps(report))
         with self.assertRaisesRegex(ValueError, "unsigned boot diagnostic"):
             observe.checked_disk(path, report_path)
+
+    def test_root_data_tamper_changes_only_disposable_boot_copy(self):
+        path, report, report_path = self.disk()
+        source = gpt_fixture.synthetic_disk()
+        path.write_bytes(source)
+        report["raw_disk_sha256"] = digest(source)
+        report["raw_disk_bytes"] = len(source)
+        report_path.write_text(json.dumps(report))
+        output = self.directory / "observe"
+        output.mkdir()
+        fd, checked = observe.checked_disk(path, report_path)
+        try:
+            derived, mutation = observe.root_data_tamper(fd, path, checked, output)
+            try:
+                offset = mutation["changed_disk_offset_bytes"]
+                actual = os.pread(derived, len(source), 0)
+                self.assertEqual(actual[:offset], source[:offset])
+                self.assertEqual(actual[offset], source[offset] ^ 1)
+                self.assertEqual(actual[offset + 1:], source[offset + 1:])
+                self.assertEqual(mutation["changed_byte_count"], 1)
+                self.assertEqual(mutation["source_disk_sha256"], digest(source))
+                self.assertEqual(mutation["boot_disk_sha256"], digest(actual))
+                self.assertTrue(mutation["synthetic_root_data_tamper"])
+                self.assertFalse((output / "root-data-tampered.raw").exists())
+            finally:
+                os.close(derived)
+            self.assertEqual(path.read_bytes(), source)
+            poisoned = output / "root-data-tampered.raw"
+            poisoned.write_bytes(b"existing observation")
+            with self.assertRaises(FileExistsError):
+                observe.root_data_tamper(fd, path, checked, output)
+            self.assertEqual(poisoned.read_bytes(), b"existing observation")
+        finally:
+            os.close(fd)
 
     def test_qemu_command_has_no_network_or_guest_input_override(self):
         command = observe.qemu_command(7, 2048, 2)

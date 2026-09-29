@@ -26,11 +26,13 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import boot_qemu_toolchain as toolchain
+import inspect_raw_gpt as gpt
 import stage_builder_toolchain as stager
 import verify_builder_packages as direct
 
 
 STATUS = "diagnostic-qemu-vga-observation-unapproved"
+TAMPER_STATUS = "diagnostic-qemu-root-data-tamper-observation-unapproved"
 BOOT_DISK_STATUS = "diagnostic-unsigned-early-init-boot-disk-unapproved"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 NET_NAMESPACE = re.compile(r"net:\[[0-9]+\]\Z")
@@ -155,6 +157,61 @@ def digest_fd(fd, size):
     if os.fstat(fd).st_size != size:
         raise ValueError("diagnostic raw disk changed size while hashing")
     return digest.hexdigest()
+
+
+def root_data_tamper(fd, path, report, output):
+    """Derive a one-byte changed boot disk; retain the checked source intact."""
+    size = report["raw_disk_bytes"]
+    original = report["raw_disk_sha256"]
+    layout = gpt.inspect(path, original, size, 512)
+    root = next(entry for entry in layout["partitions"]
+                if entry["type"] == "root-x86-64")
+    offset = root["first_lba"] * 512
+    if offset >= size:
+        raise ValueError("root data mutation lies outside the diagnostic disk")
+    target = output / "root-data-tampered.raw"
+    derived_fd = None
+    created = False
+    try:
+        with target.open("xb") as stream:
+            created = True
+            position = 0
+            while position < size:
+                chunk = os.pread(fd, min(1024 * 1024, size - position), position)
+                if not chunk:
+                    raise ValueError("checked diagnostic disk ended during copy")
+                stream.write(chunk)
+                position += len(chunk)
+        writable = os.open(target, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            if os.fstat(writable).st_size != size:
+                raise ValueError("derived diagnostic disk size differs")
+            first = os.pread(writable, 1, offset)
+            if len(first) != 1 or first != os.pread(fd, 1, offset):
+                raise ValueError("derived root byte differs before mutation")
+            if os.pwrite(writable, bytes((first[0] ^ 1,)), offset) != 1:
+                raise ValueError("derived root byte could not be changed")
+            if os.fstat(writable).st_size != size:
+                raise ValueError("derived diagnostic disk size changed")
+        finally:
+            os.close(writable)
+        derived_fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        changed = digest_fd(derived_fd, size)
+        if changed == original or os.pread(derived_fd, 1, offset) == first:
+            raise ValueError("derived diagnostic disk has no root data mutation")
+        return derived_fd, {"source_disk_sha256": original,
+                            "boot_disk_sha256": changed,
+                            "root_partition_guid": root["partition_guid"],
+                            "changed_disk_offset_bytes": offset,
+                            "changed_byte_count": 1,
+                            "synthetic_root_data_tamper": True}
+    except BaseException:
+        if derived_fd is not None:
+            os.close(derived_fd)
+        raise
+    finally:
+        if created:
+            target.unlink(missing_ok=True)
 
 
 def mapped_identity(path, selected):
@@ -406,12 +463,17 @@ def run(args):
                    for offset in args.capture_at_seconds)):
         raise ValueError("explicit positive resources/deadline and ordered capture offsets required")
     fd, disk_report = checked_disk(args.disk, args.disk_report)
+    boot_fd = fd
+    tamper_report = None
     process = None
     qmp = None
     ready_read = None
     try:
         vars_sha256 = prepare_output(root, args.output, args.qemu_uid, args.qemu_gid)
-        command = qemu_command(fd, args.memory_mib, args.vcpus)
+        if args.tamper_root_data:
+            boot_fd, tamper_report = root_data_tamper(
+                fd, args.disk, disk_report, args.output)
+        command = qemu_command(boot_fd, args.memory_mib, args.vcpus)
         ready_read, ready_write = os.pipe2(os.O_CLOEXEC)
         try:
             with (args.output / "qemu.log").open("xb") as log:
@@ -419,7 +481,7 @@ def run(args):
                     command, stdin=subprocess.DEVNULL, stdout=log,
                     stderr=subprocess.STDOUT,
                     env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C"},
-                    close_fds=True, pass_fds=(fd, ready_write), start_new_session=True,
+                    close_fds=True, pass_fds=(boot_fd, ready_write), start_new_session=True,
                     preexec_fn=lambda: _drop_and_chroot(root, args.qemu_uid,
                                                          args.qemu_gid, ready_write))
         finally:
@@ -433,11 +495,14 @@ def run(args):
         qmp = connect_qmp(args.output / QMP_SOCKET, process, deadline)
         observed = observe(qmp, process, args.output, deadline, started,
                            args.capture_at_seconds)
-        report = {"schema_version": 1, "status": STATUS, "qemu_attempted": True,
+        report = {"schema_version": 1,
+                  "status": TAMPER_STATUS if tamper_report else STATUS,
+                  "qemu_attempted": True,
                   "qmp_connected": True, "qemu_unprivileged_witness": True,
                   "qemu_uid": args.qemu_uid, "qemu_gid": args.qemu_gid,
                   "guest_network_devices_configured": False,
-                  "disk_sha256": disk_report["raw_disk_sha256"],
+                  "disk_sha256": (tamper_report["boot_disk_sha256"] if tamper_report
+                                  else disk_report["raw_disk_sha256"]),
                   "disk_bytes": disk_report["raw_disk_bytes"],
                   "ovmf_vars_template_sha256": vars_sha256,
                   "memory_mib": args.memory_mib, "vcpus": args.vcpus,
@@ -445,6 +510,7 @@ def run(args):
                   "secure_boot_verified": False, "hardware_verified": False,
                   "early_init_handoff_verified": False, "rootfs_ready_verified": False,
                   "boot_verified": False, "private_mode_approved": False,
+                  **({"root_data_tamper": tamper_report} if tamper_report else {}),
                   **observed}
         return report
     finally:
@@ -465,6 +531,13 @@ def run(args):
                 process.wait(timeout=args.deadline_seconds)
         finally:
             try:
+                if boot_fd != fd:
+                    try:
+                        if digest_fd(boot_fd, disk_report["raw_disk_bytes"]) != \
+                                tamper_report["boot_disk_sha256"]:
+                            raise ValueError("derived diagnostic disk changed during QEMU observation")
+                    finally:
+                        os.close(boot_fd)
                 if digest_fd(fd, disk_report["raw_disk_bytes"]) != disk_report["raw_disk_sha256"]:
                     raise ValueError("diagnostic disk changed during QEMU observation")
             finally:
@@ -494,6 +567,7 @@ def main(argv=None):
     for name in ("memory-mib", "vcpus", "deadline-seconds", "qemu-uid", "qemu-gid"):
         running.add_argument("--" + name, type=int, required=True)
     running.add_argument("--capture-at-seconds", type=int, action="append", default=[])
+    running.add_argument("--tamper-root-data", action="store_true")
     running.add_argument("--parent-net-ns", required=True)
     args = parser.parse_args(argv)
     try:

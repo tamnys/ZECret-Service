@@ -265,6 +265,8 @@ def observer_argv(args, parent_net):
         command.extend(("--" + flag, str(value)))
     for offset in args.capture_at_seconds:
         command.extend(("--capture-at-seconds", str(offset)))
+    if args.tamper_root_data:
+        command.append("--tamper-root-data")
     return command
 
 
@@ -356,6 +358,7 @@ def main(argv=None):
         running.add_argument("--" + name, type=positive, required=True)
     running.add_argument("--capture-at-seconds", type=positive, action="append",
                          default=[])
+    running.add_argument("--tamper-root-data", action="store_true")
     args = parser.parse_args(argv)
     try:
         return run(args)
