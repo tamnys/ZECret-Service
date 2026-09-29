@@ -30,13 +30,16 @@ EXPECTED_GUEST_BINARIES = {
 EXPECTED_ALL_BINARIES = {
     "zrpc", "zrpc-wrapper", "zrpc-node-wrapper", "zrpc-quote-proxy",
     "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-disk-id", "zrpc-gcp-cookie",
-    "zrpc-gcp-early-init", "zrpc-gcp-lifecycle", "zrpc-uki-digest",
+    "zrpc-gcp-early-init", "zrpc-gcp-lifecycle", "zrpc-gcp-import-producer",
+    "zrpc-uki-digest",
 }
 EXPECTED_SELECTED = ({("zrpc-cli", "zrpc"),
                       ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),
+                      ("zrpc-lifecycle", "zrpc-gcp-import-producer"),
                       ("zrpc-uki-digest", "zrpc-uki-digest")}
                      | {("zrpc-server", name) for name in EXPECTED_ALL_BINARIES
-                        if name not in {"zrpc", "zrpc-gcp-lifecycle", "zrpc-uki-digest"}})
+                        if name not in {"zrpc", "zrpc-gcp-lifecycle",
+                                        "zrpc-gcp-import-producer", "zrpc-uki-digest"}})
 
 
 def unique_object(pairs):
@@ -189,7 +192,10 @@ def inspect(bundle, revision, *, selected_output=None):
             or not isinstance(builds, list) or len(builds) != 2
             or any(not isinstance(build, dict) for build in builds)
             or {build.get("directory") for build in builds} != {"build-a", "build-b"}
-            or any(build.get("exit_code") != 0 or build.get("artifact_sha256") != digests
+            or any(build.get("exit_code") != 0
+                   or build.get("static_import_producer_exit_code") != 0
+                   or build.get("static_import_producer_no_dynamic_loader") is not True
+                   or build.get("artifact_sha256") != digests
                    for build in builds)):
         raise ValueError("two independent binary receipts do not match")
     expected_sums = "".join(f"{digests[name]}  artifacts/{name}\n"

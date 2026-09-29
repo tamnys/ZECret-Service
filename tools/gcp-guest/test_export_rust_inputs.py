@@ -67,11 +67,14 @@ class GuestRustInputTests(unittest.TestCase):
             "selected_binaries": [
                 {"package": {"zrpc": "zrpc-cli",
                              "zrpc-gcp-lifecycle": "zrpc-lifecycle",
+                             "zrpc-gcp-import-producer": "zrpc-lifecycle",
                              "zrpc-uki-digest": "zrpc-uki-digest"}.get(name, "zrpc-server"),
                  "name": name} for name in sorted(digests)
             ],
             "artifact_sha256": digests,
             "builds": [{"directory": label, "exit_code": 0,
+                        "static_import_producer_exit_code": 0,
+                        "static_import_producer_no_dynamic_loader": True,
                         "artifact_sha256": digests} for label in ("build-a", "build-b")],
             "approved_release": False,
             "private_accepted": False,
@@ -116,6 +119,12 @@ class GuestRustInputTests(unittest.TestCase):
     def test_changed_copy_is_rejected(self):
         (self.bundle / "build-b/target/release/zrpc-gcp-guard").write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "binary differs"):
+            exporter.inspect(self.bundle, self.revision)
+
+    def test_dynamic_import_producer_build_record_is_rejected(self):
+        self.manifest["builds"][1]["static_import_producer_no_dynamic_loader"] = False
+        (self.bundle / "manifest.json").write_text(json.dumps(self.manifest))
+        with self.assertRaisesRegex(ValueError, "independent binary receipts"):
             exporter.inspect(self.bundle, self.revision)
 
     def test_matching_wrong_machine_is_rejected(self):

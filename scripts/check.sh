@@ -9,6 +9,7 @@ cargo build --locked -p zrpc-cli --bins --examples
 cargo build --locked -p zrpc-server --bins
 cargo build --locked -p zrpc-lifecycle --bins
 "${CARGO_TARGET_DIR:-target}/debug/zrpc-gcp-lifecycle" --help >/dev/null
+"${CARGO_TARGET_DIR:-target}/debug/zrpc-gcp-import-producer" --help >/dev/null
 python3 scripts/cli-check.py
 python3 scripts/public-inspection-check.py
 python3 scripts/public-inspection-check.py --platform gcp-tdx

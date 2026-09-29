@@ -44,20 +44,21 @@ private-mode approval.
 Run the offline native archive producer on the managed Linux builder:
 
 ```sh
-zrpc-gcp-lifecycle pack-import \
+zrpc-gcp-import-producer pack-import \
   --raw /workspace/evaluation/disk.raw \
   --archive /workspace/evaluation/disk.tar.gz \
   > /workspace/evaluation/import-receipt.json
 ```
 
 Supply the JSON output as the `import_receipt` artifact, the matched-build
-`manifest.json` as `native_rust_manifest`, and the exact
-`zrpc-gcp-lifecycle` executable from that build as `producer_binary`. The
+`manifest.json` as `native_rust_manifest`, and the exact statically linked
+`zrpc-gcp-import-producer` executable from that build as `producer_binary`. The
 manifest digest must match the final disk builder's handoff. Input and output
 must be on `/workspace`, and the archive path must be new. Package preparation
 checks the archive and its expanded `disk.raw` with the native Rust verifier,
-then compares the three producer identities. These records do not authenticate
-which code ran or the operator host's dynamic libraries.
+then compares the three producer identities. Run the producer with no network
+and only the input/output workspace mounted writable. These records do not
+authenticate which code ran on the operator host.
 
 Specify the project, C3 machine type, region/zone, boot/data disk capacities,
 private subnet CIDR, wrapper port, and an existing private staging bucket.

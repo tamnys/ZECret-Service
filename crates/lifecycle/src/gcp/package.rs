@@ -541,7 +541,7 @@ fn verify_import_receipt(
     let receipt: NativeImportReceipt =
         serde_json::from_slice(&bytes).map_err(|_| Error("invalid typed import receipt"))?;
     if receipt.schema_version != 2
-        || receipt.producer != "zrpc-gcp-lifecycle-rust"
+        || receipt.producer != "zrpc-gcp-import-producer-rust"
         || !valid_digest(&receipt.producer_executable_sha256)
         || receipt.archive_sha256 != spec.raw_image_tar_gz.sha256
         || receipt.raw_disk_sha256 != spec.raw_disk_sha256
@@ -580,22 +580,57 @@ fn verify_import_receipt(
         .any(|field| manifest.get(*field).and_then(Value::as_bool) != Some(false))
         || manifest
             .get("artifact_sha256")
-            .and_then(|artifacts| artifacts.get("zrpc-gcp-lifecycle"))
+            .and_then(|artifacts| artifacts.get("zrpc-gcp-import-producer"))
             .and_then(Value::as_str)
             != Some(spec.producer_binary.sha256.as_str())
         || selected
             .iter()
             .filter(|item| {
                 item.get("package").and_then(Value::as_str) == Some("zrpc-lifecycle")
-                    && item.get("name").and_then(Value::as_str) == Some("zrpc-gcp-lifecycle")
+                    && item.get("name").and_then(Value::as_str) == Some("zrpc-gcp-import-producer")
             })
             .count()
             != 1
     {
         return Err(Error("native Rust producer differs from builder manifest"));
     }
+    let builds = manifest
+        .get("builds")
+        .and_then(Value::as_array)
+        .ok_or(Error(
+            "native Rust producer lacks independent build records",
+        ))?;
+    if builds.len() != 2
+        || ["build-a", "build-b"].iter().any(|label| {
+            builds
+                .iter()
+                .filter(|build| build.get("directory").and_then(Value::as_str) == Some(label))
+                .count()
+                != 1
+        })
+        || builds.iter().any(|build| {
+            build.get("exit_code").and_then(Value::as_u64) != Some(0)
+                || build
+                    .get("static_import_producer_exit_code")
+                    .and_then(Value::as_u64)
+                    != Some(0)
+                || build
+                    .get("static_import_producer_no_dynamic_loader")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+                || build
+                    .get("artifact_sha256")
+                    .and_then(|artifacts| artifacts.get("zrpc-gcp-import-producer"))
+                    .and_then(Value::as_str)
+                    != Some(spec.producer_binary.sha256.as_str())
+        })
+    {
+        return Err(Error(
+            "native Rust producer build records differ from candidate",
+        ));
+    }
     // Matching self-reported and build-recorded bytes does not authenticate
-    // producer execution or the operator host's dynamic runtime closure.
+    // producer execution or the operator host's execution policy.
     Ok(())
 }
 

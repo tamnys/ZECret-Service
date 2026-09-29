@@ -201,7 +201,7 @@ pub(super) fn pack_import_archive(
             .map_err(|_| Error("import archive directory sync failed"))?;
         Ok(NativeImportReceipt {
             schema_version: 2,
-            producer: "zrpc-gcp-lifecycle-rust",
+            producer: "zrpc-gcp-import-producer-rust",
             producer_executable_sha256,
             archive_sha256,
             raw_disk_sha256: raw_sha256,

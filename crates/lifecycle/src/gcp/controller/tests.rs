@@ -52,7 +52,7 @@ fn synthetic_import_archive() -> &'static (Vec<u8>, String, Vec<u8>) {
                 .unwrap();
         assert_eq!(receipt["private_mode_approved"], false);
         assert_eq!(receipt["toolchain_reviewed"], false);
-        assert_eq!(receipt["producer"], "zrpc-gcp-lifecycle-rust");
+        assert_eq!(receipt["producer"], "zrpc-gcp-import-producer-rust");
         let bytes = fs::read(archive).unwrap();
         let raw_sha256 = receipt["raw_disk_sha256"].as_str().unwrap().to_owned();
         let receipt_bytes = serde_json::to_vec(&receipt).unwrap();
@@ -112,8 +112,16 @@ impl Fixture {
                 "deployment_enabled":false,
                 "published":false,
                 "signed":false,
-                "selected_binaries":[{"package":"zrpc-lifecycle","name":"zrpc-gcp-lifecycle"}],
-                "artifact_sha256":{"zrpc-gcp-lifecycle":producer_sha256}
+                "selected_binaries":[{"package":"zrpc-lifecycle","name":"zrpc-gcp-import-producer"}],
+                "artifact_sha256":{"zrpc-gcp-import-producer":producer_sha256},
+                "builds":[{"directory":"build-a","exit_code":0,
+                    "static_import_producer_exit_code":0,
+                    "static_import_producer_no_dynamic_loader":true,
+                    "artifact_sha256":{"zrpc-gcp-import-producer":producer_sha256}},
+                    {"directory":"build-b","exit_code":0,
+                    "static_import_producer_exit_code":0,
+                    "static_import_producer_no_dynamic_loader":true,
+                    "artifact_sha256":{"zrpc-gcp-import-producer":producer_sha256}}]
             }),
         );
         let disk_raw = root.join("disk.raw");
