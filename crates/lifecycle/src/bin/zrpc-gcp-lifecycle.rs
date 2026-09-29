@@ -196,8 +196,8 @@ async fn run() -> Result<()> {
     // No OAuth/network operation occurs before all applicable admission above.
     let mut provider = GoogleClient::authenticate(&runtime, &package.spec.project).await?;
     if command == "watchdog-once" && !due {
-        // Authentication can cross the original deletion trigger. Recheck
-        // against the journaled binding immediately before dispatch.
+        // Authentication or controls-file verification can cross the original
+        // deletion trigger. Recheck against the journal before dispatch.
         let original = store
             .journal()
             .watchdog
@@ -207,7 +207,7 @@ async fn run() -> Result<()> {
             &path(&options, "--controls")?,
             gcp::now()?,
             store.journal().teardown_started,
-        )?;
+        )? || gcp::now()? >= original.deletion_start_unix_seconds;
     }
     match command.as_str() {
         "deploy" => print(&controller::deploy_once(&mut store, &mut provider).await?),
