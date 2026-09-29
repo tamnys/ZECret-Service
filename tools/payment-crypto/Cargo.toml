@@ -1,0 +1,18 @@
+[package]
+name = "zrpc-payment-crypto"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# This local executable intentionally has a separate Cargo graph. The service
+# workspace's Zcash parser currently pins pre-release digest/crypto-common;
+# RFC 9578's maintained blind-RSA implementation needs the stable releases.
+[workspace]
+
+[dependencies]
+blind-rsa-signatures = "=0.17.2"
+
+[dev-dependencies]
+rsa = "=0.10.0-rc.18"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.149"
