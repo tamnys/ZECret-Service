@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import sys
 import tarfile
 import tempfile
 import types
@@ -18,6 +19,73 @@ SPEC.loader.exec_module(runner)
 
 
 class OuterImageRunnerTest(unittest.TestCase):
+    def test_import_sfdisk_is_reconstructed_from_signed_package(self):
+        with mock.patch.object(sys, "path", [str(HERE), *sys.path]):
+            import debian_snapshot
+            import verify_builder_closure as closure
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            metadata = root / "metadata"
+            archives = root / "archives"
+            metadata.mkdir()
+            archives.mkdir()
+            executable = b"\x7fELFsynthetic-sfdisk"
+            installed = root / "sfdisk"
+            installed.write_bytes(executable)
+            data = io.BytesIO()
+            with tarfile.open(fileobj=data, mode="w:xz") as members:
+                member = tarfile.TarInfo("./usr/sbin/sfdisk")
+                member.mode = 0o755
+                member.size = len(executable)
+                members.addfile(member, io.BytesIO(executable))
+            package = bytearray(b"!<arch>\n")
+            for name, payload in (("debian-binary/", b"2.0\n"),
+                                  ("data.tar.xz/", data.getvalue())):
+                package.extend(
+                    f"{name:<16}{0:<12}{0:<6}{0:<6}{0o100644:<8}{len(payload):<10}`\n".encode())
+                package.extend(payload)
+                if len(payload) % 2:
+                    package.extend(b"\n")
+            package_hash = runner.sha256(package)
+            (archives / (package_hash + ".deb")).write_bytes(package)
+            entry = {"name": "fdisk", "version": "synthetic", "architecture": "amd64",
+                     "filename": "pool/main/f/fdisk.deb", "size": len(package),
+                     "sha256": package_hash}
+            lock = root / "builder.json"
+            lock.write_text(json.dumps({"snapshot": "https://example.invalid/snapshot/",
+                                        "packages": [entry]}))
+            guest = types.SimpleNamespace(
+                SNAPSHOT="https://example.invalid/snapshot/",
+                INRELEASE_SHA256="a" * 64, SIGNED_RELEASE_EPOCH=1,
+                PACKAGES_SHA256="b" * 64, PACKAGES_SIZE=4,
+                prepare=types.SimpleNamespace(unique_object=dict))
+            context = types.SimpleNamespace(
+                source=types.SimpleNamespace(guest=guest),
+                import_disk=types.SimpleNamespace(
+                    SFDISK_PACKAGE_SHA256=package_hash,
+                    SFDISK_SHA256=runner.sha256(executable)))
+            records = {("fdisk", "synthetic", "amd64"):
+                       {"Filename": entry["filename"], "Size": str(entry["size"]),
+                        "SHA256": entry["sha256"]}}
+            with (mock.patch.object(closure, "LOCK", lock),
+                  mock.patch.object(closure, "LOCK_BYTES", lock.stat().st_size),
+                  mock.patch.object(closure, "LOCK_SHA256", runner.sha256(lock.read_bytes())),
+                  mock.patch.object(debian_snapshot, "authenticated_index_bytes",
+                                    return_value=(1, ("b" * 64, 4), b"test")),
+                  mock.patch.object(debian_snapshot, "package_records", return_value=records)):
+                checked = runner.checked_sfdisk_package(
+                    context, metadata, archives, installed)
+                self.assertTrue(checked["sfdisk_archive_membership_rechecked"])
+                self.assertFalse(checked["sfdisk_dynamic_runtime_authenticated"])
+                installed.write_bytes(b"\x7fELFsubstituted")
+                with self.assertRaisesRegex(ValueError, "differs from signed fdisk package"):
+                    runner.checked_sfdisk_package(context, metadata, archives, installed)
+                installed.write_bytes(executable)
+                (archives / (package_hash + ".deb")).write_bytes(package + b"changed")
+                with self.assertRaisesRegex(ValueError, "differs from signed index"):
+                    runner.checked_sfdisk_package(context, metadata, archives, installed)
+
     def test_final_initrd_requires_unique_kernel_and_depmod_sources(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = Path(temporary) / "package_manifest"

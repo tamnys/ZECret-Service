@@ -213,7 +213,7 @@ impl Fixture {
                 "raw_disk_sha256":raw_disk_sha256,"raw_disk_bytes":1024 * 1024 * 1024,
                 "sfdisk_sha256":sfdisk_sha256,
                 "sfdisk_package_archive_sha256":sfdisk_archive_sha256,
-                "sfdisk_archive_membership_rechecked":false,
+                "sfdisk_archive_membership_rechecked":true,
                 "sfdisk_dynamic_runtime_authenticated":false,
                 "disk_raw":"/workspace/import-disk/disk.raw",
                 "reports":guest_reports,
@@ -236,7 +236,7 @@ impl Fixture {
                 "raw_disk_sha256":raw_disk_sha256,"raw_disk_bytes":1024 * 1024 * 1024,
                 "sfdisk_sha256":sfdisk_sha256,
                 "sfdisk_package_archive_sha256":sfdisk_archive_sha256,
-                "sfdisk_archive_membership_rechecked":false,
+                "sfdisk_archive_membership_rechecked":true,
                 "sfdisk_dynamic_runtime_authenticated":false,
                 "disk_raw":disk_raw,"reinspection_receipt":reinspection,
                 "review_reports":host_reports,
@@ -780,6 +780,7 @@ fn operator_handoff_binds_the_final_disk_and_review_reports_without_approval() {
         ("disk_raw", json!(f.root.join("other.raw"))),
         ("import_package_ready", json!(true)),
         ("private_mode_approved", json!(true)),
+        ("sfdisk_archive_membership_rechecked", json!(false)),
     ] {
         let spec = f.spec_with_handoff_edit(|handoff| handoff[edit.0] = edit.1);
         assert!(
