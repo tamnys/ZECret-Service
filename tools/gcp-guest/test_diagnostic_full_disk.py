@@ -699,30 +699,28 @@ class DiagnosticDiskTests(unittest.TestCase):
         uki = stage / "output/zrpc-gcp.efi"
         uki_sha256 = diagnostic.sha256(uki.read_bytes())
         signer_sha256 = diagnostic.sha256(certificate.read_bytes())
-        context = SimpleNamespace(sbverify=SimpleNamespace(stage=lambda *_: {
-            "status": "diagnostic-sbverify-objects-staged-unapproved"}))
         accepted = {"status": "diagnostic-supplied-signer-signature-verified-unapproved",
                     "signed_uki_checked": True, "uki_sha256": uki_sha256,
                     "signer_certificate_sha256": signer_sha256,
                     "private_mode_approved": False}
-        with (mock.patch.object(diagnostic.outer, "source_context", return_value=context),
-              mock.patch.object(diagnostic.subprocess, "run",
-                                return_value=SimpleNamespace(returncode=0,
-                                  stdout=json.dumps(accepted).encode()))):
+        with mock.patch.object(diagnostic.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=0,
+                                 stdout=json.dumps(accepted).encode())) as run:
             observed = diagnostic.verify_diagnostic_signature(
                 stage, self.root, self.root, bundle, "a" * 40, uki_sha256)
             self.assertEqual(observed, accepted)
+            self.assertEqual(run.call_args.args[0][:3],
+                             ["/usr/bin/python3", "-I", "-B"])
+            self.assertIn("diagnostic-verify-uki", run.call_args.args[0])
         for changed in ({**accepted, "signed_uki_checked": False},
                         {**accepted, "uki_sha256": "0" * 64},
                         {**accepted, "signer_certificate_sha256": "0" * 64},
                         {**accepted, "private_mode_approved": True}):
             with self.subTest(changed=changed):
-                with (mock.patch.object(diagnostic.outer, "source_context",
-                                        return_value=context),
-                      mock.patch.object(diagnostic.subprocess, "run",
-                                        return_value=SimpleNamespace(
-                                            returncode=0,
-                                            stdout=json.dumps(changed).encode()))):
+                with mock.patch.object(diagnostic.subprocess, "run",
+                                       return_value=SimpleNamespace(
+                                           returncode=0,
+                                           stdout=json.dumps(changed).encode())):
                     with self.assertRaisesRegex(ValueError, "verification report differs"):
                         diagnostic.verify_diagnostic_signature(
                             stage, self.root, self.root, bundle, "a" * 40,

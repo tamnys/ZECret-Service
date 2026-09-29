@@ -312,46 +312,33 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
 
 def verify_diagnostic_signature(stage, builder_archives, workspace,
                                 rust_bundle, revision, uki_sha256):
-    """Use the production pinned sbverify closure for a supplied test signer."""
-    context = outer.source_context(revision, rust_bundle)
-    manifest = json.loads(outer.regular_bytes(rust_bundle / "manifest.json"),
-                          object_pairs_hook=prepare.unique_object)
-    binary = rust_bundle / "artifacts/zrpc-uki-digest"
-    if outer.hash_regular(binary)[1] != manifest["artifact_sha256"]["zrpc-uki-digest"]:
-        raise ValueError("diagnostic UKI verifier differs from native Rust receipt")
+    """Use a fresh source-bound process to verify the synthetic signature."""
     output = stage / "output"
     files = outer.checked_outputs(output)
     if files["zrpc-gcp.efi"][1] != uki_sha256:
         raise ValueError("signed UKI differs from inspected ESP")
     certificate = stage / "artifacts/secure_boot_certificate"
     cert_bytes = outer.regular_bytes(certificate)
-    with tempfile.TemporaryDirectory(prefix="zrpc-diagnostic-sbverify-",
-                                     dir=workspace) as temporary:
-        runtime = Path(temporary) / "runtime"
-        staged = context.sbverify.stage(builder_archives, runtime)
-        if staged["status"] != "diagnostic-sbverify-objects-staged-unapproved":
-            raise ValueError("signed sbverify runtime stage differs")
-        command = [str(binary), "verify-signature", str(output / "zrpc-gcp.efi"),
-                   uki_sha256, str(files["zrpc-gcp.efi"][0]),
-                   str(runtime / "sbverify"), str(certificate), sha256(cert_bytes),
-                   str(len(cert_bytes)),
-                   *(str(runtime / name) for name in (
-                       "ld-linux-x86-64.so.2", "libc.so.6", "libz.so.1",
-                       "libzstd.so.1", "libcrypto.so.3"))]
-        result = subprocess.run(command, capture_output=True, check=False,
-                                stdin=subprocess.DEVNULL,
-                                env={"HOME": "/nonexistent", "LC_ALL": "C",
-                                     "PATH": "/usr/bin:/bin"})
-        if result.returncode:
-            raise ValueError("pinned verifier rejected synthetic signed UKI")
-        signature = json.loads(result.stdout, object_pairs_hook=prepare.unique_object)
-        if (signature.get("status") !=
+    command = ["/usr/bin/python3", "-I", "-B", str(outer.ROOT / outer.SCRIPT),
+               "diagnostic-verify-uki", "--stage", str(stage),
+               "--builder-archives", str(builder_archives),
+               "--workspace", str(workspace), "--rust-bundle", str(rust_bundle),
+               "--revision", revision, "--uki-sha256", uki_sha256]
+    result = subprocess.run(command, capture_output=True, check=False,
+                            stdin=subprocess.DEVNULL,
+                            env={"HOME": "/nonexistent", "LC_ALL": "C",
+                                 "PATH": "/usr/bin:/bin"})
+    if result.returncode:
+        raise ValueError("pinned verifier rejected synthetic signed UKI")
+    signature = json.loads(result.stdout, object_pairs_hook=prepare.unique_object)
+    if (type(signature) is not dict
+            or signature.get("status") !=
                 "diagnostic-supplied-signer-signature-verified-unapproved"
-                or signature.get("signed_uki_checked") is not True
-                or signature.get("uki_sha256") != uki_sha256
-                or signature.get("signer_certificate_sha256") != sha256(cert_bytes)
-                or signature.get("private_mode_approved") is not False):
-            raise ValueError("synthetic signed UKI verification report differs")
+            or signature.get("signed_uki_checked") is not True
+            or signature.get("uki_sha256") != uki_sha256
+            or signature.get("signer_certificate_sha256") != sha256(cert_bytes)
+            or signature.get("private_mode_approved") is not False):
+        raise ValueError("synthetic signed UKI verification report differs")
     outer.require_unchanged_outputs(output, files)
     return signature
 
