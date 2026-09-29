@@ -340,8 +340,21 @@ def verify_diagnostic_signature(stage, builder_archives, workspace,
                 or not reason.isprintable() or len(reason) > 128):
             reason = "no bounded verifier reason"
         raise ValueError("pinned verifier rejected synthetic signed UKI: " + reason)
-    signature = json.loads(result.stdout, object_pairs_hook=prepare.unique_object)
-    if (type(signature) is not dict
+    evidence = json.loads(result.stdout, object_pairs_hook=prepare.unique_object)
+    signature = evidence.get("signature") if type(evidence) is dict else None
+    changed_hash = evidence.get("changed_uki_sha256") if type(evidence) is dict else None
+    changed_offset = evidence.get("changed_kernel_byte_offset") if type(evidence) is dict else None
+    if (type(evidence) is not dict
+            or evidence.get("status") != "diagnostic-signed-kernel-negative-check-unapproved"
+            or evidence.get("source_uki_sha256") != uki_sha256
+            or type(changed_hash) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", changed_hash)
+            or changed_hash == uki_sha256
+            or type(changed_offset) is not int
+            or not 0 <= changed_offset < files["zrpc-gcp.efi"][0]
+            or evidence.get("signed_kernel_byte_mutation_rejected") is not True
+            or evidence.get("private_mode_approved") is not False
+            or type(signature) is not dict
             or signature.get("status") !=
                 "diagnostic-supplied-signer-signature-verified-unapproved"
             or signature.get("signed_uki_checked") is not True
@@ -350,7 +363,7 @@ def verify_diagnostic_signature(stage, builder_archives, workspace,
             or signature.get("private_mode_approved") is not False):
         raise ValueError("synthetic signed UKI verification report differs")
     outer.require_unchanged_outputs(output, files)
-    return signature
+    return evidence
 
 
 def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
@@ -406,13 +419,13 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
             or prepare.digest(stage / "candidate-manifest.json") != staged["manifest_sha256"]):
         raise ValueError("source-bound image inputs changed during rehearsal")
     observed = inspect(stage, metadata, builder_archives, workspace, manifest)
-    signature = None
+    signature_evidence = None
     if signed_boot:
         if outer.checked_signing_key(
                 stage / "artifacts/secure_boot_certificate",
                 Path(prepare.EXTERNAL_SECURE_BOOT_KEY)) != certificate_sha256:
             raise ValueError("diagnostic signer changed during mkosi build")
-        signature = verify_diagnostic_signature(
+        signature_evidence = verify_diagnostic_signature(
             stage, builder_archives, workspace, boot_receipt[0],
             boot_receipt[1], observed["uki_sha256"])
     if boot_receipt is not None:
@@ -427,7 +440,7 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
             "source_profile_sha256": prepare.digest(prepare.PROFILE / "mkosi.conf"),
             "stage_manifest_sha256": staged["manifest_sha256"],
             "secure_boot_override": None if signed_boot else override,
-            "secure_boot_signature_checked": signature is not None,
+            "secure_boot_signature_checked": signature_evidence is not None,
             "mkosi_executed": True, "diagnostic_disk_built": True,
             **observed, "boot_verified": False, "hardware_verified": False,
             "private_mode_approved": False}
@@ -438,7 +451,11 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
                        "source_commit": boot_receipt[1]})
     if signed_boot:
         report.update({"diagnostic_signer_certificate_sha256": certificate_sha256,
-                       "synthetic_signature_report": signature})
+                       "synthetic_signature_report": signature_evidence["signature"],
+                       "signed_kernel_byte_mutation_rejected":
+                           signature_evidence["signed_kernel_byte_mutation_rejected"],
+                       "changed_kernel_uki_sha256":
+                           signature_evidence["changed_uki_sha256"]})
     return report
 
 

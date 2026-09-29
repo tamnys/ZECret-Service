@@ -320,8 +320,61 @@ def diagnostic_verify_uki(stage, builder_archives, workspace, rust_bundle,
                 or signature.get("signer_certificate_sha256") != sha256(certificate_bytes)
                 or signature.get("private_mode_approved") is not False):
             raise ValueError("reviewed UKI signature report differs from image bytes")
+        changed_path = Path(temporary) / "changed-kernel.efi"
+        changed_sha256, changed_offset = changed_kernel_uki(
+            output, files, changed_path)
+        changed_command = command.copy()
+        changed_command[2:5] = [str(changed_path), changed_sha256,
+                                str(files["zrpc-gcp.efi"][0])]
+        changed_result = subprocess.run(
+            changed_command, capture_output=True, check=False,
+            stdin=subprocess.DEVNULL,
+            env={"HOME": "/nonexistent", "LC_ALL": "C", "PATH": "/usr/bin:/bin"})
+        try:
+            rejected = json.loads(changed_result.stdout,
+                                  object_pairs_hook=context.source.guest.prepare.unique_object)
+        except (ValueError, UnicodeError, TypeError) as error:
+            raise ValueError("changed signed kernel has no bounded verifier rejection") from error
+        if (changed_result.returncode != 1 or changed_result.stderr
+                or type(rejected) is not dict or rejected.get("schema_version") != 2
+                or rejected.get("status") != "blocked"
+                or rejected.get("reason") !=
+                    "UKI Authenticode signature rejected by reviewed sbverify binary"
+                or rejected.get("signed_uki_checked") is not False
+                or rejected.get("release_approved") is not False
+                or rejected.get("private_mode_approved") is not False):
+            raise ValueError("changed signed kernel was not rejected by pinned sbverify")
     require_unchanged_outputs(output, files)
-    return signature
+    return {"status": "diagnostic-signed-kernel-negative-check-unapproved",
+            "signature": signature,
+            "source_uki_sha256": uki_sha256,
+            "changed_uki_sha256": changed_sha256,
+            "changed_kernel_byte_offset": changed_offset,
+            "signed_kernel_byte_mutation_rejected": True,
+            "private_mode_approved": False}
+
+
+def changed_kernel_uki(output, files, destination):
+    """Change one byte in the exact split .linux payload, never the PE header."""
+    uki = regular_bytes(output / "zrpc-gcp.efi")
+    kernel = regular_bytes(output / "zrpc-gcp.vmlinuz")
+    if (not kernel or len(uki) != files["zrpc-gcp.efi"][0]
+            or sha256(uki) != files["zrpc-gcp.efi"][1]
+            or len(kernel) != files["zrpc-gcp.vmlinuz"][0]
+            or sha256(kernel) != files["zrpc-gcp.vmlinuz"][1]):
+        raise ValueError("signed UKI or split kernel changed before negative check")
+    start = uki.find(kernel)
+    if start < 0 or uki.find(kernel, start + 1) >= 0:
+        raise ValueError("signed UKI has no unique exact split kernel payload")
+    changed_offset = start + len(kernel) // 2
+    changed = bytearray(uki)
+    changed[changed_offset] ^= 1
+    with destination.open("xb") as stream:
+        stream.write(changed)
+    changed_sha256 = sha256(changed)
+    if changed_sha256 == files["zrpc-gcp.efi"][1]:
+        raise ValueError("signed kernel negative check did not change the UKI")
+    return changed_sha256, changed_offset
 
 
 def checked_zebra(context, lock, inputs, receipt_path, now=None):
