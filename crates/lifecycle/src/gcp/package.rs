@@ -2,6 +2,11 @@
 use super::{Error, Result, digest, read_regular, valid_digest};
 use crate::MAX_LIFETIME_SECONDS;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use object::{
+    elf,
+    endian::Endianness,
+    read::elf::{Dyn, ElfFile64, FileHeader, ProgramHeader},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -541,7 +546,7 @@ fn verify_import_receipt(
     let receipt: NativeImportReceipt =
         serde_json::from_slice(&bytes).map_err(|_| Error("invalid typed import receipt"))?;
     if receipt.schema_version != 2
-        || receipt.producer != "zrpc-gcp-lifecycle-rust"
+        || receipt.producer != "zrpc-gcp-import-producer-rust"
         || !valid_digest(&receipt.producer_executable_sha256)
         || receipt.archive_sha256 != spec.raw_image_tar_gz.sha256
         || receipt.raw_disk_sha256 != spec.raw_disk_sha256
@@ -580,22 +585,105 @@ fn verify_import_receipt(
         .any(|field| manifest.get(*field).and_then(Value::as_bool) != Some(false))
         || manifest
             .get("artifact_sha256")
-            .and_then(|artifacts| artifacts.get("zrpc-gcp-lifecycle"))
+            .and_then(|artifacts| artifacts.get("zrpc-gcp-import-producer"))
             .and_then(Value::as_str)
             != Some(spec.producer_binary.sha256.as_str())
         || selected
             .iter()
             .filter(|item| {
                 item.get("package").and_then(Value::as_str) == Some("zrpc-lifecycle")
-                    && item.get("name").and_then(Value::as_str) == Some("zrpc-gcp-lifecycle")
+                    && item.get("name").and_then(Value::as_str) == Some("zrpc-gcp-import-producer")
             })
             .count()
             != 1
     {
         return Err(Error("native Rust producer differs from builder manifest"));
     }
+    let builds = manifest
+        .get("builds")
+        .and_then(Value::as_array)
+        .ok_or(Error(
+            "native Rust producer lacks independent build records",
+        ))?;
+    if builds.len() != 2
+        || ["build-a", "build-b"].iter().any(|label| {
+            builds
+                .iter()
+                .filter(|build| build.get("directory").and_then(Value::as_str) == Some(label))
+                .count()
+                != 1
+        })
+        || builds.iter().any(|build| {
+            build.get("exit_code").and_then(Value::as_u64) != Some(0)
+                || build
+                    .get("static_import_producer_exit_code")
+                    .and_then(Value::as_u64)
+                    != Some(0)
+                || build
+                    .get("static_import_producer_no_dynamic_loader")
+                    .and_then(Value::as_bool)
+                    != Some(true)
+                || build
+                    .get("artifact_sha256")
+                    .and_then(|artifacts| artifacts.get("zrpc-gcp-import-producer"))
+                    .and_then(Value::as_str)
+                    != Some(spec.producer_binary.sha256.as_str())
+        })
+    {
+        return Err(Error(
+            "native Rust producer build records differ from candidate",
+        ));
+    }
+    let producer = read_regular(&spec.producer_binary.path)?;
+    if digest(&producer) != spec.producer_binary.sha256 {
+        return Err(Error("import producer executable SHA-256 mismatch"));
+    }
+    verify_static_import_elf(&producer)?;
     // Matching self-reported and build-recorded bytes does not authenticate
-    // producer execution or the operator host's dynamic runtime closure.
+    // producer execution or the operator host's execution policy.
+    Ok(())
+}
+
+pub(crate) fn verify_static_import_elf(bytes: &[u8]) -> Result<()> {
+    let file: ElfFile64<'_, Endianness> =
+        ElfFile64::parse(bytes).map_err(|_| Error("invalid import producer ELF"))?;
+    let endian = file.endian();
+    let header = file.elf_header();
+    if endian != Endianness::Little
+        || header.e_machine(endian) != elf::EM_X86_64
+        || !matches!(header.e_type(endian), elf::ET_EXEC | elf::ET_DYN)
+    {
+        return Err(Error("import producer requires an x86_64 executable ELF"));
+    }
+    let mut has_load = false;
+    for segment in file.elf_program_headers() {
+        match segment.p_type(endian) {
+            elf::PT_LOAD => has_load = true,
+            elf::PT_INTERP => return Err(Error("import producer retains an ELF interpreter")),
+            elf::PT_DYNAMIC => {
+                let entries = segment
+                    .dynamic(endian, bytes)
+                    .map_err(|_| Error("invalid import producer dynamic segment"))?
+                    .ok_or(Error("invalid import producer dynamic segment"))?;
+                if !entries
+                    .iter()
+                    .any(|entry| entry.tag(endian) == elf::DT_NULL)
+                {
+                    return Err(Error("unterminated import producer dynamic segment"));
+                }
+                if entries
+                    .iter()
+                    .any(|entry| entry.tag(endian) == elf::DT_NEEDED)
+                {
+                    return Err(Error("import producer retains a shared-library dependency"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if !has_load {
+        return Err(Error("import producer lacks a loadable ELF segment"));
+    }
     Ok(())
 }
 

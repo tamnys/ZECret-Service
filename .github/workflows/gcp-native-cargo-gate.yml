@@ -103,6 +103,34 @@ jobs:
           git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
           echo 'Locked native dependency fetch completed; no code built or guest image created.'
 
+      - name: Run lifecycle package tests on native Linux without network
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$GITHUB_WORKSPACE/native-cargo"
+          mkdir -p "$source/.codex-tmp" "$source/target"
+          mkdir "$scratch/test-target" "$scratch/test-temp"
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$source,dst=/workspace,readonly" \
+            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
+            --mount "type=bind,src=$scratch/test-target,dst=/workspace/target" \
+            --mount "type=bind,src=$scratch/test-temp,dst=/workspace/.codex-tmp" \
+            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
+            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/workspace/target CARGO_NET_OFFLINE=true \
+            CODEX_TMP_DIR=/workspace/.codex-tmp \
+            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
+            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            LANG=C LC_ALL=C TZ=UTC \
+            sh -ceu 'ulimit -c 0; cargo test --locked --offline -p zrpc-lifecycle --lib gcp::'
+          test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
+          git -C "$source" diff --quiet
+
       - name: Build and export matching native binaries with no network or source write access
         shell: bash
         env:
@@ -112,7 +140,8 @@ jobs:
           source="$GITHUB_WORKSPACE/source"
           scratch="$GITHUB_WORKSPACE/native-cargo"
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
-          mkdir "$source/.codex-tmp" "$scratch/reproduction"
+          mkdir -p "$source/.codex-tmp"
+          mkdir "$scratch/reproduction"
           docker run --rm --pull=never --platform linux/amd64 --network none \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
             --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
@@ -138,7 +167,7 @@ jobs:
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
 
-      - name: Exercise the exact native import producer on synthetic media
+      - name: Exercise the exact matched static import producer on synthetic media
         shell: bash
         env:
           RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
@@ -160,7 +189,7 @@ jobs:
               smoke=/workspace/.codex-tmp/import-smoke
               release="/workspace/.codex-tmp/release-$1"
               mkdir "$smoke"
-              cp "$release/artifacts/zrpc-gcp-lifecycle" "$smoke/producer"
+              cp "$release/artifacts/zrpc-gcp-import-producer" "$smoke/producer"
               chmod 0500 "$smoke/producer"
               # The import contract requires a whole-GiB disk; this one is only zeros.
               truncate -s 1073741824 "$smoke/disk.raw"
@@ -185,11 +214,11 @@ jobs:
           binary_sha256 = digest(smoke / "producer")
           if (manifest.get("source_commit") != revision
                   or manifest.get("reproducible") is not True
-                  or manifest.get("artifact_sha256", {}).get("zrpc-gcp-lifecycle") != binary_sha256):
+                  or manifest.get("artifact_sha256", {}).get("zrpc-gcp-import-producer") != binary_sha256):
               raise ValueError("native import producer differs from matched build")
           expected = {
               "schema_version": 2,
-              "producer": "zrpc-gcp-lifecycle-rust",
+              "producer": "zrpc-gcp-import-producer-rust",
               "producer_executable_sha256": binary_sha256,
               "archive_sha256": digest(smoke / "disk.tar.gz"),
               "raw_disk_sha256": digest(smoke / "disk.raw"),
@@ -207,7 +236,7 @@ jobs:
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           git -C "$source" diff --quiet
 
-      - name: Probe a static native import producer in an empty-root container
+      - name: Exercise the matched import producer in an empty-root container
         shell: bash
         env:
           RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
@@ -216,28 +245,21 @@ jobs:
           source="$GITHUB_WORKSPACE/source"
           scratch="$GITHUB_WORKSPACE/native-cargo"
           probe="$scratch/static-producer-probe"
-          mkdir "$probe" "$scratch/static-target" "$probe/smoke"
+          mkdir "$probe" "$probe/smoke"
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           docker run --rm --pull=never --platform linux/amd64 --network none \
             --read-only --cap-drop ALL --security-opt no-new-privileges \
             --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
-            --mount "type=bind,src=$source,dst=/workspace,readonly" \
-            --mount "type=bind,src=$scratch/cargo-home,dst=/cargo-home" \
-            --mount "type=bind,src=$scratch/static-target,dst=/target" \
+            --mount "type=bind,src=$scratch/reproduction/release-$GITHUB_SHA/artifacts,dst=/release,readonly" \
             --mount "type=bind,src=$probe,dst=/output" \
-            --workdir /workspace --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
-            HOME=/cargo-home PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin \
-            CARGO_HOME=/cargo-home CARGO_TARGET_DIR=/target CARGO_NET_OFFLINE=true \
-            RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
-            RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
+            --workdir /output --entrypoint /usr/bin/env "$RUST_IMAGE" -i \
+            HOME=/nonexistent PATH=/usr/bin:/bin \
             LANG=C LC_ALL=C TZ=UTC \
             sh -ceu '
               ulimit -c 0
               test -f /usr/lib/x86_64-linux-gnu/libc.a
               test -f /usr/lib/x86_64-linux-gnu/libm.a
-              cargo rustc --locked --offline --release -p zrpc-lifecycle \
-                --bin zrpc-gcp-lifecycle -- -C target-feature=+crt-static
-              cp /target/release/zrpc-gcp-lifecycle /output/producer
+              cp /release/zrpc-gcp-import-producer /output/producer
               chmod 0555 /output/producer
               if readelf -l /output/producer | grep -q INTERP; then
                 echo "static producer retained an ELF interpreter" >&2; exit 1
@@ -263,7 +285,8 @@ jobs:
             --workdir /workspace "$image" pack-import \
               --raw /workspace/disk.raw --archive /workspace/disk.tar.gz \
               > "$probe/smoke/receipt.json"
-          python3 -I - "$probe" "$GITHUB_SHA" <<'PY'
+          python3 -I - "$probe" "$GITHUB_SHA" \
+            "$scratch/reproduction/release-$GITHUB_SHA/manifest.json" <<'PY'
           import hashlib
           import json
           from pathlib import Path
@@ -271,14 +294,25 @@ jobs:
 
           probe = Path(sys.argv[1])
           revision = sys.argv[2]
+          manifest = json.loads(Path(sys.argv[3]).read_bytes())
           def digest(path):
               with path.open("rb") as stream:
                   return hashlib.file_digest(stream, "sha256").hexdigest()
           receipt = json.loads((probe / "smoke/receipt.json").read_bytes())
           producer = digest(probe / "producer")
+          builds = manifest.get("builds")
+          if (manifest.get("source_commit") != revision
+                  or manifest.get("reproducible") is not True
+                  or manifest.get("artifact_sha256", {}).get("zrpc-gcp-import-producer") != producer
+                  or not isinstance(builds, list) or len(builds) != 2
+                  or any(build.get("static_import_producer_exit_code") != 0
+                         or build.get("static_import_producer_no_dynamic_loader") is not True
+                         or build.get("artifact_sha256", {}).get("zrpc-gcp-import-producer") != producer
+                         for build in builds)):
+              raise ValueError("static producer differs from matched double build")
           expected = {
               "schema_version": 2,
-              "producer": "zrpc-gcp-lifecycle-rust",
+              "producer": "zrpc-gcp-import-producer-rust",
               "producer_executable_sha256": producer,
               "archive_sha256": digest(probe / "smoke/disk.tar.gz"),
               "raw_disk_sha256": digest(probe / "smoke/disk.raw"),
@@ -307,7 +341,7 @@ jobs:
               "no_elf_interpreter": True,
               "no_shared_library_dependency": True,
               "empty_root_pack_import_passed": True,
-              "reproducible": False,
+              "reproducible": True,
               "private_mode_approved": False,
           }
           (probe / "diagnostic.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

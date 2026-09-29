@@ -42,7 +42,7 @@ sha2 = "=0.10.9"
 flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
 tar = { version = "=0.4.46", default-features = false }
 authenticode = { version = "=0.6.0", default-features = false, features = ["object", "std"] }
-object = { version = "=0.39.0", default-features = false, features = ["pe", "read_core", "unaligned"] }
+object = { version = "=0.39.0", default-features = false, features = ["elf", "pe", "read_core", "unaligned"] }
 
 # Offline quote verification only: no PCCS/HTTP fetch or permissive TCB override.
 dcap-qvl = { version = "=0.6.3", default-features = false, features = ["std", "ring", "default-x509"] }

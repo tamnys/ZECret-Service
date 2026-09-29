@@ -39,8 +39,11 @@ ARTIFACTS = (
     ("zrpc-server", "zrpc-gcp-cookie"),
     ("zrpc-server", "zrpc-gcp-early-init"),
     ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),
+    ("zrpc-lifecycle", "zrpc-gcp-import-producer"),
     ("zrpc-uki-digest", "zrpc-uki-digest"),
 )
+
+STATIC_IMPORT_PRODUCER = "zrpc-gcp-import-producer"
 
 
 def check_project_artifacts(source):
@@ -298,6 +301,7 @@ def reproduce(args):
     tools = {name: tool(name, repository, env, *options) for name, options in
              {"rustc": ["-vV"], "cargo": ["--version", "--verbose"],
               "cc": ["--version"], "ar": ["--version"], "ld": ["--version"],
+              "readelf": ["--version"],
               "git": ["--version"]}.items()}
     release = re.search(r"^release: (.+)$", tools["rustc"]["version"], re.MULTILINE)
     if release is None or release.group(1) != pin:
@@ -367,6 +371,25 @@ def reproduce(args):
             record["exit_code"] = result.returncode
             if result.returncode:
                 raise Refusal(f"{label} failed (exit {result.returncode}); retained build.log has diagnostics")
+            static_argv = [tools["cargo"]["path"], "rustc", "--locked", "--offline",
+                           "--release", "-p", "zrpc-lifecycle", "--bin",
+                           STATIC_IMPORT_PRODUCER, "--", "-C", "target-feature=+crt-static"]
+            record["static_import_producer_command"] = static_argv
+            print(f"Building static import producer for {label}; diagnostics: {root / 'static-import.log'}", flush=True)
+            with (root / "static-import.log").open("xb") as log:
+                result = subprocess.run(static_argv, cwd=source, env=build_env, stdout=log,
+                                        stderr=subprocess.STDOUT, check=False)
+            record["static_import_producer_exit_code"] = result.returncode
+            if result.returncode:
+                raise Refusal(f"{label} static import producer failed (exit {result.returncode}); retained static-import.log has diagnostics")
+            static_binary = target / "release" / STATIC_IMPORT_PRODUCER
+            segments = command([tools["readelf"]["path"], "--wide", "--program-headers",
+                                str(static_binary)], cwd=source, env=build_env)
+            dynamic = command([tools["readelf"]["path"], "--wide", "--dynamic",
+                               str(static_binary)], cwd=source, env=build_env)
+            if "INTERP" in segments or "NEEDED" in dynamic:
+                raise Refusal(f"{label} import producer retains a dynamic loader or shared library")
+            record["static_import_producer_no_dynamic_loader"] = True
             record["artifact_sha256"] = {name: digest(target / "release" / name)
                                           for _, name in ARTIFACTS}
         first, second = manifest["builds"]

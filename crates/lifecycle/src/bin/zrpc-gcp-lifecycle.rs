@@ -8,7 +8,7 @@ use std::{
 use zrpc_lifecycle::gcp::{
     self, Error, Result, controller,
     iam_diagnostic::{self, Snapshot as IamFreezeSnapshot},
-    package::{self, Artifact, DeploymentSpec, Package},
+    package::{Artifact, DeploymentSpec, Package},
     provider::{GoogleClient, Runtime},
     store::Store,
     watchdog::{self, Controls, WatchdogBinding},
@@ -46,12 +46,11 @@ async fn run() -> Result<()> {
     let command = args.next().unwrap_or_else(|| "--help".into());
     if command == "--help" || command == "help" {
         println!(
-            "zrpc-gcp-lifecycle: explicit Google C3 TDX operator control plane\n\nLocal commands (no authentication/network):\n  pack-import --raw ABSOLUTE_DISK.raw --archive ABSOLUTE_NEW.tar.gz\n  prepare --spec SPEC.json --package PACKAGE.json --state ABSOLUTE_NEW_DIRECTORY\n  status --state DIRECTORY\n  recover --state DIRECTORY\n  export-watchdog --state DIRECTORY --controls CONTROLS.json --output NEW_DIRECTORY\n  record-billing-evidence --state DIRECTORY --evidence ARTIFACT.json\n  inspect-iam-freeze --state DIRECTORY --snapshot CAPTURED_IAM.json\n\nOperator cloud commands (OAuth/network; deploy can incur costs):\n  deploy --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json --approve-package SHA256\n  observe --state DIRECTORY --runtime RUNTIME.json\n  teardown --state DIRECTORY --runtime RUNTIME.json\n  watchdog-once --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json\n\nPack-import requires disk.raw and writes a new archive on /workspace. Save its\nJSON output as the import receipt. Prepare requires the final disk and operator\nhandoff on this host; it hashes the disk and validates the handoff reports\nagainst the import archive. Later package validation rechecks the archive\nwithout requiring the loose disk. Each pass is bounded by explicit runtime\ninputs. Pending results require another pass. Never replace the original\njournal. No package grants private acceptance. Local commands make no cloud\ncalls; billing evidence does not establish finality. IAM snapshot inspection\nnever grants deployment approval."
+            "zrpc-gcp-lifecycle: explicit Google C3 TDX operator control plane\n\nLocal commands (no authentication/network):\n  prepare --spec SPEC.json --package PACKAGE.json --state ABSOLUTE_NEW_DIRECTORY\n  status --state DIRECTORY\n  recover --state DIRECTORY\n  export-watchdog --state DIRECTORY --controls CONTROLS.json --output NEW_DIRECTORY\n  record-billing-evidence --state DIRECTORY --evidence ARTIFACT.json\n  inspect-iam-freeze --state DIRECTORY --snapshot CAPTURED_IAM.json\n\nOperator cloud commands (OAuth/network; deploy can incur costs):\n  deploy --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json --approve-package SHA256\n  observe --state DIRECTORY --runtime RUNTIME.json\n  teardown --state DIRECTORY --runtime RUNTIME.json\n  watchdog-once --state DIRECTORY --runtime RUNTIME.json --controls CONTROLS.json\n\nThe separate zrpc-gcp-import-producer creates import archives offline. Prepare\nrequires the final disk and operator handoff on this host; it hashes the disk\nand validates the handoff reports against the import archive. Later package\nvalidation rechecks the archive without requiring the loose disk. Each pass is\nbounded by explicit runtime inputs. Pending results require another pass.\nNever replace the original journal. No package grants private acceptance.\nLocal commands make no cloud calls; billing evidence does not establish\nfinality. IAM snapshot inspection never grants deployment approval."
         );
         return Ok(());
     }
     let allowed: &[&str] = match command.as_str() {
-        "pack-import" => &["--raw", "--archive"],
         "prepare" => &["--spec", "--package", "--state"],
         "status" | "recover" => &["--state"],
         "export-watchdog" => &["--state", "--controls", "--output"],
@@ -68,12 +67,6 @@ async fn run() -> Result<()> {
         if !allowed.contains(&key.as_str()) || options.insert(key, val).is_some() {
             return Err(Error("unknown or duplicate operator option"));
         }
-    }
-    if command == "pack-import" {
-        return print(&package::pack_import_archive(
-            &path(&options, "--raw")?,
-            &path(&options, "--archive")?,
-        )?);
     }
     let state_path = path(&options, "--state")?;
     let at = gcp::now()?;
