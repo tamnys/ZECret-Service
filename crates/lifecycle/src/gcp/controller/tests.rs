@@ -7,7 +7,7 @@ use crate::gcp::{
     watchdog::{Controls, WatchdogBinding},
 };
 use serde_json::json;
-use std::{collections::BTreeMap, fs, path::PathBuf, process::Command, sync::OnceLock};
+use std::{cell::Cell, collections::BTreeMap, fs, path::PathBuf, process::Command, sync::OnceLock};
 
 fn diagnostic_artifact(root: &std::path::Path, name: &str, value: &Value) -> Artifact {
     let bytes = serde_json::to_vec(value).unwrap();
@@ -383,6 +383,7 @@ impl Fixture {
             staging_soft_deleted: false,
             staging_residual_failure: false,
             operations: BTreeMap::new(),
+            preflight_calls: 0,
             calls: Vec::new(),
             deletes: Vec::new(),
             compute_delete_response: None,
@@ -846,6 +847,7 @@ struct Mock {
     staging_soft_deleted: bool,
     staging_residual_failure: bool,
     operations: BTreeMap<String, Operation>,
+    preflight_calls: usize,
     calls: Vec<String>,
     deletes: Vec<String>,
     compute_delete_response: Option<Mutation>,
@@ -887,6 +889,7 @@ impl Mock {
 }
 impl Provider for Mock {
     async fn preflight(&mut self, _: &Package) -> Result<()> {
+        self.preflight_calls += 1;
         if self.outage {
             Err(Error("synthetic outage"))
         } else {
@@ -912,7 +915,13 @@ impl Provider for Mock {
         }
         Ok(self.staging_noncurrent || self.staging_soft_deleted)
     }
-    async fn create(&mut self, _: &Package, r: &ResourcePlan, request: &str) -> Result<Mutation> {
+    async fn create(
+        &mut self,
+        _: &Package,
+        r: &ResourcePlan,
+        request: &str,
+        _: u64,
+    ) -> Result<Mutation> {
         self.assert_committed(request);
         self.calls.push(request.into());
         let id = (self.objects.len() + 1).to_string();
@@ -969,6 +978,12 @@ impl Provider for Mock {
         Ok(self.operations.get(request).cloned())
     }
 }
+// Legacy synthetic cases use their fixture clock. Production deploy_once
+// always obtains a fresh wall-clock value itself.
+async fn deploy_once(store: &mut Store, provider: &mut Mock, at: u64) -> Result<Progress> {
+    deploy_once_with_clock(store, provider, || Ok(at)).await
+}
+
 async fn deploy_all(store: &mut Store, provider: &mut Mock, package: &Package) {
     for _ in &package.resources {
         assert_eq!(
@@ -1510,6 +1525,63 @@ async fn rejects_early_late_and_tampered_deploy_without_provider_mutations() {
     assert!(deploy_once(&mut store, &mut p, 1000).await.is_err());
     assert!(p.calls.is_empty());
 }
+
+#[tokio::test]
+async fn creation_window_rejects_delayed_admission_before_provider_calls() {
+    let f = Fixture::new();
+    let store = Store::open(&f.state).unwrap();
+    assert!(ensure_creation_window(&store, 1000).is_ok());
+    let trigger = store
+        .journal()
+        .watchdog
+        .as_ref()
+        .unwrap()
+        .deletion_start_unix_seconds;
+    let deadline = store.journal().original_deadline;
+    let original_generation = store.journal().generation;
+    drop(store);
+
+    for late_at in [trigger, deadline] {
+        let mut store = Store::open(&f.state).unwrap();
+        let mut provider = f.mock();
+        let error = deploy_once_with_clock(&mut store, &mut provider, || Ok(late_at))
+            .await
+            .unwrap_err();
+        assert!(error.0.contains("original deletion trigger"));
+        assert_eq!(provider.preflight_calls, 0);
+        assert!(provider.calls.is_empty());
+        assert!(provider.objects.is_empty());
+        assert_eq!(store.journal().generation, original_generation);
+    }
+}
+
+#[tokio::test]
+async fn creation_window_rejects_expiration_after_durable_intent() {
+    let f = Fixture::new();
+    let mut store = Store::open(&f.state).unwrap();
+    let mut provider = f.mock();
+    let trigger = store
+        .journal()
+        .watchdog
+        .as_ref()
+        .unwrap()
+        .deletion_start_unix_seconds;
+    let reads = Cell::new(0);
+    let error = deploy_once_with_clock(&mut store, &mut provider, || {
+        let next = reads.get() + 1;
+        reads.set(next);
+        Ok(if next == 6 { trigger } else { 1000 })
+    })
+    .await
+    .unwrap_err();
+    assert!(error.0.contains("original deletion trigger"));
+    assert_eq!(reads.get(), 6);
+    assert_eq!(provider.preflight_calls, 1);
+    assert!(provider.calls.is_empty());
+    assert!(provider.objects.is_empty());
+    assert!(store.journal().resources[0].create.is_some());
+}
+
 #[tokio::test]
 async fn cleanup_survives_expired_quote_missing_image_and_outage() {
     let f = Fixture::new();
