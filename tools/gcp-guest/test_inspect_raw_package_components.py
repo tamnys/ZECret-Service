@@ -279,6 +279,16 @@ class PackageComponentsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "removed package path remains"):
             self.inspect()
 
+    def test_ldconfig_cache_and_boot_unit_cannot_survive(self):
+        for relative in components.prepare.REMOVED_LDCONFIG_PATHS:
+            path = relative.removeprefix("/")
+            with self.subTest(path=path):
+                self.assertIn(path, self.plan["removed"])
+                self.actual[path] = {"type": "regular"}
+                with self.assertRaisesRegex(ValueError, "removed package path remains"):
+                    self.inspect()
+                del self.actual[path]
+
     def test_executable_outside_component_prefix_rejects_but_inert_data_does_not(self):
         path = "var/cache/payload"
         self.inventory[path] = {"type": "file", "mode": 0o755}

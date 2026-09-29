@@ -10,6 +10,7 @@ import sys
 
 EXPECTED_MOUNT_SHA256 = "__STAGED_MOUNT_SHA256__"
 MOUNT_OWNER = (0, 0)
+MACHINE_ID_OWNER = (0, 0)
 FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/unix_chkpwd", "usr/bin/umount", "usr/bin/su", "usr/sbin/losetup", "usr/sbin/swapon", "usr/sbin/swapoff", "usr/lib/dbus-1.0/dbus-daemon-launch-helper")
 FORBIDDEN_NVME_SURFACE = (
     "etc/nvme/discovery.conf", "usr/sbin/uuidd", "usr/bin/adduser", "usr/bin/passwd",
@@ -90,6 +91,11 @@ REMOVED_GENERATED_ETC_PATHS = (
     "etc/modules", "etc/initramfs-tools/modules",
     "etc/rc2.d/S01dbus", "etc/rc3.d/S01dbus",
     "etc/rc4.d/S01dbus", "etc/rc5.d/S01dbus",
+)
+REMOVED_LDCONFIG_PATHS = (
+    "etc/ld.so.cache",
+    "usr/lib/systemd/system/ldconfig.service",
+    "usr/lib/systemd/system/sysinit.target.wants/ldconfig.service",
 )
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
 # units must also be checked on the exact booted image; they do not exist in a
@@ -389,6 +395,16 @@ def audit(root):
     for name in REMOVED_GENERATED_ETC_PATHS:
         if present(root / name):
             raise ValueError("generated configuration remains: " + name)
+    for name in REMOVED_LDCONFIG_PATHS:
+        if present(root / name):
+            raise ValueError("ldconfig cache or boot activation remains: " + name)
+    machine_id = root / "etc/machine-id"
+    if (machine_id.is_symlink() or not machine_id.is_file()
+            or machine_id.stat().st_nlink != 1
+            or (machine_id.stat().st_uid, machine_id.stat().st_gid) != MACHINE_ID_OWNER
+            or stat.S_IMODE(machine_id.stat().st_mode) != 0o644
+            or machine_id.stat().st_size != 0):
+        raise ValueError("generic read-only machine-id differs")
     if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
         raise ValueError("signed mount ELF identity absent")
     mount = root / "usr/bin/mount"

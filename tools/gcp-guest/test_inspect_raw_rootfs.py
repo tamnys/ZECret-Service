@@ -38,6 +38,7 @@ class RawRootfsTest(unittest.TestCase):
             path = self.stage / "rootfs" / relative
             data = ((Path(__file__).resolve().parents[2] / "deploy/gcp/guest/rootfs" / relative).read_bytes()
                     if relative in rootfs.ACCOUNT_FILES
+                    else b"" if relative == rootfs.MACHINE_ID_FILE
                     else ("approved " + relative + "\n").encode())
             path.write_bytes(data)
             path.chmod(rootfs.ACCOUNT_FILES[relative][2] if relative in rootfs.ACCOUNT_FILES
@@ -265,6 +266,50 @@ class RawRootfsTest(unittest.TestCase):
                 mock.patch.object(rootfs, "run_cat", return_value="0" * 64):
             with self.assertRaisesRegex(ValueError, "raw rootfs file bytes differ"):
                 rootfs.inspect_entries(None, None, {file: account}, self.root)
+
+    def test_machine_id_cannot_be_replaced_or_owned_by_guest_service(self):
+        relative = rootfs.MACHINE_ID_FILE
+        path = self.stage / "rootfs" / relative
+        source = self.entries["rootfs/" + relative]
+        self.assertEqual(rootfs.checked_overlay(self.manifest, self.stage)[relative]["size"], 0)
+        path.write_bytes(b"uninitialized\n")
+        source["sha256"] = digest(path.read_bytes())
+        with self.assertRaisesRegex(ValueError, "generic read-only machine-id differs"):
+            rootfs.checked_overlay(self.manifest, self.stage)
+        path.write_bytes(b"")
+        source["sha256"] = rootfs.EMPTY_SHA256
+        selected = rootfs.checked_overlay(self.manifest, self.stage)[relative]
+        observed = {"type": "regular", "mode": 0o644, "uid": 0, "gid": 0,
+                    "size": 0, "link": None}
+        with mock.patch.object(rootfs, "run_stat", return_value=observed), \
+                mock.patch.object(rootfs, "run_cat", return_value=rootfs.EMPTY_SHA256):
+            self.assertEqual(rootfs.inspect_entries(None, None, {relative: selected}, self.root),
+                             {"file": 1, "directory": 0, "symlink": 0})
+        with mock.patch.object(rootfs, "run_stat", return_value={**observed, "uid": 101}), \
+                mock.patch.object(rootfs, "run_cat", side_effect=AssertionError(
+                    "machine-id owner must reject before extraction")):
+            with self.assertRaisesRegex(ValueError, "raw rootfs file metadata differs"):
+                rootfs.inspect_entries(None, None, {relative: selected}, self.root)
+
+    def test_long_overlay_symlink_uses_bounded_inode_target_reader(self):
+        relative = "etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"
+        target = "/usr/lib/systemd/system/systemd-networkd-wait-online.service"
+        self.assertEqual(len(target.encode()), 60)
+        image = self.root / "root.ext4"
+        image.write_bytes(b"synthetic ext4 placeholder")
+        inode = {"inode": 80, "type": "symlink", "mode": 0o777,
+                 "uid": 0, "gid": 0, "size": 60, "link": None}
+        selected = {relative: {"type": "symlink", "target": target}}
+        with mock.patch.object(rootfs, "run_stat", return_value=inode), \
+                mock.patch.object(rootfs.forbidden, "_unit_target", return_value=target) as read:
+            self.assertEqual(rootfs.inspect_entries(None, image, selected, self.root),
+                             {"file": 0, "directory": 0, "symlink": 1})
+            read.assert_called_once_with(None, image, inode, self.root,
+                                         image.stat().st_size, env=rootfs.ENV, pass_fds=())
+        with mock.patch.object(rootfs, "run_stat", return_value=inode), \
+                mock.patch.object(rootfs.forbidden, "_unit_target", return_value="/dev/null"):
+            with self.assertRaisesRegex(ValueError, "raw rootfs symlink target differs"):
+                rootfs.inspect_entries(None, image, selected, self.root)
 
     def test_mismatched_verity_evidence_rejects_before_partition_read(self):
         layout = {"status": "diagnostic-gpt-only-unapproved",

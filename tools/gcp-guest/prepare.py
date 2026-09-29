@@ -61,6 +61,7 @@ PINNED_DISK_FILES = {
     "usr/lib/udev/rules.d/65-gce-disk-naming.rules": "b06b83104359437859d4f497973eede0da1d8b3958afc4aab073d9f94e9d7b19",
     "usr/lib/systemd/system/zrpc-gcp-disk-trigger.service": "60da51b2fb02e6591a42bdce024594c3f891a314d5622ab88237049ae3ac9737",
 }
+MACHINE_ID_PATH = "etc/machine-id"
 ROLES = set(BINARIES) | set(DISK_TOOL_PACKAGES) | {EARLY_INIT_ROLE, "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 # Builder-only handoff. A later operator build must supply this private key
 # from a memory-backed mount. Staging never checks that mount, copies the key,
@@ -100,6 +101,14 @@ REMOVED_GENERATED_ETC_PATHS = (
     "/etc/rc2.d/S01dbus", "/etc/rc3.d/S01dbus",
     "/etc/rc4.d/S01dbus", "/etc/rc5.d/S01dbus",
 )
+REMOVED_LDCONFIG_PATHS = (
+    # libc-bin postinst generates a cache that is not a package member.
+    # Without these vendor unit paths, the read-only guest cannot launch
+    # ldconfig.service to regenerate it during sysinit.
+    "/etc/ld.so.cache",
+    "/usr/lib/systemd/system/ldconfig.service",
+    "/usr/lib/systemd/system/sysinit.target.wants/ldconfig.service",
+)
 ROOT_REMOVE_FILES = (
     "/usr/sbin/unix_chkpwd", "/usr/bin/umount", "/usr/bin/su",
     "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
@@ -117,6 +126,7 @@ ROOT_REMOVE_FILES = (
     # no reviewed guest startup path invokes these frontends.
     *REMOVED_ALTERNATIVES_PATHS,
     *REMOVED_GENERATED_ETC_PATHS,
+    *REMOVED_LDCONFIG_PATHS,
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
@@ -292,6 +302,13 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
                 or stat.S_IMODE(path.stat().st_mode) != 0o644
                 or digest(path) != expected_sha256):
             raise ValueError("measured public-disk boot input differs: " + relative)
+    # An empty regular file lets systemd use a transient ID with a read-only
+    # root. mkosi's earlier `uninitialized\n` image marker is not acceptable.
+    machine_id = profile / "rootfs" / MACHINE_ID_PATH
+    if (machine_id.is_symlink() or not machine_id.is_file()
+            or stat.S_IMODE(machine_id.stat().st_mode) != 0o644
+            or machine_id.stat().st_size != 0):
+        raise ValueError("generic read-only machine-id source differs")
     repart = profile / "repart"
     expected = {"10-root.conf", "20-root-verity.conf", "30-esp.conf"}
     if {path.name for path in repart.iterdir()} != expected:

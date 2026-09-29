@@ -43,8 +43,10 @@ ACCOUNT_FILES = {
     "etc/group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00", 0o644, 0o644),
     "etc/shadow": (509, "92ec1ef612eb9c38cbe22403a595d268bf38546cadded7d8e0471bf271f15d13", 0o400, 0o000),
 }
+MACHINE_ID_FILE = "etc/machine-id"
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 REQUIRED_FILES = frozenset({
-    "etc/fstab", "etc/zrpc/zebra.toml", *ACCOUNT_FILES,
+    "etc/fstab", "etc/zrpc/zebra.toml", MACHINE_ID_FILE, *ACCOUNT_FILES,
     "usr/lib/zrpc/zrpc-node-wrapper", "usr/lib/zrpc/zrpc-gcp-quote-broker",
     "usr/lib/zrpc/zrpc-gcp-guard", "usr/lib/zrpc/zrpc-gcp-disk-id", "usr/lib/zrpc/zrpc-gcp-cookie",
     "usr/lib/zrpc/zebrad",
@@ -162,6 +164,9 @@ def checked_overlay(manifest, stage):
         if selected.get(name) != {"type": "file", "mode": staged_mode,
                                    "sha256": digest, "size": size}:
             raise ValueError("staged account differs from reviewed source: " + name)
+    if selected.get(MACHINE_ID_FILE) != {"type": "file", "mode": 0o644,
+                                         "sha256": EMPTY_SHA256, "size": 0}:
+        raise ValueError("generic read-only machine-id differs from reviewed source")
     return selected
 
 
@@ -310,15 +315,23 @@ def inspect_entries(reader, image, selected, scratch, *, env=ENV, pass_fds=()):
         if expected["type"] == "file":
             final_mode = (ACCOUNT_FILES[relative][3] if relative in ACCOUNT_FILES
                           else expected["mode"])
+            root_owned = relative in ACCOUNT_FILES or relative == MACHINE_ID_FILE
             if (inode["mode"] != final_mode or inode["size"] != expected["size"]
-                    or (relative in ACCOUNT_FILES
-                        and (inode["uid"], inode["gid"]) != (0, 0))):
+                    or (root_owned and (inode["uid"], inode["gid"]) != (0, 0))):
                 raise ValueError("raw rootfs file metadata differs: " + relative)
             if run_cat(reader, image, relative, expected["size"], scratch,
                        env=env, pass_fds=pass_fds) != expected["sha256"]:
                 raise ValueError("raw rootfs file bytes differ: " + relative)
         elif expected["type"] == "symlink":
-            if inode["link"] != expected["target"]:
+            target = inode["link"]
+            if target is None:
+                # debugfs stat omits Fast link dest for block-backed links.
+                # The no-follow reader validates the same inode's metadata
+                # and bounds the exact target read before comparison.
+                target = forbidden._unit_target(
+                    reader, image, inode, scratch, Path(image).stat().st_size,
+                    env=env, pass_fds=pass_fds)
+            if target != expected["target"]:
                 raise ValueError("raw rootfs symlink target differs: " + relative)
         checked[expected["type"]] += 1
     return checked

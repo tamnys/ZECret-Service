@@ -83,6 +83,9 @@ class CandidateTests(unittest.TestCase):
         self.audit_mount_owner_patch = mock.patch.object(
             audit_rootfs, "MOUNT_OWNER", (os.getuid(), os.getgid()))
         self.audit_mount_owner_patch.start()
+        self.audit_machine_id_owner_patch = mock.patch.object(
+            audit_rootfs, "MACHINE_ID_OWNER", (os.getuid(), os.getgid()))
+        self.audit_machine_id_owner_patch.start()
         self.audit_disk_elf_patch = mock.patch.dict(
             audit_rootfs.SIGNED_DISK_ELFS,
             {name: (len(b"SYNTHETIC"), hashlib.sha256(b"SYNTHETIC").hexdigest(), mode)
@@ -99,6 +102,7 @@ class CandidateTests(unittest.TestCase):
             path.chmod(mode)
 
     def tearDown(self):
+        self.audit_machine_id_owner_patch.stop()
         self.audit_mount_owner_patch.stop()
         self.audit_mount_hash_patch.stop()
         self.mount_identity_patch.stop()
@@ -865,6 +869,7 @@ class CandidateTests(unittest.TestCase):
             "zrpc-node:x:101:\n"
             "zrpc-wrapper:x:102:\n"
             "zrpc-cookie:x:103:zrpc-node,zrpc-wrapper\n")
+        (root / "etc/machine-id").write_bytes(b"")
         for name in prepare.BINARIES.values():
             (root / "usr/lib/zrpc" / name).write_text("SYNTHETIC")
             (root / "usr/lib/zrpc" / name).chmod(0o555)
@@ -1016,7 +1021,8 @@ class CandidateTests(unittest.TestCase):
             if relative in (*prepare.REMOVED_GENERATED_UNIT_DIRECTORIES,
                             *prepare.REMOVED_GENERATED_UNIT_LINKS,
                             *prepare.REMOVED_ALTERNATIVES_PATHS,
-                            *prepare.REMOVED_GENERATED_ETC_PATHS):
+                            *prepare.REMOVED_GENERATED_ETC_PATHS,
+                            *prepare.REMOVED_LDCONFIG_PATHS):
                 continue
             with self.subTest(relative=relative):
                 path = root / relative.lstrip("/")
@@ -1123,6 +1129,36 @@ class CandidateTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,
                                             "generated configuration remains: " + relative):
                     audit_rootfs.audit(root)
+
+    def test_rootfs_audit_requires_ldconfig_cache_and_unit_absent(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_LDCONFIG_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_LDCONFIG_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-ldconfig-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"generated cache or active unit")
+                with self.assertRaisesRegex(
+                        ValueError, "ldconfig cache or boot activation remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_machine_id_source_and_final_root_must_be_empty(self):
+        prepare.validate_boot_profile()
+        source = prepare.PROFILE / "rootfs/etc/machine-id"
+        self.assertEqual(source.read_bytes(), b"")
+        root = self.synthetic_guest_root("-machine-id")
+        audit_rootfs.audit(root)
+        target = root / "etc/machine-id"
+        target.write_bytes(b"uninitialized\n")
+        with self.assertRaisesRegex(ValueError, "generic read-only machine-id differs"):
+            audit_rootfs.audit(root)
+        target.write_bytes(b"")
+        target.unlink()
+        target.symlink_to("/var/lib/zebra/machine-id")
+        with self.assertRaisesRegex(ValueError, "generic read-only machine-id differs"):
+            audit_rootfs.audit(root)
 
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
         self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
