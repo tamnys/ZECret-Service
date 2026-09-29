@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       prepare_boot_diagnostic:
-        description: Prepare unsigned boot-test disk and QEMU tools
+        description: Prepare exact-commit native early init for a synthetic boot diagnostic
         required: true
         default: false
         type: boolean
@@ -15,6 +15,11 @@ on:
         type: boolean
       tamper_root_data:
         description: Boot a disposable one-byte root-data mutation; synthetic negative only
+        required: true
+        default: false
+        type: boolean
+      signed_synthetic_boot:
+        description: Sign a synthetic-service disk with an ephemeral tmpfs key; no release approval
         required: true
         default: false
         type: boolean
@@ -71,6 +76,7 @@ jobs:
       ZRPC_PREPARE_BOOT_DIAGNOSTIC: ${{ github.event_name == 'workflow_dispatch' && inputs.prepare_boot_diagnostic || false }}
       ZRPC_OBSERVE_BOOT: ${{ github.event_name == 'workflow_dispatch' && inputs.observe_boot || false }}
       ZRPC_TAMPER_ROOT_DATA: ${{ github.event_name == 'workflow_dispatch' && inputs.tamper_root_data || false }}
+      ZRPC_SIGNED_SYNTHETIC_BOOT: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_synthetic_boot || false }}
       ZRPC_COMPARE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.compare_rebuild || false }}
       ZRPC_QEMU_MEMORY_MIB: ${{ inputs.qemu_memory_mib }}
       ZRPC_QEMU_VCPUS: ${{ inputs.qemu_vcpus }}
@@ -107,14 +113,18 @@ jobs:
           prepare = os.environ["ZRPC_PREPARE_BOOT_DIAGNOSTIC"]
           observe = os.environ["ZRPC_OBSERVE_BOOT"]
           tamper = os.environ["ZRPC_TAMPER_ROOT_DATA"]
+          signed = os.environ["ZRPC_SIGNED_SYNTHETIC_BOOT"]
           compare = os.environ["ZRPC_COMPARE_REBUILD"]
           values = (os.environ["ZRPC_QEMU_MEMORY_MIB"],
                     os.environ["ZRPC_QEMU_VCPUS"],
                     os.environ["ZRPC_QEMU_DEADLINE_SECONDS"])
           captures = os.environ["ZRPC_QEMU_CAPTURE_SECONDS"]
           if any(value not in ("true", "false") for value in (prepare, observe,
-                                                              tamper, compare)):
+                                                              tamper, signed, compare)):
               raise ValueError("diagnostic selection is malformed")
+          if signed == "true" and (prepare != "true" or observe != "false"
+                                   or tamper != "false" or compare != "false"):
+              raise ValueError("signed synthetic diagnostic requires native receipt and no QEMU or rebuild mode")
           if compare == "true" and prepare != "false":
               raise ValueError("root rebuild comparison requires the synthetic non-boot disk")
           if tamper == "true" and observe != "true":
@@ -236,7 +246,7 @@ jobs:
             --scratch "/var/tmp/zrpc-owner-map-full-disk-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             -- /usr/bin/bash -c '
             set -euo pipefail
-            if test "$#" -ne 12; then
+            if test "$#" -ne 13; then
               echo "namespace handoff argument count differs" >&2
               exit 1
             fi
@@ -246,6 +256,7 @@ jobs:
             chroot_command=${10}
             boot_diagnostic=${11}
             compare_rebuild=${12}
+            signed_synthetic_boot=${13}
             test "$staged" = "$scratch/staged"
             test "$(readlink /proc/self/ns/user)" != "$2"
             test "$(readlink /proc/self/ns/mnt)" != "$3"
@@ -277,6 +288,13 @@ jobs:
               test ! -L "$staged/$directory"
               mkdir -p "$staged/$directory"
             done
+            if test "$signed_synthetic_boot" = true; then
+              test "$boot_diagnostic" = true
+              test ! -e "$staged/run/zrpc-build-signing"
+              mkdir -m 0700 "$staged/run/zrpc-build-signing"
+              mount -t tmpfs -o mode=0700,nodev,nosuid,noexec tmpfs \
+                "$staged/run/zrpc-build-signing"
+            fi
             mount --bind "$scratch/apt-scratch" "$staged/zrpc-apt-scratch"
             mkdir -m 0700 "$staged/zrpc-apt-scratch/tmp"
             mount --bind "$scratch/guest-payload" "$staged/workspace"
@@ -332,6 +350,16 @@ jobs:
                 TMPDIR=/zrpc-apt-scratch/tmp \
                 "$chroot_command" "$staged" "$@"
             }
+            if test "$signed_synthetic_boot" = true; then
+              umask 077
+              run_staged /usr/bin/openssl req -new -x509 -newkey rsa:2048 \
+                -sha256 -noenc -days 1 -config /dev/null \
+                -subj /CN=ZRPC-SYNTHETIC-UNAPPROVED \
+                -keyout /run/zrpc-build-signing/secure-boot.key \
+                -out /workspace/source/.codex-tmp/diagnostic-cert.pem
+              chmod 0600 "$staged/run/zrpc-build-signing/secure-boot.key"
+              test -s "$scratch/diagnostic-work/diagnostic-cert.pem"
+            fi
             run_staged /usr/bin/python3 -I -B - <<"PY"
           import json
           import hashlib
@@ -384,18 +412,27 @@ jobs:
                     --lock /workspace/source/.codex-tmp/inputs.lock.json)
             receipt=()
             if test "$boot_diagnostic" = true; then
-              create_mode=create-boot-inputs
-              build_mode=build-boot
+              if test "$signed_synthetic_boot" = true; then
+                create_mode=create-signed-boot-inputs
+                build_mode=build-signed-boot
+                certificate=(--certificate \
+                  /workspace/source/.codex-tmp/diagnostic-cert.pem)
+              else
+                create_mode=create-boot-inputs
+                build_mode=build-boot
+                certificate=()
+              fi
               receipt=(--rust-bundle /workspace/rust-bundle --revision "$9")
             elif test "$boot_diagnostic" = false; then
               create_mode=create-inputs
               build_mode=build
+              certificate=()
             else
               echo "Invalid boot diagnostic selection" >&2
               exit 1
             fi
             run_staged /usr/bin/python3 -I -B "$tool" "$create_mode" \
-              "${prefix[@]}" "${receipt[@]}"
+              "${prefix[@]}" "${receipt[@]}" "${certificate[@]}"
             build=(/usr/bin/python3 -I -B "$tool" "$build_mode" \
                    "${prefix[@]}" "${receipt[@]}" \
                    --stage /workspace/source/.codex-tmp/stage \
@@ -404,8 +441,13 @@ jobs:
                    --parent-net-ns "$4" --parent-user-ns "$2" --parent-pid-ns "$5")
             if test "$boot_diagnostic" = true; then
               run_staged "${build[@]}" | tee "$scratch/diagnostic-build.log"
-              tail -n 1 "$scratch/diagnostic-build.log" \
-                > "$scratch/guest-payload/boot-disk-report.json"
+              if test "$signed_synthetic_boot" = true; then
+                tail -n 1 "$scratch/diagnostic-build.log" \
+                  > "$scratch/guest-payload/signed-disk-report.json"
+              else
+                tail -n 1 "$scratch/diagnostic-build.log" \
+                  > "$scratch/guest-payload/boot-disk-report.json"
+              fi
             else
               run_staged "${build[@]}"
             fi
@@ -423,7 +465,7 @@ jobs:
                 --metadata /zrpc-metadata --builder-archives /zrpc-archives \
                 --workspace /workspace
             fi
-            if test "$boot_diagnostic" = true; then
+            if test "$boot_diagnostic" = true && test "$signed_synthetic_boot" = false; then
               mkdir -m 0700 "$staged/workspace/boot-apt-scratch"
               run_staged /usr/bin/python3 -I -B \
                 /workspace/source/tools/gcp-guest/boot_qemu_toolchain.py stage \
@@ -435,14 +477,27 @@ jobs:
               tail -n 1 "$scratch/qemu-stage.log" \
                 > "$scratch/guest-payload/boot-toolchain-stage.json"
             fi
-            echo "::warning::Unsigned synthetic-service disk is diagnostic only; not signed or approved for private mode."
+            echo "::warning::Synthetic-service disk is diagnostic only; never approved for private mode."
           ' _ "$staged" "$parent_user_ns" "$parent_mount_ns" \
             "$parent_net_ns" "$parent_pid_ns" \
             "$root_stage" "$source" "$scratch" \
             "$ZRPC_SOURCE_SHA" "$chroot_command" "$ZRPC_PREPARE_BOOT_DIAGNOSTIC" \
-            "$ZRPC_COMPARE_REBUILD"
+            "$ZRPC_COMPARE_REBUILD" "$ZRPC_SIGNED_SYNTHETIC_BOOT"
+          if test "$ZRPC_SIGNED_SYNTHETIC_BOOT" = true; then
+            sudo -n install -m 0644 \
+              "$root_stage/full-disk/guest-payload/signed-disk-report.json" \
+              "$GITHUB_WORKSPACE/signed-disk-report.json"
+          fi
           echo "Exact source: $ZRPC_SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
-          echo 'Result: unsigned synthetic-service full-disk diagnostic; optional QEMU observation is a separate step; no TDX or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Result: synthetic-service full-disk diagnostic; optional signing uses a throwaway tmpfs key; no TDX or private-mode approval.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload synthetic signed-UKI diagnostic report
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.signed_synthetic_boot }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gcp-signed-synthetic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: signed-disk-report.json
+          if-no-files-found: warn
 
       - name: Observe optional unsigned boot in isolated QEMU
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.observe_boot }}

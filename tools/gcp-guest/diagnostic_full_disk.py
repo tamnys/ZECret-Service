@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Build and inspect unsigned, non-approving GCP diagnostic disks.
+"""Build and inspect non-approving GCP diagnostic disks.
 
-This rehearses the production mkosi/repart source with only the explicit
-``--secure-boot=no`` invocation override. The original rehearsal uses invalid
-ELF fixtures for every guest executable. The separate boot-input variant uses
-only an exact-HEAD, double-built Rust receipt's early init; all service
-executables remain invalid. Neither output has a Secure Boot signature, real
-Zebra, live TDX evidence, or a path into the approved-release catalog. Never
-import or boot either disk as a service.
+The unsigned modes rehearse the production mkosi/repart source with only the
+explicit ``--secure-boot=no`` invocation override. The original rehearsal
+uses invalid ELF fixtures for every guest executable. The boot-input modes
+use only an exact-HEAD, double-built Rust receipt's early init; all service
+executables remain invalid. The signed mode accepts a throwaway certificate
+whose key is held on the builder's private tmpfs and uses the unchanged
+production Secure Boot recipe. No mode has real Zebra, live TDX evidence, or
+a path into the approved-release catalog. Never import or boot a diagnostic
+disk as a service.
 """
 
 import argparse
@@ -47,6 +49,7 @@ _package_spec.loader.exec_module(packages)
 
 STATUS = "diagnostic-unsigned-synthetic-full-disk-unapproved"
 BOOT_STATUS = "diagnostic-unsigned-early-init-boot-disk-unapproved"
+SIGNED_BOOT_STATUS = "diagnostic-signed-synthetic-boot-disk-unapproved"
 REBUILD_STATUS = "diagnostic-root-rebuild-comparison-unapproved"
 SYNTHETIC_MARKER = b"ZRPC_SYNTHETIC_UNEXECUTABLE_FULL_DISK_REHEARSAL"
 # The header satisfies the staging architecture check, but this is not a
@@ -67,7 +70,7 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def checked_diagnostic_inputs(lock, inputs, early_init):
+def checked_diagnostic_inputs(lock, inputs, early_init, *, certificate=SYNTHETIC_CERTIFICATE):
     """Only the separately verified early-init role may differ from fixtures."""
     if type(lock) is not dict or type(lock.get("artifacts")) is not dict:
         raise ValueError("synthetic input lock is malformed")
@@ -77,7 +80,7 @@ def checked_diagnostic_inputs(lock, inputs, early_init):
             raise ValueError("synthetic role identity is absent")
         expected = (early_init if role == prepare.EARLY_INIT_ROLE else
                     SYNTHETIC_ELF if role in SYNTHETIC_ROLES else
-                    SYNTHETIC_CERTIFICATE if role == "secure_boot_certificate" else
+                    certificate if role == "secure_boot_certificate" else
                     SYNTHETIC_BOOT_POLICY)
         path = inputs / entry["path"]
         if outer.regular_bytes(path) != expected or entry["sha256"] != sha256(expected):
@@ -135,7 +138,8 @@ def checked_boot_receipt(rust_bundle, revision):
     return binary, manifest_sha256
 
 
-def _create_inputs(metadata, guest_archives, inputs, lock_path, early_init):
+def _create_inputs(metadata, guest_archives, inputs, lock_path, early_init,
+                   *, certificate=SYNTHETIC_CERTIFICATE):
     """Write fresh signed-package-backed inputs; callers choose the one init."""
     if inputs.exists() or inputs.is_symlink() or lock_path.exists() or lock_path.is_symlink():
         raise ValueError("synthetic input and lock destinations must be fresh")
@@ -150,7 +154,7 @@ def _create_inputs(metadata, guest_archives, inputs, lock_path, early_init):
     artifacts = {}
     fixed = {**{role: SYNTHETIC_ELF for role in SYNTHETIC_ROLES},
              prepare.EARLY_INIT_ROLE: early_init,
-             "secure_boot_certificate": SYNTHETIC_CERTIFICATE,
+             "secure_boot_certificate": certificate,
              "boot_policy": SYNTHETIC_BOOT_POLICY,
              "package_manifest": package_bytes,
              "snapshot_inrelease": outer.regular_bytes(metadata / "InRelease"),
@@ -181,7 +185,7 @@ def _create_inputs(metadata, guest_archives, inputs, lock_path, early_init):
             "source_date_epoch": guest.SIGNED_RELEASE_EPOCH,
             "kernel_version": prepare.KERNEL_VERSION, "snapshot": guest.SNAPSHOT,
             "artifacts": artifacts, "runtime": runtime}
-    checked_diagnostic_inputs(lock, inputs, early_init)
+    checked_diagnostic_inputs(lock, inputs, early_init, certificate=certificate)
     prepare.validate_lock(lock, inputs)
     lock_path.write_text(json.dumps(lock, sort_keys=True, separators=(",", ":")) + "\n")
     return {"status": "diagnostic-synthetic-inputs-staged-unapproved",
@@ -207,6 +211,32 @@ def create_boot_inputs(metadata, guest_archives, inputs, lock_path,
                    "native_rust_manifest_sha256": manifest_sha256,
                    "source_commit": revision,
                    "boot_verified": False})
+    return report
+
+
+def create_signed_boot_inputs(metadata, guest_archives, inputs, lock_path,
+                              rust_bundle, revision, certificate_path):
+    """Stage only a signed boot diagnostic with an unexecutable service set."""
+    early_init, manifest_sha256 = checked_boot_receipt(rust_bundle, revision)
+    certificate = outer.regular_bytes(certificate_path)
+    if (certificate == SYNTHETIC_CERTIFICATE
+            or not certificate.startswith(b"-----BEGIN CERTIFICATE-----\n")
+            or not certificate.endswith(b"-----END CERTIFICATE-----\n")):
+        raise ValueError("signed diagnostic requires a PEM certificate")
+    if outer.checked_signing_key(certificate_path,
+                                 Path(prepare.EXTERNAL_SECURE_BOOT_KEY)) != sha256(certificate):
+        raise ValueError("diagnostic certificate changed while matching key")
+    report = _create_inputs(metadata, guest_archives, inputs, lock_path,
+                            early_init, certificate=certificate)
+    if outer.checked_signing_key(inputs / "secure_boot_certificate",
+                                 Path(prepare.EXTERNAL_SECURE_BOOT_KEY)) != sha256(certificate):
+        raise ValueError("copied diagnostic certificate differs from signing key")
+    report.update({"status": "diagnostic-signed-boot-inputs-staged-unapproved",
+                   "synthetic_workload": False, "synthetic_service_payloads": True,
+                   "native_early_init_sha256": sha256(early_init),
+                   "native_rust_manifest_sha256": manifest_sha256,
+                   "diagnostic_signer_certificate_sha256": sha256(certificate),
+                   "source_commit": revision, "boot_verified": False})
     return report
 
 
@@ -280,14 +310,71 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
             "complete_initrd_runtime_audited": False}
 
 
+def verify_diagnostic_signature(stage, builder_archives, workspace,
+                                rust_bundle, revision, uki_sha256):
+    """Use the production pinned sbverify closure for a supplied test signer."""
+    context = outer.source_context(revision, rust_bundle)
+    manifest = json.loads(outer.regular_bytes(rust_bundle / "manifest.json"),
+                          object_pairs_hook=prepare.unique_object)
+    binary = rust_bundle / "artifacts/zrpc-uki-digest"
+    if outer.hash_regular(binary)[1] != manifest["artifact_sha256"]["zrpc-uki-digest"]:
+        raise ValueError("diagnostic UKI verifier differs from native Rust receipt")
+    output = stage / "output"
+    files = outer.checked_outputs(output)
+    if files["zrpc-gcp.efi"][1] != uki_sha256:
+        raise ValueError("signed UKI differs from inspected ESP")
+    certificate = stage / "artifacts/secure_boot_certificate"
+    cert_bytes = outer.regular_bytes(certificate)
+    with tempfile.TemporaryDirectory(prefix="zrpc-diagnostic-sbverify-",
+                                     dir=workspace) as temporary:
+        runtime = Path(temporary) / "runtime"
+        staged = context.sbverify.stage(builder_archives, runtime)
+        if staged["status"] != "diagnostic-sbverify-objects-staged-unapproved":
+            raise ValueError("signed sbverify runtime stage differs")
+        command = [str(binary), "verify-signature", str(output / "zrpc-gcp.efi"),
+                   uki_sha256, str(files["zrpc-gcp.efi"][0]),
+                   str(runtime / "sbverify"), str(certificate), sha256(cert_bytes),
+                   str(len(cert_bytes)),
+                   *(str(runtime / name) for name in (
+                       "ld-linux-x86-64.so.2", "libc.so.6", "libz.so.1",
+                       "libzstd.so.1", "libcrypto.so.3"))]
+        result = subprocess.run(command, capture_output=True, check=False,
+                                stdin=subprocess.DEVNULL,
+                                env={"HOME": "/nonexistent", "LC_ALL": "C",
+                                     "PATH": "/usr/bin:/bin"})
+        if result.returncode:
+            raise ValueError("pinned verifier rejected synthetic signed UKI")
+        signature = json.loads(result.stdout, object_pairs_hook=prepare.unique_object)
+        if (signature.get("status") !=
+                "diagnostic-supplied-signer-signature-verified-unapproved"
+                or signature.get("signed_uki_checked") is not True
+                or signature.get("uki_sha256") != uki_sha256
+                or signature.get("signer_certificate_sha256") != sha256(cert_bytes)
+                or signature.get("private_mode_approved") is not False):
+            raise ValueError("synthetic signed UKI verification report differs")
+    outer.require_unchanged_outputs(output, files)
+    return signature
+
+
 def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
           workspace, apt_scratch, parent_net_ns, parent_user_ns, parent_pid_ns,
-          *, boot_receipt=None):
+          *, boot_receipt=None, signed_boot=False):
+    if signed_boot and boot_receipt is None:
+        raise ValueError("signed diagnostic requires exact native boot receipt")
     early_init = SYNTHETIC_ELF
     if boot_receipt is not None:
         early_init, receipt_sha256 = checked_boot_receipt(*boot_receipt)
     lock = json.loads(outer.regular_bytes(lock_path), object_pairs_hook=prepare.unique_object)
-    checked_diagnostic_inputs(lock, inputs, early_init)
+    certificate = (outer.regular_bytes(inputs / "secure_boot_certificate")
+                   if signed_boot else SYNTHETIC_CERTIFICATE)
+    checked_diagnostic_inputs(lock, inputs, early_init, certificate=certificate)
+    certificate_sha256 = None
+    if signed_boot:
+        certificate_sha256 = outer.checked_signing_key(
+            inputs / "secure_boot_certificate",
+            Path(prepare.EXTERNAL_SECURE_BOOT_KEY))
+        if certificate_sha256 != sha256(certificate):
+            raise ValueError("diagnostic signer changed before staging")
     if stage.exists() or stage.is_symlink() or not workspace.is_dir():
         raise ValueError("fresh rehearsal stage and workspace required")
     execution = builder.verify_execution_context(
@@ -300,32 +387,49 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
         raise ValueError("guest package signature was not rechecked")
     staged = prepare.stage(lock_path, inputs, stage)
     override = checked_override(stage, staged["manifest_sha256"], staged["manifest_bytes"])
+    if signed_boot and outer.checked_signing_key(
+            stage / "artifacts/secure_boot_certificate",
+            Path(prepare.EXTERNAL_SECURE_BOOT_KEY)) != certificate_sha256:
+        raise ValueError("diagnostic signer changed before mkosi")
     manifest = json.loads(outer.regular_bytes(stage / "candidate-manifest.json"),
                           object_pairs_hook=prepare.unique_object)
     initial = outer.immutable_stage_inventory(stage, manifest)
     environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LC_ALL": "C",
                    "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
                    "TMPDIR": str(apt_scratch / "tmp")}
-    command = ["/usr/bin/mkosi", f"--directory={stage}", override, "build"]
+    command = ["/usr/bin/mkosi", f"--directory={stage}"]
+    if not signed_boot:
+        command.append(override)
+    command.append("build")
     result = subprocess.run(command, env=environment, check=False)
     if result.returncode:
-        raise ValueError("unsigned synthetic mkosi full-disk rehearsal failed")
+        raise ValueError("synthetic mkosi full-disk rehearsal failed")
     if (outer.immutable_stage_inventory(stage, manifest) != initial
             or prepare.digest(stage / "candidate-manifest.json") != staged["manifest_sha256"]):
         raise ValueError("source-bound image inputs changed during rehearsal")
     observed = inspect(stage, metadata, builder_archives, workspace, manifest)
+    signature = None
+    if signed_boot:
+        if outer.checked_signing_key(
+                stage / "artifacts/secure_boot_certificate",
+                Path(prepare.EXTERNAL_SECURE_BOOT_KEY)) != certificate_sha256:
+            raise ValueError("diagnostic signer changed during mkosi build")
+        signature = verify_diagnostic_signature(
+            stage, builder_archives, workspace, boot_receipt[0],
+            boot_receipt[1], observed["uki_sha256"])
     if boot_receipt is not None:
         final_early_init, final_receipt_sha256 = checked_boot_receipt(*boot_receipt)
         if final_early_init != early_init or final_receipt_sha256 != receipt_sha256:
             raise ValueError("native Rust receipt changed during boot disk build")
     report = {"schema_version": 1,
-            "status": BOOT_STATUS if boot_receipt is not None else STATUS,
+            "status": SIGNED_BOOT_STATUS if signed_boot else
+                      BOOT_STATUS if boot_receipt is not None else STATUS,
             "production_image": False,
             "synthetic_workload": boot_receipt is None,
             "source_profile_sha256": prepare.digest(prepare.PROFILE / "mkosi.conf"),
             "stage_manifest_sha256": staged["manifest_sha256"],
-            "secure_boot_override": override,
-            "secure_boot_signature_checked": False,
+            "secure_boot_override": None if signed_boot else override,
+            "secure_boot_signature_checked": signature is not None,
             "mkosi_executed": True, "diagnostic_disk_built": True,
             **observed, "boot_verified": False, "hardware_verified": False,
             "private_mode_approved": False}
@@ -334,6 +438,9 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
                        "native_early_init_sha256": sha256(early_init),
                        "native_rust_manifest_sha256": receipt_sha256,
                        "source_commit": boot_receipt[1]})
+    if signed_boot:
+        report.update({"diagnostic_signer_certificate_sha256": certificate_sha256,
+                       "synthetic_signature_report": signature})
     return report
 
 
@@ -344,6 +451,15 @@ def build_boot(lock_path, inputs, stage, metadata, guest_archives,
                  builder_archives, workspace, apt_scratch, parent_net_ns,
                  parent_user_ns, parent_pid_ns,
                  boot_receipt=(rust_bundle, revision))
+
+
+def build_signed_boot(lock_path, inputs, stage, metadata, guest_archives,
+                      builder_archives, workspace, apt_scratch, parent_net_ns,
+                      parent_user_ns, parent_pid_ns, rust_bundle, revision):
+    return build(lock_path, inputs, stage, metadata, guest_archives,
+                 builder_archives, workspace, apt_scratch, parent_net_ns,
+                 parent_user_ns, parent_pid_ns,
+                 boot_receipt=(rust_bundle, revision), signed_boot=True)
 
 
 def debugfs_output(reader, image, command, descriptor):
@@ -563,21 +679,24 @@ def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("create-inputs", "create-boot-inputs"):
+    for name in ("create-inputs", "create-boot-inputs",
+                 "create-signed-boot-inputs"):
         create = sub.add_parser(name)
         for flag in ("metadata", "guest-archives", "inputs", "lock"):
             create.add_argument("--" + flag, required=True, type=Path)
-        if name == "create-boot-inputs":
+        if name != "create-inputs":
             create.add_argument("--rust-bundle", required=True, type=Path)
             create.add_argument("--revision", required=True)
-    for name in ("build", "build-boot"):
+        if name == "create-signed-boot-inputs":
+            create.add_argument("--certificate", required=True, type=Path)
+    for name in ("build", "build-boot", "build-signed-boot"):
         run = sub.add_parser(name)
         for flag in ("lock", "inputs", "stage", "metadata", "guest-archives",
                      "builder-archives", "workspace", "apt-scratch"):
             run.add_argument("--" + flag, required=True, type=Path)
         for flag in ("parent-net-ns", "parent-user-ns", "parent-pid-ns"):
             run.add_argument("--" + flag, required=True)
-        if name == "build-boot":
+        if name != "build":
             run.add_argument("--rust-bundle", required=True, type=Path)
             run.add_argument("--revision", required=True)
     compare = sub.add_parser("compare-roots")
@@ -599,13 +718,23 @@ def main(argv=None):
             report = create_boot_inputs(args.metadata, args.guest_archives,
                                         args.inputs, args.lock,
                                         args.rust_bundle, args.revision)
+        elif args.command == "create-signed-boot-inputs":
+            report = create_signed_boot_inputs(
+                args.metadata, args.guest_archives, args.inputs, args.lock,
+                args.rust_bundle, args.revision, args.certificate)
         elif args.command == "build-boot":
             report = build_boot(args.lock, args.inputs, args.stage,
                                 args.metadata, args.guest_archives,
                                 args.builder_archives, args.workspace,
                                 args.apt_scratch, args.parent_net_ns,
                                 args.parent_user_ns, args.parent_pid_ns,
-                                args.rust_bundle, args.revision)
+                                      args.rust_bundle, args.revision)
+        elif args.command == "build-signed-boot":
+            report = build_signed_boot(
+                args.lock, args.inputs, args.stage, args.metadata,
+                args.guest_archives, args.builder_archives, args.workspace,
+                args.apt_scratch, args.parent_net_ns, args.parent_user_ns,
+                args.parent_pid_ns, args.rust_bundle, args.revision)
         else:
             report = build(args.lock, args.inputs, args.stage, args.metadata,
                            args.guest_archives, args.builder_archives,

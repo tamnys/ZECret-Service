@@ -1,4 +1,4 @@
-"""Fail-closed tests for both unsigned full-disk rehearsal input modes."""
+"""Fail-closed tests for synthetic full-disk rehearsal modes."""
 
 import json
 from pathlib import Path
@@ -589,6 +589,144 @@ class DiagnosticDiskTests(unittest.TestCase):
                                       "net:[0]", "user:[0]", "pid:[0]",
                                       bundle, revision)
         run.assert_called_once()
+
+    def test_signed_boot_requires_real_matching_certificate_before_staging(self):
+        bundle, revision, binary, _ = self.boot_receipt()
+        certificate = self.root / "diagnostic.pem"
+        inputs = self.root / "inputs"
+        lock = self.root / "inputs.lock.json"
+        certificate.write_bytes(diagnostic.SYNTHETIC_CERTIFICATE)
+        with mock.patch.object(diagnostic, "checked_boot_receipt",
+                               return_value=(binary, "b" * 64)):
+            with self.assertRaisesRegex(ValueError, "PEM certificate"):
+                diagnostic.create_signed_boot_inputs(
+                    self.root, self.root, inputs, lock, bundle, revision,
+                    certificate)
+        self.assertFalse(inputs.exists())
+        self.assertFalse(lock.exists())
+
+        certificate.write_bytes(b"-----BEGIN CERTIFICATE-----\nTEST\n"
+                                b"-----END CERTIFICATE-----\n")
+        with (mock.patch.object(diagnostic, "checked_boot_receipt",
+                                return_value=(binary, "b" * 64)),
+              mock.patch.object(diagnostic.outer, "checked_signing_key",
+                                side_effect=ValueError("unmatched signer"))):
+            with self.assertRaisesRegex(ValueError, "unmatched signer"):
+                diagnostic.create_signed_boot_inputs(
+                    self.root, self.root, inputs, lock, bundle, revision,
+                    certificate)
+        self.assertFalse(inputs.exists())
+        self.assertFalse(lock.exists())
+
+    def test_signed_boot_uses_no_override_and_rejects_changed_service(self):
+        bundle, revision, binary, _ = self.boot_receipt()
+        inputs = self.root / "inputs"
+        lock = self.boot_input_lock(inputs, binary)
+        certificate = (b"-----BEGIN CERTIFICATE-----\nTEST\n"
+                       b"-----END CERTIFICATE-----\n")
+        (inputs / "secure_boot_certificate").write_bytes(certificate)
+        lock["artifacts"]["secure_boot_certificate"]["sha256"] = diagnostic.sha256(certificate)
+        lock_path = self.root / "inputs.lock.json"
+        lock_path.write_text(json.dumps(lock))
+        stage = self.root / "stage"
+
+        def staged(*_):
+            stage.mkdir()
+            (stage / "candidate-manifest.json").write_text("{}")
+            return {"manifest_sha256": "c" * 64, "manifest_bytes": b"manifest"}
+
+        signature = {"status": "diagnostic-supplied-signer-signature-verified-unapproved",
+                     "signed_uki_checked": True, "private_mode_approved": False}
+        with (mock.patch.object(diagnostic, "checked_boot_receipt",
+                                return_value=(binary, "b" * 64)),
+              mock.patch.object(diagnostic.outer, "checked_signing_key",
+                                return_value=diagnostic.sha256(certificate)),
+              mock.patch.object(diagnostic.builder, "verify_execution_context",
+                                return_value={"status": "diagnostic-signed-staged-builder-no-route"}),
+              mock.patch.object(diagnostic.guest, "verify_cached_archives",
+                                return_value={"signed_snapshot_rechecked": True}),
+              mock.patch.object(diagnostic.prepare, "stage", side_effect=staged),
+              mock.patch.object(diagnostic, "checked_override",
+                                return_value=diagnostic.SECURE_BOOT_OVERRIDE),
+              mock.patch.object(diagnostic.outer, "immutable_stage_inventory",
+                                return_value={}),
+              mock.patch.object(diagnostic.prepare, "digest", return_value="c" * 64),
+              mock.patch.object(diagnostic.subprocess, "run",
+                                return_value=SimpleNamespace(returncode=0)) as run,
+              mock.patch.object(diagnostic, "inspect",
+                                return_value={"uki_sha256": "d" * 64,
+                                              "private_mode_approved": False}),
+              mock.patch.object(diagnostic, "verify_diagnostic_signature",
+                                return_value=signature)):
+            report = diagnostic.build_signed_boot(
+                lock_path, inputs, stage, self.root, self.root, self.root,
+                self.root, self.root, "net:[0]", "user:[0]", "pid:[0]",
+                bundle, revision)
+        self.assertEqual(report["status"], diagnostic.SIGNED_BOOT_STATUS)
+        self.assertTrue(report["secure_boot_signature_checked"])
+        self.assertIsNone(report["secure_boot_override"])
+        self.assertFalse(report["production_image"])
+        self.assertFalse(report["private_mode_approved"])
+        self.assertEqual(run.call_args.args[0],
+                         ["/usr/bin/mkosi", f"--directory={stage}", "build"])
+
+        changed = diagnostic.SYNTHETIC_ELF + b"changed service"
+        (inputs / "wrapper").write_bytes(changed)
+        lock["artifacts"]["wrapper"]["sha256"] = diagnostic.sha256(changed)
+        lock_path.write_text(json.dumps(lock))
+        with (mock.patch.object(diagnostic, "checked_boot_receipt",
+                                return_value=(binary, "b" * 64)),
+              mock.patch.object(diagnostic.subprocess, "run") as run):
+            with self.assertRaisesRegex(ValueError, "non-synthetic workload"):
+                diagnostic.build_signed_boot(
+                    lock_path, inputs, self.root / "second-stage", self.root,
+                    self.root, self.root, self.root, self.root,
+                    "net:[0]", "user:[0]", "pid:[0]", bundle, revision)
+            run.assert_not_called()
+
+    def test_signed_signature_report_must_match_pinned_uki_and_certificate(self):
+        stage = self.make_output(gpt_fixture.synthetic_disk())
+        certificate = stage / "artifacts/secure_boot_certificate"
+        certificate.parent.mkdir()
+        certificate.write_bytes(b"-----BEGIN CERTIFICATE-----\nTEST\n"
+                                b"-----END CERTIFICATE-----\n")
+        bundle = self.root / "rust-bundle"
+        (bundle / "artifacts").mkdir(parents=True)
+        verifier = bundle / "artifacts/zrpc-uki-digest"
+        verifier.write_bytes(b"pinned verifier fixture")
+        (bundle / "manifest.json").write_text(json.dumps({
+            "artifact_sha256": {"zrpc-uki-digest": diagnostic.sha256(verifier.read_bytes())}}))
+        uki = stage / "output/zrpc-gcp.efi"
+        uki_sha256 = diagnostic.sha256(uki.read_bytes())
+        signer_sha256 = diagnostic.sha256(certificate.read_bytes())
+        context = SimpleNamespace(sbverify=SimpleNamespace(stage=lambda *_: {
+            "status": "diagnostic-sbverify-objects-staged-unapproved"}))
+        accepted = {"status": "diagnostic-supplied-signer-signature-verified-unapproved",
+                    "signed_uki_checked": True, "uki_sha256": uki_sha256,
+                    "signer_certificate_sha256": signer_sha256,
+                    "private_mode_approved": False}
+        with (mock.patch.object(diagnostic.outer, "source_context", return_value=context),
+              mock.patch.object(diagnostic.subprocess, "run",
+                                return_value=SimpleNamespace(returncode=0,
+                                  stdout=json.dumps(accepted).encode()))):
+            observed = diagnostic.verify_diagnostic_signature(
+                stage, self.root, self.root, bundle, "a" * 40, uki_sha256)
+            self.assertEqual(observed, accepted)
+        for changed in ({**accepted, "signed_uki_checked": False},
+                        {**accepted, "uki_sha256": "0" * 64},
+                        {**accepted, "signer_certificate_sha256": "0" * 64},
+                        {**accepted, "private_mode_approved": True}):
+            with self.subTest(changed=changed):
+                with (mock.patch.object(diagnostic.outer, "source_context",
+                                        return_value=context),
+                      mock.patch.object(diagnostic.subprocess, "run",
+                                        return_value=SimpleNamespace(
+                                            returncode=0,
+                                            stdout=json.dumps(changed).encode()))):
+                    with self.assertRaisesRegex(ValueError, "verification report differs"):
+                        diagnostic.verify_diagnostic_signature(
+                            stage, self.root, self.root, bundle, "a" * 40,
+                            uki_sha256)
 
 
 if __name__ == "__main__":
