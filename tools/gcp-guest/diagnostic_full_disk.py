@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 # The native workflow invokes this exact-commit, read-only script with -I.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -343,7 +344,71 @@ def build_boot(lock_path, inputs, stage, metadata, guest_archives,
                  boot_receipt=(rust_bundle, revision))
 
 
-def compare_root_rebuilds(first_stage, second_stage):
+def debugfs_output(reader, image, command, descriptor):
+    result = subprocess.run([str(reader), "-R", command, str(image)],
+                            stdin=subprocess.DEVNULL, capture_output=True,
+                            env=rootfs.SUPER_ENV, pass_fds=(descriptor,), check=False)
+    if result.returncode or result.stderr != rootfs.READER_BANNER:
+        raise ValueError("signed debugfs block ownership query failed")
+    try:
+        return result.stdout.decode("ascii")
+    except UnicodeError as error:
+        raise ValueError("signed debugfs block ownership report is malformed") from error
+
+
+def describe_changed_block(reader, image, byte_offset, descriptor):
+    stats = debugfs_output(reader, image, "stats -h", descriptor)
+    sizes = re.findall(r"(?m)^Block size:\s+([1-9][0-9]*)$", stats)
+    if sizes != ["4096"]:
+        raise ValueError("root ext4 block size differs from pinned mkfs recipe")
+    block = byte_offset // 4096
+    lines = debugfs_output(reader, image, f"icheck {block}", descriptor).splitlines()
+    if len(lines) != 2 or lines[0] != "Block\tInode number":
+        raise ValueError("signed debugfs block owner report is malformed")
+    row = lines[1].split("\t")
+    if len(row) != 2 or row[0] != str(block):
+        raise ValueError("signed debugfs block owner report is malformed")
+    if row[1] == "<block not found>":
+        inode = None
+        paths = []
+    elif re.fullmatch(r"[1-9][0-9]*", row[1]):
+        inode = int(row[1])
+        names = debugfs_output(reader, image, f"ncheck {inode}", descriptor).splitlines()
+        if not names or names[0] != "Inode\tPathname":
+            raise ValueError("signed debugfs inode path report is malformed")
+        paths = []
+        for line in names[1:]:
+            prefix = str(inode) + "\t"
+            if not line.startswith(prefix) or not line[len(prefix):].startswith("/"):
+                raise ValueError("signed debugfs inode path report is malformed")
+            paths.append(line[len(prefix):])
+    else:
+        raise ValueError("signed debugfs block owner report is malformed")
+    return {"block_size": 4096, "block": block, "inode": inode,
+            "paths": paths, "byte_offset_in_block": byte_offset % 4096}
+
+
+def signed_block_owners(disks, byte_offset, metadata, builder_archives, workspace):
+    workspace = verity.esp.workspace_scratch(workspace)
+    signed_reader, _ = rootfs.signed_reader_bytes(
+        metadata / "InRelease", metadata / "Packages.xz", builder_archives)
+    rootfs.checked_reader(signed_reader)
+    with tempfile.TemporaryDirectory(prefix="zrpc-root-rebuild-", dir=workspace) as temporary:
+        scratch = Path(temporary)
+        images = []
+        for index, (raw, size, expected_sha, _, sector_size, layout) in enumerate(disks):
+            target = scratch / str(index)
+            target.mkdir()
+            partitions = verity.partition_images(raw, layout, expected_sha,
+                                                  size, sector_size, target)
+            images.append(partitions["root-x86-64"][0])
+        with verity.closure.sealed_elf_bytes(signed_reader) as (reader, descriptor):
+            return [describe_changed_block(reader, image, byte_offset, descriptor)
+                    for image in images]
+
+
+def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
+                          builder_archives=None, workspace=None):
     """Locate the first changed root byte in two source-identical diagnostics."""
     if first_stage.resolve() == second_stage.resolve():
         raise ValueError("two distinct rehearsal stages required")
@@ -358,7 +423,7 @@ def compare_root_rebuilds(first_stage, second_stage):
         layout = gpt.inspect(raw, expected_sha, size, outer.SECTOR_SIZE)
         root = next(partition for partition in layout["partitions"]
                     if partition["type"] == "root-x86-64")
-        disks.append((raw, size, expected_sha, root, layout["sector_size"]))
+        disks.append((raw, size, expected_sha, root, layout["sector_size"], layout))
     first, second = disks
     if first[4] != second[4]:
         raise ValueError("rebuild disk sector sizes differ")
@@ -368,7 +433,7 @@ def compare_root_rebuilds(first_stage, second_stage):
     overlap = min(lengths)
     descriptors = []
     try:
-        for raw, size, _, _, _ in disks:
+        for raw, size, _, _, _, _ in disks:
             fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             descriptors.append(fd)
             info = os.fstat(fd)
@@ -388,12 +453,19 @@ def compare_root_rebuilds(first_stage, second_stage):
                                                  if pair[0] != pair[1])
                 break
             offset += count
-        for fd, (_, size, expected_sha, _, _) in zip(descriptors, disks):
+        for fd, (_, size, expected_sha, _, _, _) in zip(descriptors, disks):
             if os.fstat(fd).st_size != size or gpt.digest(fd, size) != expected_sha:
                 raise ValueError("rebuild disk changed during comparison")
     finally:
         for fd in descriptors:
             os.close(fd)
+    owners = None
+    if metadata is not None or builder_archives is not None or workspace is not None:
+        if metadata is None or builder_archives is None or workspace is None:
+            raise ValueError("complete signed block-owner inputs required")
+        if first_difference is not None:
+            owners = signed_block_owners(disks, first_difference, metadata,
+                                         builder_archives, workspace)
     return {"status": REBUILD_STATUS,
             "source_manifest_sha256": sha256(manifest),
             "first_root_partition": first[3],
@@ -407,6 +479,7 @@ def compare_root_rebuilds(first_stage, second_stage):
             "first_difference_root_offset_bytes": first_difference,
             "first_difference_first_disk_offset_bytes": None if first_difference is None else starts[0] + first_difference,
             "first_difference_second_disk_offset_bytes": None if first_difference is None else starts[1] + first_difference,
+            "first_changed_block_owners": owners,
             "production_image": False, "hardware_verified": False,
             "private_mode_approved": False}
 
@@ -434,10 +507,15 @@ def main(argv=None):
     compare = sub.add_parser("compare-roots")
     compare.add_argument("--first-stage", required=True, type=Path)
     compare.add_argument("--second-stage", required=True, type=Path)
+    compare.add_argument("--metadata", required=True, type=Path)
+    compare.add_argument("--builder-archives", required=True, type=Path)
+    compare.add_argument("--workspace", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "compare-roots":
-            report = compare_root_rebuilds(args.first_stage, args.second_stage)
+            report = compare_root_rebuilds(
+                args.first_stage, args.second_stage, metadata=args.metadata,
+                builder_archives=args.builder_archives, workspace=args.workspace)
         elif args.command == "create-inputs":
             report = create_inputs(args.metadata, args.guest_archives,
                                    args.inputs, args.lock)

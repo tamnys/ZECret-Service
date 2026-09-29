@@ -364,7 +364,9 @@ jobs:
                 --parent-net-ns "$4" --parent-user-ns "$2" --parent-pid-ns "$5"
               run_staged /usr/bin/python3 -I -B "$tool" compare-roots \
                 --first-stage /workspace/source/.codex-tmp/stage \
-                --second-stage /workspace/source/.codex-tmp/stage-repeat
+                --second-stage /workspace/source/.codex-tmp/stage-repeat \
+                --metadata /zrpc-metadata --builder-archives /zrpc-archives \
+                --workspace /workspace
             fi
             if test "$boot_diagnostic" = true; then
               mkdir -m 0700 "$staged/workspace/boot-apt-scratch"
