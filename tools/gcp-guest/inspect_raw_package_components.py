@@ -178,8 +178,9 @@ def expected_components(authenticated, verified_overlay, workspace):
         elif kind == "symlink":
             item.update(size=len(row["target"].encode("ascii")), target=row["target"])
         expected[path] = item
-    if removals & expected.keys():
-        raise ValueError("removed package path remains required")
+    if conflict := removals & expected.keys():
+        raise ValueError("removed package path remains required: " +
+                         repr(sorted(conflict)))
     generated_entries = generated.expected_entries(
         payloads, source_rows, verified_overlay, workspace)
     for path in generated_entries:
