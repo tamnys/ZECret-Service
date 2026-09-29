@@ -4,9 +4,13 @@ on:
   pull_request:
     paths:
       - .github/workflows/gcp-lifecycle-native-tests.yml
+      - Cargo.lock
+      - Cargo.toml
+      - crates/lifecycle/Cargo.toml
       - crates/lifecycle/src/gcp/store.rs
       - crates/lifecycle/src/gcp/store/tests.rs
       - crates/lifecycle/src/gcp/package.rs
+      - crates/lifecycle/src/gcp/import_archive.rs
       - crates/lifecycle/src/gcp/controller/tests.rs
       - crates/lifecycle/src/bin/zrpc-gcp-lifecycle.rs
 

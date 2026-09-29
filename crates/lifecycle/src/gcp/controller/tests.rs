@@ -266,11 +266,6 @@ impl Fixture {
             path: import_receipt_path,
             sha256: digest(receipt_bytes),
         };
-        let import_verifier_python_path = fs::canonicalize("/usr/bin/python3").unwrap();
-        let import_verifier_python = Artifact {
-            sha256: crate::gcp::provider::file_sha256(&import_verifier_python_path).unwrap(),
-            path: import_verifier_python_path,
-        };
         let components = [
             "compute",
             "boot_disk",
@@ -284,7 +279,7 @@ impl Fixture {
         .map(|k| (k.to_owned(), 1))
         .into();
         let spec = DeploymentSpec {
-            schema_version: 7,
+            schema_version: 8,
             experiment: "synthetic-evaluation".into(),
             project: "synthetic-project".into(),
             region: "us-central1".into(),
@@ -302,7 +297,6 @@ impl Fixture {
             raw_disk_bytes: 1024 * 1024 * 1024,
             import_receipt,
             operator_handoff,
-            import_verifier_python,
             release_manifest: a.clone(),
             boot_policy: a.clone(),
             memory_measurement: a.clone(),
@@ -696,7 +690,7 @@ fn custom_image_package_rejects_zones_without_c3_tdx_support() {
 }
 
 #[test]
-fn import_receipt_binds_candidate_media_and_local_executables_without_approval() {
+fn import_receipt_binds_candidate_media_with_native_validation_without_approval() {
     let f = Fixture::new();
     let original: Value =
         serde_json::from_slice(&fs::read(&f.package.spec.import_receipt.path).unwrap()).unwrap();
@@ -705,18 +699,18 @@ fn import_receipt_binds_candidate_media_and_local_executables_without_approval()
     assert!(
         crate::gcp::LIVE_DEPLOYMENT_BLOCKERS
             .iter()
-            .any(|item| item.contains("operator Python/GNU tar import toolchain"))
+            .any(|item| item.contains("import producer toolchain identity"))
     );
 
     let mut missing = serde_json::to_value(&f.package.spec).unwrap();
     missing.as_object_mut().unwrap().remove("import_receipt");
     assert!(serde_json::from_value::<DeploymentSpec>(missing).is_err());
-    let mut missing_verifier = serde_json::to_value(&f.package.spec).unwrap();
-    missing_verifier
-        .as_object_mut()
-        .unwrap()
-        .remove("import_verifier_python");
-    assert!(serde_json::from_value::<DeploymentSpec>(missing_verifier).is_err());
+    let mut unexpected_verifier = serde_json::to_value(&f.package.spec).unwrap();
+    unexpected_verifier.as_object_mut().unwrap().insert(
+        "import_verifier_python".into(),
+        json!({"path":"/usr/bin/python3", "sha256":"0".repeat(64)}),
+    );
+    assert!(serde_json::from_value::<DeploymentSpec>(unexpected_verifier).is_err());
 
     for field in ["archive_sha256", "raw_disk_sha256"] {
         let changed = f.spec_with_receipt_edit(|receipt| receipt[field] = json!("0".repeat(64)));
@@ -754,14 +748,6 @@ fn import_receipt_binds_candidate_media_and_local_executables_without_approval()
         }
     });
     assert!(Package::prepare(different_producer, 1000).is_ok());
-    let mut wrong_verifier = f.package.spec.clone();
-    wrong_verifier.import_verifier_python.sha256 = "0".repeat(64);
-    assert!(Package::prepare(wrong_verifier, 1000).is_err());
-    let mut selected_verifier = f.package.spec.clone();
-    selected_verifier.import_verifier_python.path = f.package.spec.release_manifest.path.clone();
-    selected_verifier.import_verifier_python.sha256 =
-        f.package.spec.release_manifest.sha256.clone();
-    assert!(Package::prepare(selected_verifier, 1000).is_err());
     let stale_hash = f.package.spec.clone();
     fs::write(&stale_hash.import_receipt.path, b"{}%").unwrap();
     assert!(Package::prepare(stale_hash, 1000).is_err());

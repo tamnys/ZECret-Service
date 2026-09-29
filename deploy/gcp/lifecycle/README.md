@@ -13,7 +13,7 @@ Run build and test commands through the project's managed container.
 
 ## Prepare a package
 
-Supply a `DeploymentSpec` JSON object with `schema_version: 7`, matching
+Supply a `DeploymentSpec` JSON object with `schema_version: 8`, matching
 `crates/lifecycle/src/gcp/package.rs`. Its artifact fields are objects containing
 an absolute `path` and lowercase `sha256`. Required inputs include the raw disk
 archive, release manifest, boot policy, memory measurements, reproducibility
@@ -42,11 +42,9 @@ requiring the loose disk. The handoff remains diagnostic and does not grant
 private-mode approval.
 
 Save the JSON output of the offline `gcp_import_archive.py pack` command and
-supply it as the `import_receipt` artifact. Supply `import_verifier_python` as
-an artifact for the operator host's resolved `/usr/bin/python3` executable
-(the canonical target if that path is a symlink). The receipt describes the
-archive producer; the verifier artifact identifies the separate local
-interpreter used to check the archive during package preparation.
+supply it as the `import_receipt` artifact. Package preparation checks the
+archive and its expanded `disk.raw` with the native Rust verifier. The receipt
+describes the archive producer; it does not authorize the archive.
 
 Specify the project, C3 machine type, region/zone, boot/data disk capacities,
 private subnet CIDR, wrapper port, and an existing private staging bucket.

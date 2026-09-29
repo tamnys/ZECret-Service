@@ -11,9 +11,10 @@ use std::{
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Mutex, OnceLock},
 };
+
+#[path = "import_archive.rs"]
+mod import_archive;
 
 const IMPORT_GIB: u64 = 1024 * 1024 * 1024;
 // Google manual boot-disk import caps this raw-disk workflow at 2048 GB (2 TB).
@@ -62,11 +63,6 @@ const CUSTOM_IMAGE_C3_TDX_ZONES: [&str; 24] = [
     "us-west1-a",
     "us-west1-b",
 ];
-// Embed the checked source so a path next to the operator binary cannot
-// replace the import validator. Python's maintained gzip/tarfile decoders are
-// required on the operator's reviewed Linux host; absence fails closed.
-const IMPORT_CHECKER: &str = include_str!("../../../../tools/gcp-guest/gcp_import_archive.py");
-
 /// Candidate producer record. Its executable hashes and status fields cannot
 /// grant toolchain or private-mode approval; the live deployment blocker stays.
 #[derive(Debug, Deserialize)]
@@ -561,58 +557,6 @@ fn verify_import_receipt(spec: &DeploymentSpec) -> Result<()> {
     Ok(())
 }
 
-fn verify_import_archive(
-    archive: &Artifact,
-    raw_sha256: &str,
-    raw_bytes: u64,
-    python: &Artifact,
-) -> Result<()> {
-    // Keep the operator executable separate from the producer receipt. A
-    // caller-supplied executable path must never select arbitrary code here.
-    let system_python = fs::canonicalize("/usr/bin/python3")
-        .map_err(|_| Error("operator Python executable unavailable"))?;
-    if python.path != system_python {
-        return Err(Error("import verifier must use canonical system Python"));
-    }
-    python.verify()?;
-    static CHECKED: OnceLock<Mutex<BTreeMap<(String, String), (String, u64)>>> = OnceLock::new();
-    let checked = CHECKED.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut cache = checked
-        .lock()
-        .map_err(|_| Error("import archive cache poisoned"))?;
-    let key = (archive.sha256.clone(), python.sha256.clone());
-    if cache.get(&key) == Some(&(raw_sha256.to_owned(), raw_bytes)) {
-        return Ok(());
-    }
-    let status = Command::new(&python.path)
-        .arg("-I")
-        .arg("-c")
-        .arg(IMPORT_CHECKER)
-        .arg("verify")
-        .arg(&archive.path)
-        .arg(&archive.sha256)
-        .arg(raw_sha256)
-        .arg(raw_bytes.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| Error("offline import archive validator unavailable"))?;
-    if !status.success() {
-        return Err(Error(
-            "raw image archive is not the reviewed oldgnu disk.raw",
-        ));
-    }
-    // The artifact hash is checked before and after the decoder. A changed
-    // upload is also rejected by the provider's streaming media hash check.
-    archive.verify()?;
-    if super::provider::file_sha256(&python.path)? != python.sha256 {
-        return Err(Error("operator Python changed during archive verification"));
-    }
-    cache.insert(key, (raw_sha256.to_owned(), raw_bytes));
-    Ok(())
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
@@ -670,9 +614,6 @@ pub struct DeploymentSpec {
     /// Pre-archive handoff from the final disk reinspection. Preparation hashes
     /// its disk directly; later validation checks the frozen archive instead.
     pub operator_handoff: Artifact,
-    /// Exact operator-host interpreter for the embedded offline validator.
-    /// This identity is separate from the producer's Python in the receipt.
-    pub import_verifier_python: Artifact,
     pub release_manifest: Artifact,
     pub boot_policy: Artifact,
     pub memory_measurement: Artifact,
@@ -740,7 +681,7 @@ impl DeploymentSpec {
         self.validate_inner(at, true)
     }
     fn validate_inner(&self, at: u64, verify_disk: bool) -> Result<()> {
-        if self.schema_version != 7
+        if self.schema_version != 8
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -832,21 +773,19 @@ impl DeploymentSpec {
         }
         verify_operator_handoff(self, verify_disk)?;
         verify_import_receipt(self)?;
-        verify_import_archive(
+        import_archive::verify_import_archive(
             &self.raw_image_tar_gz,
             &self.raw_disk_sha256,
             self.raw_disk_bytes,
-            &self.import_verifier_python,
         )?;
         verify_exact_uki_db(self)?;
         Ok(())
     }
-    pub fn artifacts(&self) -> [&Artifact; 16] {
+    pub fn artifacts(&self) -> [&Artifact; 15] {
         [
             &self.raw_image_tar_gz,
             &self.import_receipt,
             &self.operator_handoff,
-            &self.import_verifier_python,
             &self.release_manifest,
             &self.boot_policy,
             &self.memory_measurement,
@@ -945,14 +884,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 7,
+            schema_version: 8,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
         let expected = Self::from_spec(self.spec.clone(), at, false)?;
-        if self.schema_version != 7 || self.resources != expected.resources {
+        if self.schema_version != 8 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));
