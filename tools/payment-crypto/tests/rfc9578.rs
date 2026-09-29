@@ -7,8 +7,8 @@ use std::{
     process::{Command, Output, Stdio},
 };
 use zrpc_payment_crypto::{
-    AUTHENTICATOR_LEN, TOKEN_INPUT_LEN, blind_token_input, finalize_blind_signature, sign_blinded,
-    verify_authenticator,
+    AUTHENTICATOR_LEN, TOKEN_INPUT_LEN, blind_token_input, canonicalize_issuer_spki,
+    finalize_blind_signature, sign_blinded, verify_authenticator,
 };
 
 fn decode(hex: &str) -> Vec<u8> {
@@ -119,6 +119,12 @@ fn blind_sign_finalize_round_trip_and_wrong_key_rejection() {
     let issuer = KeyPairSha384PSSDeterministic::generate(&mut DefaultRng, 2048).unwrap();
     let other = KeyPairSha384PSSDeterministic::generate(&mut DefaultRng, 2048).unwrap();
     let spki = issuer.pk.to_spki().unwrap();
+    let generic_public_der = issuer.pk.to_der().unwrap();
+    assert_eq!(canonicalize_issuer_spki(&generic_public_der).unwrap(), spki);
+    let normalized = helper_call(5, &generic_public_der, &[], &[]);
+    assert!(normalized.status.success());
+    assert_eq!(normalized.stdout, spki);
+    assert!(normalized.stderr.is_empty());
     let secret_der = issuer.sk.to_der().unwrap();
     let prepared = blind_token_input(&spki, input).unwrap();
     assert_eq!(format!("{prepared:?}"), "PreparedBlind([redacted])");

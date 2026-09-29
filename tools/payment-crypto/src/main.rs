@@ -3,14 +3,15 @@
 
 use std::io::{self, Read, Write};
 use zrpc_payment_crypto::{
-    AUTHENTICATOR_LEN, TOKEN_INPUT_LEN, blind_token_input, finalize_blind_signature, sign_blinded,
-    verify_authenticator,
+    AUTHENTICATOR_LEN, TOKEN_INPUT_LEN, blind_token_input, canonicalize_issuer_spki,
+    finalize_blind_signature, sign_blinded, verify_authenticator,
 };
 
 const OP_VERIFY: u8 = 1;
 const OP_BLIND: u8 = 2;
 const OP_SIGN: u8 = 3;
 const OP_FINALIZE: u8 = 4;
+const OP_CANONICALIZE_SPKI: u8 = 5;
 const MAGIC: &[u8; 8] = b"ZRPCPC01";
 
 fn read_fixed<const N: usize>(input: &mut impl Read) -> io::Result<[u8; N]> {
@@ -86,6 +87,12 @@ fn run() -> io::Result<Option<Vec<u8>>> {
                 &blind_signature,
             )
             .map(Vec::from)
+        }
+        OP_CANONICALIZE_SPKI => {
+            if !eof(&mut input)? {
+                return Ok(None);
+            }
+            canonicalize_issuer_spki(&spki)
         }
         _ => None,
     };
