@@ -225,7 +225,11 @@ def qemu_command(fd, memory_mib, vcpus):
     if (type(fd) is not int or fd <= 2 or type(memory_mib) is not int
             or memory_mib <= 0 or type(vcpus) is not int or vcpus <= 0):
         raise ValueError("explicit QEMU disk descriptor, memory and CPU inputs required")
-    return ["/" + toolchain.QEMU, "-machine", "q35,accel=tcg", "-cpu", "max",
+    # The package-only chroot need not have QEMU's absolute ELF interpreter
+    # alias. Use the signed loader already checked in the stage.
+    return ["/" + toolchain.LOADER, "--inhibit-cache", "--library-path",
+            "/" + toolchain.LIBRARY, "/" + toolchain.QEMU,
+            "-machine", "q35,accel=tcg", "-cpu", "max",
             "-m", str(memory_mib), "-smp", str(vcpus), "-nodefaults",
             "-vga", "std", "-display", "none", "-nic", "none",
             "-serial", "none", "-parallel", "none", "-monitor", "none",

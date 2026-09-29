@@ -114,7 +114,10 @@ class ObserverTests(unittest.TestCase):
 
     def test_qemu_command_has_no_network_or_guest_input_override(self):
         command = observe.qemu_command(7, 2048, 2)
-        self.assertEqual(command[0], "/" + observe.toolchain.QEMU)
+        self.assertEqual(command[:5],
+                         ["/" + observe.toolchain.LOADER, "--inhibit-cache",
+                          "--library-path", "/" + observe.toolchain.LIBRARY,
+                          "/" + observe.toolchain.QEMU])
         self.assertEqual(command[command.index("-nic") + 1], "none")
         self.assertIn("-nodefaults", command)
         self.assertIn("-display", command)
