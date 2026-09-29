@@ -121,10 +121,15 @@ def expected_components(authenticated, verified_overlay, workspace):
     source = {row["path"]: row for row in source_rows}
     if len(source) != len(source_rows) or "." not in source:
         raise ValueError("authenticated package payload inventory is malformed")
+    removed_directories = frozenset(
+        path for path in removals
+        if source.get(path, {}).get("kind") == "directory")
     selected = {}
     overlaid = []
     for path, row in source.items():
-        if not _component(path, row) or path in removals:
+        if (not _component(path, row) or path in removals
+                or any(parent.as_posix() in removed_directories
+                       for parent in PurePosixPath(path).parents)):
             continue
         if path in (*CODE_ROOTS, *forbidden.UNIT_DIRS) and row["kind"] != "directory":
             raise ValueError("signed package code or unit directory is redirected: " + path)

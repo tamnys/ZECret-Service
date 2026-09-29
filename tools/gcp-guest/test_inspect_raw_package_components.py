@@ -279,6 +279,24 @@ class PackageComponentsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "removed package path remains"):
             self.inspect()
 
+    def test_signed_child_of_removed_directory_is_not_required(self):
+        named = baseline()
+        named["dpkg"] = [("file", "etc/alternatives/README",
+                          b"inert signed package documentation", 0o644)]
+        plan = components.expected_components(authenticated(named), self.overlay,
+                                              self.workspace)
+        self.assertIn("etc/alternatives", plan["removed"])
+        self.assertNotIn("etc/alternatives", plan["entries"])
+        self.assertNotIn("etc/alternatives/README", plan["entries"])
+        components.inspect_components(
+            plan, self.overlay, self.inventory, self.actual.get,
+            lambda path, size: self.digests[path])
+        self.actual["etc/alternatives"] = {"type": "directory"}
+        with self.assertRaisesRegex(ValueError, "removed package path remains"):
+            components.inspect_components(
+                plan, self.overlay, self.inventory, self.actual.get,
+                lambda path, size: self.digests[path])
+
     def test_ldconfig_cache_and_boot_unit_cannot_survive(self):
         for relative in components.prepare.REMOVED_LDCONFIG_PATHS:
             path = relative.removeprefix("/")
