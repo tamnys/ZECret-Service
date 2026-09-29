@@ -424,6 +424,8 @@ class CandidateTests(unittest.TestCase):
         for relative in ("/usr/sbin/unix_chkpwd", "/usr/bin/umount",
                          "/usr/bin/perl", "/usr/bin/perl5.40.1",
                          "/var/log/journal", "/var/mail",
+                         "/var/cache/ldconfig/aux-cache",
+                         "/var/log/alternatives.log",
                          "/usr/lib/systemd/system/systemd-sysext.service",
                          "/usr/lib/systemd/system/systemd-sysext.socket",
                          "/usr/lib/systemd/system/systemd-sysext@.service",
