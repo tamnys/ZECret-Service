@@ -1,0 +1,11 @@
+{
+  "name": "ZECret logo — draft 02 exploration",
+  "status": "Variant A selected as the tentative logo; the glasses variant remains an exploratory sketch",
+  "tentative_logo": "../tentative-logo.svg",
+  "palette": "../draft-01/palette.json",
+  "variants": [
+    "hat-mustache-dark.svg",
+    "hat-glasses-mustache-dark.svg"
+  ],
+  "changes_from_draft_01": "Hat lowered two SVG units; mustache widened 18 percent without changing its height. The second candidate adds round disguise glasses."
+}

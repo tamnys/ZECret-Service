@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="14 3 36 59" role="img" aria-label="Gold Zcash Z with a lowered fitted hat and slim mustache">
+  <defs>
+    <g id="incognito-mark">
+      <svg x="22" y="22" width="20" height="32" viewBox="443.69 369.42 192.62 341.03">
+        <path fill="#f4b728" d="M636.31 414.7v41.09l-114.28 155h114.28v54.5h-73.67v45.16h-45.28v-45.16h-73.67v-41.09l114.16-155h-114.16v-54.5h73.67v-45.28h45.28v45.28h73.67Z"/>
+      </svg>
+      <g transform="translate(0 2)">
+        <path d="M23.7 20L26.2 11.3Q26.5 10.4 27.3 10.8L32 12.5L36.7 10.8Q37.5 10.4 37.8 11.3L40.3 20ZM18.5 20Q32 18.4 45.5 20V22.5Q32 24 18.5 22.5Z" fill="currentColor"/>
+        <path d="M32 41.6C30.8 40 29.2 40.2 27.5 41.5C25.5 43 23.7 43.2 22.4 41.8C23.1 45.1 27.8 46 32 43.2C36.2 46 40.9 45.1 41.6 41.8C40.3 43.2 38.5 43 36.5 41.5C34.8 40.2 33.2 40 32 41.6Z" fill="currentColor"/>
+      </g>
+    </g>
+  </defs>
+  <use href="#incognito-mark" color="#f5f4ef"/>
+</svg>

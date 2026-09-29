@@ -14,3 +14,4 @@ execFileSync(join(root, 'node_modules/.bin/tsc'), ['--project', join(root, 'tsco
 for (const file of ['index.html', 'privacy.html', 'style.css', 'favicon.svg', '_headers']) {
   await copyFile(join(root, file), join(output, file));
 }
+await copyFile(join(root, 'design/brand/tentative-logo.svg'), join(output, 'logo.svg'));

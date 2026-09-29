@@ -4,28 +4,52 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta name="description" content="The privacy boundaries and limitations of ZECret service's public website, native client, and planned payment model.">
+  <meta name="description" content="What ZECret's public site, native client, and proposed payments can and cannot protect.">
   <title>Privacy model · ZECret service</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="site-header"><div class="shell header-inner"><a class="brand" href="/" aria-label="ZECret service home"><span class="brand-mark">Z<span>·</span></span><span>ZECret <small>service</small></span></a><nav aria-label="Main navigation"><a href="/#demo">Demo</a><a href="/#quickstart">Quickstart</a><a href="/privacy" aria-current="page">Privacy</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></nav></div></header>
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="/" aria-label="ZECret service home"><img src="/logo.svg" width="24" height="39" alt=""><span>ZECret <small>service</small></span></a>
+      <nav aria-label="Main navigation">
+        <a href="/#demo">Demo</a>
+        <a href="/#how-it-works">How it works</a>
+        <a href="/#quickstart">For developers</a>
+        <a href="/privacy" aria-current="page">Privacy</a>
+      </nav>
+    </div>
+  </header>
+
   <main id="main" class="shell privacy-main">
-    <p class="eyebrow">PRIVACY MODEL · EXPERIMENTAL</p>
-    <h1>Know which part<br><em>you are trusting.</em></h1>
-    <p class="lede">The public site teaches the model with fixtures. The native client is the component intended to verify a private connection. No approved private release or hosted endpoint is available through this site today.</p>
+    <p class="section-label">Privacy model · Experimental</p>
+    <h1>Where privacy begins and ends.</h1>
+    <p class="lede">The public site explains ZECret with fixed examples. Only the native client is designed to verify a private connection. No approved private release or hosted endpoint is available through this site today.</p>
 
     <div class="privacy-list">
-      <section><span class="mini-number">01 / THIS WEBSITE</span><h2>A public visit stays public.</h2><p>Cloudflare serves this site and can observe ordinary visitor metadata such as network addresses and request timing. We do not add analytics, identity cookies, customer accounts, third-party scripts, or request-body logging in the application. The site does not accept transaction selections, wallet material, tickets, or local-client secrets. It does not connect to localhost.</p><p>Using Tor for the native CLI does not anonymize your browser visit here. The fixture API returns only fixed public examples and is never an approval authority.</p></section>
-      <section><span class="mini-number">02 / NATIVE CLIENT</span><h2>Verification belongs on your device.</h2><p>The intended private path is the native Rust client through Tor to an attested TLS connection, then a measured RPC wrapper and loopback Zebra testnet node. Before sending query parameters, the client must check an independently trusted approved release, hardware and workload evidence, freshness, and binding to the live encrypted connection. A status badge on this website cannot perform that verification.</p><p>The bundled local dashboard opens from the CLI and shares its Rust core. It is separate from this public site and does not silently inherit configuration from it.</p></section>
-      <section id="payments"><span class="mini-number">03 / PROPOSED PAYMENTS</span><h2>One-use tickets would stay local.</h2><p>The planned prepaid model keeps pending purchases, blinding state, and unspent tickets in a private native-client store. A separate issuer would authorize blinded requests but never receive finalized tokens; a redeemer would keep issuer-scoped spent markers rather than purchase references or query contents. The initial proof of concept proposes simulated settlement via private operator file exchange. It has not been implemented and accepts no ZEC payments.</p><p>A ticket would be charged on admission. Node errors and lost responses could consume it; there are no automatic retries, refunds, or stored response replay in the proposal. Blinding does not remove timing, network, or small-crowd correlation, and ordinary restart safety would not protect against malicious disk rollback.</p></section>
-      <section><span class="mini-number">04 / RECORDS + LIMITS</span><h2>Policy is not proof of deletion.</h2><p>The current local fixture application does not intentionally save query history or remote diagnostics. CLI output remains on the operator’s device. The local dashboard keeps its access capability in memory and serves API results with no-store headers. A future approved wrapper is intended not to persist request bodies, transaction selections, responses, customer identifiers, or query-to-payment mappings. This is an application policy, not a claim that browsers, operating systems, providers, or compromised software retain nothing.</p><p>Tor does not defeat all traffic analysis. A TEE does not establish blockchain consensus, prove software has no bugs, or hide every access pattern. Your device, the release distribution, verifier, hardware vendor, firmware, and accepted platform stack remain in the trust model.</p></section>
+      <section>
+        <h2>Visiting this website</h2>
+        <div><p>Cloudflare serves this public site and can observe ordinary visitor metadata, including network addresses and request timing. The application adds no analytics, identity cookies, accounts, third-party scripts, or request-body logging.</p><p>This site does not accept transaction selections, wallet material, tickets, or native-client secrets. It does not connect to localhost. Tor use by the native CLI does not anonymize a browser visit here.</p><p>The demo API returns fixed public examples. Its output cannot approve a release or verify a private query.</p></div>
+      </section>
+      <section>
+        <h2>Using the native client</h2>
+        <div><p>The intended path is native Rust client → Tor → attested TLS connection → measured RPC wrapper → loopback Zebra testnet node. Before sending query parameters, the client must check an independently trusted approved release, hardware and workload evidence, freshness, and the live encrypted connection.</p><p>The bundled local dashboard opens from the CLI and shares its Rust core. It is separate from this public site and does not silently take trusted release settings from it.</p></div>
+      </section>
+      <section id="payments">
+        <h2>Proposed payments</h2>
+        <div><p>The planned prepaid model would keep pending purchases, blinding state, and one-use tickets in a private native-client store. A separate issuer would authorize blinded requests without receiving finalized tickets; a redeemer would keep spent-ticket markers without purchase references or query contents.</p><p>The initial proof of concept proposes a private operator file exchange for simulated settlement. It is not implemented and accepts no ZEC payments. A ticket would be charged when a request is admitted, so a node error or lost response could consume it. The client must not automatically spend a replacement; the proposal has no refunds or stored response replay.</p><p>Blinding does not remove timing, network, or small-crowd correlation. Ordinary restart safety does not protect against malicious disk rollback.</p></div>
+      </section>
+      <section>
+        <h2>Records and limits</h2>
+        <div><p>The current local fixture application does not intentionally save query history or remote diagnostics. CLI output remains on the operator's device. The local dashboard keeps its access capability in memory and serves API results with no-store headers.</p><p>A future approved wrapper is intended not to persist request bodies, transaction selections, responses, customer identifiers, or query-to-payment mappings. That is an application policy, not proof that browsers, operating systems, providers, or compromised software retain nothing.</p><p>Tor cannot defeat every form of traffic analysis. Attestation does not prove blockchain consensus or that software has no bugs. Your device, release distribution, verifier, hardware vendor, firmware, and accepted platform stack remain part of the trust model.</p></div>
+      </section>
     </div>
-    <aside class="privacy-sources"><h2>Read the authoritative design</h2><p>The repository defines the current security boundary, retention policy, and detailed design. These documents take precedence over this summary when building or reviewing the native path.</p><div><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/config/retention-policy.md" rel="noreferrer noopener">Retention policy ↗</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/records/input-design.md" rel="noreferrer noopener">Design record ↗</a></div></aside>
-    <p><a class="text-link" href="/">← Back to the site</a></p>
+    <aside class="privacy-sources"><h2>Read the project design</h2><p>The repository defines the security boundary, retention policy, and detailed design. Use those documents when building or reviewing the native path.</p><div><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/config/retention-policy.md" rel="noreferrer noopener">Retention policy ↗</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/records/input-design.md" rel="noreferrer noopener">Design record ↗</a></div></aside>
+    <p><a class="text-link" href="/">← Back to the homepage</a></p>
   </main>
-  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret service</strong><p>Experimental testnet research. Fixtures are not live verification.</p></div><div><a href="/">Home</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
+
+  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret service</strong><p>Experimental Zcash testnet research. Public examples are synthetic.</p></div><div><a href="/">Home</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
 </body>
 </html>

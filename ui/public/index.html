@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta name="description" content="ZECret service is an experimental Zcash testnet RPC client. Explore synthetic examples, native setup, and the privacy model.">
-  <title>ZECret service · Verify before querying</title>
+  <meta name="description" content="Explore ZECret, an experimental native client for private Zcash testnet queries. Try synthetic examples and learn what the client verifies.">
+  <title>ZECret service · Experimental Zcash testnet RPC</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
@@ -14,12 +14,12 @@
   <a class="skip" href="#main">Skip to content</a>
   <header class="site-header">
     <div class="shell header-inner">
-      <a class="brand" href="/" aria-label="ZECret service home"><span class="brand-mark">Z<span>·</span></span><span>ZECret <small>service</small></span></a>
+      <a class="brand" href="/" aria-label="ZECret service home"><img src="/logo.svg" width="24" height="39" alt=""><span>ZECret <small>service</small></span></a>
       <nav aria-label="Main navigation">
         <a href="#demo">Demo</a>
-        <a href="#quickstart">Quickstart</a>
+        <a href="#how-it-works">How it works</a>
+        <a href="#quickstart">For developers</a>
         <a href="/privacy">Privacy</a>
-        <a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a>
       </nav>
     </div>
   </header>
@@ -27,87 +27,112 @@
   <main id="main">
     <section class="hero shell" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="status-dot"></span> EXPERIMENTAL · ZCASH TESTNET</p>
-        <h1 id="hero-title">Check the service.<br><em>Then ask the chain.</em></h1>
-        <p class="lede">ZECret is a native client for read-only Zcash testnet RPC. Its intended private path uses Tor to obscure the client’s network address and attestation to check the server before a query leaves your device.</p>
+        <p class="section-label">Experimental · Zcash testnet</p>
+        <h1 id="hero-title">An experimental path to private Zcash queries.</h1>
+        <p class="lede">ZECret is a native client for reading Zcash testnet data. It is designed to route requests through Tor and check the remote service before sending a query.</p>
         <div class="actions">
-          <a class="button primary" href="#demo">Try the demo <span aria-hidden="true">↗</span></a>
+          <a class="button primary" href="#demo">Try the demo</a>
           <a class="button secondary" href="#quickstart">Run the native client</a>
-          <a class="text-link" href="/privacy">Read the privacy model <span aria-hidden="true">→</span></a>
+          <a class="text-link" href="/privacy">Read the privacy model →</a>
         </div>
-        <p class="hero-caution"><strong>Today:</strong> the public demo is synthetic. No approved private release or hosted live endpoint is available from this site.</p>
+        <p class="availability"><strong>Available here today:</strong> synthetic examples. There is no approved private release or live endpoint available from this site.</p>
       </div>
-      <div class="path-card" aria-label="Intended native query path">
-        <div class="path-top"><span>INTENDED NATIVE PATH</span><span>01 / 04</span></div>
-        <ol class="path-steps">
-          <li><span class="path-number">01</span><div><strong>Native Rust client</strong><small>Trusted policy stays on your device</small></div></li>
-          <li><span class="path-number">02</span><div><strong>Tor</strong><small>Network route for private mode</small></div></li>
-          <li><span class="path-number">03</span><div><strong>Measured RPC wrapper</strong><small>Attested TLS, checked by the client</small></div></li>
-          <li><span class="path-number">04</span><div><strong>Zebra testnet node</strong><small>Read-only methods over loopback</small></div></li>
+      <aside class="path" aria-labelledby="path-title">
+        <h2 id="path-title">How a private query is intended to work</h2>
+        <ol>
+          <li><strong>Route through Tor</strong><span>The native client connects without exposing its direct network address to the service.</span></li>
+          <li><strong>Check the service</strong><span>The client verifies an approved release, attestation evidence, and the live encrypted connection.</span></li>
+          <li><strong>Send one read-only query</strong><span>The measured RPC wrapper reads from a Zebra testnet node over loopback.</span></li>
         </ol>
-        <p class="path-foot">The public website sits outside this path. It cannot approve a release or make a private query.</p>
-      </div>
-    </section>
-
-    <section class="band" aria-labelledby="boundary-title">
-      <div class="shell boundary-grid">
-        <div><p class="eyebrow">TWO SEPARATE CHECKS</p><h2 id="boundary-title">Privacy has more than one boundary.</h2></div>
-        <div class="boundary-card"><span class="mini-number">01 / NETWORK</span><h3>Tor hides the direct route.</h3><p>The native client uses Tor for private sessions. It does not anonymize this browser visit or guarantee resistance to traffic analysis.</p></div>
-        <div class="boundary-card"><span class="mini-number">02 / EXECUTION</span><h3>Attestation checks the workload.</h3><p>The client checks a trusted release, hardware evidence, freshness, and the live TLS connection before sending a query. A website badge cannot do that check for you.</p></div>
-      </div>
+        <p>This website illustrates the path. It cannot run or approve a private query.</p>
+      </aside>
     </section>
 
     <section class="section shell" id="demo" aria-labelledby="demo-title">
-      <div class="section-heading"><div><p class="eyebrow">PUBLIC EXAMPLE</p><h2 id="demo-title">See a decision, not a live session.</h2></div><p>Choose a canned scenario. The Worker returns only synthetic fixtures. There is no transaction ID field, wallet connection, local-client probe, or public RPC proxy.</p></div>
+      <div class="section-head">
+        <p class="section-label">Public demo</p>
+        <h2 id="demo-title">Try a safe example.</h2>
+        <p>Choose a fixed scenario to see an accepted or rejected decision. The examples are synthetic; this browser sends no private RPC request.</p>
+      </div>
       <div class="demo-grid">
-        <div class="demo-controls card">
-          <label for="scenario">Example scenario</label>
+        <div class="demo-controls panel">
+          <label for="scenario">Choose an example</label>
           <select id="scenario">
             <option value="success">Synthetic block-height response</option>
             <option value="release-rejected">Unknown release rejected</option>
             <option value="ticket-replay">Simulated ticket replay rejected</option>
           </select>
-          <button id="run-scenario" class="button primary" type="button">Run fixture <span aria-hidden="true">↗</span></button>
-          <p class="fine-print">“Success” means the fixture illustrates an accepted decision. It does not mean a real private query or payment succeeded.</p>
+          <button id="run-scenario" class="button primary" type="button">Show example</button>
+          <p>The ticket example illustrates a proposed payment check. Ticket issuance and redemption are not implemented.</p>
         </div>
-        <div class="demo-output card" aria-live="polite">
-          <div class="output-top"><span class="eyebrow">EXAMPLE OUTPUT</span><span class="fixture-pill">FIXTURE ONLY</span></div>
-          <h3 id="scenario-title">Choose a scenario</h3>
+        <div class="demo-output panel" aria-live="polite">
+          <div class="output-top"><span>Example result</span><span class="fixture-pill">Synthetic fixture</span></div>
+          <h3 id="scenario-title">Choose an example</h3>
           <p id="scenario-note">The selected example will appear here. No native query runs in this browser.</p>
-          <pre id="scenario-result" tabindex="0">No fixture loaded.</pre>
+          <pre id="scenario-result" tabindex="0">No example loaded.</pre>
         </div>
       </div>
     </section>
 
-    <section class="section shell status-section" aria-labelledby="status-title">
-      <div class="section-heading"><div><p class="eyebrow">WHAT IS ACTUALLY AVAILABLE</p><h2 id="status-title">Four independent states.</h2></div><p id="status-source" class="source-label">Checking public status…</p></div>
-      <div class="status-grid">
-        <div class="status-card"><span>01</span><h3>Release approval</h3><p id="status-release">Unavailable until the public status source loads.</p></div>
-        <div class="status-card"><span>02</span><h3>Transport + attestation</h3><p id="status-transport">Unavailable until the public status source loads.</p></div>
-        <div class="status-card"><span>03</span><h3>Payment implementation</h3><p id="status-payment">Unavailable until the public status source loads.</p></div>
-        <div class="status-card"><span>04</span><h3>Chain-data provenance</h3><p id="status-chain">Unavailable until the public status source loads.</p></div>
+    <section class="section section-band" id="how-it-works" aria-labelledby="checks-title">
+      <div class="shell">
+        <div class="section-head"><p class="section-label">Privacy model</p><h2 id="checks-title">Two different checks.</h2><p>The network route and the software answering the request need separate protection.</p></div>
+        <div class="checks-grid">
+          <div><h3>Tor hides the direct route.</h3><p>The native client uses Tor so the service does not see the client's direct network address. It does not anonymize this website visit or prevent every form of traffic analysis.</p></div>
+          <div><h3>Attestation checks the service.</h3><p>The native client checks evidence about the remote workload and binds that check to its live TLS connection before sending query parameters. A badge on this page cannot make that decision.</p></div>
+        </div>
       </div>
-      <p class="status-note">These are repository-snapshot statements, not local verification or a live operator feed. The fixture above reports example outcomes only.</p>
     </section>
 
-    <section class="band" id="quickstart" aria-labelledby="quickstart-title">
-      <div class="shell quickstart-grid">
-        <div><p class="eyebrow">DEVELOPER QUICKSTART</p><h2 id="quickstart-title">Start with the native client.</h2><p>Build from source on Linux with the pinned Rust 1.94.1 toolchain and committed Cargo.lock. The current CLI offers local synthetic examples and a bundled loopback dashboard.</p><p>There is no approved release download or checksum to link yet. Source code alone does not approve a private deployment.</p><a class="text-link" href="https://github.com/tamnys/ZECret-Service/blob/main/README.md" rel="noreferrer noopener">Read the repository setup guide →</a></div>
-        <div class="code-card"><div class="code-title"><span>LOCAL · SYNTHETIC</span><span>zrpc</span></div><pre>cargo build --locked -p zrpc-cli
+    <section class="section shell" id="status" aria-labelledby="status-title">
+      <div class="section-head">
+        <p class="section-label">Current state</p>
+        <h2 id="status-title">What is available today?</h2>
+        <p>These are dated repository statements. They are not a live deployment check or a result from your device.</p>
+      </div>
+      <p id="status-source" class="source-label">Checking public status…</p>
+      <div class="status-list">
+        <div><h3>Approved release</h3><p id="status-release">Unavailable until public status loads.</p></div>
+        <div><h3>Private transport and attestation</h3><p id="status-transport">Unavailable until public status loads.</p></div>
+        <div><h3>Payment implementation</h3><p id="status-payment">Unavailable until public status loads.</p></div>
+        <div><h3>Chain-data source</h3><p id="status-chain">Unavailable until public status loads.</p></div>
+      </div>
+      <p class="status-note">The demo above is a set of examples. Its results do not change these states.</p>
+    </section>
+
+    <section class="section section-band" id="quickstart" aria-labelledby="quickstart-title">
+      <div class="shell">
+        <div class="quickstart-grid">
+          <div>
+            <p class="section-label">For developers</p>
+            <h2 id="quickstart-title">Run the native client locally.</h2>
+            <p>The current Rust CLI includes local synthetic examples. Build from source on Linux with the pinned Rust 1.94.1 toolchain and committed Cargo.lock.</p>
+            <p>These commands do not start a verified private session. There is no approved release download or checksum to link yet.</p>
+            <a class="text-link" href="https://github.com/tamnys/ZECret-Service/blob/main/README.md" rel="noreferrer noopener">Read the source setup guide →</a>
+          </div>
+          <div class="code-card">
+            <div class="code-title"><span>Local examples</span><span>zrpc</span></div>
+            <pre>cargo build --locked -p zrpc-cli
 ./target/debug/zrpc doctor
 ./target/debug/zrpc query --simulate --method getblockcount
 ./target/debug/zrpc query --simulate --scenario wrong-key
-./target/debug/zrpc demo</pre><p>Private commands require an approved release and live verification; this build does not package one. The dashboard opens locally through the native CLI.</p></div>
+./target/debug/zrpc demo</pre>
+            <p>The local dashboard opens through the native CLI. It is separate from this public site.</p>
+          </div>
+        </div>
+        <div class="methods"><h3>Supported read-only methods</h3><ul><li><code>getblockchaininfo</code></li><li><code>getblockcount</code></li><li><code>getblockhash</code></li><li><code>getblockheader</code></li><li><code>getrawtransaction</code></li></ul><p>Wallet methods, transaction submission, batches, and arbitrary upstream URLs are rejected. Requests with parameters use the native client's typed format.</p></div>
       </div>
-      <div class="shell methods"><h3>Supported read-only methods</h3><ul><li><code>getblockchaininfo</code></li><li><code>getblockcount</code></li><li><code>getblockhash</code></li><li><code>getblockheader</code></li><li><code>getrawtransaction</code></li></ul><p>Wallet methods, transaction submission, batches, and arbitrary upstream URLs are rejected. Parameterized requests use the native client’s typed request format; the simple <code>--method</code> example above uses a method with no parameters.</p></div>
     </section>
 
     <section class="section shell payment-section" aria-labelledby="payment-title">
-      <div><p class="eyebrow">OPTIONAL PAYMENT CONCEPT</p><h2 id="payment-title">Prepaid credits, held locally.</h2><p>The proposed flow is simple: buy a batch, keep blinded one-use tickets in the native client’s private store, and spend one ticket when a request is admitted. That avoids an on-chain transaction for every query.</p><p>For this experiment, settlement would be a private operator file exchange, illustrated only with fixtures here. Issuance and redemption are not implemented, and no real or testnet ZEC payment is accepted. A ticket can be consumed even if the node fails or the response is lost; the client must not automatically spend a replacement.</p><a class="text-link" href="/privacy#payments">How the payment model affects privacy →</a></div>
-      <ol class="payment-steps"><li><span>01</span><div><strong>Prepare locally</strong><p>Native client creates blinded requests and keeps blinding state on your device.</p></div></li><li><span>02</span><div><strong>Settle and collect</strong><p>Planned POC uses a private operator exchange, not a public minting form.</p></div></li><li><span>03</span><div><strong>Spend one ticket</strong><p>The proposed redeemer rejects repeat use without storing purchase references.</p></div></li></ol>
+      <p class="section-label">Proposed payment model</p>
+      <h2 id="payment-title">Prepaid credits would stay with the client.</h2>
+      <p>The proposed flow is to buy a batch, keep blinded one-use tickets locally, and spend one when a request is admitted. It would avoid an on-chain transaction for every query.</p>
+      <p>For this experiment, settlement would be a private operator file exchange. Issuance and redemption are not implemented, and this site accepts no ZEC payment. A ticket could be consumed even if the node fails or the response is lost; the client must not automatically spend a replacement.</p>
+      <a class="text-link" href="/privacy#payments">Read how this affects privacy →</a>
     </section>
   </main>
 
-  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret service</strong><p>Experimental testnet research. Fixtures are not live verification.</p></div><div><a href="/privacy">Privacy model</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
+  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret service</strong><p>Experimental Zcash testnet research. Public examples are synthetic.</p></div><div><a href="/privacy">Privacy model</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
 </body>
 </html>
