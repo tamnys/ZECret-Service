@@ -74,6 +74,11 @@ class DiagnosticDiskTests(unittest.TestCase):
         self.assertEqual(report["first_difference_first_disk_offset_bytes"], offset)
         self.assertEqual(report["first_difference_second_disk_offset_bytes"], offset)
         self.assertFalse(report["root_partition_byte_identical"])
+        self.assertFalse(report["disk_byte_identical"])
+        self.assertEqual(report["first_disk_difference_kind"], "byte")
+        self.assertEqual(report["first_disk_difference_offset_bytes"], offset)
+        self.assertEqual(report["first_disk_difference_regions"],
+                         {"first": "root-x86-64", "second": "root-x86-64"})
         self.assertFalse(report["production_image"])
         self.assertFalse(report["hardware_verified"])
         self.assertFalse(report["private_mode_approved"])
@@ -92,7 +97,7 @@ class DiagnosticDiskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "distinct rehearsal stages"):
             diagnostic.compare_root_rebuilds(first_stage, first_stage)
 
-    def test_rebuild_comparison_ignores_esp_bytes_but_checks_raw_identity(self):
+    def test_rebuild_comparison_distinguishes_esp_from_unchanged_root(self):
         first = gpt_fixture.synthetic_disk()
         second = first.copy()
         second[120 * gpt_fixture.SECTOR + 7] = 0x42
@@ -102,10 +107,36 @@ class DiagnosticDiskTests(unittest.TestCase):
         self.assertTrue(report["root_partition_byte_identical"])
         self.assertIsNone(report["first_difference_kind"])
         self.assertIsNone(report["first_difference_root_offset_bytes"])
+        self.assertFalse(report["disk_byte_identical"])
+        self.assertEqual(report["first_disk_difference_offset_bytes"],
+                         120 * gpt_fixture.SECTOR + 7)
+        self.assertEqual(report["first_disk_difference_regions"],
+                         {"first": "esp", "second": "esp"})
         raw = second_stage / "output/zrpc-gcp.raw"
         raw.write_bytes(raw.read_bytes() + b"tamper")
         with self.assertRaises(ValueError):
             diagnostic.compare_root_rebuilds(first_stage, second_stage)
+
+    def test_rebuild_comparison_reports_equal_full_disk_and_changed_gap(self):
+        disk = gpt_fixture.synthetic_disk()
+        first_stage = self.make_comparable_output(disk, "first")
+        second_stage = self.make_comparable_output(disk, "second")
+        equal = diagnostic.compare_root_rebuilds(first_stage, second_stage)
+        self.assertTrue(equal["disk_byte_identical"])
+        self.assertIsNone(equal["first_disk_difference_kind"])
+        self.assertIsNone(equal["first_disk_difference_offset_bytes"])
+        self.assertIsNone(equal["first_disk_difference_regions"])
+        changed = disk.copy()
+        changed[100] = 0x42
+        self.make_output(changed, "gap")
+        second_stage = self.root / "gap"
+        (second_stage / "candidate-manifest.json").write_text('{"synthetic":true}\n')
+        report = diagnostic.compare_root_rebuilds(first_stage, second_stage)
+        self.assertTrue(report["root_partition_byte_identical"])
+        self.assertFalse(report["disk_byte_identical"])
+        self.assertEqual(report["first_disk_difference_offset_bytes"], 100)
+        self.assertEqual(report["first_disk_difference_regions"],
+                         {"first": "outside-partitions", "second": "outside-partitions"})
 
     def test_rebuild_comparison_reports_root_extent_drift(self):
         disk = gpt_fixture.synthetic_disk()

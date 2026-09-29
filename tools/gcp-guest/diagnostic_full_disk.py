@@ -407,9 +407,31 @@ def signed_block_owners(disks, byte_offset, metadata, builder_archives, workspac
                     for image in images]
 
 
+def first_changed_bytes(left, right, left_start, right_start, overlap):
+    offset = 0
+    while offset < overlap:
+        count = min(1024 * 1024, overlap - offset)
+        first = gpt.read_at(left, left_start + offset, count)
+        second = gpt.read_at(right, right_start + offset, count)
+        if first != second:
+            return offset + next(index for index, pair in enumerate(zip(first, second))
+                                 if pair[0] != pair[1])
+        offset += count
+    return None
+
+
+def disk_region(layout, offset):
+    for partition in layout["partitions"]:
+        start = partition["first_lba"] * layout["sector_size"]
+        end = (partition["last_lba"] + 1) * layout["sector_size"]
+        if start <= offset < end:
+            return partition["type"]
+    return "outside-partitions"
+
+
 def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
                           builder_archives=None, workspace=None):
-    """Locate the first changed root byte in two source-identical diagnostics."""
+    """Locate root and whole-disk differences in two source-identical diagnostics."""
     if first_stage.resolve() == second_stage.resolve():
         raise ValueError("two distinct rehearsal stages required")
     manifest = outer.regular_bytes(first_stage / "candidate-manifest.json")
@@ -442,17 +464,14 @@ def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
         left_info, right_info = (os.fstat(fd) for fd in descriptors)
         if (left_info.st_dev, left_info.st_ino) == (right_info.st_dev, right_info.st_ino):
             raise ValueError("rebuilds refer to the same disk file")
-        first_difference = None
-        offset = 0
-        while offset < overlap:
-            count = min(1024 * 1024, overlap - offset)
-            left = gpt.read_at(descriptors[0], starts[0] + offset, count)
-            right = gpt.read_at(descriptors[1], starts[1] + offset, count)
-            if left != right:
-                first_difference = offset + next(index for index, pair in enumerate(zip(left, right))
-                                                 if pair[0] != pair[1])
-                break
-            offset += count
+        first_difference = first_changed_bytes(descriptors[0], descriptors[1],
+                                               starts[0], starts[1], overlap)
+        disk_difference = None
+        if first[1] != second[1] or first[2] != second[2]:
+            disk_difference = first_changed_bytes(descriptors[0], descriptors[1],
+                                                  0, 0, min(first[1], second[1]))
+            if disk_difference is None and first[1] == second[1]:
+                raise ValueError("different raw disk hashes lack a changed byte")
         for fd, (_, size, expected_sha, _, _, _) in zip(descriptors, disks):
             if os.fstat(fd).st_size != size or gpt.digest(fd, size) != expected_sha:
                 raise ValueError("rebuild disk changed during comparison")
@@ -468,6 +487,15 @@ def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
                                          builder_archives, workspace)
     return {"status": REBUILD_STATUS,
             "source_manifest_sha256": sha256(manifest),
+            "first_disk_sha256": first[2], "second_disk_sha256": second[2],
+            "first_disk_bytes": first[1], "second_disk_bytes": second[1],
+            "disk_byte_identical": first[1] == second[1] and first[2] == second[2],
+            "first_disk_difference_kind": "byte" if disk_difference is not None else
+                                          "length" if first[1] != second[1] else None,
+            "first_disk_difference_offset_bytes": disk_difference,
+            "first_disk_difference_regions": None if disk_difference is None else {
+                "first": disk_region(first[5], disk_difference),
+                "second": disk_region(second[5], disk_difference)},
             "first_root_partition": first[3],
             "second_root_partition": second[3],
             "root_partition_layout_identical": first[3] == second[3],
