@@ -36,7 +36,7 @@ SIGNED_DISK_ELFS = {
     "usr/lib/x86_64-linux-gnu/libkeyutils.so.1": (22448, "e5d5a7450d08eff7d4bbcaac75ef2b94d3447c81a1b2ddf3ab85d2de4709a9a8", 0o444),
 }
 MASKED_UNITS = (
-    "ssh.service", "sshd.service", "ssh.socket", "ctrl-alt-del.target",
+    "ssh.service", "sshd.service", "ssh.socket",
     "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service",
     "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target",
     "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service",
@@ -68,8 +68,14 @@ REMOVED_GENERATED_UNIT_PATHS = (
     "etc/systemd/system/systemd-journald.service.wants",
     "etc/systemd/system/timers.target.wants",
     "etc/systemd/user",
+    "etc/systemd/system/ctrl-alt-del.target",
     "etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
     "etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
+)
+REMOVED_ALTERNATIVES_PATHS = (
+    "etc/alternatives",
+    "usr/bin/awk", "usr/bin/nawk", "usr/bin/mt",
+    "usr/sbin/rmt", "usr/bin/pager", "usr/bin/which",
 )
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
 # units must also be checked on the exact booted image; they do not exist in a
@@ -363,6 +369,9 @@ def audit(root):
     for name in REMOVED_GENERATED_UNIT_PATHS:
         if present(root / name):
             raise ValueError("generated startup path remains: " + name)
+    for name in REMOVED_ALTERNATIVES_PATHS:
+        if present(root / name):
+            raise ValueError("unused alternative frontend remains: " + name)
     if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
         raise ValueError("signed mount ELF identity absent")
     mount = root / "usr/bin/mount"

@@ -75,8 +75,14 @@ REMOVED_GENERATED_UNIT_DIRECTORIES = (
     "/etc/systemd/user",
 )
 REMOVED_GENERATED_UNIT_LINKS = (
+    "/etc/systemd/system/ctrl-alt-del.target",
     "/etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
     "/etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
+)
+REMOVED_ALTERNATIVES_PATHS = (
+    "/etc/alternatives",
+    "/usr/bin/awk", "/usr/bin/nawk", "/usr/bin/mt",
+    "/usr/sbin/rmt", "/usr/bin/pager", "/usr/bin/which",
 )
 ROOT_REMOVE_FILES = (
     "/usr/sbin/unix_chkpwd", "/usr/bin/umount", "/usr/bin/su",
@@ -91,6 +97,9 @@ ROOT_REMOVE_FILES = (
     # source overlay. None belongs to the appliance's required unit graph.
     *REMOVED_GENERATED_UNIT_DIRECTORIES,
     *REMOVED_GENERATED_UNIT_LINKS,
+    # Pinned postinst alternatives provide interactive/tape commands only;
+    # no reviewed guest startup path invokes these frontends.
+    *REMOVED_ALTERNATIVES_PATHS,
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
@@ -179,8 +188,8 @@ REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-se
 # external credential imports disabled by the fixed kernel command line.
 # In the pinned kernel, pstore_register() rejects every backend except the
 # selected name; no shipped backend is named "none".
-FIXED_KERNEL_CMDLINE = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service pstore.backend=none panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality"
-MASKS = ("ssh.service", "sshd.service", "ssh.socket", "ctrl-alt-del.target", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service", "systemd-network-generator.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
+FIXED_KERNEL_CMDLINE = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=ctrl-alt-del.target systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service pstore.backend=none panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality"
+MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service", "systemd-network-generator.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
 RETAINED_UNIT_LINKS = {
     "dbus-org.freedesktop.network1.service": "systemd-networkd.service",
     "dbus-org.freedesktop.resolve1.service": "systemd-resolved.service",

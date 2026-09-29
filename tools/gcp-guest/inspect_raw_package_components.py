@@ -50,8 +50,11 @@ REVIEWED_REMOVALS = frozenset({
     "etc/systemd/system/systemd-journald.service.wants",
     "etc/systemd/system/timers.target.wants",
     "etc/systemd/user",
+    "etc/systemd/system/ctrl-alt-del.target",
     "etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
     "etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
+    "etc/alternatives", "usr/bin/awk", "usr/bin/nawk", "usr/bin/mt",
+    "usr/sbin/rmt", "usr/bin/pager", "usr/bin/which",
 })
 PACKAGE_METADATA_ROOTS = ("var/lib/dpkg", "var/lib/apt", "var/cache/apt")
 # These source-bound overlay paths may replace Debian package members. The

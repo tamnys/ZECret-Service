@@ -77,7 +77,6 @@ APPLIANCE_UNITS = (
 )
 MASKED_UNITS = (
     "ssh.service", "sshd.service", "ssh.socket",
-    "ctrl-alt-del.target",
     "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service",
     "container-getty@.service", "debug-shell.service", "rescue.service",
     "rescue.target", "emergency.service", "emergency.target",

@@ -349,8 +349,8 @@ class CandidateTests(unittest.TestCase):
         for relative, target in prepare.RETAINED_UNIT_LINKS.items():
             self.assertEqual((output / "rootfs/etc/systemd/system" / relative).readlink(),
                              Path("/usr/lib/systemd/system") / target)
-        self.assertEqual((output / "rootfs/etc/systemd/system/ctrl-alt-del.target").readlink(),
-                         Path("/dev/null"))
+        self.assertFalse((output / "rootfs/etc/systemd/system/ctrl-alt-del.target").exists())
+        self.assertIn("systemd.mask=ctrl-alt-del.target", prepare.FIXED_KERNEL_CMDLINE)
         self.assertEqual(
             (output / "rootfs/etc/systemd/system/systemd-resolved.service.d/10-no-credentials.conf").read_bytes(),
             audit_rootfs.RESOLVED_CREDENTIAL_DROPIN_BYTES,
@@ -509,6 +509,7 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.conf", "KernelModulesInitrdInclude=^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdInclude=.*"),
             ("mkosi.conf", "KernelModulesInitrdExclude=.*", "KernelModulesInitrdExclude="),
             ("mkosi.conf", "systemd.import_credentials=no", "systemd.import_credentials=yes"),
+            ("mkosi.conf", "systemd.mask=ctrl-alt-del.target", ""),
             ("mkosi.conf", "systemd.import_credentials=no ", ""),
             ("mkosi.conf", "systemd.import_credentials=no", "systemd.import_credentials=no systemd.import_credentials=yes"),
             ("mkosi.conf", "pstore.backend=none ", ""),
@@ -1013,7 +1014,8 @@ class CandidateTests(unittest.TestCase):
         audit_rootfs.audit(root)
         for relative in prepare.ROOT_REMOVE_FILES:
             if relative in (*prepare.REMOVED_GENERATED_UNIT_DIRECTORIES,
-                            *prepare.REMOVED_GENERATED_UNIT_LINKS):
+                            *prepare.REMOVED_GENERATED_UNIT_LINKS,
+                            *prepare.REMOVED_ALTERNATIVES_PATHS):
                 continue
             with self.subTest(relative=relative):
                 path = root / relative.lstrip("/")
@@ -1088,6 +1090,23 @@ class CandidateTests(unittest.TestCase):
                 else:
                     path.symlink_to("/usr/lib/systemd/system/rogue.socket")
                 with self.assertRaisesRegex(ValueError, "generated startup path remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_alternative_frontends(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_ALTERNATIVES_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_ALTERNATIVES_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-alternative-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if relative == "etc/alternatives":
+                    path.mkdir()
+                else:
+                    path.symlink_to("/etc/alternatives/rogue")
+                with self.assertRaisesRegex(ValueError,
+                                            "unused alternative frontend remains: " + relative):
                     audit_rootfs.audit(root)
 
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):

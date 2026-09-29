@@ -217,6 +217,11 @@ class PackageComponentsTests(unittest.TestCase):
                     self.inspect()
                 del self.inventory[path]
 
+    def test_removed_alternative_frontend_cannot_survive(self):
+        self.actual["etc/alternatives"] = {"type": "directory"}
+        with self.assertRaisesRegex(ValueError, "removed package path remains"):
+            self.inspect()
+
     def test_executable_outside_component_prefix_rejects_but_inert_data_does_not(self):
         path = "var/cache/payload"
         self.inventory[path] = {"type": "file", "mode": 0o755}
