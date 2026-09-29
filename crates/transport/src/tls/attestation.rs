@@ -452,6 +452,7 @@ pub struct PublicTestnetPreview {
     pub best_block_hash: String,
     pub transparent_address: String,
     pub transparent_balance_zatoshis: u64,
+    pub balance_context: &'static str,
 }
 
 impl VerifiedRpcSession {
@@ -661,6 +662,7 @@ impl PreviewRpcSession {
             best_block_hash,
             transparent_address: address.as_str().to_owned(),
             transparent_balance_zatoshis,
+            balance_context: "Node-reported balance; the displayed chain height was sampled before the balance request. Synchronization completeness is unverified.",
         })
     }
 }
