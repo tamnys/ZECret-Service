@@ -14,6 +14,7 @@ import re
 import assemble_guest_base_tree as base_tree
 import fetch_guest_closure as guest
 import inspect_raw_forbidden as forbidden
+import inspect_raw_generated_etc as generated_etc
 import inspect_raw_generated_kernel as generated
 import inspect_raw_generated_usr as generated_usr
 import preflight_guest_base_tree as preflight
@@ -209,6 +210,11 @@ def expected_components(authenticated, verified_overlay, workspace):
         if path in source or path in verified_overlay or path in removals or path in expected:
             raise ValueError("generated clock path collides with source inventory: " + path)
     expected.update(clock_entries)
+    etc_entries = generated_etc.expected_entries(source_rows, verified_overlay)
+    for path in etc_entries:
+        if path in source or path in verified_overlay or path in removals or path in expected:
+            raise ValueError("generated etc path collides with source inventory: " + path)
+    expected.update(etc_entries)
     return {"entries": expected, "removed": tuple(sorted(removals)),
             "overlaid": tuple(sorted(overlaid))}
 

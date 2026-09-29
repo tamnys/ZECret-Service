@@ -120,6 +120,21 @@ class PackageComponentsTests(unittest.TestCase):
                                     return_value=self.generated_entries)
         self.generated = patcher.start()
         self.addCleanup(patcher.stop)
+        etc_patcher = mock.patch.object(components.generated_etc, "expected_entries",
+                                        return_value={
+            "etc/nsswitch.conf": {
+                "type": "regular", "mode": 0o644, "uid": 0, "gid": 0,
+                "size": len(b"synthetic nsswitch"),
+                "sha256": hashlib.sha256(b"synthetic nsswitch").hexdigest(),
+            },
+            "etc/mtab": {
+                "type": "symlink", "mode": 0o777, "uid": 0, "gid": 0,
+                "size": len(b"../proc/self/mounts"),
+                "target": "../proc/self/mounts",
+            },
+        })
+        self.generated_etc = etc_patcher.start()
+        self.addCleanup(etc_patcher.stop)
         self.plan = components.expected_components(
             self.authenticated, self.overlay, self.workspace)
         self.actual = {}
@@ -158,6 +173,8 @@ class PackageComponentsTests(unittest.TestCase):
                      "etc/pam.d/login", "etc/empty-policy", "usr/lib", "usr/lib/systemd",
                      "usr/lib/systemd/system/multi-user.target.wants"):
             self.assertIn(path, expected)
+        self.assertIn("etc/nsswitch.conf", expected)
+        self.assertIn("etc/mtab", expected)
         self.assertNotIn("usr/share/doc/base-files/README", expected)
         self.assertNotIn("etc/passwd", expected)
         self.assertNotIn("usr/bin/umount", expected)
@@ -331,6 +348,15 @@ class PackageComponentsTests(unittest.TestCase):
         self.inspect()
         self.actual[path]["mtime_ns"] += 1
         with self.assertRaisesRegex(ValueError, "generated component mtime differs"):
+            self.inspect()
+
+    def test_generated_etc_bytes_and_link_target_must_match(self):
+        self.digests["etc/nsswitch.conf"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "component bytes differ"):
+            self.inspect()
+        self.digests["etc/nsswitch.conf"] = self.plan["entries"]["etc/nsswitch.conf"]["sha256"]
+        self.actual["etc/mtab"]["link"] = "../proc/self/other"
+        with self.assertRaisesRegex(ValueError, "symlink target differs"):
             self.inspect()
 
     def test_executable_outside_component_prefix_rejects_but_inert_data_does_not(self):
