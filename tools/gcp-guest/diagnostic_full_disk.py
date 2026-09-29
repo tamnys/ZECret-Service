@@ -283,6 +283,7 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
             or not re.fullmatch(r"[0-9a-f]{64}", hashes["verity_partition_sha256"])
             or hashes.get("one_byte_root_change_rejected") is not True
             or workload.get("reader_executable_matches_signed_package") is not True
+            or workload.get("reader_initial_elf_objects_checked") is not True
             or workload.get("private_mode_approved") is not False):
         raise ValueError("synthetic workload bytes did not match the raw root")
     superblock = rootfs.checked_superblock_metadata(workload)
@@ -477,10 +478,12 @@ def build_signed_boot(lock_path, inputs, stage, metadata, guest_archives,
                  boot_receipt=(rust_bundle, revision), signed_boot=True)
 
 
-def debugfs_output(reader, image, command, descriptor):
-    result = subprocess.run([str(reader), "-R", command, str(image)],
+def debugfs_output(reader, image, command, descriptors, *, env=rootfs.SUPER_ENV):
+    pass_fds = (descriptors,) if type(descriptors) is int else descriptors
+    result = subprocess.run(rootfs.forbidden.reader_command(
+                            reader, "-R", command, str(image)),
                             stdin=subprocess.DEVNULL, capture_output=True,
-                            env=rootfs.SUPER_ENV, pass_fds=(descriptor,), check=False)
+                            env=env, pass_fds=pass_fds, check=False)
     if result.returncode or result.stderr != rootfs.READER_BANNER:
         raise ValueError("signed debugfs block ownership query failed")
     try:
@@ -489,13 +492,14 @@ def debugfs_output(reader, image, command, descriptor):
         raise ValueError("signed debugfs block ownership report is malformed") from error
 
 
-def describe_changed_block(reader, image, byte_offset, descriptor):
-    stats = debugfs_output(reader, image, "stats -h", descriptor)
+def describe_changed_block(reader, image, byte_offset, descriptors, *, env=rootfs.SUPER_ENV):
+    stats = debugfs_output(reader, image, "stats -h", descriptors, env=env)
     sizes = re.findall(r"(?m)^Block size:\s+([1-9][0-9]*)$", stats)
     if sizes != ["4096"]:
         raise ValueError("root ext4 block size differs from pinned mkfs recipe")
     block = byte_offset // 4096
-    lines = debugfs_output(reader, image, f"icheck {block}", descriptor).splitlines()
+    lines = debugfs_output(reader, image, f"icheck {block}", descriptors,
+                           env=env).splitlines()
     if len(lines) != 2 or lines[0] != "Block\tInode number":
         raise ValueError("signed debugfs block owner report is malformed")
     row = lines[1].split("\t")
@@ -506,7 +510,8 @@ def describe_changed_block(reader, image, byte_offset, descriptor):
         paths = []
     elif re.fullmatch(r"[1-9][0-9]*", row[1]):
         inode = int(row[1])
-        names = debugfs_output(reader, image, f"ncheck {inode}", descriptor).splitlines()
+        names = debugfs_output(reader, image, f"ncheck {inode}", descriptors,
+                               env=env).splitlines()
         if not names or names[0] != "Inode\tPathname":
             raise ValueError("signed debugfs inode path report is malformed")
         paths = []
@@ -523,9 +528,9 @@ def describe_changed_block(reader, image, byte_offset, descriptor):
 
 def signed_block_owners(disks, byte_offset, metadata, builder_archives, workspace):
     workspace = verity.esp.workspace_scratch(workspace)
-    signed_reader, _ = rootfs.signed_reader_bytes(
+    toolchain = rootfs.authenticated_reader_toolchain(
         metadata / "InRelease", metadata / "Packages.xz", builder_archives)
-    rootfs.checked_reader(signed_reader)
+    rootfs.checked_reader(toolchain[0])
     with tempfile.TemporaryDirectory(prefix="zrpc-root-rebuild-", dir=workspace) as temporary:
         scratch = Path(temporary)
         images = []
@@ -535,8 +540,9 @@ def signed_block_owners(disks, byte_offset, metadata, builder_archives, workspac
             partitions = verity.partition_images(raw, layout, expected_sha,
                                                   size, sector_size, target)
             images.append(partitions["root-x86-64"][0])
-        with verity.closure.sealed_elf_bytes(signed_reader) as (reader, descriptor):
-            return [describe_changed_block(reader, image, byte_offset, descriptor)
+        with rootfs.sealed_reader_runtime(toolchain, scratch) as (reader, descriptors, env):
+            return [describe_changed_block(reader, image, byte_offset, descriptors,
+                                           env={**env, "TZ": "UTC"})
                     for image in images]
 
 

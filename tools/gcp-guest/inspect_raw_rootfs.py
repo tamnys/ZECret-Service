@@ -4,11 +4,13 @@
 The production outer runner calls this only after its signed staged-builder
 check, immutable input inventory, and userspace dm-verity verification. The
 installed debugfs executable must match the member of the exact signed Debian
-package, then reads a copied root partition without mounting it. This module
-does not independently seal its dynamic runtime or prove a successful boot.
+package, then reads a copied root partition without mounting it. Its initial
+ELF loader objects come from sealed signed-package members. This does not rule
+out later dynamic loads or prove a successful boot.
 No result from this module approves an image or private mode.
 """
 
+from contextlib import contextmanager, ExitStack
 import hashlib
 import io
 import json
@@ -69,6 +71,19 @@ SUPER_FIELDS = {
     "Directory Hash Seed": "directory_hash_seed",
 }
 UUID_TEXT = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
+
+
+# Direct and transitive DT_NEEDED providers of the exact Debian debugfs ELF.
+# A package update requires reviewing this list against its signed objects.
+READER_ELF_PROVIDERS = (
+    ("libext2fs.so.2", "libext2fs2t64"),
+    ("libe2p.so.2", "libext2fs2t64"),
+    ("libss.so.2", "libss2"),
+    ("libcom_err.so.2", "libcom-err2"),
+    ("libblkid.so.1", "libblkid1"),
+    ("libuuid.so.1", "libuuid1"),
+    ("libc.so.6", "libc6"),
+)
 
 
 def _file_identity(info):
@@ -172,8 +187,8 @@ def checked_overlay(manifest, stage):
     return selected
 
 
-def signed_reader_bytes(inrelease, packages_index, archives):
-    """Read debugfs from the source-pinned package and Debian-signed index."""
+def authenticated_reader_toolchain(inrelease, packages_index, archives):
+    """Read debugfs and its initial ELF objects from the signed builder closure."""
     lock_bytes = verity.debian_snapshot.bounded_regular_bytes(
         verity.esp.LOCK, verity.closure.LOCK_BYTES, "builder closure lock")
     if (len(lock_bytes) != verity.closure.LOCK_BYTES
@@ -192,17 +207,62 @@ def signed_reader_bytes(inrelease, packages_index, archives):
     if (epoch != lock["signed_release_date_epoch"]
             or index_hash != lock["packages_index_sha256"]):
         raise ValueError("signed debugfs index differs from reviewed builder candidate")
-    entries = [entry for entry in lock["packages"] if entry["name"] == "e2fsprogs"]
-    if len(entries) != 1:
-        raise ValueError("signed debugfs package identity is absent or ambiguous")
-    entry = entries[0]
     records = verity.debian_snapshot.package_records(io.BytesIO(index_bytes))
-    record = records.get((entry["name"], entry["version"], entry["architecture"]))
-    package = verity.closure.indexed_archive(entry, record, archives, keep_bytes=True)
-    program = verity.esp.regular_member_from_deb(package, "usr/sbin/debugfs")
+    needed = {"e2fsprogs", "libc6", *(name for _, name in READER_ELF_PROVIDERS)}
+    entries = {}
+    for entry in lock["packages"]:
+        name = entry["name"]
+        if name in needed:
+            if name in entries:
+                raise ValueError("duplicate signed debugfs runtime provider")
+            entries[name] = entry
+    if set(entries) != needed:
+        raise ValueError("signed debugfs runtime provider missing")
+    packages = {}
+    for name, entry in entries.items():
+        record = records.get((name, entry["version"], entry["architecture"]))
+        packages[name] = verity.closure.indexed_archive(
+            entry, record, archives, keep_bytes=True)
+    program = verity.esp.regular_member_from_deb(packages["e2fsprogs"],
+                                                  "usr/sbin/debugfs")
     if not program.startswith(b"\x7fELF"):
         raise ValueError("signed debugfs package member is not ELF")
-    return program, entry["sha256"]
+    loader = verity.closure.package_elf(packages["libc6"], "ld-linux-x86-64.so.2")
+    libraries = tuple(verity.closure.package_elf(packages[name], soname)
+                      for soname, name in READER_ELF_PROVIDERS)
+    return program, loader, libraries, entries["e2fsprogs"]["sha256"]
+
+
+@contextmanager
+def sealed_reader_runtime(toolchain, scratch):
+    """Check sealed startup objects, then use them for every debugfs query."""
+    if scratch.is_symlink() or not scratch.is_dir():
+        raise ValueError("debugfs scratch directory missing or redirected")
+    program_bytes, loader_bytes, libraries, _ = toolchain
+    if len(libraries) != len(READER_ELF_PROVIDERS):
+        raise ValueError("signed debugfs runtime object count differs")
+    with (tempfile.TemporaryDirectory(prefix="zrpc-debugfs-libs-", dir=scratch) as empty_lib,
+          ExitStack() as stack):
+        program, program_fd = stack.enter_context(
+            verity.closure.sealed_elf_bytes(program_bytes))
+        loader, loader_fd = stack.enter_context(
+            verity.closure.sealed_elf_bytes(loader_bytes))
+        preloads = []
+        descriptors = [program_fd, loader_fd]
+        for data in libraries:
+            library, descriptor = stack.enter_context(
+                verity.closure.sealed_elf_bytes(data))
+            preloads.append(library)
+            descriptors.append(descriptor)
+        prefix = (str(loader), "--inhibit-cache", "--preload",
+                  ":".join(map(str, preloads)), "--library-path", empty_lib)
+        environment = {"HOME": empty_lib, "LC_ALL": "C", "PATH": empty_lib,
+                       "DEBUGFS_PAGER": empty_lib + "/no-pager"}
+        inspected = subprocess.run([*prefix, "--list", str(program)],
+                                   pass_fds=descriptors, env=environment,
+                                   capture_output=True, text=True, check=False)
+        verity.closure.check_loader_report(inspected, loader, preloads)
+        yield (*prefix, str(program)), tuple(descriptors), environment
 
 
 def checked_reader(signed_bytes):
@@ -235,7 +295,8 @@ def clock_mtime_ns(lines):
 
 
 def run_stat(reader, image, relative, *, env=ENV, pass_fds=(), require_mtime=False):
-    result = subprocess.run([str(reader), "-R", "stat /" + relative, str(image)],
+    result = subprocess.run(forbidden.reader_command(
+                            reader, "-R", "stat /" + relative, str(image)),
                             stdin=subprocess.DEVNULL, capture_output=True, env=env,
                             pass_fds=pass_fds, check=False)
     if result.returncode or result.stderr != READER_BANNER:
@@ -280,7 +341,8 @@ def checked_superblock_metadata(report):
 
 def run_superblock_stats(reader, image, *, env=SUPER_ENV, pass_fds=()):
     """Read three ext4 superblock values from the signed debugfs header."""
-    result = subprocess.run([str(reader), "-R", "stats -h", str(image)],
+    result = subprocess.run(forbidden.reader_command(
+                            reader, "-R", "stats -h", str(image)),
                             stdin=subprocess.DEVNULL, capture_output=True, env=env,
                             pass_fds=pass_fds, check=False)
     if result.returncode or result.stderr != READER_BANNER:
@@ -310,7 +372,8 @@ def run_cat(reader, image, relative, expected_size, scratch, *, env=ENV, pass_fd
 
     with tempfile.TemporaryFile(mode="w+b", dir=scratch) as content, \
             tempfile.TemporaryFile(mode="w+b", dir=scratch) as errors:
-        result = subprocess.run([str(reader), "-R", "cat /" + relative, str(image)],
+        result = subprocess.run(forbidden.reader_command(
+                                reader, "-R", "cat /" + relative, str(image)),
                                 stdin=subprocess.DEVNULL, stdout=content, stderr=errors,
                                 env=env, preexec_fn=bound_output,
                                 pass_fds=pass_fds, check=False)
@@ -376,7 +439,8 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
             or packages_index != inrelease.with_name("Packages.xz")):
         raise ValueError("rootfs package authentication requires matching metadata paths")
     selected = checked_overlay(manifest, stage)
-    signed_reader, archive_sha256 = signed_reader_bytes(inrelease, packages_index, archives)
+    toolchain = authenticated_reader_toolchain(inrelease, packages_index, archives)
+    signed_reader, _, _, archive_sha256 = toolchain
     reader_sha256 = checked_reader(signed_reader)
     with tempfile.TemporaryDirectory(prefix="zrpc-raw-rootfs-", dir=workspace) as temporary:
         scratch = Path(temporary)
@@ -388,13 +452,13 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
             raise ValueError("raw rootfs partition differs from verified verity report")
         with root.open("rb") as stream:
             root_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
-        # The installed executable is checked for build consistency, but the
-        # inspected bytes are read using this immutable package-member fd.
-        with verity.closure.sealed_elf_bytes(signed_reader) as (reader, descriptor):
+        # The installed executable is checked for build consistency; actual
+        # reads use the signed executable and its signed initial loader objects.
+        with sealed_reader_runtime(toolchain, scratch) as (reader, descriptors, env):
             inventory = forbidden.inspect(reader, root, scratch,
-                                          pass_fds=(descriptor,))
+                                          env=env, pass_fds=descriptors)
             checked = inspect_entries(reader, root, selected, scratch,
-                                      pass_fds=(descriptor,))
+                                      env=env, pass_fds=descriptors)
             def lookup_inode(path):
                 entry = inventory.get(path)
                 if entry is None:
@@ -402,7 +466,8 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
                 observed = {**entry, "type": "regular" if entry["type"] == "file"
                             else entry["type"]}
                 if entry["type"] == "symlink" or path == generated_usr.CLOCK_EPOCH:
-                    detail = run_stat(reader, root, path, pass_fds=(descriptor,),
+                    detail = run_stat(reader, root, path, env=env,
+                                      pass_fds=descriptors,
                                       require_mtime=path == generated_usr.CLOCK_EPOCH)
                     if any(detail[field] != observed[field] for field in
                            ("inode", "type", "mode", "uid", "gid", "size")):
@@ -417,10 +482,11 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
                 inrelease.parent, stage / "packages", selected, inventory,
                 lookup_inode,
                 lambda path, size: run_cat(reader, root, path, size, scratch,
-                                           pass_fds=(descriptor,)),
+                                           env=env, pass_fds=descriptors),
                 workspace=scratch,
             )
-            superblock = run_superblock_stats(reader, root, pass_fds=(descriptor,))
+            superblock = run_superblock_stats(reader, root, env={**env, "TZ": "UTC"},
+                                              pass_fds=descriptors)
     return {"status": STATUS, "raw_disk_sha256": expected_sha256,
             "raw_disk_bytes": expected_bytes,
             "root_partition_guid": root_guid,
@@ -433,5 +499,6 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
             "staged_builder_debugfs_sha256": reader_sha256,
             "signed_e2fsprogs_archive_sha256": archive_sha256,
             "reader_executable_matches_signed_package": True,
+            "reader_initial_elf_objects_checked": True,
             "reader_dynamic_runtime_independently_sealed": False,
             "boot_verified": False, "private_mode_approved": False}

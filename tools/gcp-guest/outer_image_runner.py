@@ -652,6 +652,7 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
             or rootfs.get("raw_disk_bytes") != raw_bytes
             or rootfs.get("root_partition_guid") != verity.get("root_partition_guid")
             or rootfs.get("reader_executable_matches_signed_package") is not True
+            or rootfs.get("reader_initial_elf_objects_checked") is not True
             or rootfs.get("forbidden_surfaces_checked") is not True
             or type(rootfs.get("raw_root_inventory_entries")) is not int
             or rootfs["raw_root_inventory_entries"] <= 0
@@ -1005,6 +1006,7 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
             or workload.get("root_partition_sha256") !=
                original["raw_rootfs_audit"]["root_partition_sha256"]
             or workload.get("reader_executable_matches_signed_package") is not True
+            or workload.get("reader_initial_elf_objects_checked") is not True
             or workload.get("forbidden_surfaces_checked") is not True
             or workload.get("raw_root_inventory_entries") !=
                original["raw_rootfs_audit"]["raw_root_inventory_entries"]

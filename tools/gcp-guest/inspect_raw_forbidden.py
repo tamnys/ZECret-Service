@@ -162,6 +162,15 @@ def _parse_entry(line):
     }
 
 
+def reader_command(reader, *arguments):
+    """Append a debugfs query to a checked sealed-loader command or test path."""
+    if isinstance(reader, tuple):
+        if not reader or any(type(part) is not str or not part for part in reader):
+            raise ValueError("sealed debugfs command is malformed")
+        return [*reader, *arguments]
+    return [str(reader), *arguments]
+
+
 @contextmanager
 def _debugfs_output(reader, image, command, scratch, image_bytes, *, env, pass_fds,
                     max_output_bytes=None):
@@ -182,7 +191,7 @@ def _debugfs_output(reader, image, command, scratch, image_bytes, *, env, pass_f
 
     with tempfile.TemporaryFile(mode="w+b", dir=scratch) as output, \
             tempfile.TemporaryFile(mode="w+b", dir=scratch) as errors:
-        result = subprocess.run([str(reader), "-R", command, str(image)],
+        result = subprocess.run(reader_command(reader, "-R", command, str(image)),
                                 stdin=subprocess.DEVNULL, stdout=output,
                                 stderr=errors, env=env, pass_fds=pass_fds,
                                 preexec_fn=bound_output, check=False)
