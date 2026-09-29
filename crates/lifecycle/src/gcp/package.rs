@@ -305,7 +305,7 @@ fn verify_source_disk(path: &Path, expected_sha256: &str, expected_bytes: u64) -
     Ok(())
 }
 
-fn verify_operator_handoff(spec: &DeploymentSpec, verify_disk: bool) -> Result<()> {
+fn verify_operator_handoff(spec: &DeploymentSpec, verify_disk: bool) -> Result<(String, String)> {
     let handoff: OperatorHandoff =
         serde_json::from_slice(&read_hashed_diagnostic(&spec.operator_handoff)?)
             .map_err(|_| Error("invalid typed operator handoff"))?;
@@ -427,7 +427,7 @@ fn verify_operator_handoff(spec: &DeploymentSpec, verify_disk: bool) -> Result<(
             spec.raw_disk_bytes,
         )?;
     }
-    Ok(())
+    Ok((handoff.source_commit, handoff.native_rust_manifest_sha256))
 }
 
 fn reviewed_roothash(cmdline: &str) -> Option<&str> {
@@ -529,7 +529,11 @@ fn verify_exact_uki_db(spec: &DeploymentSpec) -> Result<()> {
     Ok(())
 }
 
-fn verify_import_receipt(spec: &DeploymentSpec) -> Result<()> {
+fn verify_import_receipt(
+    spec: &DeploymentSpec,
+    source_commit: &str,
+    native_rust_manifest_sha256: &str,
+) -> Result<()> {
     let bytes = read_regular(&spec.import_receipt.path)?;
     if digest(&bytes) != spec.import_receipt.sha256 {
         return Err(Error("import receipt SHA-256 mismatch"));
@@ -545,13 +549,53 @@ fn verify_import_receipt(spec: &DeploymentSpec) -> Result<()> {
         || !receipt.oldgnu_single_member_checked
         || receipt.private_mode_approved
         || receipt.toolchain_reviewed
+        || receipt.producer_executable_sha256 != spec.producer_binary.sha256
     {
         return Err(Error(
             "import receipt differs from candidate media or status",
         ));
     }
-    // This self-reported producer hash does not identify or approve the
-    // separate operator-host verification environment.
+    if spec.native_rust_manifest.sha256 != native_rust_manifest_sha256 {
+        return Err(Error("native Rust manifest differs from builder handoff"));
+    }
+    let manifest: Value =
+        serde_json::from_slice(&read_hashed_diagnostic(&spec.native_rust_manifest)?)
+            .map_err(|_| Error("invalid native Rust build manifest"))?;
+    let selected = manifest
+        .get("selected_binaries")
+        .and_then(Value::as_array)
+        .ok_or(Error("native Rust build manifest lacks selected binaries"))?;
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || manifest.get("artifact_kind").and_then(Value::as_str) != Some("unsigned_native_scaffold")
+        || manifest.get("source_commit").and_then(Value::as_str) != Some(source_commit)
+        || manifest.get("reproducible").and_then(Value::as_bool) != Some(true)
+        || [
+            "approved_release",
+            "private_accepted",
+            "deployment_enabled",
+            "published",
+            "signed",
+        ]
+        .iter()
+        .any(|field| manifest.get(*field).and_then(Value::as_bool) != Some(false))
+        || manifest
+            .get("artifact_sha256")
+            .and_then(|artifacts| artifacts.get("zrpc-gcp-lifecycle"))
+            .and_then(Value::as_str)
+            != Some(spec.producer_binary.sha256.as_str())
+        || selected
+            .iter()
+            .filter(|item| {
+                item.get("package").and_then(Value::as_str) == Some("zrpc-lifecycle")
+                    && item.get("name").and_then(Value::as_str) == Some("zrpc-gcp-lifecycle")
+            })
+            .count()
+            != 1
+    {
+        return Err(Error("native Rust producer differs from builder manifest"));
+    }
+    // Matching self-reported and build-recorded bytes does not authenticate
+    // producer execution or the operator host's dynamic runtime closure.
     Ok(())
 }
 
@@ -609,6 +653,10 @@ pub struct DeploymentSpec {
     pub raw_disk_bytes: u64,
     /// Hash-bound candidate record emitted by the offline archive packer.
     pub import_receipt: Artifact,
+    /// Native double-build manifest also named by the final image handoff.
+    pub native_rust_manifest: Artifact,
+    /// Exact operator-side executable identified by that manifest and receipt.
+    pub producer_binary: Artifact,
     /// Pre-archive handoff from the final disk reinspection. Preparation hashes
     /// its disk directly; later validation checks the frozen archive instead.
     pub operator_handoff: Artifact,
@@ -679,7 +727,7 @@ impl DeploymentSpec {
         self.validate_inner(at, true)
     }
     fn validate_inner(&self, at: u64, verify_disk: bool) -> Result<()> {
-        if self.schema_version != 8
+        if self.schema_version != 9
             || !name(&self.experiment)
             || self.experiment.len() + "-public-data".len() > 63
             || !name(&self.project)
@@ -769,8 +817,9 @@ impl DeploymentSpec {
         for artifact in self.artifacts() {
             artifact.verify()?;
         }
-        verify_operator_handoff(self, verify_disk)?;
-        verify_import_receipt(self)?;
+        let (source_commit, native_rust_manifest_sha256) =
+            verify_operator_handoff(self, verify_disk)?;
+        verify_import_receipt(self, &source_commit, &native_rust_manifest_sha256)?;
         import_archive::verify_import_archive(
             &self.raw_image_tar_gz,
             &self.raw_disk_sha256,
@@ -779,10 +828,12 @@ impl DeploymentSpec {
         verify_exact_uki_db(self)?;
         Ok(())
     }
-    pub fn artifacts(&self) -> [&Artifact; 15] {
+    pub fn artifacts(&self) -> [&Artifact; 17] {
         [
             &self.raw_image_tar_gz,
             &self.import_receipt,
+            &self.native_rust_manifest,
+            &self.producer_binary,
             &self.operator_handoff,
             &self.release_manifest,
             &self.boot_policy,
@@ -882,14 +933,14 @@ impl Package {
             },
         ];
         Ok(Self {
-            schema_version: 8,
+            schema_version: 9,
             spec,
             resources,
         })
     }
     pub fn validate(&self, at: u64) -> Result<()> {
         let expected = Self::from_spec(self.spec.clone(), at, false)?;
-        if self.schema_version != 8 || self.resources != expected.resources {
+        if self.schema_version != 9 || self.resources != expected.resources {
             return Err(Error(
                 "package resources differ from typed deployment policy",
             ));
