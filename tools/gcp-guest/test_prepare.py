@@ -1015,7 +1015,8 @@ class CandidateTests(unittest.TestCase):
         for relative in prepare.ROOT_REMOVE_FILES:
             if relative in (*prepare.REMOVED_GENERATED_UNIT_DIRECTORIES,
                             *prepare.REMOVED_GENERATED_UNIT_LINKS,
-                            *prepare.REMOVED_ALTERNATIVES_PATHS):
+                            *prepare.REMOVED_ALTERNATIVES_PATHS,
+                            *prepare.REMOVED_GENERATED_ETC_PATHS):
                 continue
             with self.subTest(relative=relative):
                 path = root / relative.lstrip("/")
@@ -1107,6 +1108,20 @@ class CandidateTests(unittest.TestCase):
                     path.symlink_to("/etc/alternatives/rogue")
                 with self.assertRaisesRegex(ValueError,
                                             "unused alternative frontend remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_generated_configuration(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_GENERATED_ETC_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_GENERATED_ETC_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-generated-etc-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("generated or mutable data\n")
+                with self.assertRaisesRegex(ValueError,
+                                            "generated configuration remains: " + relative):
                     audit_rootfs.audit(root)
 
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):

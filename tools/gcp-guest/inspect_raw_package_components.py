@@ -13,6 +13,7 @@ import re
 
 import assemble_guest_base_tree as base_tree
 import inspect_raw_forbidden as forbidden
+import inspect_raw_generated_kernel as generated
 import preflight_guest_base_tree as preflight
 import prepare
 
@@ -55,6 +56,18 @@ REVIEWED_REMOVALS = frozenset({
     "etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
     "etc/alternatives", "usr/bin/awk", "usr/bin/nawk", "usr/bin/mt",
     "usr/sbin/rmt", "usr/bin/pager", "usr/bin/which",
+    "etc/apt/sources.list.d/trixie.sources", "etc/dpkg/origins/default",
+    "etc/.pwd.lock", "etc/group-", "etc/gshadow", "etc/gshadow-",
+    "etc/passwd-", "etc/shadow-", "etc/security/opasswd",
+    "etc/subgid", "etc/subuid",
+    "etc/pam.d/common-account", "etc/pam.d/common-auth",
+    "etc/pam.d/common-password", "etc/pam.d/common-session",
+    "etc/pam.d/common-session-noninteractive",
+    "etc/environment", "etc/profile", "etc/shells", "etc/motd",
+    "etc/default/locale", "etc/vconsole.conf",
+    "etc/modules", "etc/initramfs-tools/modules",
+    "etc/rc2.d/S01dbus", "etc/rc3.d/S01dbus",
+    "etc/rc4.d/S01dbus", "etc/rc5.d/S01dbus",
 })
 PACKAGE_METADATA_ROOTS = ("var/lib/dpkg", "var/lib/apt", "var/cache/apt")
 # These source-bound overlay paths may replace Debian package members. The
@@ -92,7 +105,7 @@ def _sensitive_path(path):
                    for root in forbidden.UNIT_DIRS))
 
 
-def expected_components(authenticated, verified_overlay):
+def expected_components(authenticated, verified_overlay, workspace):
     """Build a source-derived plan from preflight.authenticated_archives data.
 
     `verified_overlay` is the return value of checked_overlay, never a list of
@@ -101,7 +114,7 @@ def expected_components(authenticated, verified_overlay):
     if type(verified_overlay) is not dict:
         raise ValueError("verified source overlay inventory required")
     removals = _reviewed_removals()
-    _, source_rows = base_tree.source_plan(authenticated)
+    payloads, source_rows = base_tree.source_plan(authenticated)
     source = {row["path"]: row for row in source_rows}
     if len(source) != len(source_rows) or "." not in source:
         raise ValueError("authenticated package payload inventory is malformed")
@@ -164,6 +177,18 @@ def expected_components(authenticated, verified_overlay):
         expected[path] = item
     if removals & expected.keys():
         raise ValueError("removed package path remains required")
+    generated_entries = generated.expected_entries(
+        payloads, source_rows, verified_overlay, workspace)
+    for path in generated_entries:
+        if path in source or path in verified_overlay or path in removals:
+            raise ValueError("generated kernel path collides with source inventory: " + path)
+        for parent in PurePosixPath(path).parents:
+            name = parent.as_posix()
+            if name == ".":
+                break
+            if expected.get(name, {}).get("type") != "directory":
+                raise ValueError("generated kernel parent is not an authenticated directory: " + name)
+    expected.update(generated_entries)
     return {"entries": expected, "removed": tuple(sorted(removals)),
             "overlaid": tuple(sorted(overlaid))}
 
@@ -242,9 +267,9 @@ def inspect_components(plan, verified_overlay, inventory, lookup_inode,
 
 def inspect_authenticated_components(metadata, archives, verified_overlay,
                                      inventory, lookup_inode, hash_file,
-                                     read_link=None):
+                                     read_link=None, *, workspace):
     """Authenticate the exact guest closure, derive the plan, and inspect it."""
     authenticated = preflight.authenticated_archives(metadata, archives)
-    plan = expected_components(authenticated, verified_overlay)
+    plan = expected_components(authenticated, verified_overlay, workspace)
     return inspect_components(plan, verified_overlay, inventory, lookup_inode,
                               hash_file, read_link)

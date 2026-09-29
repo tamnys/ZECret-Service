@@ -19,6 +19,9 @@ import unicodedata
 READER_BANNER = b"debugfs 1.47.2 (1-Jan-2025)\n"
 ENV = {"HOME": "/nonexistent", "LC_ALL": "C", "PATH": "/usr/bin:/bin",
        "DEBUGFS_PAGER": "/usr/bin/cat"}
+# Linux PATH_MAX includes the trailing NUL. A larger target cannot be a
+# usable systemd unit alias in this x86_64 Linux appliance.
+MAX_UNIT_LINK_BYTES = 4095
 
 # ext4 directory names have at most 255 bytes; inode and owner IDs are 32-bit,
 # file sizes are 64-bit, and debugfs prints a six-digit octal mode. A formatted
@@ -160,12 +163,19 @@ def _parse_entry(line):
 
 
 @contextmanager
-def _debugfs_output(reader, image, command, scratch, image_bytes, *, env, pass_fds):
+def _debugfs_output(reader, image, command, scratch, image_bytes, *, env, pass_fds,
+                    max_output_bytes=None):
     # An ext4 dirent occupies at least 12 bytes. Even the longest possible
     # debugfs row is below 8 times its corresponding dirent. Thus eight times
     # the whole image is a conservative per-listing output bound derived from
     # the image, with one extra byte to detect overflow.
-    output_limit = image_bytes * 8 + 1
+    default_max = image_bytes * 8
+    if max_output_bytes is None:
+        max_output_bytes = default_max
+    if not 0 <= max_output_bytes <= default_max:
+        raise ValueError("signed debugfs output bound is invalid")
+    # The same process writes the fixed banner to stderr under RLIMIT_FSIZE.
+    output_limit = max(max_output_bytes, len(READER_BANNER)) + 1
 
     def bound_output():
         resource.setrlimit(resource.RLIMIT_FSIZE, (output_limit, output_limit))
@@ -179,7 +189,7 @@ def _debugfs_output(reader, image, command, scratch, image_bytes, *, env, pass_f
         errors.seek(0)
         if (result.returncode or os.fstat(errors.fileno()).st_size != len(READER_BANNER)
                 or errors.read(len(READER_BANNER) + 1) != READER_BANNER
-                or os.fstat(output.fileno()).st_size > image_bytes * 8):
+                or os.fstat(output.fileno()).st_size > max_output_bytes):
             raise ValueError("signed debugfs failed or emitted unexpected diagnostics")
         output.seek(0)
         yield output
@@ -226,21 +236,38 @@ def list_directory(reader, image, inode, parent_inode, scratch, image_bytes,
 def _unit_target(reader, image, entry, scratch, image_bytes, *, env, pass_fds):
     """Read a unit alias by inode, never by a path that debugfs could follow."""
     links, headers, owners = [], [], []
+    size = entry["size"]
+    if (entry["type"] != "symlink" or not isinstance(size, int)
+            or not 0 < size <= MAX_UNIT_LINK_BYTES):
+        raise ValueError("signed debugfs unit symlink target is ambiguous")
+    malformed_link_line = False
     with _debugfs_output(reader, image, f"stat <{entry['inode']}>", scratch,
                          image_bytes, env=env, pass_fds=pass_fds) as output:
         for line in output:
             if match := FAST_LINK.fullmatch(line):
                 links.append(match.group(1))
+            elif line.startswith(b"Fast link dest:"):
+                malformed_link_line = True
             if match := STAT_HEADER.fullmatch(line):
                 headers.append((int(match.group(1)), int(match.group(2), 8)))
             if match := STAT_OWNER_SIZE.fullmatch(line):
                 owners.append(tuple(int(group) for group in match.groups()))
-    if (len(links) != 1 or len(headers) != 1 or len(owners) != 1
-            or len(links[0]) != entry["size"]
+    if (malformed_link_line or len(links) > 1 or len(headers) != 1 or len(owners) != 1
             or headers[0] != (entry["inode"], entry["mode"])
             or owners[0] != (entry["uid"], entry["gid"], entry["size"])):
         raise ValueError("signed debugfs unit symlink target is ambiguous")
-    return _clean_name(links[0])
+    if links:
+        target = links[0]
+    else:
+        # Pinned e2fsprogs prints no Fast link dest for a block-backed long
+        # symlink. Its cat command opens the numeric inode without path lookup.
+        with _debugfs_output(reader, image, f"cat <{entry['inode']}>", scratch,
+                             image_bytes, env=env, pass_fds=pass_fds,
+                             max_output_bytes=size) as output:
+            target = output.read(size + 1)
+    if len(target) != size:
+        raise ValueError("signed debugfs unit symlink target is ambiguous")
+    return _clean_name(target)
 
 
 def reject_xattrs(reader, image, inode, scratch, image_bytes, *, env=ENV, pass_fds=()):

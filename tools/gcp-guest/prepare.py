@@ -84,6 +84,22 @@ REMOVED_ALTERNATIVES_PATHS = (
     "/usr/bin/awk", "/usr/bin/nawk", "/usr/bin/mt",
     "/usr/sbin/rmt", "/usr/bin/pager", "/usr/bin/which",
 )
+REMOVED_GENERATED_ETC_PATHS = (
+    # These are post-install or builder outputs. The appliance has no package
+    # manager, login, PAM session, SysV boot, or interactive console path.
+    "/etc/apt/sources.list.d/trixie.sources", "/etc/dpkg/origins/default",
+    "/etc/.pwd.lock", "/etc/group-", "/etc/gshadow", "/etc/gshadow-",
+    "/etc/passwd-", "/etc/shadow-", "/etc/security/opasswd",
+    "/etc/subgid", "/etc/subuid",
+    "/etc/pam.d/common-account", "/etc/pam.d/common-auth",
+    "/etc/pam.d/common-password", "/etc/pam.d/common-session",
+    "/etc/pam.d/common-session-noninteractive",
+    "/etc/environment", "/etc/profile", "/etc/shells", "/etc/motd",
+    "/etc/default/locale", "/etc/vconsole.conf",
+    "/etc/modules", "/etc/initramfs-tools/modules",
+    "/etc/rc2.d/S01dbus", "/etc/rc3.d/S01dbus",
+    "/etc/rc4.d/S01dbus", "/etc/rc5.d/S01dbus",
+)
 ROOT_REMOVE_FILES = (
     "/usr/sbin/unix_chkpwd", "/usr/bin/umount", "/usr/bin/su",
     "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
@@ -100,6 +116,7 @@ ROOT_REMOVE_FILES = (
     # Pinned postinst alternatives provide interactive/tape commands only;
     # no reviewed guest startup path invokes these frontends.
     *REMOVED_ALTERNATIVES_PATHS,
+    *REMOVED_GENERATED_ETC_PATHS,
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",

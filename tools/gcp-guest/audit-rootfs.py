@@ -77,6 +77,20 @@ REMOVED_ALTERNATIVES_PATHS = (
     "usr/bin/awk", "usr/bin/nawk", "usr/bin/mt",
     "usr/sbin/rmt", "usr/bin/pager", "usr/bin/which",
 )
+REMOVED_GENERATED_ETC_PATHS = (
+    "etc/apt/sources.list.d/trixie.sources", "etc/dpkg/origins/default",
+    "etc/.pwd.lock", "etc/group-", "etc/gshadow", "etc/gshadow-",
+    "etc/passwd-", "etc/shadow-", "etc/security/opasswd",
+    "etc/subgid", "etc/subuid",
+    "etc/pam.d/common-account", "etc/pam.d/common-auth",
+    "etc/pam.d/common-password", "etc/pam.d/common-session",
+    "etc/pam.d/common-session-noninteractive",
+    "etc/environment", "etc/profile", "etc/shells", "etc/motd",
+    "etc/default/locale", "etc/vconsole.conf",
+    "etc/modules", "etc/initramfs-tools/modules",
+    "etc/rc2.d/S01dbus", "etc/rc3.d/S01dbus",
+    "etc/rc4.d/S01dbus", "etc/rc5.d/S01dbus",
+)
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
 # units must also be checked on the exact booted image; they do not exist in a
 # finalized rootfs and this audit does not claim to check their later output.
@@ -372,6 +386,9 @@ def audit(root):
     for name in REMOVED_ALTERNATIVES_PATHS:
         if present(root / name):
             raise ValueError("unused alternative frontend remains: " + name)
+    for name in REMOVED_GENERATED_ETC_PATHS:
+        if present(root / name):
+            raise ValueError("generated configuration remains: " + name)
     if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
         raise ValueError("signed mount ELF identity absent")
     mount = root / "usr/bin/mount"

@@ -382,6 +382,7 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
                 lookup_inode,
                 lambda path, size: run_cat(reader, root, path, size, scratch,
                                            pass_fds=(descriptor,)),
+                workspace=scratch,
             )
             superblock = run_superblock_stats(reader, root, pass_fds=(descriptor,))
     return {"status": STATUS, "raw_disk_sha256": expected_sha256,

@@ -3,6 +3,7 @@
 import hashlib
 import io
 import lzma
+from pathlib import Path
 import tarfile
 import unittest
 from unittest import mock
@@ -85,6 +86,12 @@ def baseline():
             ("file", "usr/bin/udevadm", b"signed udevadm", 0o755),
             ("symlink", "usr/lib/systemd/systemd-udevd", "../../bin/udevadm", 0o777),
         ],
+        components.prepare.KERNEL_PACKAGE: [
+            ("file", "boot/vmlinuz-" + components.prepare.KERNEL_VERSION,
+             b"signed kernel image", 0o644),
+            ("directory", "usr/lib/modules/" + components.prepare.KERNEL_VERSION,
+             b"", 0o755),
+        ],
     }
 
 
@@ -95,7 +102,22 @@ class PackageComponentsTests(unittest.TestCase):
         self.overlay = {"etc/passwd": {"type": "file", "mode": 0o644,
                                         "sha256": hashlib.sha256(b"overlay").hexdigest(),
                                         "size": 7}}
-        self.plan = components.expected_components(self.authenticated, self.overlay)
+        self.workspace = Path("/synthetic/workspace")
+        module_root = "usr/lib/modules/" + components.prepare.KERNEL_VERSION
+        def regular(data, mode):
+            return {"type": "regular", "mode": mode, "uid": 0, "gid": 0,
+                    "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        self.generated_entries = {
+            module_root + "/vmlinuz": regular(b"signed kernel image", 0o644),
+            module_root + "/modules.dep": regular(b"signed depmod text", 0o644),
+            module_root + "/modules.dep.bin": regular(b"signed depmod binary", 0o644),
+        }
+        patcher = mock.patch.object(components.generated, "expected_entries",
+                                    return_value=self.generated_entries)
+        self.generated = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.plan = components.expected_components(
+            self.authenticated, self.overlay, self.workspace)
         self.actual = {}
         for path, expected in self.plan["entries"].items():
             self.actual[path] = {"type": expected["type"], "mode": expected["mode"],
@@ -143,14 +165,49 @@ class PackageComponentsTests(unittest.TestCase):
         self.assertEqual(report["overlaid_package_paths"], ("etc/passwd",))
 
     def test_public_entrypoint_uses_authenticated_closure(self):
+        self.generated.reset_mock()
         with mock.patch.object(components.preflight, "authenticated_archives",
                                return_value=self.authenticated) as checked:
             report = components.inspect_authenticated_components(
                 "signed-metadata", "hashed-archives", self.overlay, self.inventory,
                 self.actual.get,
-                lambda path, size: self.digests[path])
+                lambda path, size: self.digests[path], workspace=self.workspace)
         checked.assert_called_once_with("signed-metadata", "hashed-archives")
+        self.generated.assert_called_once()
+        payloads, rows, overlay, workspace = self.generated.call_args.args
+        self.assertIn(components.prepare.KERNEL_PACKAGE, payloads)
+        self.assertEqual(next(row for row in rows if row["path"] ==
+                              "boot/vmlinuz-" + components.prepare.KERNEL_VERSION)["packages"],
+                         [components.prepare.KERNEL_PACKAGE])
+        self.assertIs(overlay, self.overlay)
+        self.assertIs(workspace, self.workspace)
         self.assertGreater(report["components_checked"]["regular"], 0)
+
+    def test_generated_kernel_metadata_and_bytes_are_compared(self):
+        path = "usr/lib/modules/" + components.prepare.KERNEL_VERSION + "/modules.dep.bin"
+        self.assertEqual(self.plan["entries"][path], self.generated_entries[path])
+        self.assertGreater(self.inspect()["components_checked"]["regular"], 0)
+        self.actual[path]["mode"] = 0o600
+        with self.assertRaisesRegex(ValueError, "type, mode, or owner differs"):
+            self.inspect()
+        self.actual[path]["mode"] = 0o644
+        self.digests[path] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "bytes differ"):
+            self.inspect()
+
+    def test_generated_kernel_cannot_replace_source_or_escape_parents(self):
+        self.generated.return_value = {
+            "usr/lib/systemd/systemd": self.generated_entries[
+                "usr/lib/modules/" + components.prepare.KERNEL_VERSION + "/vmlinuz"]}
+        with self.assertRaisesRegex(ValueError, "generated kernel path collides"):
+            components.expected_components(self.authenticated, self.overlay,
+                                           self.workspace)
+        self.generated.return_value = {
+            "usr/lib/unplanned/modules.dep": self.generated_entries[
+                "usr/lib/modules/" + components.prepare.KERNEL_VERSION + "/modules.dep"]}
+        with self.assertRaisesRegex(ValueError, "generated kernel parent"):
+            components.expected_components(self.authenticated, self.overlay,
+                                           self.workspace)
 
     def test_raw_file_metadata_bytes_and_parent_redirection_reject(self):
         path = "usr/lib/systemd/systemd-networkd"
@@ -244,12 +301,12 @@ class PackageComponentsTests(unittest.TestCase):
     def test_matching_source_overlay_directory_keeps_package_identity(self):
         path = "etc/empty-policy"
         overlay = {**self.overlay, path: {"type": "directory", "mode": 0o755}}
-        plan = components.expected_components(self.authenticated, overlay)
+        plan = components.expected_components(self.authenticated, overlay, self.workspace)
         self.assertIn(path, plan["entries"])
         self.assertNotIn(path, plan["overlaid"])
         overlay[path] = {"type": "directory", "mode": 0o700}
         with self.assertRaisesRegex(ValueError, "unreviewed source overlay"):
-            components.expected_components(self.authenticated, overlay)
+            components.expected_components(self.authenticated, overlay, self.workspace)
 
     def test_complete_inventory_and_signed_empty_directory_identity_required(self):
         del self.inventory["etc/empty-policy"]
@@ -269,7 +326,8 @@ class PackageComponentsTests(unittest.TestCase):
         modified["systemd"] = [item for item in modified["systemd"]
                                if item[1] != "usr/lib/systemd/systemd-networkd"]
         with self.assertRaisesRegex(ValueError, "critical package"):
-            components.expected_components(authenticated(modified), self.overlay)
+            components.expected_components(authenticated(modified), self.overlay,
+                                           self.workspace)
         self.actual["usr/bin/umount"] = {"type": "regular"}
         with self.assertRaisesRegex(ValueError, "removed package path remains"):
             self.inspect()
@@ -277,20 +335,23 @@ class PackageComponentsTests(unittest.TestCase):
     def test_unreviewed_overlay_and_mode_transform_reject(self):
         overlay = {**self.overlay, "usr/lib/systemd/systemd": {"type": "file"}}
         with self.assertRaisesRegex(ValueError, "unreviewed source overlay"):
-            components.expected_components(self.authenticated, overlay)
+            components.expected_components(self.authenticated, overlay, self.workspace)
         changed = baseline()
         changed["mount"] = [(kind, path, data, 0o755 if path == "usr/bin/mount" else mode)
                             for kind, path, data, mode in changed["mount"]]
         with self.assertRaisesRegex(ValueError, "mount helper differs"):
-            components.expected_components(authenticated(changed), self.overlay)
+            components.expected_components(authenticated(changed), self.overlay,
+                                           self.workspace)
         changed = baseline()
         changed["systemd"].append(("file", "usr/lib/systemd/privileged",
                                    b"unexpected SUID", 0o4755))
         with self.assertRaisesRegex(ValueError, "unreviewed package component mode"):
-            components.expected_components(authenticated(changed), self.overlay)
+            components.expected_components(authenticated(changed), self.overlay,
+                                           self.workspace)
         with mock.patch.object(components.prepare, "ROOT_REMOVE_FILES", ("/usr/bin/umount",)):
             with self.assertRaisesRegex(ValueError, "RemoveFiles differs"):
-                components.expected_components(self.authenticated, self.overlay)
+                components.expected_components(self.authenticated, self.overlay,
+                                               self.workspace)
 
     def test_symlink_target_size_and_long_link_reader_reject(self):
         path = "usr/lib/systemd/systemd-udevd"

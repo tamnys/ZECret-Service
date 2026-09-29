@@ -190,6 +190,9 @@ class RawRootfsTest(unittest.TestCase):
         self.assertEqual(surfaces.call_args.kwargs["pass_fds"], (7,))
         self.assertEqual(components.call_args.args[:3],
                          (self.root, self.stage / "packages", {}))
+        self.assertEqual(components.call_args.kwargs["workspace"].parent, self.root)
+        self.assertTrue(components.call_args.kwargs["workspace"].name.startswith(
+            "zrpc-raw-rootfs-"))
         self.assertEqual({key: result[key] for key in metadata}, metadata)
         self.assertEqual(result["root_partition_sha256"], digest(root.read_bytes()))
         self.assertEqual(result["status"], rootfs.STATUS)

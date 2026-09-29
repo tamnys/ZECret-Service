@@ -214,6 +214,69 @@ class RawForbiddenTests(unittest.TestCase):
                                            self.scratch, self.image.stat().st_size,
                                            env=forbidden.ENV, pass_fds=())
 
+    def test_long_unit_symlink_reads_numeric_inode_with_exact_output_bound(self):
+        target = forbidden.RETAINED_UNIT_LINKS[
+            forbidden.CONFIGURED_UNITS +
+            "/network-online.target.wants/systemd-networkd-wait-online.service"].encode()
+        # ext4's inline i_block has 60 bytes; the NUL makes this target slow.
+        self.assertEqual(len(target), 60)
+        symlink = entry(80, "symlink", 0o777, size=len(target))
+        stat_output = (b"Inode: 80   Type: symlink    Mode:  0777   Flags: 0x0\n"
+                       + b"User: 0   Group: 0   Project: 0   Size: "
+                       + str(len(target)).encode() + b"\nBLOCKS:\n")
+        calls, run = self.fake_run({
+            "stat <80>": (stat_output, forbidden.READER_BANNER),
+            "cat <80>": (target, forbidden.READER_BANNER),
+        })
+        limits = []
+
+        def checked_run(*args, **kwargs):
+            with mock.patch.object(forbidden.resource, "setrlimit",
+                                   side_effect=lambda *_args: limits.append(_args)):
+                kwargs["preexec_fn"]()
+            return run(*args, **kwargs)
+
+        with mock.patch.object(forbidden.subprocess, "run", side_effect=checked_run):
+            observed = forbidden._unit_target(
+                self.reader, self.image, symlink, self.scratch,
+                self.image.stat().st_size, env=forbidden.ENV, pass_fds=())
+        self.assertEqual(observed, target.decode())
+        self.assertEqual(calls, ["stat <80>", "cat <80>"])
+        self.assertEqual(limits, [
+            (forbidden.resource.RLIMIT_FSIZE,
+             (self.image.stat().st_size * 8 + 1,) * 2),
+            (forbidden.resource.RLIMIT_FSIZE, (len(target) + 1,) * 2),
+        ])
+
+        for payload, banner in (
+            (target[:-1], forbidden.READER_BANNER),
+            (target + b"x", forbidden.READER_BANNER),
+            (target[:-1] + b"\n", forbidden.READER_BANNER),
+            (target, forbidden.READER_BANNER + b"warning\n"),
+        ):
+            with self.subTest(payload=payload, banner=banner), mock.patch.object(
+                    forbidden.subprocess, "run", side_effect=self.fake_run({
+                        "stat <80>": (stat_output, forbidden.READER_BANNER),
+                        "cat <80>": (payload, banner),
+                    })[1]):
+                with self.assertRaises(ValueError):
+                    forbidden._unit_target(
+                        self.reader, self.image, symlink, self.scratch,
+                        self.image.stat().st_size, env=forbidden.ENV, pass_fds=())
+
+        for changed in (
+            {**symlink, "size": forbidden.MAX_UNIT_LINK_BYTES + 1},
+            {**symlink, "uid": 1},
+        ):
+            with self.subTest(changed=changed), mock.patch.object(
+                    forbidden.subprocess, "run", side_effect=self.fake_run({
+                        "stat <80>": (stat_output, forbidden.READER_BANNER),
+                    })[1]):
+                with self.assertRaisesRegex(ValueError, "ambiguous"):
+                    forbidden._unit_target(
+                        self.reader, self.image, changed, self.scratch,
+                        self.image.stat().st_size, env=forbidden.ENV, pass_fds=())
+
     def baseline_inventory(self):
         data = {"": entry(2), "efi": entry(10),
                 "usr": entry(11), "usr/bin": entry(12),

@@ -60,6 +60,7 @@ ADDITIONAL_SCRIPTS = (
     "tools/gcp-guest/prepare_import_disk.py",
     "tools/gcp-guest/inspect_raw_package_components.py",
     "tools/gcp-guest/inspect_raw_forbidden.py",
+    "tools/gcp-guest/inspect_raw_generated_kernel.py",
 )
 STATIC_SOURCE_FILES = (
     "tools/gcp-guest/audit-rootfs.py",
@@ -247,8 +248,12 @@ def source_context(revision, rust_bundle):
     gpt = bind_file_module("inspect_raw_gpt", ADDITIONAL_SCRIPTS[1], selected, revision)
     esp = bind_file_module("inspect_raw_esp", ADDITIONAL_SCRIPTS[2], selected, revision)
     verity = bind_file_module("inspect_raw_verity", ADDITIONAL_SCRIPTS[3], selected, revision)
+    final_initrd = bind_file_module(
+        "inspect_final_initrd", ADDITIONAL_SCRIPTS[8], selected, revision)
     forbidden = bind_file_module(
         "inspect_raw_forbidden", ADDITIONAL_SCRIPTS[12], selected, revision)
+    bind_file_module("inspect_raw_generated_kernel", ADDITIONAL_SCRIPTS[13],
+                     selected, revision)
     package_components = bind_file_module(
         "inspect_raw_package_components", ADDITIONAL_SCRIPTS[11], selected, revision)
     return types.SimpleNamespace(
@@ -264,8 +269,7 @@ def source_context(revision, rust_bundle):
                                 selected, revision),
         importer=bind_file_module("outer_gcp_import_archive", ADDITIONAL_SCRIPTS[7],
                                   selected, revision),
-        final_initrd=bind_file_module("outer_final_initrd", ADDITIONAL_SCRIPTS[8],
-                                      selected, revision),
+        final_initrd=final_initrd,
         rootfs=bind_file_module("outer_raw_rootfs", ADDITIONAL_SCRIPTS[9],
                                 selected, revision),
         import_disk=bind_file_module("outer_prepare_import_disk", ADDITIONAL_SCRIPTS[10],
