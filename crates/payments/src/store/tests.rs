@@ -139,6 +139,17 @@ fn client_pending_and_ticket_states_survive_restart() {
         pending(b"blind-b", b"state-b"),
     ];
     client.store_prepared(id, &tickets).unwrap();
+    assert_eq!(
+        client.pending_purchases().unwrap(),
+        vec![PendingPurchase {
+            purchase_id: id,
+            quantity: 2,
+        }]
+    );
+    assert_eq!(
+        format!("{:?}", client.pending_purchases().unwrap()[0]),
+        "PendingPurchase([redacted])"
+    );
     assert!(matches!(
         client.store_prepared(id, &[pending(b"changed", b"state-a")]),
         Err(StoreError::AlteredPurchase)
@@ -146,6 +157,7 @@ fn client_pending_and_ticket_states_survive_restart() {
     drop(client);
 
     let mut client = ClientStore::open(&directory).unwrap();
+    assert_eq!(client.pending_purchases().unwrap().len(), 1);
     let recovered = client.pending(id).unwrap();
     assert_eq!(recovered.len(), 2);
     assert_eq!(recovered[0].blinding_state.expose(), b"state-a");
@@ -160,6 +172,7 @@ fn client_pending_and_ticket_states_survive_restart() {
         )
         .unwrap();
     assert!(client.pending(id).unwrap().is_empty());
+    assert!(client.pending_purchases().unwrap().is_empty());
     assert_eq!(
         client.balance().unwrap(),
         Balance {
@@ -250,9 +263,16 @@ fn issuer_authorization_is_exact_and_issuance_is_idempotent() {
         issuer.issue_once(id, [1; 32], || Ok(vec![b"sig".to_vec()])),
         Err(StoreError::UnknownPurchase)
     );
-    issuer.authorize(id, 2).unwrap();
-    issuer.authorize(id, 2).unwrap();
-    assert_eq!(issuer.authorize(id, 3), Err(StoreError::AlteredPurchase));
+    issuer.authorize(id, 2, [1; 32]).unwrap();
+    issuer.authorize(id, 2, [1; 32]).unwrap();
+    assert_eq!(
+        issuer.authorize(id, 3, [1; 32]),
+        Err(StoreError::AlteredPurchase)
+    );
+    assert_eq!(
+        issuer.authorize(id, 2, [2; 32]),
+        Err(StoreError::AlteredPurchase)
+    );
     assert_eq!(
         issuer.issue_once(id, [1; 32], || Ok(vec![b"one".to_vec()])),
         Err(StoreError::InvalidQuantity)
@@ -306,7 +326,7 @@ fn issuer_partial_issuance_rolls_back_after_process_exit() {
     let fixture = Fixture::new();
     let directory = fixture.directory();
     let mut issuer = IssuerStore::create(&directory).unwrap();
-    issuer.authorize(id, 2).unwrap();
+    issuer.authorize(id, 2, [7; 32]).unwrap();
     drop(issuer);
 
     let child = Command::new(std::env::current_exe().unwrap())

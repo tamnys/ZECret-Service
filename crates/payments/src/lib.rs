@@ -10,11 +10,16 @@ mod challenge;
 mod crypto;
 mod exchange;
 mod http;
+mod issuance;
 mod store;
 mod wire;
 
+pub use issuance::{
+    IssuanceError, IssuerPublic, collect_purchase, export_pending_purchase, load_private_key_file,
+    mock_settle_purchase, prepare_purchase,
+};
 pub use store::RedeemerStore;
 pub use store::{
-    Admission, Balance, ClientStore, IssuerStore, PendingTicket, PrivateDirectory, PurchaseId,
-    SecretBytes, SelectedTicket, StoreError,
+    Admission, Balance, ClientStore, IssuerStore, PendingPurchase, PendingTicket, PrivateDirectory,
+    PurchaseId, SecretBytes, SelectedTicket, StoreError,
 };

@@ -24,7 +24,7 @@ zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_
 zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query --stdin [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
-zrpc payments balance --ticket-store ABSOLUTE_PRIVATE_DIR
+zrpc payments --help
 zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
 zrpc demo [--no-open]
 zrpc plan --input FILE

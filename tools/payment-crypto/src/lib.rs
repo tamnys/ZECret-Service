@@ -33,6 +33,15 @@ fn canonical_public_key(issuer_spki: &[u8]) -> Option<PublicKeySha384PSSDetermin
     Some(issuer)
 }
 
+/// Normalize a supported RSA public key to the exact RFC 9578 issuer SPKI
+/// before calculating its key identifier or sharing it with clients.
+pub fn canonicalize_issuer_spki(public_der: &[u8]) -> Option<Vec<u8>> {
+    let issuer = PublicKeySha384PSSDeterministic::from_spki(public_der)
+        .or_else(|_| PublicKeySha384PSSDeterministic::from_der(public_der))
+        .ok()?;
+    issuer.to_spki().ok()
+}
+
 fn type_two_input(token_input: &[u8]) -> bool {
     token_input.len() == TOKEN_INPUT_LEN && token_input[..2] == [0, 2]
 }

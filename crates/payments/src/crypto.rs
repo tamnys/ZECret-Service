@@ -19,6 +19,8 @@ const VERIFY: u8 = 1;
 const BLIND: u8 = 2;
 const SIGN: u8 = 3;
 const FINALIZE: u8 = 4;
+const CANONICALIZE_SPKI: u8 = 5;
+const CANONICAL_SPKI_LEN: usize = 342;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CryptoFrameError;
@@ -69,6 +71,10 @@ impl CryptoFrame {
         frame.bytes.extend_from_slice(signed_input);
         frame.bytes.extend_from_slice(authenticator);
         Ok(frame)
+    }
+
+    pub(crate) fn canonicalize_spki(public_der: &[u8]) -> Result<Self, CryptoFrameError> {
+        Self::start(CANONICALIZE_SPKI, public_der, CANONICAL_SPKI_LEN)
     }
 
     pub(crate) fn blind(issuer_spki: &[u8], signed_input: &[u8]) -> Result<Self, CryptoFrameError> {
@@ -243,6 +249,9 @@ mod tests {
         assert_eq!(finalize.as_bytes().len(), 11 + 342 + 98 + 256 * 3);
 
         assert!(CryptoFrame::blind(&[], &input).is_err());
+        let normalize = CryptoFrame::canonicalize_spki(&spki).unwrap();
+        assert_eq!(normalize.as_bytes()[8], CANONICALIZE_SPKI);
+        assert_eq!(normalize.expected_response_len(), CANONICAL_SPKI_LEN);
         assert!(CryptoFrame::blind(&spki, &input[..97]).is_err());
         assert!(CryptoFrame::sign(&spki, &[], &rsa).is_err());
         assert!(CryptoFrame::sign(&spki, &[7], &rsa[..255]).is_err());

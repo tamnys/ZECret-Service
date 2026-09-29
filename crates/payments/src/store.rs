@@ -11,14 +11,14 @@ use zeroize::Zeroize;
 pub type PurchaseId = [u8; 32];
 type Marker = [u8; 32];
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const CLIENT_APPLICATION_ID: i64 = 0x5a50_434c;
 const ISSUER_APPLICATION_ID: i64 = 0x5a50_4953;
 const REDEEMER_APPLICATION_ID: i64 = 0x5a50_5244;
 const CLIENT_PURCHASES_SQL: &str = "CREATE TABLE purchases (purchase_id BLOB PRIMARY KEY CHECK(length(purchase_id)=32), quantity INTEGER NOT NULL CHECK(quantity>0), collected INTEGER NOT NULL DEFAULT 0 CHECK(collected IN (0,1)))";
 const CLIENT_PENDING_SQL: &str = "CREATE TABLE pending (purchase_id BLOB NOT NULL REFERENCES purchases(purchase_id), ordinal INTEGER NOT NULL, blinded_request BLOB NOT NULL, blinding_state BLOB NOT NULL, PRIMARY KEY(purchase_id, ordinal))";
 const CLIENT_TICKETS_SQL: &str = "CREATE TABLE tickets (marker BLOB PRIMARY KEY CHECK(length(marker)=32), token BLOB NOT NULL, state TEXT NOT NULL CHECK(state IN ('available','uncertain','spent')))";
-const ISSUER_AUTHORIZATIONS_SQL: &str = "CREATE TABLE authorizations (purchase_id BLOB PRIMARY KEY CHECK(length(purchase_id)=32), quantity INTEGER NOT NULL CHECK(quantity>0), request_commitment BLOB CHECK(request_commitment IS NULL OR length(request_commitment)=32))";
+const ISSUER_AUTHORIZATIONS_SQL: &str = "CREATE TABLE authorizations (purchase_id BLOB PRIMARY KEY CHECK(length(purchase_id)=32), quantity INTEGER NOT NULL CHECK(quantity>0), request_commitment BLOB NOT NULL CHECK(length(request_commitment)=32))";
 const ISSUER_RESPONSES_SQL: &str = "CREATE TABLE issuance_responses (purchase_id BLOB NOT NULL REFERENCES authorizations(purchase_id), ordinal INTEGER NOT NULL, blind_signature BLOB NOT NULL, PRIMARY KEY(purchase_id, ordinal))";
 const REDEEMER_TABLE_SQL: &str = "CREATE TABLE spent (issuer_key_id BLOB NOT NULL CHECK(length(issuer_key_id)=32), ticket_marker BLOB NOT NULL CHECK(length(ticket_marker)=32), PRIMARY KEY(issuer_key_id, ticket_marker)) WITHOUT ROWID";
 
@@ -140,6 +140,20 @@ pub struct PendingTicket {
 impl fmt::Debug for PendingTicket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PendingTicket([redacted])")
+    }
+}
+
+/// Local purchase metadata needed to re-export a blinded request batch after
+/// an interrupted prepare. The purchase identifier never enters a token.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct PendingPurchase {
+    pub purchase_id: PurchaseId,
+    pub quantity: u64,
+}
+
+impl fmt::Debug for PendingPurchase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PendingPurchase([redacted])")
     }
 }
 
@@ -292,7 +306,7 @@ impl ClientStore {
             .and_then(|_| {
                 connection.execute_batch(
                     "PRAGMA application_id=1515209548;
-                     PRAGMA user_version=1;
+                     PRAGMA user_version=2;
                      COMMIT;",
                 )
             })
@@ -401,6 +415,39 @@ impl ClientStore {
             .map_err(|_| StoreError::StorageUnavailable)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|_| StoreError::StorageUnavailable)
+    }
+
+    /// Find durable uncollected purchases, including those whose request file
+    /// was never written. A missing pending row is treated as corrupt state.
+    pub fn pending_purchases(&self) -> Result<Vec<PendingPurchase>, StoreError> {
+        let mut statement = self
+            .0
+            .prepare(
+                "SELECT p.purchase_id, p.quantity, count(n.ordinal)
+             FROM purchases p LEFT JOIN pending n ON n.purchase_id=p.purchase_id
+             WHERE p.collected=0 GROUP BY p.purchase_id ORDER BY p.purchase_id",
+            )
+            .map_err(|_| StoreError::StorageUnavailable)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|_| StoreError::StorageUnavailable)?;
+        rows.map(|row| {
+            let (id, quantity, pending_count) = row.map_err(|_| StoreError::StorageUnavailable)?;
+            if quantity <= 0 || pending_count != quantity {
+                return Err(StoreError::MissingOrCorrupt);
+            }
+            Ok(PendingPurchase {
+                purchase_id: id.try_into().map_err(|_| StoreError::MissingOrCorrupt)?,
+                quantity: u64::try_from(quantity).map_err(|_| StoreError::MissingOrCorrupt)?,
+            })
+        })
+        .collect()
     }
 
     /// Only a future cryptographic finalizer in this crate may call this after
@@ -542,7 +589,7 @@ impl IssuerStore {
             .and_then(|_| {
                 connection.execute_batch(
                     "PRAGMA application_id=1515211091;
-                     PRAGMA user_version=1;
+                     PRAGMA user_version=2;
                      COMMIT;",
                 )
             })
@@ -575,30 +622,31 @@ impl IssuerStore {
         &mut self,
         id: PurchaseId,
         requested_quantity: usize,
+        request_commitment: Marker,
     ) -> Result<(), StoreError> {
         let count = quantity(requested_quantity)?;
         let transaction = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreError::StorageUnavailable)?;
-        let existing: Option<i64> = transaction
+        let existing: Option<(i64, Vec<u8>)> = transaction
             .query_row(
-                "SELECT quantity FROM authorizations WHERE purchase_id=?1",
+                "SELECT quantity, request_commitment FROM authorizations WHERE purchase_id=?1",
                 [id.as_slice()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|_| StoreError::StorageUnavailable)?;
-        if let Some(existing) = existing {
-            if existing == count {
+        if let Some((existing_quantity, existing_commitment)) = existing {
+            if existing_quantity == count && existing_commitment == request_commitment {
                 return Ok(());
             }
             return Err(StoreError::AlteredPurchase);
         }
         transaction
             .execute(
-                "INSERT INTO authorizations(purchase_id, quantity) VALUES (?1, ?2)",
-                params![id.as_slice(), count],
+                "INSERT INTO authorizations(purchase_id, quantity, request_commitment) VALUES (?1, ?2, ?3)",
+                params![id.as_slice(), count, request_commitment.as_slice()],
             )
             .map_err(|_| StoreError::StorageUnavailable)?;
         transaction
@@ -621,7 +669,7 @@ impl IssuerStore {
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| StoreError::StorageUnavailable)?;
-        let authorization: Option<(i64, Option<Vec<u8>>)> = transaction
+        let authorization: Option<(i64, Vec<u8>)> = transaction
             .query_row(
                 "SELECT quantity, request_commitment FROM authorizations WHERE purchase_id=?1",
                 [id.as_slice()],
@@ -632,24 +680,26 @@ impl IssuerStore {
         let Some((expected, existing_commitment)) = authorization else {
             return Err(StoreError::UnknownPurchase);
         };
-        if let Some(existing_commitment) = existing_commitment {
-            if existing_commitment != request_commitment {
-                return Err(StoreError::AlteredPurchase);
-            }
+        if existing_commitment != request_commitment {
+            return Err(StoreError::AlteredPurchase);
+        }
+        let stored_signatures = {
             let mut statement = transaction.prepare(
                 "SELECT blind_signature FROM issuance_responses WHERE purchase_id=?1 ORDER BY ordinal",
             ).map_err(|_| StoreError::StorageUnavailable)?;
-            let signatures = statement
+            statement
                 .query_map([id.as_slice()], |row| row.get(0))
                 .map_err(|_| StoreError::StorageUnavailable)?
                 .collect::<Result<Vec<Vec<u8>>, _>>()
-                .map_err(|_| StoreError::StorageUnavailable)?;
-            if i64::try_from(signatures.len()).map_err(|_| StoreError::StorageUnavailable)?
-                != expected
-            {
-                return Err(StoreError::MissingOrCorrupt);
-            }
-            return Ok(signatures);
+                .map_err(|_| StoreError::StorageUnavailable)?
+        };
+        if i64::try_from(stored_signatures.len()).map_err(|_| StoreError::StorageUnavailable)?
+            == expected
+        {
+            return Ok(stored_signatures);
+        }
+        if !stored_signatures.is_empty() {
+            return Err(StoreError::MissingOrCorrupt);
         }
         let signatures = sign()?;
         if i64::try_from(signatures.len()).map_err(|_| StoreError::InvalidQuantity)? != expected {
@@ -661,10 +711,6 @@ impl IssuerStore {
                 params![id.as_slice(), i64::try_from(ordinal).map_err(|_| StoreError::InvalidQuantity)?, signature],
             ).map_err(|_| StoreError::StorageUnavailable)?;
         }
-        transaction.execute(
-            "UPDATE authorizations SET request_commitment=?2 WHERE purchase_id=?1 AND request_commitment IS NULL",
-            params![id.as_slice(), request_commitment.as_slice()],
-        ).map_err(|_| StoreError::StorageUnavailable)?;
         transaction
             .commit()
             .map_err(|_| StoreError::StorageUnavailable)?;
@@ -683,7 +729,7 @@ impl RedeemerStore {
             .and_then(|_| {
                 connection.execute_batch(
                     "PRAGMA application_id=1515213380;
-                     PRAGMA user_version=1;
+                     PRAGMA user_version=2;
                      COMMIT;",
                 )
             })
