@@ -989,15 +989,15 @@ class CandidateTests(unittest.TestCase):
                 path = root / relative.lstrip("/")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"SYNTHETIC")
-                expected = ("build-generated ldconfig auxiliary cache remains"
-                            if relative == "/var/cache/ldconfig/aux-cache"
+                expected = ("build-generated file remains: " + relative.lstrip("/")
+                            if relative in ("/var/cache/ldconfig/aux-cache", "/var/log/alternatives.log")
                             else "administrative binary present")
                 with self.assertRaisesRegex(ValueError, expected):
                     audit_rootfs.audit(root)
                 path.unlink()
         cache = root / "var/cache/ldconfig/aux-cache"
         cache.symlink_to("/var/lib/zebra/aux-cache")
-        with self.assertRaisesRegex(ValueError, "build-generated ldconfig auxiliary cache remains"):
+        with self.assertRaisesRegex(ValueError, "build-generated file remains: var/cache/ldconfig/aux-cache"):
             audit_rootfs.audit(root)
         cache.unlink()
         privileged = {

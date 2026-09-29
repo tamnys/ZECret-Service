@@ -322,9 +322,10 @@ def audit(root):
     for name in (*FORBIDDEN_BINARIES, *FORBIDDEN_NVME_SURFACE):
         if (root / name).exists() or (root / name).is_symlink():
             raise ValueError("administrative binary present")
-    aux_cache = root / "var/cache/ldconfig/aux-cache"
-    if aux_cache.exists() or aux_cache.is_symlink():
-        raise ValueError("build-generated ldconfig auxiliary cache remains")
+    for name in ("var/cache/ldconfig/aux-cache", "var/log/alternatives.log"):
+        generated = root / name
+        if generated.exists() or generated.is_symlink():
+            raise ValueError("build-generated file remains: " + name)
     if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
         raise ValueError("signed mount ELF identity absent")
     mount = root / "usr/bin/mount"

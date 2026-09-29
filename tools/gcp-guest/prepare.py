@@ -72,6 +72,7 @@ ROOT_REMOVE_FILES = (
     "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
     "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
     "/var/cache/ldconfig/aux-cache",
+    "/var/log/alternatives.log",
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
