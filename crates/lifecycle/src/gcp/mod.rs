@@ -15,7 +15,7 @@ pub mod watchdog;
 pub const LIVE_DEPLOYMENT_BLOCKERS: &[&str] = &[
     "exact raw image has not passed pinned offline post-build image inspection of GPT, ESP, signed UKI, command line, dm-verity root, installed components and Secure Boot policy",
     "Compute deletion has no reviewed incarnation-safe precondition; same-name replacement race unresolved",
-    "GNU tar/gzip/Python import producer toolchain identity and execution closure have not been independently reviewed/pinned",
+    "native Rust import producer executable identity and execution closure have not been independently reviewed/pinned",
 ];
 
 pub fn ensure_live_creation_ready() -> Result<()> {

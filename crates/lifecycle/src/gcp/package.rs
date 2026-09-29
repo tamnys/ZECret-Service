@@ -63,24 +63,26 @@ const CUSTOM_IMAGE_C3_TDX_ZONES: [&str; 24] = [
     "us-west1-a",
     "us-west1-b",
 ];
-/// Candidate producer record. Its executable hashes and status fields cannot
-/// grant toolchain or private-mode approval; the live deployment blocker stays.
+/// Candidate producer record. Its executable hash is self-reported and
+/// cannot grant toolchain or private-mode approval.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ImportReceipt {
+struct NativeImportReceipt {
+    schema_version: u8,
+    producer: String,
+    producer_executable_sha256: String,
     archive_sha256: String,
     raw_disk_sha256: String,
     raw_disk_bytes: u64,
     oldgnu_single_member_checked: bool,
     private_mode_approved: bool,
-    gnu_tar_version: String,
-    gnu_tar_sha256: String,
-    gnu_gzip_version: String,
-    gnu_gzip_sha256: String,
-    python_executable_sha256: String,
-    python_version: String,
     toolchain_reviewed: bool,
-    workspace_volume_override_used: bool,
+}
+
+/// Local archive creation only. The receipt remains diagnostic until the
+/// producer binary and execution closure have been reviewed independently.
+pub fn pack_import_archive(raw_disk: &Path, archive: &Path) -> Result<impl Serialize> {
+    import_archive::pack_import_archive(raw_disk, archive)
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -532,28 +534,24 @@ fn verify_import_receipt(spec: &DeploymentSpec) -> Result<()> {
     if digest(&bytes) != spec.import_receipt.sha256 {
         return Err(Error("import receipt SHA-256 mismatch"));
     }
-    let receipt: ImportReceipt =
+    let receipt: NativeImportReceipt =
         serde_json::from_slice(&bytes).map_err(|_| Error("invalid typed import receipt"))?;
-    if receipt.archive_sha256 != spec.raw_image_tar_gz.sha256
+    if receipt.schema_version != 2
+        || receipt.producer != "zrpc-gcp-lifecycle-rust"
+        || !valid_digest(&receipt.producer_executable_sha256)
+        || receipt.archive_sha256 != spec.raw_image_tar_gz.sha256
         || receipt.raw_disk_sha256 != spec.raw_disk_sha256
         || receipt.raw_disk_bytes != spec.raw_disk_bytes
         || !receipt.oldgnu_single_member_checked
         || receipt.private_mode_approved
         || receipt.toolchain_reviewed
-        || !receipt.gnu_tar_version.starts_with("tar (GNU tar) ")
-        || !receipt.gnu_gzip_version.starts_with("gzip ")
-        || receipt.python_version.is_empty()
-        || !valid_digest(&receipt.gnu_tar_sha256)
-        || !valid_digest(&receipt.gnu_gzip_sha256)
-        || !valid_digest(&receipt.python_executable_sha256)
     {
         return Err(Error(
             "import receipt differs from candidate media or status",
         ));
     }
-    // These producer hashes and versions describe archive creation. They do
-    // not identify or approve the separate operator-host verifier toolchain.
-    let _ = receipt.workspace_volume_override_used;
+    // This self-reported producer hash does not identify or approve the
+    // separate operator-host verification environment.
     Ok(())
 }
 

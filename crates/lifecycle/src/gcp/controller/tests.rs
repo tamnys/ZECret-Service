@@ -7,7 +7,7 @@ use crate::gcp::{
     watchdog::{Controls, WatchdogBinding},
 };
 use serde_json::json;
-use std::{cell::Cell, collections::BTreeMap, fs, path::PathBuf, process::Command, sync::OnceLock};
+use std::{cell::Cell, collections::BTreeMap, fs, path::PathBuf, sync::OnceLock};
 
 fn diagnostic_artifact(root: &std::path::Path, name: &str, value: &Value) -> Artifact {
     let bytes = serde_json::to_vec(value).unwrap();
@@ -47,20 +47,12 @@ fn synthetic_import_archive() -> &'static (Vec<u8>, String, Vec<u8>) {
             .set_len(1024 * 1024 * 1024)
             .unwrap();
         let archive = root.join("synthetic.tar.gz");
-        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/gcp-guest/gcp_import_archive.py");
-        let output = Command::new("/usr/bin/python3")
-            .arg("-I")
-            .arg(script)
-            .arg("pack")
-            .arg(&raw)
-            .arg(&archive)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "synthetic archive creation failed");
-        let receipt: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let receipt: Value =
+            serde_json::to_value(crate::gcp::package::pack_import_archive(&raw, &archive).unwrap())
+                .unwrap();
         assert_eq!(receipt["private_mode_approved"], false);
         assert_eq!(receipt["toolchain_reviewed"], false);
+        assert_eq!(receipt["producer"], "zrpc-gcp-lifecycle-rust");
         let bytes = fs::read(archive).unwrap();
         let raw_sha256 = receipt["raw_disk_sha256"].as_str().unwrap().to_owned();
         let receipt_bytes = serde_json::to_vec(&receipt).unwrap();
@@ -716,11 +708,7 @@ fn import_receipt_binds_candidate_media_with_native_validation_without_approval(
         let changed = f.spec_with_receipt_edit(|receipt| receipt[field] = json!("0".repeat(64)));
         assert!(Package::prepare(changed, 1000).is_err(), "field {field}");
     }
-    for field in [
-        "python_executable_sha256",
-        "gnu_tar_sha256",
-        "gnu_gzip_sha256",
-    ] {
+    for field in ["producer_executable_sha256"] {
         let malformed = f.spec_with_receipt_edit(|receipt| receipt[field] = json!("not-a-sha256"));
         assert!(Package::prepare(malformed, 1000).is_err(), "field {field}");
     }
@@ -736,18 +724,15 @@ fn import_receipt_binds_candidate_media_with_native_validation_without_approval(
     let changed_claim =
         f.spec_with_receipt_edit(|receipt| receipt["oldgnu_single_member_checked"] = json!(false));
     assert!(Package::prepare(changed_claim, 1000).is_err());
-    // Producer and operator toolchains are distinct. A candidate receipt can
-    // describe another producer without approving it or changing validation.
+    // Producer self-description is diagnostic, not independent approval.
     let different_producer = f.spec_with_receipt_edit(|receipt| {
-        for field in [
-            "python_executable_sha256",
-            "gnu_tar_sha256",
-            "gnu_gzip_sha256",
-        ] {
+        for field in ["producer_executable_sha256"] {
             receipt[field] = json!("0".repeat(64));
         }
     });
     assert!(Package::prepare(different_producer, 1000).is_ok());
+    let wrong_producer = f.spec_with_receipt_edit(|receipt| receipt["producer"] = json!("other"));
+    assert!(Package::prepare(wrong_producer, 1000).is_err());
     let stale_hash = f.package.spec.clone();
     fs::write(&stale_hash.import_receipt.path, b"{}%").unwrap();
     assert!(Package::prepare(stale_hash, 1000).is_err());
