@@ -2,8 +2,9 @@
 """Stage a no-package mkosi CPIO diagnostic from source-bound inputs.
 
 The Debian tree is regenerated from signed package data, while /init comes
-only from the matching, double-built x86_64 Rust receipt. The staged audit is
-the selected source's initrd audit with that /init digest fixed into it.
+only from the matching, double-built x86_64 Rust receipt. The exact mount(8)
+ELF comes from the signed Debian mount archive and is stripped of privilege
+by a source-bound finalizer before the staged audit runs.
 Preparation does not build, sign, boot, or approve anything.
 """
 
@@ -27,10 +28,16 @@ STATUS = "diagnostic-no-package-initrd-cpio-profile-unbuilt"
 ARCHIVE = "guest-initrd-inputs.tar"
 INPUT = "input/" + ARCHIVE
 INIT_TREE = "init-tree.tar"
+SANITIZER = "sanitize-mount.py"
 AUDIT = "audit-initrd.py"
 CONFIG = "mkosi.conf"
 MANIFEST = "profile-manifest.json"
 OUTPUT_NAME = "initrd.cpio.zst"
+# Reviewed against the signed mount_2.41.5-0+deb13u1_amd64.deb payload.
+# An updated source package must receive a fresh ELF and runtime review.
+MOUNT_ELF_SHA256 = "2f36342bd2fef42343c4fa4a2a396a7f56c7c8f4ddcbd31c43205c62e152e6d4"
+MOUNT_ELF_SIZE = 72072
+MOUNT_SOURCE_MODE = 0o4755
 MODULE_DIR = Path(__file__).resolve(strict=True).parent
 REPOSITORY = MODULE_DIR.parents[1]
 SOURCE_MODULES = (
@@ -42,6 +49,7 @@ SOURCE_MODULES = (
 )
 SOURCE_FILES = tuple(f"tools/gcp-guest/{name}.py" for name in SOURCE_MODULES) + (
     "tools/gcp-guest/prepare_initrd_basetree_profile.py",
+    "tools/gcp-guest/sanitize-mount.py",
     "tools/gcp-guest/audit-initrd.py",
 )
 FULL_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -226,13 +234,13 @@ def config_bytes(profile):
             f"Autologin=no\nBaseTrees={profile / INPUT}\n"
             f"ExtraTrees={profile / INIT_TREE}\nPackages=\n"
             f"CleanPackageMetadata=no\nSourceDateEpoch=0\n"
-            f"FinalizeScripts={profile / AUDIT}\n"
+            f"FinalizeScripts={profile / SANITIZER},{profile / AUDIT}\n"
             f"\n[Build]\nWithNetwork=no\nCacheOnly=always\n"
             f"Incremental=no\n"
             f"WorkspaceDirectory={profile.parent / (profile.name + '-work')}\n").encode()
 
 
-def init_tree_bytes(binary):
+def init_tree_bytes(binary, mount, mount_mode):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:", format=tarfile.USTAR_FORMAT) as archive:
         entry = tarfile.TarInfo("init")
@@ -242,7 +250,78 @@ def init_tree_bytes(binary):
         entry.mtime = 0
         entry.size = len(binary)
         archive.addfile(entry, io.BytesIO(binary))
+        entry = tarfile.TarInfo("usr/bin/mount")
+        entry.type = tarfile.REGTYPE
+        entry.uid = entry.gid = 0
+        entry.mode = mount_mode
+        entry.mtime = 0
+        entry.size = len(mount)
+        archive.addfile(entry, io.BytesIO(mount))
     return stream.getvalue()
+
+
+def signed_mount_elf(metadata, archives):
+    """Extract only mount(8) from the authenticated, locked Debian archive."""
+    if "usr/bin/mount" in initrd_input.SELECTED_FILES:
+        raise ValueError("mount ELF is already selected by the BaseTrees input")
+    packages = guest.authenticated_packages(Path(metadata))
+    candidates = [entry for entry in packages
+                  if entry["name"] == "mount" and entry["architecture"] == "amd64"]
+    if len(candidates) != 1:
+        raise ValueError("one signed amd64 mount package required")
+    directory = guest.open_directory(Path(archives), "signed mount package")
+    try:
+        package = builder.locked_archive(
+            {key: candidates[0][key] for key in builder.closure.PACKAGE_FIELDS},
+            directory)
+    finally:
+        os.close(directory)
+    payload = builder.closure.deb_data_tar(package)
+    mount = None
+    mode = None
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:xz") as contents:
+        for member in contents:
+            if member.name not in ("./usr/bin/mount", "usr/bin/mount"):
+                continue
+            if (mount is not None or not member.isfile()
+                    or (member.uid, member.gid) != (0, 0)
+                    or member.size <= 0 or not member.mode & 0o111
+                    or member.mode & (0o022 | stat.S_ISGID)):
+                raise ValueError("signed mount ELF metadata differs")
+            with contents.extractfile(member) as stream:
+                mount = stream.read(member.size + 1)
+            if len(mount) != member.size:
+                raise ValueError("signed mount ELF size differs")
+            mode = member.mode
+    if (mount is None or len(mount) != MOUNT_ELF_SIZE
+            or hashlib.sha256(mount).hexdigest() != MOUNT_ELF_SHA256
+            or mode != MOUNT_SOURCE_MODE
+            or mount[:6] != b"\x7fELF\x02\x01"
+            or mount[18:20] != b"\x3e\x00"):
+        raise ValueError("signed mount ELF differs from reviewed x86_64 artifact")
+    # The exact signed mount binary's reviewed direct dependencies are these
+    # three SONAMEs. Source selection checks their presence and the ELF
+    # interpreter; complete runtime behavior still needs a real boot test.
+    for name in ("libmount.so.1", "libselinux.so.1", "libc.so.6"):
+        if not any(path.endswith("/" + name) for path in initrd_input.ELF_RUNTIME):
+            raise ValueError("mount runtime dependency absent from BaseTrees: " + name)
+    if "usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2" not in initrd_input.ELF_RUNTIME:
+        raise ValueError("mount ELF interpreter absent from BaseTrees")
+    return mount, mode
+
+
+def bound_finalizer(revision, name, markers):
+    path = Path(__file__).with_name(name)
+    template = rust_inputs.regular_bytes(path)
+    if (rust_inputs.git_bytes(revision, f"tools/gcp-guest/{name}") != template
+            or not template.startswith(b"#!/usr/bin/env python3\n")
+            or any(template.count(marker) != 1 for marker, _ in markers)):
+        raise ValueError(f"initrd {name} differs from selected source commit")
+    script = template.replace(b"#!/usr/bin/env python3\n",
+                              b"#!/usr/bin/python3 -I\n", 1)
+    for marker, value in markers:
+        script = script.replace(marker, value)
+    return script
 
 
 def checked_inputs(metadata, archives, artifact, rust_bundle, revision, workspace):
@@ -285,19 +364,24 @@ def checked_inputs(metadata, archives, artifact, rust_bundle, revision, workspac
     if (hashlib.sha256(binary).hexdigest() != source["early_init_sha256"]
             or not rust_inputs.x86_64_elf(binary)):
         raise ValueError("Rust /init changed after reproducible receipt inspection")
-    audit_template = rust_inputs.regular_bytes(Path(__file__).with_name("audit-initrd.py"))
-    if (rust_inputs.git_bytes(revision, "tools/gcp-guest/audit-initrd.py") != audit_template
-            or not audit_template.startswith(b"#!/usr/bin/env python3\n")
-            or audit_template.count(b"__STAGED_INIT_SHA256__") != 1):
-        raise ValueError("initrd audit differs from selected source commit")
-    audit = audit_template.replace(b"#!/usr/bin/env python3\n",
-                                   b"#!/usr/bin/python3 -I\n", 1).replace(
-                                       b"__STAGED_INIT_SHA256__",
-                                       source["early_init_sha256"].encode())
-    return source, binary, hashlib.sha256(script).hexdigest(), audit
+    mount, mount_mode = signed_mount_elf(metadata, archives)
+    mount_sha256 = hashlib.sha256(mount).hexdigest()
+    source["mount_elf_sha256"] = mount_sha256
+    source["mount_elf_size"] = len(mount)
+    source["mount_source_mode"] = mount_mode
+    sanitizer = bound_finalizer(revision, SANITIZER, (
+        (b"__STAGED_MOUNT_SHA256__", mount_sha256.encode()),
+        (b"__STAGED_MOUNT_SIZE__", str(len(mount)).encode()),
+    ))
+    audit = bound_finalizer(revision, AUDIT, (
+        (b"__STAGED_INIT_SHA256__", source["early_init_sha256"].encode()),
+        (b"__STAGED_MOUNT_SHA256__", mount_sha256.encode()),
+    ))
+    return source, binary, mount, hashlib.sha256(script).hexdigest(), sanitizer, audit
 
 
-def expected_manifest(source, archive_size, init_tree, config, script_sha256, audit):
+def expected_manifest(source, archive_size, init_tree, config, script_sha256,
+                      sanitizer, audit):
     return {
         "schema_version": 1,
         "status": STATUS,
@@ -309,7 +393,11 @@ def expected_manifest(source, archive_size, init_tree, config, script_sha256, au
         "rust_source_commit": source["rust_source_commit"],
         "rust_receipt_sha256": source["rust_receipt_sha256"],
         "early_init_sha256": source["early_init_sha256"],
+        "mount_elf_sha256": source["mount_elf_sha256"],
+        "mount_elf_size": source["mount_elf_size"],
+        "mount_source_mode": source["mount_source_mode"],
         "init_tree_sha256": hashlib.sha256(init_tree).hexdigest(),
+        "mount_sanitizer_sha256": hashlib.sha256(sanitizer).hexdigest(),
         "initrd_audit_sha256": hashlib.sha256(audit).hexdigest(),
         "mkosi_config_sha256": hashlib.sha256(config).hexdigest(),
         "profile_script_sha256": script_sha256,
@@ -329,6 +417,8 @@ def result(manifest, encoded):
         "profile_manifest_sha256": hashlib.sha256(encoded).hexdigest(),
         "source_bound_archive_sha256": manifest["source_bound_archive_sha256"],
         "early_init_sha256": manifest["early_init_sha256"],
+        "mount_elf_sha256": manifest["mount_elf_sha256"],
+        "mount_sanitizer_sha256": manifest["mount_sanitizer_sha256"],
         "initrd_audit_sha256": manifest["initrd_audit_sha256"],
         "package_install_configured": False,
         "package_control_scripts_executed": False,
@@ -375,10 +465,10 @@ def copy_archive(artifact, input_fd, expected_sha256, expected_size):
 
 
 def prepare_profile(metadata, archives, artifact, rust_bundle, revision, profile, workspace):
-    source, binary, script_sha256, audit = checked_inputs(
+    source, binary, mount, script_sha256, sanitizer, audit = checked_inputs(
         metadata, archives, artifact, rust_bundle, revision, workspace)
     profile = checked_profile_path(profile, workspace)
-    init_tree = init_tree_bytes(binary)
+    init_tree = init_tree_bytes(binary, mount, source["mount_source_mode"])
     config = config_bytes(profile)
     parent = builder.output_parent(Path(workspace), profile)
     try:
@@ -398,8 +488,9 @@ def prepare_profile(metadata, archives, artifact, rust_bundle, revision, profile
         finally:
             os.close(input_fd)
         manifest = expected_manifest(source, archive_size, init_tree, config,
-                                     script_sha256, audit)
+                                     script_sha256, sanitizer, audit)
         write_file(root, INIT_TREE, init_tree)
+        write_file(root, SANITIZER, sanitizer, mode=0o500)
         write_file(root, AUDIT, audit, mode=0o500)
         write_file(root, CONFIG, config)
         encoded = initrd_input.canonical_bytes(manifest)
@@ -411,16 +502,16 @@ def prepare_profile(metadata, archives, artifact, rust_bundle, revision, profile
 
 
 def verify_profile(metadata, archives, artifact, rust_bundle, revision, profile, workspace):
-    source, binary, script_sha256, audit = checked_inputs(
+    source, binary, mount, script_sha256, sanitizer, audit = checked_inputs(
         metadata, archives, artifact, rust_bundle, revision, workspace)
     profile = checked_profile_path(profile, workspace)
-    init_tree = init_tree_bytes(binary)
+    init_tree = init_tree_bytes(binary, mount, source["mount_source_mode"])
     config = config_bytes(profile)
     root = guest.open_directory(profile, "mkosi initrd directory profile")
     try:
         if (stat.S_IMODE(os.fstat(root).st_mode) != 0o700
                 or {entry.name for entry in os.scandir(root)} !=
-                {"input", INIT_TREE, AUDIT, CONFIG, MANIFEST}):
+                {"input", INIT_TREE, SANITIZER, AUDIT, CONFIG, MANIFEST}):
             raise ValueError("mkosi initrd profile has unreviewed inputs")
         input_fd = os.open("input", builder.DIRECTORY_FLAGS, dir_fd=root)
         try:
@@ -435,12 +526,14 @@ def verify_profile(metadata, archives, artifact, rust_bundle, revision, profile,
             raise ValueError("mkosi initrd BaseTrees archive differs from signed source")
         if verified_file(root, INIT_TREE, len(init_tree)) != init_tree:
             raise ValueError("mkosi initrd /init tree differs from Rust receipt")
+        if verified_file(root, SANITIZER, len(sanitizer), mode=0o500) != sanitizer:
+            raise ValueError("mkosi initrd mount sanitizer differs from selected source")
         if verified_file(root, AUDIT, len(audit), mode=0o500) != audit:
             raise ValueError("mkosi initrd audit differs from selected source")
         if verified_file(root, CONFIG, len(config)) != config:
             raise ValueError("mkosi initrd config differs from no-package profile")
         manifest = expected_manifest(source, len(archive), init_tree, config,
-                                     script_sha256, audit)
+                                     script_sha256, sanitizer, audit)
         encoded = initrd_input.canonical_bytes(manifest)
         if verified_file(root, MANIFEST, len(encoded)) != encoded:
             raise ValueError("mkosi initrd profile manifest differs from signed source")

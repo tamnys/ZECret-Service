@@ -3,7 +3,10 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import types
@@ -91,13 +94,37 @@ class PackageInitrdRunnerTest(unittest.TestCase):
         members = [(path, (checkout / path).read_bytes()) for path in sorted(files)]
         with tempfile.TemporaryDirectory() as scratch:
             revision = self.source_bundle(scratch, members)
-            selected = runner.ReceiptSourceArchive(Path(scratch), revision)
-            with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
-                    "Git must not run inside the no-route builder")):
-                bound = runner.source_module(revision, selected)
-            self.assertEqual(bound._BOUND_REVISION, revision)
-            self.assertTrue(callable(bound.root_tree.preflight.authenticated_archives))
-            self.assertFalse(selected.report["private_mode_approved"])
+            # Full-suite collection imports some SOURCE_MODULES for unrelated
+            # tests. Exercise the production fail-closed binder in a fresh
+            # interpreter instead of removing those live modules from sys.modules.
+            child = """
+import importlib.util
+import json
+from pathlib import Path
+from unittest import mock
+import sys
+
+spec = importlib.util.spec_from_file_location("package_initrd_runner", sys.argv[1])
+runner = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner)
+selected = runner.ReceiptSourceArchive(Path(sys.argv[2]), sys.argv[3])
+with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
+        "Git must not run inside the no-route builder")):
+    bound = runner.source_module(sys.argv[3], selected)
+print(json.dumps({
+    "revision": bound._BOUND_REVISION,
+    "archive_verifier_bound": callable(bound.root_tree.preflight.authenticated_archives),
+    "private_mode_approved": selected.report["private_mode_approved"],
+}))
+"""
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", child,
+                 str(HERE / "package_initrd_runner.py"), scratch, revision],
+                capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout), {
+                "revision": revision, "archive_verifier_bound": True,
+                "private_mode_approved": False})
 
     def test_production_config_uses_signed_package_versions_and_inherited_settings(self):
         static = (HERE.parents[1] / runner.SUBIMAGE).read_bytes()
@@ -128,8 +155,15 @@ class PackageInitrdRunnerTest(unittest.TestCase):
         for relative in (b"/usr/bin/perl,", b"/usr/bin/perl5.40.1,"):
             self.assertIn(relative, static)
             self.assertIn(relative, data)
+        for relative in (b"/usr/bin/umount,", b"/usr/sbin/losetup,",
+                         b"/usr/sbin/swapon,", b"/usr/sbin/swapoff,"):
+            self.assertIn(relative, static)
+            self.assertIn(relative, data)
         self.assertIn(b"Distribution=debian\nRelease=trixie\nArchitecture=x86-64", data)
         self.assertIn(b"Packages=systemd=257.9-1,udev=257.9-1", data)
+        self.assertIn(
+            f"FinalizeScripts={profile / 'sanitize-mount.py'},{profile / 'audit-initrd.py'}".encode(),
+            data)
         self.assertIn(b"SourceDateEpoch=1789199741", data)
         self.assertIn(b"CacheOnly=always\nIncremental=no", data)
         self.assertNotIn(b"BaseTrees=", data)
@@ -143,6 +177,97 @@ class PackageInitrdRunnerTest(unittest.TestCase):
                 {"name": "systemd", "version": "257.9-1"},
                 {"name": "udev", "version": "257.9-1"},
             ])
+
+    def test_finalizers_bind_selected_source_and_signed_mount_identity(self):
+        revision = "a" * 40
+        mount_sha256 = runner.sha256(b"signed mount ELF")
+        mount_identity = mock.Mock(return_value=(123, mount_sha256))
+        source = types.SimpleNamespace(
+            guest=types.SimpleNamespace(prepare=types.SimpleNamespace(
+                mount_package_identity=mount_identity)),
+            rust_inputs=types.SimpleNamespace(regular_bytes=lambda path: path.read_bytes()),
+        )
+
+        def selected_bytes(arguments):
+            return (HERE / Path(arguments[1].split(":", 1)[1]).name).read_bytes()
+
+        selected = types.SimpleNamespace(output=selected_bytes)
+        packages = [{"name": "mount", "version": "1", "architecture": "amd64",
+                     "sha256": "b" * 64}]
+        with tempfile.TemporaryDirectory() as scratch:
+            audit, sanitizer, size, digest = runner.finalize_scripts(
+                source, selected, revision, "c" * 64, packages, scratch)
+            mount_identity.assert_called_once_with(packages, {
+                ("mount", "1", "amd64"): Path(scratch) / (("b" * 64) + ".deb")})
+            self.assertEqual((size, digest), (123, mount_sha256))
+            self.assertTrue(audit.startswith(b"#!/usr/bin/python3 -I\n"))
+            self.assertTrue(sanitizer.startswith(b"#!/usr/bin/python3 -I\n"))
+            self.assertIn(mount_sha256.encode(), audit)
+            self.assertIn(mount_sha256.encode(), sanitizer)
+            self.assertIn(b'EXPECTED_SIZE = "123"', sanitizer)
+            self.assertNotIn(b"__STAGED_", audit + sanitizer)
+
+            replaced = types.SimpleNamespace(output=lambda arguments: (
+                b"changed" if arguments[1].endswith("sanitize-mount.py")
+                else selected_bytes(arguments)))
+            with self.assertRaisesRegex(ValueError, "mount sanitizer differs"):
+                runner.finalize_scripts(
+                    source, replaced, revision, "c" * 64, packages, scratch)
+            with self.assertRaisesRegex(ValueError, "duplicate signed Debian package identity"):
+                runner.finalize_scripts(
+                    source, selected, revision, "c" * 64, packages + packages, scratch)
+            mount_identity.return_value = (0, mount_sha256)
+            with self.assertRaisesRegex(ValueError, "signed mount ELF identity differs"):
+                runner.finalize_scripts(
+                    source, selected, revision, "c" * 64, packages, scratch)
+
+    def test_profile_stages_sanitizer_and_rejects_tampering(self):
+        archive = b"signed Debian archive"
+        package = {"name": "mount", "version": "1", "architecture": "amd64",
+                   "size": len(archive), "sha256": runner.sha256(archive)}
+        preflight = {"mount_elf_size": 123, "mount_elf_sha256": "a" * 64}
+        inputs = (preflight, b"Rust /init", b"bound audit", b"bound sanitizer", [package])
+
+        def write_file(parent, name, data, mode=0o400):
+            descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                                 mode, dir_fd=parent)
+            try:
+                os.write(descriptor, data)
+                os.fchmod(descriptor, mode)
+            finally:
+                os.close(descriptor)
+
+        with tempfile.TemporaryDirectory() as scratch:
+            workspace = Path(scratch)
+            archives = workspace / "archives"
+            archives.mkdir()
+            (archives / (package["sha256"] + ".deb")).write_bytes(archive)
+            profile = workspace / "profile"
+            source = types.SimpleNamespace(
+                checked_profile_path=lambda path, _: path,
+                builder=types.SimpleNamespace(output_parent=lambda _, __: os.open(
+                    workspace, os.O_RDONLY | os.O_DIRECTORY)),
+                guest=types.SimpleNamespace(open_directory=lambda path, _: os.open(
+                    path, os.O_RDONLY | os.O_DIRECTORY)),
+                write_file=write_file,
+            )
+            with (mock.patch.object(runner, "inputs", return_value=inputs),
+                  mock.patch.object(runner, "config_bytes", return_value=(b"config", "b" * 64)),
+                  mock.patch.object(runner, "manifest_for", return_value={"bound": True})):
+                runner.prepare_profile(source, None, None, archives, None,
+                                       "c" * 40, profile, workspace)
+                self.assertEqual((profile / "sanitize-mount.py").read_bytes(),
+                                 b"bound sanitizer")
+                self.assertEqual((profile / "sanitize-mount.py").stat().st_mode & 0o777,
+                                 0o500)
+                runner.verify_profile(source, None, None, archives, None,
+                                      "c" * 40, profile, workspace)
+                (profile / "sanitize-mount.py").chmod(0o700)
+                (profile / "sanitize-mount.py").write_bytes(b"changed")
+                (profile / "sanitize-mount.py").chmod(0o500)
+                with self.assertRaisesRegex(ValueError, "mount sanitizer differs"):
+                    runner.verify_profile(source, None, None, archives, None,
+                                          "c" * 40, profile, workspace)
 
     def test_installed_manifest_rejects_package_outside_signed_closure(self):
         source = types.SimpleNamespace(guest=types.SimpleNamespace(

@@ -4,10 +4,13 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 
-FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/unix_chkpwd", "usr/bin/mount", "usr/bin/umount", "usr/bin/su", "usr/lib/dbus-1.0/dbus-daemon-launch-helper")
+EXPECTED_MOUNT_SHA256 = "__STAGED_MOUNT_SHA256__"
+MOUNT_OWNER = (0, 0)
+FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/unix_chkpwd", "usr/bin/umount", "usr/bin/su", "usr/sbin/losetup", "usr/sbin/swapon", "usr/sbin/swapoff", "usr/lib/dbus-1.0/dbus-daemon-launch-helper")
 FORBIDDEN_NVME_SURFACE = (
     "etc/nvme/discovery.conf", "usr/sbin/uuidd", "usr/bin/adduser", "usr/bin/passwd",
     "usr/lib/systemd/system/nvmefc-boot-connections.service",
@@ -319,6 +322,14 @@ def audit(root):
     for name in (*FORBIDDEN_BINARIES, *FORBIDDEN_NVME_SURFACE):
         if (root / name).exists() or (root / name).is_symlink():
             raise ValueError("administrative binary present")
+    if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
+        raise ValueError("signed mount ELF identity absent")
+    mount = root / "usr/bin/mount"
+    if (mount.is_symlink() or not mount.is_file() or mount.stat().st_nlink != 1
+            or (mount.stat().st_uid, mount.stat().st_gid) != MOUNT_OWNER
+            or stat.S_IMODE(mount.stat().st_mode) != 0o555
+            or hashlib.sha256(mount.read_bytes()).hexdigest() != EXPECTED_MOUNT_SHA256):
+        raise ValueError("non-privileged signed mount ELF differs")
     admin_rules = root / "etc/udev/rules.d"
     if present(admin_rules) and (admin_rules.is_symlink() or not admin_rules.is_dir()
                                  or any(admin_rules.iterdir())):
