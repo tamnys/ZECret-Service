@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import os
 from pathlib import Path
+import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -85,6 +87,70 @@ class ImportArchiveTests(unittest.TestCase):
             output = self.root / "path-poisoned.tar.gz"
             receipt = archive.pack(self.raw, output)
         self.assertFalse(marker.exists())
+        self.assertEqual(receipt["raw_disk_sha256"], self.receipt["raw_disk_sha256"])
+
+    def test_replaced_tool_paths_cannot_select_executed_binaries(self):
+        tools = self.root / "replaceable-tools"
+        tools.mkdir()
+        tar = tools / "tar"
+        gzip = tools / "gzip"
+        shutil.copy2(archive.GNU_TAR, tar)
+        shutil.copy2(archive.GNU_GZIP, gzip)
+        original_tar = sha256(tar)
+        original_gzip = sha256(gzip)
+        marker = tools / "replacement-ran"
+        real_run = subprocess.run
+        replaced = False
+
+        def replace_before_exec(command, **kwargs):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                for path in (tar, gzip):
+                    path.rename(path.with_name(path.name + ".original"))
+                    path.write_text("#!/bin/sh\nprintf ran > " +
+                                    shlex.quote(str(marker)) + "\nexit 99\n")
+                    path.chmod(0o755)
+            return real_run(command, **kwargs)
+
+        output = self.root / "replaced-tools.tar.gz"
+        with (mock.patch.object(archive, "GNU_TAR", str(tar)),
+              mock.patch.object(archive, "GNU_GZIP", str(gzip)),
+              mock.patch.object(archive.subprocess, "run", side_effect=replace_before_exec)):
+            receipt = archive.pack(self.raw, output)
+        self.assertTrue(replaced)
+        self.assertFalse(marker.exists())
+        self.assertEqual(receipt["gnu_tar_sha256"], original_tar)
+        self.assertEqual(receipt["gnu_gzip_sha256"], original_gzip)
+        self.assertEqual(receipt["raw_disk_sha256"], self.receipt["raw_disk_sha256"])
+
+    def test_replaced_compressor_after_version_check_cannot_run(self):
+        tools = self.root / "replaceable-compressor"
+        tools.mkdir()
+        gzip = tools / "gzip"
+        shutil.copy2(archive.GNU_GZIP, gzip)
+        original_gzip = sha256(gzip)
+        marker = self.root / "late-compressor-ran"
+        real_run = subprocess.run
+        replaced = False
+
+        def replace_before_pack(command, **kwargs):
+            nonlocal replaced
+            if not replaced and "--format=oldgnu" in command:
+                replaced = True
+                gzip.rename(gzip.with_name(gzip.name + ".original"))
+                gzip.write_text("#!/bin/sh\nprintf ran > " +
+                                shlex.quote(str(marker)) + "\nexit 99\n")
+                gzip.chmod(0o755)
+            return real_run(command, **kwargs)
+
+        output = self.root / "late-compressor.tar.gz"
+        with (mock.patch.object(archive, "GNU_GZIP", str(gzip)),
+              mock.patch.object(archive.subprocess, "run", side_effect=replace_before_pack)):
+            receipt = archive.pack(self.raw, output)
+        self.assertTrue(replaced)
+        self.assertFalse(marker.exists())
+        self.assertEqual(receipt["gnu_gzip_sha256"], original_gzip)
         self.assertEqual(receipt["raw_disk_sha256"], self.receipt["raw_disk_sha256"])
 
     def test_changed_compressor_is_rejected_before_archive_publication(self):

@@ -156,62 +156,68 @@ def pack(raw_path, archive_path, *, allow_non_workspace_paths=False):
         # The canonical producer is maintained GNU tar, using Google's oldgnu
         # sparse format with stable header metadata. It never extracts input.
         # Do not let an inherited PATH, loader hook, or tar option select code
-        # from the workspace. Tool hashes are diagnostic until the separate
-        # operator toolchain admission gate is reviewed.
+        # from the workspace. Keep both executables open through their use:
+        # hashing a pathname before and after exec leaves a replacement race.
+        # Tool hashes remain diagnostic until the separate operator toolchain
+        # admission gate is reviewed.
         environment = {"LC_ALL": "C", "PATH": "/usr/bin:/bin"}
-        with _regular(GNU_TAR) as executable:
-            tar_sha256 = _hash(executable)
-        with _regular(GNU_GZIP) as executable:
-            gzip_sha256 = _hash(executable)
-        probe = subprocess.run([GNU_TAR, "--version"], capture_output=True, text=True,
-                               check=True, env=environment)
-        if not probe.stdout.startswith("tar (GNU tar) "):
-            raise ValueError("GNU tar is required")
-        gzip_probe = subprocess.run([GNU_GZIP, "--version"], capture_output=True,
-                                    text=True, check=True, env=environment)
-        if not gzip_probe.stdout.startswith("gzip "):
-            raise ValueError("GNU gzip is required")
-        descriptor, temporary = tempfile.mkstemp(prefix=".disk-import-", suffix=".tar.gz",
-                                                  dir=archive_path.parent)
-        os.close(descriptor)
-        try:
-            subprocess.run([GNU_TAR, "--format=oldgnu", "--sparse", "--create",
-                            f"--use-compress-program={GNU_GZIP}",
-                            f"--file={temporary}", f"--directory={raw_path.parent}",
-                            "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner",
-                            "--mode=0644", "disk.raw"], check=True, env=environment,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            with _regular(temporary) as output:
-                archive_sha256 = _hash(output)
-            receipt = verify(temporary, archive_sha256, raw_sha256, raw_bytes)
-            # A changed source or input redirection after hashing cannot pass.
-            if os.fstat(raw.fileno()).st_size != raw_bytes or _hash(raw) != raw_sha256:
-                raise ValueError("disk.raw changed during archive creation")
-            receipt["gnu_tar_version"] = probe.stdout.splitlines()[0]
-            with _regular(GNU_TAR) as executable:
-                if _hash(executable) != tar_sha256:
-                    raise ValueError("GNU tar changed during archive creation")
-            with _regular(GNU_GZIP) as executable:
-                if _hash(executable) != gzip_sha256:
-                    raise ValueError("GNU gzip changed during archive creation")
-            receipt["gnu_tar_sha256"] = tar_sha256
-            receipt["gnu_gzip_version"] = gzip_probe.stdout.splitlines()[0]
-            receipt["gnu_gzip_sha256"] = gzip_sha256
-            with _regular(Path(sys.executable).resolve()) as executable:
-                receipt["python_executable_sha256"] = _hash(executable)
-            receipt["python_version"] = sys.version.split()[0]
-            receipt["toolchain_reviewed"] = False
-            receipt["workspace_volume_override_used"] = allow_non_workspace_paths
-            os.link(temporary, archive_path)
-            with _regular(archive_path) as output:
-                os.fsync(output.fileno())
-            directory = os.open(archive_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        with _regular(GNU_TAR) as tar_binary, _regular(GNU_GZIP) as gzip_binary:
+            tar_sha256 = _hash(tar_binary)
+            gzip_sha256 = _hash(gzip_binary)
+            tar_fd = tar_binary.fileno()
+            gzip_fd = gzip_binary.fileno()
+            tar_exec = f"/proc/self/fd/{tar_fd}"
+            gzip_exec = f"/proc/self/fd/{gzip_fd}"
+            probe = subprocess.run([GNU_TAR, "--version"], executable=tar_exec,
+                                   pass_fds=(tar_fd,), capture_output=True, text=True,
+                                   check=True, env=environment)
+            if not probe.stdout.startswith("tar (GNU tar) "):
+                raise ValueError("GNU tar is required")
+            gzip_probe = subprocess.run([GNU_GZIP, "--version"], executable=gzip_exec,
+                                        pass_fds=(gzip_fd,), capture_output=True,
+                                        text=True, check=True, env=environment)
+            if not gzip_probe.stdout.startswith("gzip "):
+                raise ValueError("GNU gzip is required")
+            descriptor, temporary = tempfile.mkstemp(prefix=".disk-import-", suffix=".tar.gz",
+                                                      dir=archive_path.parent)
+            os.close(descriptor)
             try:
-                os.fsync(directory)
+                subprocess.run([GNU_TAR, "--format=oldgnu", "--sparse", "--create",
+                                f"--use-compress-program={gzip_exec}",
+                                f"--file={temporary}", f"--directory={raw_path.parent}",
+                                "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner",
+                                "--mode=0644", "disk.raw"], executable=tar_exec,
+                               pass_fds=(tar_fd, gzip_fd), check=True, env=environment,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                with _regular(temporary) as output:
+                    archive_sha256 = _hash(output)
+                receipt = verify(temporary, archive_sha256, raw_sha256, raw_bytes)
+                # A changed source or input redirection after hashing cannot pass.
+                if os.fstat(raw.fileno()).st_size != raw_bytes or _hash(raw) != raw_sha256:
+                    raise ValueError("disk.raw changed during archive creation")
+                receipt["gnu_tar_version"] = probe.stdout.splitlines()[0]
+                if _hash(tar_binary) != tar_sha256:
+                    raise ValueError("GNU tar changed during archive creation")
+                if _hash(gzip_binary) != gzip_sha256:
+                    raise ValueError("GNU gzip changed during archive creation")
+                receipt["gnu_tar_sha256"] = tar_sha256
+                receipt["gnu_gzip_version"] = gzip_probe.stdout.splitlines()[0]
+                receipt["gnu_gzip_sha256"] = gzip_sha256
+                with _regular(Path(sys.executable).resolve()) as executable:
+                    receipt["python_executable_sha256"] = _hash(executable)
+                receipt["python_version"] = sys.version.split()[0]
+                receipt["toolchain_reviewed"] = False
+                receipt["workspace_volume_override_used"] = allow_non_workspace_paths
+                os.link(temporary, archive_path)
+                with _regular(archive_path) as output:
+                    os.fsync(output.fileno())
+                directory = os.open(archive_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
             finally:
-                os.close(directory)
-        finally:
-            os.unlink(temporary)
+                os.unlink(temporary)
     return receipt
 
 
