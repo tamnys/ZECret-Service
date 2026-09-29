@@ -429,6 +429,47 @@ def disk_region(layout, offset):
     return "outside-partitions"
 
 
+def compare_material_outputs(outputs):
+    """Distinguish a changed UKI input from changed PE/FAT packaging."""
+    compared = {}
+    for name in ("initrd.cpio.zst", "zrpc-gcp.vmlinuz", "zrpc-gcp.initrd",
+                 "zrpc-gcp.efi"):
+        identities = [files[name] for _, files in outputs]
+        descriptors = []
+        try:
+            for (directory, _), (size, _) in zip(outputs, identities):
+                fd = os.open(directory / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                descriptors.append(fd)
+                record = os.fstat(fd)
+                if not stat.S_ISREG(record.st_mode) or record.st_size != size:
+                    raise ValueError("rebuild output changed before comparison")
+            left, right = (os.fstat(fd) for fd in descriptors)
+            if (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino):
+                raise ValueError("rebuilds refer to the same material output")
+            first_difference = None
+            if identities[0] != identities[1]:
+                first_difference = first_changed_bytes(
+                    descriptors[0], descriptors[1], 0, 0,
+                    min(identities[0][0], identities[1][0]))
+                if first_difference is None and identities[0][0] == identities[1][0]:
+                    raise ValueError("different material hashes lack a changed byte")
+            for fd, (size, expected_sha) in zip(descriptors, identities):
+                if os.fstat(fd).st_size != size or gpt.digest(fd, size) != expected_sha:
+                    raise ValueError("rebuild output changed during comparison")
+        finally:
+            for fd in descriptors:
+                os.close(fd)
+        compared[name] = {
+            "first_sha256": identities[0][1], "second_sha256": identities[1][1],
+            "first_bytes": identities[0][0], "second_bytes": identities[1][0],
+            "byte_identical": identities[0] == identities[1],
+            "first_difference_kind": "byte" if first_difference is not None else
+                                     "length" if identities[0][0] != identities[1][0] else None,
+            "first_difference_offset_bytes": first_difference,
+        }
+    return compared
+
+
 def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
                           builder_archives=None, workspace=None):
     """Locate root and whole-disk differences in two source-identical diagnostics."""
@@ -438,10 +479,13 @@ def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
     if manifest != outer.regular_bytes(second_stage / "candidate-manifest.json"):
         raise ValueError("rebuilds do not have identical staged inputs")
     disks = []
+    outputs = []
     for stage in (first_stage, second_stage):
         output = stage / "output"
         raw = output / "zrpc-gcp.raw"
-        size, expected_sha = outer.checked_outputs(output)["zrpc-gcp.raw"]
+        files = outer.checked_outputs(output)
+        outputs.append((output, files))
+        size, expected_sha = files["zrpc-gcp.raw"]
         layout = gpt.inspect(raw, expected_sha, size, outer.SECTOR_SIZE)
         root = next(partition for partition in layout["partitions"]
                     if partition["type"] == "root-x86-64")
@@ -485,8 +529,10 @@ def compare_root_rebuilds(first_stage, second_stage, *, metadata=None,
         if first_difference is not None:
             owners = signed_block_owners(disks, first_difference, metadata,
                                          builder_archives, workspace)
+    material_outputs = compare_material_outputs(outputs)
     return {"status": REBUILD_STATUS,
             "source_manifest_sha256": sha256(manifest),
+            "material_outputs": material_outputs,
             "first_disk_sha256": first[2], "second_disk_sha256": second[2],
             "first_disk_bytes": first[1], "second_disk_bytes": second[1],
             "disk_byte_identical": first[1] == second[1] and first[2] == second[2],
