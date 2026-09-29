@@ -128,6 +128,9 @@ class DiagnosticDiskTests(unittest.TestCase):
                     "raw_disk_sha256": diagnostic.sha256((output / "zrpc-gcp.raw").read_bytes()),
                     "root_partition_guid": "root-guid",
                     "root_partition_sha256": "b" * 64,
+                    "filesystem_uuid": "2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
+                    "filesystem_created_utc": "Mon Sep 28 12:34:56 2026",
+                    "directory_hash_seed": "3b84d5f6-2c3d-4e5f-901a-b2c3d4e5f607",
                     "reader_executable_matches_signed_package": True,
                     "private_mode_approved": False,
                     "overlay_entries_checked": {"file": 2}}
@@ -142,6 +145,8 @@ class DiagnosticDiskTests(unittest.TestCase):
               mock.patch.object(diagnostic.outer, "checked_split_initrd")):
             report = diagnostic.inspect(stage, self.root, self.root, self.root, {})
             self.assertEqual(report["root_partition_sha256"], "b" * 64)
+            for field in diagnostic.rootfs.SUPER_FIELDS.values():
+                self.assertEqual(report[field], workload[field])
             self.assertEqual(report["verity_partition_sha256"], "a" * 64)
             self.assertTrue(report["gpt_esp_verity_uki_inspected"])
             for source, field in ((workload, "root_partition_sha256"),
@@ -152,6 +157,15 @@ class DiagnosticDiskTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "synthetic workload bytes"):
                         diagnostic.inspect(stage, self.root, self.root, self.root, {})
                     source[field] = original
+            for field in diagnostic.rootfs.SUPER_FIELDS.values():
+                with self.subTest(field=field):
+                    original = workload.pop(field)
+                    with self.assertRaisesRegex(ValueError, "lacks required metadata"):
+                        diagnostic.inspect(stage, self.root, self.root, self.root, {})
+                    workload[field] = "malformed"
+                    with self.assertRaises(ValueError):
+                        diagnostic.inspect(stage, self.root, self.root, self.root, {})
+                    workload[field] = original
 
     def test_changed_workload_with_recomputed_hash_is_still_refused(self):
         inputs = self.root / "inputs"

@@ -251,6 +251,7 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
             or workload.get("reader_executable_matches_signed_package") is not True
             or workload.get("private_mode_approved") is not False):
         raise ValueError("synthetic workload bytes did not match the raw root")
+    superblock = rootfs.checked_superblock_metadata(workload)
     if (files["zrpc-gcp.efi"][1] != boot["uki_sha256"]
             or files["zrpc-gcp.vmlinuz"][1] != boot["uki_sections"][".linux"]["sha256"]
             or files["zrpc-gcp.initrd"][1] != boot["uki_sections"][".initrd"]["sha256"]):
@@ -266,6 +267,7 @@ def inspect(stage, metadata, builder_archives, workspace, manifest):
     return {"raw_disk_sha256": raw_sha, "raw_disk_bytes": raw_size,
             "uki_sha256": boot["uki_sha256"], "roothash": binding["roothash"],
             "root_partition_sha256": workload["root_partition_sha256"],
+            **superblock,
             "verity_partition_sha256": hashes["verity_partition_sha256"],
             "synthetic_workload_files_checked": workload["overlay_entries_checked"]["file"],
             "gpt_esp_verity_uki_inspected": True,
