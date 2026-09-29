@@ -52,6 +52,15 @@ class RawForbiddenTests(unittest.TestCase):
                      "UNIT_DIRS"):
             self.assertEqual(getattr(forbidden, name), getattr(POLICY, name))
 
+    def test_reader_command_preserves_checked_loader_prefix(self):
+        prefix = ("/proc/self/fd/11", "--inhibit-cache", "/proc/self/fd/10")
+        self.assertEqual(forbidden.reader_command(prefix, "-R", "stats -h", "/root.img"),
+                         [*prefix, "-R", "stats -h", "/root.img"])
+        self.assertEqual(forbidden.reader_command(self.reader, "-R", "stats -h"),
+                         [str(self.reader), "-R", "stats -h"])
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            forbidden.reader_command(("",), "-R", "stats -h")
+
     def test_exact_inode_listing_and_bounded_output(self):
         output = listing(
             "/2/040755/0/0/.//", "/2/040755/0/0/..//",

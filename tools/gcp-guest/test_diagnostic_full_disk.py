@@ -212,6 +212,19 @@ class DiagnosticDiskTests(unittest.TestCase):
                 diagnostic.debugfs_output(Path("/proc/self/fd/4"), Path("/root.img"),
                                           "icheck 42", 4)
 
+        good = SimpleNamespace(returncode=0, stderr=diagnostic.rootfs.READER_BANNER,
+                               stdout=b"Block\tInode number\n")
+        loader = ("/proc/self/fd/5", "--inhibit-cache", "/proc/self/fd/4")
+        environment = {"LC_ALL": "C", "PATH": "/empty"}
+        with mock.patch.object(diagnostic.subprocess, "run", return_value=good) as run:
+            self.assertEqual(diagnostic.debugfs_output(
+                loader, Path("/root.img"), "icheck 42", (4, 5), env=environment),
+                "Block\tInode number\n")
+            self.assertEqual(run.call_args.args[0],
+                             [*loader, "-R", "icheck 42", "/root.img"])
+            self.assertEqual(run.call_args.kwargs["pass_fds"], (4, 5))
+            self.assertIs(run.call_args.kwargs["env"], environment)
+
     def boot_receipt(self):
         bundle = self.root / "native-rust"
         artifacts = bundle / "artifacts"
@@ -290,6 +303,7 @@ class DiagnosticDiskTests(unittest.TestCase):
                     "filesystem_created_utc": "Mon Sep 28 12:34:56 2026",
                     "directory_hash_seed": "3b84d5f6-2c3d-4e5f-901a-b2c3d4e5f607",
                     "reader_executable_matches_signed_package": True,
+                    "reader_initial_elf_objects_checked": True,
                     "private_mode_approved": False,
                     "overlay_entries_checked": {"file": 2}}
         with (mock.patch.object(diagnostic.gpt, "inspect"),

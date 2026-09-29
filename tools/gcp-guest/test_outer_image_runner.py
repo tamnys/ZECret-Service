@@ -482,6 +482,7 @@ class OuterImageRunnerTest(unittest.TestCase):
                              "raw_disk_bytes": files["zrpc-gcp.raw"][0],
                              "root_partition_guid": "root-guid",
                              "reader_executable_matches_signed_package": True,
+                             "reader_initial_elf_objects_checked": True,
                              "forbidden_surfaces_checked": True,
                              "raw_root_inventory_entries": 1,
                              "authenticated_package_components_checked": {

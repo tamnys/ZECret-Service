@@ -196,12 +196,15 @@ class RawRootfsTest(unittest.TestCase):
                 mock.patch.object(rootfs.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(rootfs.verity.esp, "workspace_scratch", return_value=self.root), \
                 mock.patch.object(rootfs, "checked_overlay", return_value={}), \
-                mock.patch.object(rootfs, "signed_reader_bytes", return_value=(b"ELF", "b" * 64)), \
+                mock.patch.object(rootfs, "authenticated_reader_toolchain",
+                                  return_value=(b"ELF", b"loader", (), "b" * 64)), \
                 mock.patch.object(rootfs, "checked_reader", return_value="c" * 64), \
                 mock.patch.object(rootfs.verity, "partition_images", return_value={
                     "root-x86-64": (root, root.stat().st_size, "root-guid")}), \
-                mock.patch.object(rootfs.verity.closure, "sealed_elf_bytes",
-                                  return_value=nullcontext((Path("/synthetic/debugfs"), 7))), \
+                mock.patch.object(rootfs, "sealed_reader_runtime",
+                                  return_value=nullcontext((
+                                      ("/signed/loader", "/synthetic/debugfs"),
+                                      (7, 8), {"LC_ALL": "C"}))), \
                 mock.patch.object(rootfs, "inspect_entries", return_value={
                     "file": 0, "directory": 0, "symlink": 0}), \
                 mock.patch.object(rootfs.forbidden, "inspect", return_value=inventory) as surfaces, \
@@ -213,9 +216,10 @@ class RawRootfsTest(unittest.TestCase):
                                     self.root / "Packages.xz", self.root / "archives",
                                     self.stage, self.manifest, self.root)
         self.assertEqual(stats.call_args.args[1], root)
-        self.assertEqual(stats.call_args.kwargs["pass_fds"], (7,))
-        self.assertEqual(surfaces.call_args.args[:2], (Path("/synthetic/debugfs"), root))
-        self.assertEqual(surfaces.call_args.kwargs["pass_fds"], (7,))
+        self.assertEqual(stats.call_args.kwargs["pass_fds"], (7, 8))
+        self.assertEqual(surfaces.call_args.args[:2],
+                         (("/signed/loader", "/synthetic/debugfs"), root))
+        self.assertEqual(surfaces.call_args.kwargs["pass_fds"], (7, 8))
         self.assertEqual(components.call_args.args[:3],
                          (self.root, self.stage / "packages", {}))
         self.assertEqual(components.call_args.kwargs["workspace"].parent, self.root)
@@ -228,6 +232,8 @@ class RawRootfsTest(unittest.TestCase):
         self.assertEqual(result["authenticated_package_components_checked"],
                          package_report["components_checked"])
         self.assertIs(result["forbidden_surfaces_checked"], True)
+        self.assertIs(result["reader_initial_elf_objects_checked"], True)
+        self.assertIs(result["reader_dynamic_runtime_independently_sealed"], False)
         self.assertIs(result["boot_verified"], False)
         self.assertIs(result["private_mode_approved"], False)
 
@@ -374,36 +380,91 @@ class RawRootfsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "installed debugfs differs"):
                 rootfs.checked_reader(signed)
 
-    def test_reader_package_rejects_changed_signed_index(self):
-        entry = {"name": "e2fsprogs", "version": "reviewed", "architecture": "amd64",
-                 "filename": "pool/e2fsprogs.deb", "size": 42, "sha256": "c" * 64}
+    def test_reader_uses_sealed_loader_objects_for_every_query(self):
+        paths = iter((Path("/proc/self/fd/" + str(fd)), fd)
+                     for fd in range(10, 12 + len(rootfs.READER_ELF_PROVIDERS)))
+        toolchain = (b"program", b"loader",
+                     tuple(b"library" for _ in rootfs.READER_ELF_PROVIDERS), "a" * 64)
+        result = types.SimpleNamespace(returncode=0, stderr="", stdout="checked")
+        with mock.patch.object(rootfs.verity.closure, "sealed_elf_bytes",
+                               side_effect=lambda _: nullcontext(next(paths))), \
+                mock.patch.object(rootfs.subprocess, "run", return_value=result) as run, \
+                mock.patch.object(rootfs.verity.closure, "check_loader_report") as checked:
+            with rootfs.sealed_reader_runtime(toolchain, self.root) as (reader, fds, env):
+                self.assertEqual(fds, tuple(range(10, 12 + len(rootfs.READER_ELF_PROVIDERS))))
+                self.assertEqual(reader[0], "/proc/self/fd/11")
+                self.assertEqual(reader[-1], "/proc/self/fd/10")
+                self.assertEqual(rootfs.forbidden.reader_command(
+                    reader, "-R", "stats -h", "/root.img")[-4:],
+                    ["/proc/self/fd/10", "-R", "stats -h", "/root.img"])
+                self.assertEqual(env["PATH"], reader[reader.index("--library-path") + 1])
+                self.assertTrue(Path(env["PATH"]).is_dir())
+            self.assertEqual(run.call_args.args[0][-2:],
+                             ["--list", "/proc/self/fd/10"])
+            self.assertEqual(run.call_args.kwargs["pass_fds"], list(fds))
+            checked.assert_called_once()
+
+        paths = iter((Path("/proc/self/fd/" + str(fd)), fd)
+                     for fd in range(10, 12 + len(rootfs.READER_ELF_PROVIDERS)))
+        with mock.patch.object(rootfs.verity.closure, "sealed_elf_bytes",
+                               side_effect=lambda _: nullcontext(next(paths))), \
+                mock.patch.object(rootfs.subprocess, "run", return_value=result), \
+                mock.patch.object(rootfs.verity.closure, "check_loader_report",
+                                  side_effect=ValueError("ambient object")):
+            with self.assertRaisesRegex(ValueError, "ambient object"):
+                with rootfs.sealed_reader_runtime(toolchain, self.root):
+                    self.fail("unchecked reader became available")
+
+    def test_reader_runtime_requires_every_signed_provider_and_index(self):
+        names = {"e2fsprogs", "libc6", *(name for _, name in rootfs.READER_ELF_PROVIDERS)}
+        entries = [{"name": name, "version": "reviewed", "architecture": "amd64",
+                    "filename": "pool/" + name + ".deb", "size": 42,
+                    "sha256": digest(name.encode())} for name in sorted(names)]
         lock = {"schema_version": 1, "status": "apt-resolved-candidate-unbuilt-unapproved",
                 "snapshot": "https://snapshot.debian.org/archive/debian/20260918T000000Z/",
                 "inrelease_sha256": "a" * 64, "signed_release_date_epoch": 123,
-                "packages_index_sha256": "b" * 64, "packages": [entry]}
-        lock_bytes = json.dumps(lock).encode()
+                "packages_index_sha256": "b" * 64, "packages": entries}
         binary = b"\x7fELFsource-bound-debugfs"
         with mock.patch.object(rootfs.verity.debian_snapshot, "bounded_regular_bytes",
-                               return_value=lock_bytes), \
-                mock.patch.object(rootfs.verity.closure, "LOCK_BYTES", len(lock_bytes)), \
-                mock.patch.object(rootfs.verity.closure, "LOCK_SHA256", digest(lock_bytes)), \
+                               side_effect=lambda *_: json.dumps(lock).encode()), \
+                mock.patch.object(rootfs.verity.closure, "LOCK_BYTES", 0), \
+                mock.patch.object(rootfs.verity.closure, "LOCK_SHA256", ""), \
                 mock.patch.object(rootfs.verity.debian_snapshot, "require_snapshot_age"), \
                 mock.patch.object(rootfs.verity.debian_snapshot, "authenticated_index_bytes",
                                   return_value=(123, ("b" * 64, 5), b"index")) as index, \
                 mock.patch.object(rootfs.verity.debian_snapshot, "package_records",
-                                  return_value={("e2fsprogs", "reviewed", "amd64"): {"signed": True}}), \
+                                  return_value={(name, "reviewed", "amd64"): {"signed": True}
+                                                for name in names}), \
                 mock.patch.object(rootfs.verity.closure, "indexed_archive",
-                                  return_value=b"signed-package") as archive, \
+                                  side_effect=lambda item, *_args, **_kwargs:
+                                  item["name"].encode()) as archive, \
                 mock.patch.object(rootfs.verity.esp, "regular_member_from_deb",
-                                  return_value=binary):
-            self.assertEqual(rootfs.signed_reader_bytes(
-                self.root / "InRelease", self.root / "Packages.xz", self.root / "archives"),
-                (binary, "c" * 64))
-            self.assertEqual(archive.call_args.args[:2], (entry, {"signed": True}))
+                                  return_value=binary), \
+                mock.patch.object(rootfs.verity.closure, "package_elf",
+                                  side_effect=lambda _archive, soname:
+                                  ("ELF:" + soname).encode()):
+            # The test lock remains source-hash bound while individual rows vary.
+            rootfs.verity.closure.LOCK_BYTES = len(json.dumps(lock).encode())
+            rootfs.verity.closure.LOCK_SHA256 = digest(json.dumps(lock).encode())
+            toolchain = rootfs.authenticated_reader_toolchain(
+                self.root / "InRelease", self.root / "Packages.xz", self.root / "archives")
+            self.assertEqual(toolchain[0], binary)
+            self.assertEqual(toolchain[1], b"ELF:ld-linux-x86-64.so.2")
+            self.assertEqual(len(toolchain[2]), len(rootfs.READER_ELF_PROVIDERS))
+            self.assertEqual(toolchain[3], next(item for item in entries
+                                                 if item["name"] == "e2fsprogs")["sha256"])
+            self.assertEqual({call.args[0]["name"] for call in archive.call_args_list}, names)
             index.return_value = (123, ("0" * 64, 5), b"index")
             with self.assertRaisesRegex(ValueError, "signed debugfs index differs"):
-                rootfs.signed_reader_bytes(self.root / "InRelease",
-                                           self.root / "Packages.xz", self.root / "archives")
+                rootfs.authenticated_reader_toolchain(
+                    self.root / "InRelease", self.root / "Packages.xz", self.root / "archives")
+            index.return_value = (123, ("b" * 64, 5), b"index")
+            lock["packages"] = entries[:-1]
+            rootfs.verity.closure.LOCK_BYTES = len(json.dumps(lock).encode())
+            rootfs.verity.closure.LOCK_SHA256 = digest(json.dumps(lock).encode())
+            with self.assertRaisesRegex(ValueError, "runtime provider missing"):
+                rootfs.authenticated_reader_toolchain(
+                    self.root / "InRelease", self.root / "Packages.xz", self.root / "archives")
 
 
 if __name__ == "__main__":
