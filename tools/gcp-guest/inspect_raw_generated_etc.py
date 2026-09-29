@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Derive two generated /etc entries from the authenticated Debian closure.
+"""Derive generated /etc entries and credential modes from signed packages.
 
 The caller supplies rows from source_plan(preflight.authenticated_archives(...))
 and the verified staged overlay. The raw inspector must compare every returned
@@ -24,6 +24,16 @@ TMPFILES_SIZE = 651
 TMPFILES_SHA256 = "4e7d4abb134ca09007775626bdddcea67badc0ea5fe4b6dde7466edb770927d2"
 MTAB_DESTINATION = "etc/mtab"
 MTAB_TARGET = "../proc/self/mounts"
+
+# The pinned systemd 257.13-1~deb13u1 archive ships both directories as
+# 0755 root:root. Its credstore.conf contains exact `d` rules that change
+# them to 0700 root:root when the package postinst runs systemd-tmpfiles.
+CREDSTORE_DIRECTORIES = ("etc/credstore", "etc/credstore.encrypted")
+CREDSTORE_SOURCE = "usr/lib/tmpfiles.d/credstore.conf"
+CREDSTORE_SOURCE_SIZE = 474
+CREDSTORE_SOURCE_SHA256 = "2bafed09323dcb75c9c59ffd863510c2d05b6939fbcda267a82198875d1b4ddb"
+CREDSTORE_ARCHIVE_MODE = 0o755
+CREDSTORE_FINAL_MODE = 0o700
 
 
 def _source_map(source_rows):
@@ -53,21 +63,48 @@ def _require_package_file(source, overlay, path, package, size, digest):
         raise ValueError("signed generated /etc package source differs: " + path)
 
 
-def expected_entries(source_rows, verified_overlay):
-    """Return source-derived nsswitch bytes and the exact mtab symlink."""
-    if type(verified_overlay) is not dict:
-        raise ValueError("verified generated /etc overlay required")
-    source = _source_map(source_rows)
+def _require_etc_parent(source, verified_overlay):
     etc = source.get("etc")
     if (etc is None or etc.get("kind") != "directory"
             or (etc.get("uid"), etc.get("gid")) != (0, 0)
             or etc.get("output_mode") != 0o755):
         raise ValueError("generated /etc parent differs from authenticated source")
-    etc_overlay = verified_overlay.get("etc")
-    if etc_overlay is not None and (type(etc_overlay) is not dict
-                                    or etc_overlay.get("type") != "directory"
-                                    or etc_overlay.get("mode") != 0o755):
-        raise ValueError("generated /etc parent is redirected by overlay")
+    if "etc" in verified_overlay:
+        etc_overlay = verified_overlay["etc"]
+        if (type(etc_overlay) is not dict
+                or etc_overlay.get("type") != "directory"
+                or etc_overlay.get("mode") != 0o755):
+            raise ValueError("generated /etc parent is redirected by overlay")
+
+
+def credential_store_modes(source_rows, verified_overlay):
+    """Derive the two systemd credential directory modes from signed data."""
+    if type(verified_overlay) is not dict:
+        raise ValueError("verified credential store overlay required")
+    source = _source_map(source_rows)
+    _require_etc_parent(source, verified_overlay)
+    _require_package_file(source, verified_overlay, CREDSTORE_SOURCE,
+                          "systemd", CREDSTORE_SOURCE_SIZE,
+                          CREDSTORE_SOURCE_SHA256)
+    for path in CREDSTORE_DIRECTORIES:
+        row = source.get(path)
+        if (row is None or row.get("kind") != "directory"
+                or row.get("packages") != ["systemd"]
+                or (row.get("uid"), row.get("gid")) != (0, 0)
+                or row.get("source_mode") != CREDSTORE_ARCHIVE_MODE
+                or row.get("output_mode") != CREDSTORE_ARCHIVE_MODE):
+            raise ValueError("signed credential store directory differs: " + path)
+        if path in verified_overlay:
+            raise ValueError("source overlay replaces signed credential store directory: " + path)
+    return {path: CREDSTORE_FINAL_MODE for path in CREDSTORE_DIRECTORIES}
+
+
+def expected_entries(source_rows, verified_overlay):
+    """Return source-derived nsswitch bytes and the exact mtab symlink."""
+    if type(verified_overlay) is not dict:
+        raise ValueError("verified generated /etc overlay required")
+    source = _source_map(source_rows)
+    _require_etc_parent(source, verified_overlay)
     for path in (NSSWITCH_DESTINATION, MTAB_DESTINATION):
         if path in source or path in verified_overlay:
             raise ValueError("generated /etc path collides with source or overlay: " + path)

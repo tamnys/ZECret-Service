@@ -68,6 +68,8 @@ def baseline():
             ("file", "usr/bin/umount", b"removed helper", 0o755),
         ],
         "systemd": [
+            ("directory", "etc/credstore", b"", 0o755),
+            ("directory", "etc/credstore.encrypted", b"", 0o755),
             ("file", "usr/lib/systemd/systemd", b"signed init", 0o755),
             ("file", "usr/lib/systemd/systemd-networkd", b"signed networkd", 0o755),
             ("file", "usr/lib/systemd/systemd-journald", b"signed journald", 0o755),
@@ -135,6 +137,12 @@ class PackageComponentsTests(unittest.TestCase):
         })
         self.generated_etc = etc_patcher.start()
         self.addCleanup(etc_patcher.stop)
+        credstore_patcher = mock.patch.object(
+            components.generated_etc, "credential_store_modes",
+            return_value={"etc/credstore": 0o700,
+                          "etc/credstore.encrypted": 0o700})
+        self.credstore = credstore_patcher.start()
+        self.addCleanup(credstore_patcher.stop)
         self.plan = components.expected_components(
             self.authenticated, self.overlay, self.workspace)
         self.actual = {}
@@ -175,6 +183,8 @@ class PackageComponentsTests(unittest.TestCase):
             self.assertIn(path, expected)
         self.assertIn("etc/nsswitch.conf", expected)
         self.assertIn("etc/mtab", expected)
+        self.assertEqual(expected["etc/credstore"]["mode"], 0o700)
+        self.assertEqual(expected["etc/credstore.encrypted"]["mode"], 0o700)
         self.assertNotIn("usr/share/doc/base-files/README", expected)
         self.assertNotIn("etc/passwd", expected)
         self.assertNotIn("usr/bin/umount", expected)
@@ -358,6 +368,18 @@ class PackageComponentsTests(unittest.TestCase):
         self.actual["etc/mtab"]["link"] = "../proc/self/other"
         with self.assertRaisesRegex(ValueError, "symlink target differs"):
             self.inspect()
+
+    def test_raw_credential_store_modes_must_match_signed_tmpfiles_rule(self):
+        for path in ("etc/credstore", "etc/credstore.encrypted"):
+            with self.subTest(path=path):
+                self.actual[path]["mode"] = 0o755
+                with self.assertRaisesRegex(ValueError, "type, mode, or owner differs"):
+                    self.inspect()
+                self.actual[path]["mode"] = 0o700
+        self.credstore.return_value = {"etc/not-signed": 0o700}
+        with self.assertRaisesRegex(ValueError, "credential store is absent"):
+            components.expected_components(self.authenticated, self.overlay,
+                                           self.workspace)
 
     def test_executable_outside_component_prefix_rejects_but_inert_data_does_not(self):
         path = "var/cache/payload"

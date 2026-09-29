@@ -20,6 +20,21 @@ def source_rows():
     ]
 
 
+def credential_rows():
+    return source_rows() + [
+        {"path": generated.CREDSTORE_SOURCE, "kind": "file",
+         "packages": ["systemd"], "uid": 0, "gid": 0,
+         "source_mode": 0o644, "output_mode": 0o644,
+         "size": generated.CREDSTORE_SOURCE_SIZE,
+         "sha256": generated.CREDSTORE_SOURCE_SHA256},
+        *({"path": path, "kind": "directory", "packages": ["systemd"],
+           "uid": 0, "gid": 0,
+           "source_mode": generated.CREDSTORE_ARCHIVE_MODE,
+           "output_mode": generated.CREDSTORE_ARCHIVE_MODE}
+          for path in generated.CREDSTORE_DIRECTORIES),
+    ]
+
+
 class GeneratedEtcTests(unittest.TestCase):
     def test_exact_source_derived_entries(self):
         self.assertEqual(generated.expected_entries(source_rows(), {}), {
@@ -78,6 +93,54 @@ class GeneratedEtcTests(unittest.TestCase):
             generated.expected_entries(source_rows() + [dict(source_rows()[1])], {})
         with self.assertRaisesRegex(ValueError, "overlay required"):
             generated.expected_entries(source_rows(), None)
+
+    def test_credential_store_modes_require_exact_signed_package_source(self):
+        self.assertEqual(generated.credential_store_modes(credential_rows(), {}), {
+            "etc/credstore": 0o700,
+            "etc/credstore.encrypted": 0o700,
+        })
+        for changes in ({"sha256": "0" * 64}, {"size": 473},
+                        {"packages": ["other"]}, {"uid": 1},
+                        {"kind": "symlink"}, {"source_mode": 0o600},
+                        {"output_mode": 0o600}):
+            with self.subTest(config=changes):
+                rows = credential_rows()
+                rows[3].update(changes)
+                with self.assertRaisesRegex(ValueError, "package source differs"):
+                    generated.credential_store_modes(rows, {})
+        for path in generated.CREDSTORE_DIRECTORIES:
+            for changes in ({"kind": "file"}, {"packages": ["other"]},
+                            {"uid": 1}, {"gid": 1},
+                            {"source_mode": 0o700},
+                            {"output_mode": 0o700}):
+                with self.subTest(directory=path, changes=changes):
+                    rows = credential_rows()
+                    next(row for row in rows if row["path"] == path).update(changes)
+                    with self.assertRaisesRegex(ValueError, "directory differs"):
+                        generated.credential_store_modes(rows, {})
+
+    def test_credential_store_missing_collision_or_malformed_source_rejects(self):
+        for path in (generated.CREDSTORE_SOURCE,
+                     *generated.CREDSTORE_DIRECTORIES):
+            with self.subTest(path=path):
+                rows = [row for row in credential_rows() if row["path"] != path]
+                with self.assertRaises(ValueError):
+                    generated.credential_store_modes(rows, {})
+                with self.assertRaises(ValueError):
+                    generated.credential_store_modes(credential_rows(),
+                                                     {path: {"type": "directory"}})
+        with self.assertRaisesRegex(ValueError, "duplicate authenticated"):
+            rows = credential_rows()
+            generated.credential_store_modes(rows + [dict(rows[-1])], {})
+        with self.assertRaisesRegex(ValueError, "source row is malformed"):
+            generated.credential_store_modes(credential_rows() + [{"path": 1}], {})
+        with self.assertRaisesRegex(ValueError, "overlay required"):
+            generated.credential_store_modes(credential_rows(), None)
+        with self.assertRaisesRegex(ValueError, "parent is redirected"):
+            generated.credential_store_modes(
+                credential_rows(), {"etc": {"type": "symlink", "mode": 0o755}})
+        with self.assertRaisesRegex(ValueError, "parent is redirected"):
+            generated.credential_store_modes(credential_rows(), {"etc": None})
 
 
 if __name__ == "__main__":

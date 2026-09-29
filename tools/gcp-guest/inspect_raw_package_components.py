@@ -127,6 +127,7 @@ def expected_components(authenticated, verified_overlay, workspace):
     source = {row["path"]: row for row in source_rows}
     if len(source) != len(source_rows) or "." not in source:
         raise ValueError("authenticated package payload inventory is malformed")
+    credstore_modes = generated_etc.credential_store_modes(source_rows, verified_overlay)
     removed_directories = frozenset(
         path for path in removals
         if source.get(path, {}).get("kind") == "directory")
@@ -179,6 +180,10 @@ def expected_components(authenticated, verified_overlay, workspace):
                     or row["source_mode"] != MOUNT_SOURCE_MODE):
                 raise ValueError("signed mount helper differs from reviewed mode exception")
             mode = MOUNT_FINAL_MODE
+        elif path in credstore_modes:
+            if row["kind"] != "directory":
+                raise ValueError("signed credential store differs from reviewed mode exception")
+            mode = credstore_modes[path]
         elif row["source_mode"] != mode:
             raise ValueError("unreviewed package component mode transform: " + path)
         item = {"type": {"file": "regular", "directory": "directory",
@@ -189,6 +194,8 @@ def expected_components(authenticated, verified_overlay, workspace):
         elif kind == "symlink":
             item.update(size=len(row["target"].encode("ascii")), target=row["target"])
         expected[path] = item
+    if not credstore_modes.keys() <= expected.keys():
+        raise ValueError("signed credential store is absent from raw component plan")
     if conflict := removals & expected.keys():
         raise ValueError("removed package path remains required: " +
                          repr(sorted(conflict)))
