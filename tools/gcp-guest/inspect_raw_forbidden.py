@@ -172,7 +172,14 @@ def list_directory(reader, image, inode, parent_inode, scratch, image_bytes,
                 raise ValueError("signed debugfs directory listing lacks terminator")
             if len(line) > ENTRY_LINE_BYTES:
                 raise ValueError("signed debugfs directory row exceeds ext4 format")
-            name, entry = _parse_entry(line)
+            try:
+                name, entry = _parse_entry(line)
+            except ValueError as error:
+                # Build inputs contain public package paths only. Preserve the
+                # bounded raw row so an unsupported debugfs format can be
+                # diagnosed without reading or printing file contents.
+                raise ValueError(
+                    f"{error}; directory inode {inode}; row hex {line.hex()}") from error
             if name in entries:
                 raise ValueError("signed debugfs directory contains duplicate names")
             entries[name] = entry
