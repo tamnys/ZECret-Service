@@ -120,11 +120,12 @@ class ReinspectImportTests(unittest.TestCase):
                 "uki_sha256": self.uki_sha, "roothash": self.roothash,
                 "raw_rootfs_audit": {"root_partition_sha256": self.root_sha}}),
             mock.patch.object(runner, "checked_zebra"),
-            mock.patch.object(runner, "checked_sfdisk_package", return_value={
+            mock.patch.object(runner, "checked_sfdisk_package", return_value=({
                 "sfdisk_sha256": "e" * 64,
                 "sfdisk_package_archive_sha256": "f" * 64,
                 "sfdisk_archive_membership_rechecked": True,
-                "sfdisk_dynamic_runtime_authenticated": False}),
+                "sfdisk_dynamic_runtime_authenticated": False}, (b"program", b"loader", ()))),
+            mock.patch.object(runner, "signed_sfdisk_runtime"),
             mock.patch.object(runner, "inspected_uki_digest", return_value=self.uki_digest),
             mock.patch.object(runner, "require_unchanged_outputs"),
         ]
@@ -137,6 +138,7 @@ class ReinspectImportTests(unittest.TestCase):
                          (self.stage / "output/zrpc-gcp.raw", self.old_sha,
                           len(self.old), self.sfdisk))
         self.assertIs(kwargs["gpt_module"], self.context.gpt)
+        self.assertTrue(callable(kwargs["sfdisk_runner"]))
         destination.write_bytes(self.final_bytes)
         return {"status": "diagnostic-import-sized-gpt-unapproved",
                 "mkosi_disk_sha256": self.old_sha, "mkosi_disk_bytes": len(self.old),
@@ -196,6 +198,14 @@ class ReinspectImportTests(unittest.TestCase):
         runner.checked_sfdisk_package.side_effect = ValueError(
             "sfdisk executable differs from signed fdisk package")
         with self.assertRaisesRegex(ValueError, "sfdisk executable differs"):
+            self.run_import()
+        self.context.import_disk._prepare.assert_not_called()
+        self.assertFalse(self.import_directory.exists())
+
+    def test_unchecked_sfdisk_loader_stops_before_conversion(self):
+        runner.signed_sfdisk_runtime.side_effect = ValueError(
+            "signed sfdisk ELF loader used ambient objects")
+        with self.assertRaisesRegex(ValueError, "ambient objects"):
             self.run_import()
         self.context.import_disk._prepare.assert_not_called()
         self.assertFalse(self.import_directory.exists())

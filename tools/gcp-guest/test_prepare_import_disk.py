@@ -68,6 +68,23 @@ class PrepareImportDiskTests(unittest.TestCase):
             self.prepare(sfdisk=fake)
         self.assertFalse(self.output.exists())
 
+    def test_failed_signed_runtime_runner_publishes_no_disk(self):
+        fake = self.root / "fake-sfdisk"
+        fake.write_bytes(b"\x7fELFsynthetic-sfdisk")
+        fake.chmod(0o755)
+        digest = hashlib.sha256(fake.read_bytes()).hexdigest()
+
+        def reject(_):
+            raise ValueError("signed loader rejected")
+
+        with mock.patch.object(import_disk, "SFDISK_SHA256", digest):
+            with self.assertRaisesRegex(ValueError, "signed loader rejected"):
+                import_disk._prepare(
+                    self.source, self.original_sha, self.original_size,
+                    self.output, fake, allow_non_workspace_paths=True,
+                    sfdisk_runner=reject)
+        self.assertFalse(self.output.exists())
+
     def test_signed_sfdisk_relocates_and_reinspects_final_disk(self):
         binary, environment = self.signed_tool()
         report = self.prepare(sfdisk=binary, env=environment)

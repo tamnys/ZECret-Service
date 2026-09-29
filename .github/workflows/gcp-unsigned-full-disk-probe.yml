@@ -324,18 +324,21 @@ jobs:
             }
             run_staged /usr/bin/python3 -I -B - <<"PY"
           import json
+          import hashlib
           from pathlib import Path
           import sys
+          import tempfile
           import types
 
           sys.path.insert(0, "/workspace/source/tools/gcp-guest")
           import fetch_guest_closure as guest
           import outer_image_runner as outer
           import prepare_import_disk as importer
+          import test_inspect_raw_gpt as fixture
 
           context = types.SimpleNamespace(
               source=types.SimpleNamespace(guest=guest), import_disk=importer)
-          checked = outer.checked_sfdisk_package(
+          checked, runtime = outer.checked_sfdisk_package(
               context, Path("/zrpc-metadata"), Path("/zrpc-archives"),
               Path("/usr/sbin/sfdisk"))
           if checked != {
@@ -344,8 +347,25 @@ jobs:
                   "sfdisk_archive_membership_rechecked": True,
                   "sfdisk_dynamic_runtime_authenticated": False}:
               raise ValueError("signed sfdisk package diagnostic changed")
+          scratch = Path("/workspace/source/.codex-tmp")
+          outer.signed_sfdisk_runtime(runtime, scratch)
+          with tempfile.TemporaryDirectory(prefix="sfdisk-gpt-probe-", dir=scratch) as temporary:
+              root = Path(temporary)
+              source = root / "zrpc-gcp.raw"
+              original = fixture.synthetic_disk()
+              source.write_bytes(original)
+              prepared = importer._prepare(
+                  source, hashlib.sha256(original).hexdigest(), len(original),
+                  root / "disk.raw", Path("/usr/sbin/sfdisk"),
+                  sfdisk_runner=lambda disk: outer.signed_sfdisk_runtime(runtime, root, disk))
+              if (prepared.get("status") != "diagnostic-import-sized-gpt-unapproved"
+                      or prepared.get("old_backup_gpt_removed") is not True
+                      or prepared.get("private_mode_approved") is not False):
+                  raise ValueError("sealed sfdisk GPT relocation diagnostic changed")
           print(json.dumps({"status": "diagnostic-signed-sfdisk-package-matched-unapproved",
-                            **checked, "private_mode_approved": False}, sort_keys=True))
+                            **checked, "signed_initial_elf_objects_checked": True,
+                            "synthetic_gpt_relocated": True,
+                            "private_mode_approved": False}, sort_keys=True))
           PY
             tool=/workspace/source/tools/gcp-guest/diagnostic_full_disk.py
             prefix=(--metadata /zrpc-metadata \
