@@ -1,16 +1,19 @@
 //! Shared native Tor/bootstrap core for diagnostics and reviewed private sessions.
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     net::SocketAddrV4,
     path::PathBuf,
     time::{Duration, Instant},
 };
-use zrpc_protocol::{Backend, ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
+use zrpc_protocol::{
+    Backend, ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError, TestnetTransparentAddress,
+};
 #[cfg(unix)]
 use zrpc_transport::ManagedTor;
 use zrpc_transport::{
-    EndpointInspection, IsolationLabel, RemoteEndpoint, TorConfig, UnverifiedGcpEvidence,
-    UnverifiedPublicEvidence, VerifiedRpcSession,
+    EndpointInspection, IsolationLabel, PublicTestnetPreview, RemoteEndpoint, TorConfig,
+    UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
 };
 use zrpc_verifier::{ReleasePolicy, gcp::GcpWorkloadPolicy, workload::WorkloadPolicy};
 
@@ -61,6 +64,112 @@ pub struct PrivateEndpointConfig {
     tor_executable: PathBuf,
     #[cfg(unix)]
     tor: tokio::sync::OnceCell<ManagedTor>,
+}
+
+/// A separate TEE preview configuration; it cannot select a private release.
+pub struct PreviewEndpointConfig {
+    endpoint: RemoteEndpoint,
+    tor_executable: PathBuf,
+    #[cfg(unix)]
+    tor: tokio::sync::OnceCell<ManagedTor>,
+}
+
+impl PreviewEndpointConfig {
+    pub fn for_phala(
+        hostname: &str,
+        port: u16,
+        tor_executable: impl Into<PathBuf>,
+    ) -> Result<Self, SafeError> {
+        let tor_executable = tor_executable.into();
+        if !tor_executable.is_absolute() {
+            return Err(SafeError::new(
+                ErrorCode::TorUnavailable,
+                "An absolute path to the local Tor executable is required.",
+            ));
+        }
+        Ok(Self {
+            endpoint: RemoteEndpoint::new(hostname, port)?,
+            tor_executable,
+            #[cfg(unix)]
+            tor: tokio::sync::OnceCell::new(),
+        })
+    }
+
+    pub fn platform(&self) -> Backend {
+        Backend::PhalaDstack
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct LiveTestnetPreview {
+    pub inspection: EndpointInspection,
+    pub public_preview_passed: bool,
+    pub workload_identity_verified: bool,
+    pub public_query_sent: Option<bool>,
+    pub preview: Option<PublicTestnetPreview>,
+    pub query_error: Option<SafeError>,
+}
+
+/// The same native public preview operation is called by the CLI and local
+/// dashboard. It inspects the live quote on the retained TLS session before
+/// sending only typed public testnet reads. No workload identity or reviewed
+/// release is populated.
+pub async fn preview_testnet(
+    config: &PreviewEndpointConfig,
+    collateral: &[u8],
+    address: &TestnetTransparentAddress,
+) -> Result<LiveTestnetPreview, SafeError> {
+    #[cfg(not(unix))]
+    return Err(SafeError::new(
+        ErrorCode::TorUnavailable,
+        "Managed local Tor requires a Unix-domain socket on this client platform.",
+    ));
+    #[cfg(unix)]
+    {
+        let tor = config
+            .tor
+            .get_or_try_init(|| async { ManagedTor::launch(&config.tor_executable) })
+            .await?;
+        let evidence = request_evidence_with(
+            Backend::PhalaDstack,
+            &config.endpoint,
+            EvidenceTransport::Managed(tor),
+        )
+        .await?;
+        let (inspection, session) = match evidence {
+            NativeEvidence::Phala(evidence) => evidence.inspect_for_public_preview(collateral)?,
+            _ => return Err(wrong_platform()),
+        };
+        let public_preview_passed = inspection.public_preview_passed();
+        let Some(session) = session else {
+            return Ok(LiveTestnetPreview {
+                inspection,
+                public_preview_passed,
+                workload_identity_verified: false,
+                public_query_sent: Some(false),
+                preview: None,
+                query_error: None,
+            });
+        };
+        match session.public_testnet_preview(address).await {
+            Ok(preview) => Ok(LiveTestnetPreview {
+                inspection,
+                public_preview_passed,
+                workload_identity_verified: false,
+                public_query_sent: Some(true),
+                preview: Some(preview),
+                query_error: None,
+            }),
+            Err(error) => Ok(LiveTestnetPreview {
+                inspection,
+                public_preview_passed,
+                workload_identity_verified: false,
+                public_query_sent: None,
+                preview: None,
+                query_error: Some(error),
+            }),
+        }
+    }
 }
 
 impl PrivateEndpointConfig {
@@ -324,5 +433,16 @@ mod tests {
         })
         .await;
         assert_eq!(result.unwrap_err().code, ErrorCode::UnknownRelease);
+    }
+
+    #[tokio::test]
+    async fn preview_requires_managed_local_tor_before_public_rpc() {
+        assert!(PreviewEndpointConfig::for_phala("fixture.invalid", 443, "relative/tor").is_err());
+        let config =
+            PreviewEndpointConfig::for_phala("fixture.invalid", 443, "/missing/local/tor").unwrap();
+        let address =
+            TestnetTransparentAddress::parse(zrpc_protocol::PREVIEW_TESTNET_ADDRESS).unwrap();
+        let error = preview_testnet(&config, b"{}", &address).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::TorUnavailable);
     }
 }

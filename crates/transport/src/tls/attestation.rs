@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{Request, StatusCode, Version, client::conn::http1, header};
 use hyper_util::rt::TokioIo;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fmt,
@@ -22,8 +22,8 @@ use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, ErrorCode, GcpAttestationResponse, MAX_ATTESTATION_REQUEST_BYTES,
     MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Method,
     PublicAttestationRequest, PublicAttestationResponse, Request as RpcRequest, RequestId,
-    SafeError, Verbosity, parse_attestation_response, parse_gcp_attestation_response,
-    parse_request,
+    SafeError, TestnetTransparentAddress, Verbosity, parse_attestation_response,
+    parse_gcp_attestation_response, parse_request,
 };
 
 mod inspection;
@@ -430,6 +430,30 @@ pub struct VerifiedRpcSession {
     authority: String,
 }
 
+/// A diagnostic-attested, managed-Tor session for two typed public testnet
+/// reads. This type is distinct from `VerifiedRpcSession`, has no arbitrary
+/// request method, and cannot establish reviewed-release or private approval.
+pub struct PreviewRpcSession {
+    session: OwnedHttpSession,
+    deadline: Instant,
+    authority: String,
+}
+
+impl fmt::Debug for PreviewRpcSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PreviewRpcSession([typed public testnet reads only])")
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicTestnetPreview {
+    pub reported_chain: &'static str,
+    pub blocks: u32,
+    pub best_block_hash: String,
+    pub transparent_address: String,
+    pub transparent_balance_zatoshis: u64,
+}
+
 impl VerifiedRpcSession {
     fn from_authenticated_inspection(
         session: OwnedHttpSession,
@@ -509,65 +533,10 @@ impl VerifiedRpcSession {
 
     pub async fn query(mut self, request: &RpcRequest) -> Result<Value, SafeError> {
         self.ensure_private_ready()?;
-        let body = encode_request(request)?;
-        let http = Request::post("/rpc")
-            .header(header::HOST, self.authority.as_str())
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ACCEPT, "application/json")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .body(Full::new(Bytes::from(body)))
-            .map_err(|_| unavailable())?;
+        ensure_private_method(request)?;
         let operation_deadline = self.private_operation_deadline()?;
         // The only sender here is the one retained from POST /attestation.
-        let operation = async {
-            let response = self
-                .session
-                .sender
-                .send_request(http)
-                .await
-                .map_err(|_| unavailable())?;
-            if response.status() != StatusCode::OK || response.version() != Version::HTTP_11 {
-                return Err(unavailable());
-            }
-            let headers = response.headers();
-            if headers.contains_key(header::CONTENT_ENCODING)
-                || headers.get_all(header::CONTENT_TYPE).iter().count() != 1
-                || headers
-                    .get(header::CONTENT_TYPE)
-                    .is_none_or(|h| h != "application/json")
-                || headers.get_all(header::CONTENT_LENGTH).iter().count() > 1
-                || headers
-                    .get(header::CONTENT_LENGTH)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-            {
-                return Err(invalid_response());
-            }
-            let body = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
-                .collect()
-                .await
-                .map_err(|_| too_large())?
-                .to_bytes();
-            if body
-                .iter()
-                .copied()
-                .find(|byte| !byte.is_ascii_whitespace())
-                != Some(b'{')
-            {
-                return Err(invalid_response());
-            }
-            let response: WireRpcResponse =
-                serde_json::from_slice(&body).map_err(|_| invalid_response())?;
-            if response.jsonrpc != "2.0"
-                || response.id != *request.id()
-                || response.result.is_none()
-                || response.error.is_some()
-            {
-                return Err(invalid_response());
-            }
-            Ok(response.result.unwrap())
-        };
+        let operation = send_rpc(&mut self.session, self.authority.as_str(), request);
         let result = tokio::time::timeout_at(
             tokio::time::Instant::from_std(operation_deadline),
             operation,
@@ -581,6 +550,181 @@ impl VerifiedRpcSession {
         // Check again before a result escapes the original TLS session deadline.
         finish_before_deadline(self.deadline, result)
     }
+}
+
+fn ensure_private_method(request: &RpcRequest) -> Result<(), SafeError> {
+    if matches!(request.method(), Method::GetPreviewAddressBalance { .. }) {
+        return Err(SafeError::new(
+            ErrorCode::MethodNotAllowed,
+            "Transparent address balance is available only in the public preview.",
+        ));
+    }
+    Ok(())
+}
+
+impl PreviewRpcSession {
+    fn from_public_preview_inspection(
+        session: OwnedHttpSession,
+        deadline: Instant,
+        authority: String,
+        collateral_deadline: PrivateDeadline,
+    ) -> Result<Self, SafeError> {
+        session.origin.require_managed()?;
+        session
+            .private_deadline
+            .set(collateral_deadline)
+            .map_err(|_| unavailable())?;
+        let preview = Self {
+            session,
+            deadline,
+            authority,
+        };
+        preview.ensure_ready()?;
+        Ok(preview)
+    }
+
+    fn ensure_ready(&self) -> Result<(), SafeError> {
+        self.session.origin.require_managed()?;
+        if Instant::now() >= self.deadline {
+            return Err(expired());
+        }
+        match self.session.private_deadline.get() {
+            Some(deadline) if !deadline.is_expired() => {}
+            Some(_) => return Err(collateral_expired()),
+            None => return Err(unavailable()),
+        }
+        if self.session.sender.is_closed() || self.session.driver.is_finished() {
+            return Err(expired());
+        }
+        Ok(())
+    }
+
+    async fn fixed_request(&mut self, request: &RpcRequest) -> Result<Value, SafeError> {
+        self.ensure_ready()?;
+        let collateral_deadline = self
+            .session
+            .private_deadline
+            .get()
+            .ok_or_else(unavailable)?;
+        let deadline = self.deadline.min(collateral_deadline.monotonic);
+        let result = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            send_rpc(&mut self.session, self.authority.as_str(), request),
+        )
+        .await
+        .map_err(|_| expired())?;
+        self.ensure_ready()?;
+        finish_before_deadline(self.deadline, result)
+    }
+
+    /// The method sequence is fixed in native code. The only caller input is a
+    /// locally validated testnet transparent address. Both RPCs use the same
+    /// Tor/TLS connection that supplied the inspected live quote.
+    pub async fn public_testnet_preview(
+        mut self,
+        address: &TestnetTransparentAddress,
+    ) -> Result<PublicTestnetPreview, SafeError> {
+        let info =
+            parse_request(br#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#)?;
+        let result = self.fixed_request(&info).await?;
+        if result.get("chain").and_then(Value::as_str) != Some("test") {
+            return Err(SafeError::new(
+                ErrorCode::WrongNetwork,
+                "The node did not report Zcash testnet.",
+            ));
+        }
+        let blocks = result
+            .get("blocks")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(invalid_response)?;
+        let best_block_hash = result
+            .get("bestblockhash")
+            .and_then(Value::as_str)
+            .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(invalid_response)?
+            .to_ascii_lowercase();
+        let balance_body = serde_json::to_vec(&json!({
+            "jsonrpc":"2.0", "id":2, "method":"getaddressbalance",
+            "params":[{"addresses":[address.as_str()]}]
+        }))
+        .map_err(|_| unavailable())?;
+        let balance_request = parse_request(&balance_body)?;
+        let balance = self.fixed_request(&balance_request).await?;
+        let transparent_balance_zatoshis = balance
+            .get("balance")
+            .and_then(Value::as_u64)
+            .ok_or_else(invalid_response)?;
+        Ok(PublicTestnetPreview {
+            reported_chain: "test",
+            blocks,
+            best_block_hash,
+            transparent_address: address.as_str().to_owned(),
+            transparent_balance_zatoshis,
+        })
+    }
+}
+
+async fn send_rpc(
+    session: &mut OwnedHttpSession,
+    authority: &str,
+    request: &RpcRequest,
+) -> Result<Value, SafeError> {
+    session.origin.require_managed()?;
+    let body = encode_request(request)?;
+    let http = Request::post("/rpc")
+        .header(header::HOST, authority)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json")
+        .header(header::ACCEPT_ENCODING, "identity")
+        .body(Full::new(Bytes::from(body)))
+        .map_err(|_| unavailable())?;
+    let response = session
+        .sender
+        .send_request(http)
+        .await
+        .map_err(|_| unavailable())?;
+    if response.status() != StatusCode::OK || response.version() != Version::HTTP_11 {
+        return Err(unavailable());
+    }
+    let headers = response.headers();
+    if headers.contains_key(header::CONTENT_ENCODING)
+        || headers.get_all(header::CONTENT_TYPE).iter().count() != 1
+        || headers
+            .get(header::CONTENT_TYPE)
+            .is_none_or(|h| h != "application/json")
+        || headers.get_all(header::CONTENT_LENGTH).iter().count() > 1
+        || headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(invalid_response());
+    }
+    let body = Limited::new(response.into_body(), MAX_RESPONSE_BYTES)
+        .collect()
+        .await
+        .map_err(|_| too_large())?
+        .to_bytes();
+    if body
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        != Some(b'{')
+    {
+        return Err(invalid_response());
+    }
+    let response: WireRpcResponse =
+        serde_json::from_slice(&body).map_err(|_| invalid_response())?;
+    if response.jsonrpc != "2.0"
+        || response.id != *request.id()
+        || response.result.is_none()
+        || response.error.is_some()
+    {
+        return Err(invalid_response());
+    }
+    Ok(response.result.unwrap())
 }
 
 #[derive(Deserialize)]
@@ -606,6 +750,7 @@ fn finish_before_deadline<T>(
 fn encode_request(request: &RpcRequest) -> Result<Vec<u8>, SafeError> {
     let params = match request.method() {
         Method::GetBlockchainInfo | Method::GetBlockCount => json!([]),
+        Method::GetPreviewAddressBalance { address } => json!([{"addresses":[address.as_str()]}]),
         Method::GetBlockHash { height } => json!([height]),
         Method::GetBlockHeader { hash, verbosity } => {
             json!([hash.as_str(), matches!(verbosity, Verbosity::Verbose)])
@@ -666,6 +811,22 @@ mod deadline_tests {
         tests::{assert_no_application_bytes, connect_pair, server_config},
     };
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn preview_address_method_cannot_enter_private_session() {
+        let preview = parse_request(format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getaddressbalance\",\"params\":[{{\"addresses\":[\"{}\"]}}]}}",
+            zrpc_protocol::PREVIEW_TESTNET_ADDRESS,
+        ).as_bytes()).unwrap();
+        assert_eq!(
+            ensure_private_method(&preview).unwrap_err().code,
+            ErrorCode::MethodNotAllowed
+        );
+        let status =
+            parse_request(br#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#)
+                .unwrap();
+        assert!(ensure_private_method(&status).is_ok());
+    }
 
     #[test]
     fn collateral_snapshot_uses_subsecond_remaining_time_and_rejects_expiry() {

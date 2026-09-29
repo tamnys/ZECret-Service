@@ -35,6 +35,21 @@ pub const QUOTE_SOCKET_PATH: &str = "/run/zrpc-quote/quote.sock";
 /// A second Unix socket carries only a one-byte liveness acknowledgement.
 /// Its held connection closes if either the bridge or wrapper exits.
 pub const QUOTE_WATCH_SOCKET_PATH: &str = "/run/zrpc-quote/watch.sock";
+/// Stock Phala preview permits this exact root-owned host socket path only.
+pub const STOCK_DSTACK_SOCKET_PATH: &str = "/run/dstack.sock";
+
+#[derive(Clone, Copy)]
+enum BackendAccess {
+    Private,
+    StockPreview,
+}
+
+fn backend_permissions_ok(path: &Path, mode: u32, uid: u32, access: BackendAccess) -> bool {
+    match access {
+        BackendAccess::Private => mode & 0o077 == 0,
+        BackendAccess::StockPreview => path == Path::new(STOCK_DSTACK_SOCKET_PATH) && uid == 0,
+    }
+}
 
 fn unavailable() -> SafeError {
     SafeError::new(
@@ -56,6 +71,25 @@ impl QuoteOnlyBridge {
     /// step succeeds. A fresh owner-only directory hides bind/chmod races and
     /// its continued existence denies a same-boot restart after any failure.
     pub fn bind_private(directory: &Path, backend: &Path) -> Result<Self, SafeError> {
+        Self::bind_with_access(directory, backend, BackendAccess::Private)
+    }
+
+    /// Stock Phala's root-owned dstack socket is world-accessible inside the
+    /// quote container. This explicit preview path cannot be used to approve
+    /// private operation; deployment must isolate that mount from the app.
+    pub fn bind_stock_preview(directory: &Path) -> Result<Self, SafeError> {
+        Self::bind_with_access(
+            directory,
+            Path::new(STOCK_DSTACK_SOCKET_PATH),
+            BackendAccess::StockPreview,
+        )
+    }
+
+    fn bind_with_access(
+        directory: &Path,
+        backend: &Path,
+        access: BackendAccess,
+    ) -> Result<Self, SafeError> {
         if !directory.is_absolute()
             || directory
                 .components()
@@ -74,13 +108,21 @@ impl QuoteOnlyBridge {
             .map_err(|_| unavailable())?;
         fs::set_permissions(&watch_path, Permissions::from_mode(0o660))
             .map_err(|_| unavailable())?;
-        let mut bridge = Self::new(listener, backend)?;
+        let mut bridge = Self::new_with_access(listener, backend, access)?;
         bridge.watch_listener = Some(watch_listener);
         fs::set_permissions(directory, Permissions::from_mode(0o750)).map_err(|_| unavailable())?;
         Ok(bridge)
     }
 
     pub fn new(listener: UnixListener, backend: &Path) -> Result<Self, SafeError> {
+        Self::new_with_access(listener, backend, BackendAccess::Private)
+    }
+
+    fn new_with_access(
+        listener: UnixListener,
+        backend: &Path,
+        access: BackendAccess,
+    ) -> Result<Self, SafeError> {
         let listener_address = listener.local_addr().map_err(|_| unavailable())?;
         let listener_path = listener_address.as_pathname().ok_or_else(unavailable)?;
         let listener_metadata =
@@ -94,7 +136,12 @@ impl QuoteOnlyBridge {
                 .components()
                 .any(|part| matches!(part, Component::ParentDir))
             || !backend_metadata.file_type().is_socket()
-            || backend_metadata.mode() & 0o077 != 0
+            || !backend_permissions_ok(
+                backend,
+                backend_metadata.mode(),
+                backend_metadata.uid(),
+                access,
+            )
             || listener_path == backend
         {
             return Err(unavailable());

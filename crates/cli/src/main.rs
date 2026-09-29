@@ -7,7 +7,9 @@ use std::{
 };
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_lifecycle::{DeploymentManifest, PlanInput};
-use zrpc_protocol::{Backend, ErrorCode, SafeError};
+use zrpc_protocol::{
+    Backend, ErrorCode, PREVIEW_TESTNET_ADDRESS, SafeError, TestnetTransparentAddress,
+};
 
 mod ledger;
 mod provider_deletion;
@@ -24,14 +26,17 @@ zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpo
 zrpc query --stdin [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
 zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
+zrpc preview --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE [--address TESTNET_TRANSPARENT_ADDRESS]
+zrpc dashboard --preview --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE [--address TESTNET_TRANSPARENT_ADDRESS] [--no-open]
 zrpc demo [--no-open]
 zrpc plan --input FILE
 zrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER
 zrpc teardown --simulate --manifest FILE
 zrpc lifecycle --help
 GCP operator tooling: zrpc-gcp-lifecycle --help
-The default platform is gcp-tdx. Phala commands additionally require --app-compose FILE.
+The default platform is gcp-tdx. Phala private and workload-inspection commands additionally require --app-compose FILE.
 Public inspection uses the configured local SOCKS. Once an approved release exists, private commands start a local Tor child with a private Unix SOCKS socket; no direct mode exists.
+Live Phala testnet preview verifies a TDX quote, current collateral, fresh challenge, and retained managed-Tor TLS key, then reads public testnet status and one validated testnet transparent address balance. The public fixture address is the default. Workload identity is unverified and private mode remains unavailable.
 The compiled approved-release catalog is empty; private queries remain blocked.";
 
 fn print_json(value: impl serde::Serialize) -> Result<(), String> {
@@ -240,15 +245,45 @@ async fn run() -> Result<(), String> {
             print_json(report)?;
             if failed{std::process::exit(1)}else{Ok(())}
         },
+        "preview"=>{
+            let inputs=preview_inputs(&mut args)?;
+            exhausted(&args)?;
+            match zrpc_client::inspection::preview_testnet(
+                &inputs.config,&inputs.collateral,&inputs.address).await {
+                Ok(report)=>{
+                    let complete=report.public_preview_passed && report.preview.is_some();
+                    print_json(json!({"mode":"live_testnet_preview","simulation":false,
+                        "platform":inputs.config.platform(),"private_accepted":false,
+                        "query_sent":false,"privacy_verification":"unavailable",
+                        "report":report,"error":null}))?;
+                    if !complete {std::process::exit(1)}
+                    Ok(())
+                },
+                Err(error)=>{
+                    print_json(json!({"mode":"live_testnet_preview","simulation":false,
+                        "platform":inputs.config.platform(),"private_accepted":false,
+                        "query_sent":false,"public_query_sent":false,
+                        "privacy_verification":"unavailable",
+                        "report":null,"error":error}))?;
+                    std::process::exit(1)
+                },
+            }
+        },
         "demo"=>{
             let no_open=take_flag(&mut args,"--no-open");exhausted(&args)?;
-            serve_dashboard(None,no_open).await
+            serve_dashboard(DashboardInputs::Simulation,no_open).await
         },
         "dashboard"=>{
             let no_open=take_flag(&mut args,"--no-open");
-            let live=live_inputs(&mut args)?;
-            exhausted(&args)?;
-            serve_dashboard(Some(live),no_open).await
+            if take_flag(&mut args,"--preview") {
+                let inputs=preview_inputs(&mut args)?;
+                exhausted(&args)?;
+                serve_dashboard(DashboardInputs::Preview(inputs),no_open).await
+            } else {
+                let live=live_inputs(&mut args)?;
+                exhausted(&args)?;
+                serve_dashboard(DashboardInputs::Live(live),no_open).await
+            }
         },
         "plan"=>{
             let path=required(&mut args,"--input")?;exhausted(&args)?;
@@ -281,6 +316,43 @@ struct LiveInputs {
     policy: zrpc_verifier::ReleasePolicy,
 }
 
+enum DashboardInputs {
+    Simulation,
+    Live(LiveInputs),
+    Preview(PreviewInputs),
+}
+
+struct PreviewInputs {
+    config: zrpc_client::inspection::PreviewEndpointConfig,
+    collateral: Vec<u8>,
+    address: TestnetTransparentAddress,
+}
+
+fn preview_inputs(args: &mut Vec<String>) -> Result<PreviewInputs, String> {
+    if required(args, "--platform")? != "phala-dstack" {
+        return Err("preview platform must be phala-dstack".into());
+    }
+    let host = required(args, "--endpoint-host")?;
+    let port = required(args, "--endpoint-port")?
+        .parse::<u16>()
+        .map_err(|_| "invalid endpoint port")?;
+    let tor_executable = required(args, "--tor-executable")?;
+    let collateral_path = required(args, "--collateral")?;
+    let address = TestnetTransparentAddress::parse(
+        &take_value(args, "--address")?.unwrap_or_else(|| PREVIEW_TESTNET_ADDRESS.to_owned()),
+    )
+    .map_err(|_| "address must be a valid Zcash testnet transparent address")?;
+    let config =
+        zrpc_client::inspection::PreviewEndpointConfig::for_phala(&host, port, tor_executable)
+            .map_err(|error| error.to_string())?;
+    let collateral = fs::read(collateral_path).map_err(|_| "collateral file unavailable")?;
+    Ok(PreviewInputs {
+        config,
+        collateral,
+        address,
+    })
+}
+
 fn live_inputs(args: &mut Vec<String>) -> Result<LiveInputs, String> {
     let backend = platform(args)?;
     let host = required(args, "--endpoint-host")?;
@@ -311,15 +383,15 @@ fn live_inputs(args: &mut Vec<String>) -> Result<LiveInputs, String> {
     })
 }
 
-async fn serve_dashboard(live: Option<LiveInputs>, no_open: bool) -> Result<(), String> {
+async fn serve_dashboard(input: DashboardInputs, no_open: bool) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .map_err(|_| "loopback bind failed")?;
     let address = listener
         .local_addr()
         .map_err(|_| "loopback address unavailable")?;
-    let (session, label) = match live {
-        Some(live) => (
+    let (session, label) = match input {
+        DashboardInputs::Live(live) => (
             zrpc_cli::LocalSession::new_live(
                 address,
                 zrpc_cli::LiveConfiguration::new(
@@ -331,7 +403,18 @@ async fn serve_dashboard(live: Option<LiveInputs>, no_open: bool) -> Result<(), 
             )?,
             "LIVE CLIENT — private mode requires reviewed release acceptance",
         ),
-        None => (zrpc_cli::LocalSession::new(address)?, "SIMULATION ONLY"),
+        DashboardInputs::Preview(inputs) => (
+            zrpc_cli::LocalSession::new_preview(
+                address,
+                zrpc_cli::PreviewConfiguration::new(
+                    inputs.config,
+                    inputs.collateral,
+                    inputs.address,
+                ),
+            )?,
+            "Live testnet preview — privacy verification unavailable",
+        ),
+        DashboardInputs::Simulation => (zrpc_cli::LocalSession::new(address)?, "SIMULATION ONLY"),
     };
     let url = session.bootstrap_url()?;
     if no_open {

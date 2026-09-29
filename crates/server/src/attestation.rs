@@ -542,7 +542,8 @@ async fn handle_rpc<Q: QuoteSource>(
     };
     // Reject before reading any body unless this exact TLS session completed
     // its one nonce/exporter quote exchange. The native client independently
-    // withholds the body until it authenticates and approves that quote.
+    // gates private bodies on reviewed-release approval; the preview client
+    // sends only typed public testnet reads after diagnostic quote checks.
     if !session.attestation_issued.load(Ordering::SeqCst) || session.io.check_deadline().is_err() {
         return failure(StatusCode::FORBIDDEN);
     }

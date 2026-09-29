@@ -1,6 +1,9 @@
 //! Diagnostic authentication consumes the session but never grants query authority.
 
-use super::{PrivateDeadline, UnverifiedPublicEvidence, VerifiedRpcSession};
+use super::{
+    PreviewRpcSession, PrivateDeadline, UnverifiedPublicEvidence, VerifiedRpcSession,
+    collateral_expired,
+};
 use crate::tls::MAX_CONNECTION_LIFETIME;
 use serde::Serialize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -8,7 +11,7 @@ use zrpc_protocol::Backend;
 use zrpc_verifier::{
     ApprovedRelease, ReleasePolicy,
     gcp::BoundGcpWorkloadInspection,
-    offline::InspectionStatus,
+    offline::{BoundQuoteInspection, InspectionStatus, inspect_quote_and_report_data},
     workload::{BoundWorkloadInspection, WorkloadPolicy, inspect_workload_and_report_data},
 };
 
@@ -31,6 +34,7 @@ pub struct EndpointInspection {
     pub operation: &'static str,
     pub platform: Backend,
     pub evidence: Option<BoundWorkloadInspection>,
+    pub hardware_evidence: Option<BoundQuoteInspection>,
     pub gcp_evidence: Option<BoundGcpWorkloadInspection>,
     pub local_session_lifetime: InspectionStatus,
     pub session_observed_open: InspectionStatus,
@@ -55,6 +59,7 @@ impl EndpointInspection {
             operation: "endpoint_evidence_inspection",
             platform: Backend::PhalaDstack,
             evidence: None,
+            hardware_evidence: None,
             gcp_evidence: None,
             local_session_lifetime: InspectionStatus::NotChecked,
             session_observed_open: InspectionStatus::NotChecked,
@@ -99,6 +104,28 @@ impl EndpointInspection {
                 }),
             })
     }
+
+    /// A public-read gate only. This deliberately leaves workload identity,
+    /// release provenance, and private approval unverified.
+    pub fn public_preview_passed(&self) -> bool {
+        self.platform == Backend::PhalaDstack
+            && self.issue.is_none()
+            && self.local_session_lifetime == InspectionStatus::Verified
+            && self.session_observed_open == InspectionStatus::Verified
+            && self.local_clock == InspectionStatus::Verified
+            && self.freshness == InspectionStatus::Verified
+            && self.live_key_binding == InspectionStatus::Verified
+            && self.private_collateral_deadline.is_some()
+            && self.hardware_evidence.as_ref().is_some_and(|evidence| {
+                evidence.quote.issue.is_none()
+                    && evidence.quote.hardware_authenticity == InspectionStatus::Verified
+                    && evidence.quote.security_policy == InspectionStatus::Verified
+                    && evidence.authenticated_report_data_match == InspectionStatus::Verified
+            })
+            && self.evidence.is_none()
+            && self.approved_workload_ownership == InspectionStatus::NotChecked
+            && !self.private_accepted
+    }
 }
 
 impl UnverifiedPublicEvidence {
@@ -117,6 +144,113 @@ impl UnverifiedPublicEvidence {
         policy: &WorkloadPolicy,
     ) -> EndpointInspection {
         self.inspect_against(collateral_json, raw_app_compose, policy)
+    }
+
+    /// Retain the original connection only for typed public reads after strict
+    /// current-time QVL, nonce and exporter checks. No workload measurement is
+    /// accepted or inferred. A failed report returns no RPC session.
+    pub fn inspect_for_public_preview(
+        self,
+        collateral_json: &[u8],
+    ) -> Result<(EndpointInspection, Option<PreviewRpcSession>), zrpc_protocol::SafeError> {
+        self._session.origin.require_managed()?;
+        let report = self.inspect_public_preview_evidence(collateral_json);
+        if !report.public_preview_passed() {
+            return Ok((report, None));
+        }
+        let deadline = report
+            .private_collateral_deadline
+            .ok_or_else(collateral_expired)?;
+        let preview = PreviewRpcSession::from_public_preview_inspection(
+            self._session,
+            self.deadline,
+            self.authority,
+            deadline,
+        )?;
+        Ok((report, Some(preview)))
+    }
+
+    fn inspect_public_preview_evidence(&self, collateral_json: &[u8]) -> EndpointInspection {
+        let mut report = EndpointInspection::new();
+        self.check_session(&mut report);
+        if report.issue.is_some() {
+            return report;
+        }
+        let before = SystemTime::now();
+        let Ok(before_unix) = before.duration_since(UNIX_EPOCH) else {
+            report.local_clock = InspectionStatus::Rejected;
+            report.issue = Some(EndpointInspectionIssue::ClockUnavailable);
+            return report;
+        };
+        report.local_clock = InspectionStatus::Verified;
+        if self.evidence.nonce != self.nonce {
+            report.freshness = InspectionStatus::Rejected;
+            report.issue = Some(EndpointInspectionIssue::ChallengeMismatch);
+            return report;
+        }
+        let quote = match hex::decode(&self.evidence.quote) {
+            Ok(quote) => quote,
+            Err(_) => {
+                report.issue = Some(EndpointInspectionIssue::MalformedQuoteEncoding);
+                return report;
+            }
+        };
+        report.hardware_evidence = Some(inspect_quote_and_report_data(
+            &quote,
+            collateral_json,
+            &self.expected_report_data,
+        ));
+        report.live_key_binding = report
+            .hardware_evidence
+            .as_ref()
+            .unwrap()
+            .authenticated_report_data_match;
+        // The response's nonce echo alone is not authenticated freshness.
+        // It becomes a signed claim only when the strict quote authenticates
+        // REPORTDATA bound to this nonce-context TLS exporter.
+        if report.live_key_binding == InspectionStatus::Verified {
+            report.freshness = InspectionStatus::Verified;
+        }
+        self.check_session(&mut report);
+        let after_instant = Instant::now();
+        let after = SystemTime::now();
+        let Ok(after_unix) = after.duration_since(UNIX_EPOCH) else {
+            report.local_clock = InspectionStatus::Rejected;
+            report.issue = Some(EndpointInspectionIssue::ClockUnavailable);
+            return report;
+        };
+        let inspection = &report.hardware_evidence.as_ref().unwrap().quote;
+        match inspection.checked_at_unix_seconds {
+            None => {
+                report.local_clock = InspectionStatus::Rejected;
+                report.issue = Some(EndpointInspectionIssue::ClockUnavailable);
+            }
+            Some(checked)
+                if after < before
+                    || checked < before_unix.as_secs()
+                    || checked > after_unix.as_secs() =>
+            {
+                report.local_clock = InspectionStatus::Rejected;
+                report.issue = Some(EndpointInspectionIssue::ClockChangedDuringInspection);
+            }
+            _ => {
+                if let Some(expiration) = inspection.collateral_earliest_expiration_unix_seconds {
+                    match PrivateDeadline::from_inspection_snapshot(
+                        expiration,
+                        after,
+                        after_instant,
+                    ) {
+                        Some(deadline) => report.private_collateral_deadline = Some(deadline),
+                        None => {
+                            report.issue.get_or_insert(
+                                EndpointInspectionIssue::CollateralExpiredDuringInspection,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        report
     }
 
     /// Only client-packaged reviewed releases can authorize the retained TLS

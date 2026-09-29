@@ -11,8 +11,9 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use zrpc_client::inspection::PrivateEndpointConfig;
+use zrpc_client::inspection::{PreviewEndpointConfig, PrivateEndpointConfig};
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
+use zrpc_protocol::TestnetTransparentAddress;
 use zrpc_verifier::ReleasePolicy;
 
 const MAX_BODY: usize = 16 * 1024; // Design §9 request bound.
@@ -30,6 +31,7 @@ pub struct LocalSession {
 enum DashboardMode {
     Simulation,
     Live(LiveConfiguration),
+    Preview(PreviewConfiguration),
 }
 
 /// These are observations of the current local session, not a cached claim
@@ -86,6 +88,26 @@ pub struct LiveConfiguration {
     policy: ReleasePolicy,
 }
 
+pub struct PreviewConfiguration {
+    config: PreviewEndpointConfig,
+    collateral: Vec<u8>,
+    default_address: TestnetTransparentAddress,
+}
+
+impl PreviewConfiguration {
+    pub fn new(
+        config: PreviewEndpointConfig,
+        collateral: Vec<u8>,
+        default_address: TestnetTransparentAddress,
+    ) -> Self {
+        Self {
+            config,
+            collateral,
+            default_address,
+        }
+    }
+}
+
 impl LiveConfiguration {
     pub fn new(
         config: PrivateEndpointConfig,
@@ -129,6 +151,14 @@ impl LocalSession {
         session.mode = Arc::new(DashboardMode::Live(live));
         Ok(session)
     }
+    pub fn new_preview(
+        address: std::net::SocketAddr,
+        preview: PreviewConfiguration,
+    ) -> Result<Self, &'static str> {
+        let mut session = Self::new(address)?;
+        session.mode = Arc::new(DashboardMode::Preview(preview));
+        Ok(session)
+    }
     /// Deliver only to the deliberate local browser launch, never an application log.
     pub fn bootstrap_url(&self) -> Result<String, &'static str> {
         let guard = self
@@ -162,7 +192,9 @@ async fn boundary(State(session): State<LocalSession>, request: Request, next: N
     let valid = exactly(headers, "host", &session.host)
         && origin_ok
         && !headers.contains_key(header::UPGRADE)
-        && request.uri().query().is_none()
+        && (request.uri().query().is_none()
+            || (matches!(session.mode.as_ref(), DashboardMode::Preview(_))
+                && request.uri().path() == "/api/preview"))
         && (!api || request.method() == Method::POST);
     let authorized = if api && request.uri().path() != "/api/bootstrap" {
         exactly(
@@ -211,14 +243,23 @@ async fn bootstrap(State(session): State<LocalSession>, headers: HeaderMap) -> R
     let mode = match session.mode.as_ref() {
         DashboardMode::Simulation => "simulation",
         DashboardMode::Live(_) => "live_unverified",
+        DashboardMode::Preview(_) => "live_testnet_preview",
     };
     let platform = match session.mode.as_ref() {
         DashboardMode::Simulation => None,
         DashboardMode::Live(live) => Some(live.config.platform()),
+        DashboardMode::Preview(preview) => Some(preview.config.platform()),
     };
     Json(json!({"capability":session.capability,"mode":mode,"platform":platform})).into_response()
 }
 async fn query(State(session): State<LocalSession>, request: Request) -> Response {
+    if matches!(session.mode.as_ref(), DashboardMode::Preview(_)) {
+        return (
+            StatusCode::NOT_FOUND,
+            "private query unavailable in preview",
+        )
+            .into_response();
+    }
     // Retain the local body stream without polling it. In live mode the Rust
     // client must approve the remote connection before it reads the request.
     let (parts, body) = request.into_parts();
@@ -305,6 +346,53 @@ async fn query(State(session): State<LocalSession>, request: Request) -> Respons
     };
     Json(SimulationClient::query(&body, scenario)).into_response()
 }
+
+async fn preview(State(session): State<LocalSession>, request: Request) -> Response {
+    let DashboardMode::Preview(config) = session.mode.as_ref() else {
+        return (StatusCode::NOT_FOUND, "preview unavailable").into_response();
+    };
+    let (parts, _body) = request.into_parts();
+    let headers = &parts.headers;
+    // No body is accepted or polled. Only an address validated by the shared
+    // protocol parser can become a typed public Zebra query.
+    if headers.contains_key(header::TRANSFER_ENCODING)
+        || headers.get_all(header::CONTENT_LENGTH).iter().count() > 1
+        || headers
+            .get(header::CONTENT_LENGTH)
+            .is_some_and(|value| value != "0")
+    {
+        return (StatusCode::BAD_REQUEST, "preview takes no request body").into_response();
+    }
+    let address = match parts.uri.query() {
+        Some(query) => match query
+            .strip_prefix("address=")
+            .and_then(|value| TestnetTransparentAddress::parse(value).ok())
+        {
+            Some(address) => address,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    "invalid testnet transparent address",
+                )
+                    .into_response();
+            }
+        },
+        None => config.default_address.clone(),
+    };
+    match zrpc_client::inspection::preview_testnet(&config.config, &config.collateral, &address)
+        .await
+    {
+        Ok(report) => Json(json!({"mode":"live_testnet_preview","simulation":false,
+            "platform":config.config.platform(),"private_accepted":false,"query_sent":false,
+            "privacy_verification":"unavailable","report":report,"error":null}))
+        .into_response(),
+        Err(error) => Json(json!({"mode":"live_testnet_preview","simulation":false,
+            "platform":config.config.platform(),"private_accepted":false,"query_sent":false,
+            "public_query_sent":false,
+            "privacy_verification":"unavailable","report":null,"error":error}))
+        .into_response(),
+    }
+}
 async fn status(State(session): State<LocalSession>) -> Response {
     match session.mode.as_ref() {
         DashboardMode::Simulation => Json(json!(PrivateClient::new().verify())).into_response(),
@@ -314,6 +402,14 @@ async fn status(State(session): State<LocalSession>) -> Response {
             "chain_readiness":"not_checked","result":null}),
         )
         .into_response(),
+        DashboardMode::Preview(preview) => {
+            Json(json!({"mode":"live_testnet_preview","simulation":false,
+            "platform":preview.config.platform(),
+            "private_accepted":false,"query_sent":false,"public_query_sent":false,
+            "privacy_verification":"unavailable","report":null,
+            "default_address":preview.default_address.as_str(),"error":null}))
+            .into_response()
+        }
     }
 }
 async fn index() -> impl IntoResponse {
@@ -342,6 +438,7 @@ pub fn dashboard(session: LocalSession) -> Router {
         .route("/style.css", get(style))
         .route("/api/bootstrap", post(bootstrap))
         .route("/api/query", post(query))
+        .route("/api/preview", post(preview))
         .route("/api/status", post(status))
         .fallback(|| async { (StatusCode::NOT_FOUND, "not found") })
         .layer(DefaultBodyLimit::max(MAX_BODY))
@@ -519,6 +616,81 @@ mod tests {
             assert_eq!(report["verification"]["channel_binding"], "not_verified");
             assert_eq!(report["verification"]["release_approval"], "not_approved");
         }
+    }
+    #[tokio::test]
+    async fn preview_dashboard_rejects_request_bodies_and_private_query_route() {
+        let config =
+            PreviewEndpointConfig::for_phala("fixture.invalid", 443, "/missing/local/tor").unwrap();
+        let preview = PreviewConfiguration::new(
+            config,
+            b"{}".to_vec(),
+            TestnetTransparentAddress::parse(zrpc_protocol::PREVIEW_TESTNET_ADDRESS).unwrap(),
+        );
+        let state = LocalSession::new_preview("127.0.0.1:32123".parse().unwrap(), preview).unwrap();
+        let app = dashboard(state.clone());
+        let mut private = call("/api/query", &state.host, &state.origin, &state.capability);
+        *private.body_mut() = Body::from("SYNTHETIC_PRIVATE_MARKER");
+        assert_eq!(
+            app.clone().oneshot(private).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        let mut arbitrary = call(
+            "/api/preview",
+            &state.host,
+            &state.origin,
+            &state.capability,
+        );
+        arbitrary
+            .headers_mut()
+            .insert(header::CONTENT_LENGTH, HeaderValue::from_static("2"));
+        assert_eq!(
+            app.clone().oneshot(arbitrary).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        for uri in [
+            "/api/preview?address=t1Hsc1LR8yKnbbe3twRp88p6vFfC5t7DLbs",
+            "/api/preview?address=tmArbitraryAddress",
+            "/api/preview?method=sendrawtransaction",
+            "/api/preview?address=tmTc6trRhbv96kGfA99i7vrFwb5p7BVFwc3&method=getblockcount",
+        ] {
+            let invalid = call(uri, &state.host, &state.origin, &state.capability);
+            assert_eq!(
+                app.clone().oneshot(invalid).await.unwrap().status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let supplied = call(
+            "/api/preview?address=tm9iMLAuYMzJ6jtFLcA7rzUmfreGuKvr7Ma",
+            &state.host,
+            &state.origin,
+            &state.capability,
+        );
+        let supplied_response = app.clone().oneshot(supplied).await.unwrap();
+        assert_eq!(supplied_response.status(), StatusCode::OK);
+        let supplied_body = to_bytes(supplied_response.into_body(), MAX_BODY)
+            .await
+            .unwrap();
+        let supplied_report: serde_json::Value = serde_json::from_slice(&supplied_body).unwrap();
+        assert_eq!(supplied_report["error"]["code"], "tor_unavailable");
+        let empty = Request::builder()
+            .method("POST")
+            .uri("/api/preview")
+            .header("host", &state.host)
+            .header("origin", &state.origin)
+            .header("authorization", format!("Bearer {}", state.capability))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(empty).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["mode"], "live_testnet_preview");
+        assert_eq!(report["private_accepted"], false);
+        assert_eq!(report["query_sent"], false);
+        assert_eq!(report["public_query_sent"], false);
+        assert!(report["report"].is_null());
+        assert_eq!(report["error"]["code"], "tor_unavailable");
+        assert!(!String::from_utf8_lossy(&body).contains("SYNTHETIC_PRIVATE_MARKER"));
     }
     #[tokio::test]
     async fn live_status_reports_separate_unverified_gates_without_network() {

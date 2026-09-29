@@ -28,8 +28,9 @@ mod tls;
 #[cfg(unix)]
 pub use managed_tor::ManagedTor;
 pub use tls::{
-    EndpointInspection, EndpointInspectionIssue, PendingChallenge, PublicBootstrapTls,
-    UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
+    EndpointInspection, EndpointInspectionIssue, PendingChallenge, PreviewRpcSession,
+    PublicBootstrapTls, PublicTestnetPreview, UnverifiedGcpEvidence, UnverifiedPublicEvidence,
+    VerifiedRpcSession,
 };
 
 /// A configuration value is not evidence that Tor is connected or functional.

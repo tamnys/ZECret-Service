@@ -1,12 +1,16 @@
-//! Measured-guest-only quote bridge. The guest image must install the fixed
-//! systemd unit/group and keep the dstack agent socket root-only.
+//! Quote-only bridge. The default measured-guest path requires a root-only
+//! dstack socket; explicit stock preview tolerates the root-owned stock mode.
 
 use std::path::Path;
 use zrpc_server::quote_proxy::{QUOTE_SOCKET_PATH, QuoteOnlyBridge};
 
 const DSTACK_SOCKET: &str = "/run/dstack.sock";
 
-fn bind_ready_bridge(quote_dir: &Path, backend: &Path) -> Result<QuoteOnlyBridge, &'static str> {
+fn bind_ready_bridge(
+    quote_dir: &Path,
+    backend: &Path,
+    stock_preview: bool,
+) -> Result<QuoteOnlyBridge, &'static str> {
     // sd-notify 0.4.5 treats an absent variable as success and supports only
     // pathname sockets. The measured guest must supply a compatible absolute
     // NOTIFY_SOCKET; abstract addresses fail closed in this source candidate.
@@ -15,8 +19,15 @@ fn bind_ready_bridge(quote_dir: &Path, backend: &Path) -> Result<QuoteOnlyBridge
     if !Path::new(&notify_socket).is_absolute() {
         return Err("systemd notification socket must be an absolute pathname");
     }
-    let bridge = QuoteOnlyBridge::bind_private(quote_dir, backend)
-        .map_err(|_| "private quote socket unavailable")?;
+    let bridge = if stock_preview {
+        if backend != Path::new(DSTACK_SOCKET) {
+            return Err("stock preview requires the fixed dstack socket");
+        }
+        QuoteOnlyBridge::bind_stock_preview(quote_dir)
+    } else {
+        QuoteOnlyBridge::bind_private(quote_dir, backend)
+    }
+    .map_err(|_| "private quote socket unavailable")?;
     // This process owns both published listeners before reporting readiness.
     // Do not unset process-wide environment after Tokio has started threads.
     sd_notify::notify(false, &[sd_notify::NotifyState::Ready])
@@ -25,9 +36,12 @@ fn bind_ready_bridge(quote_dir: &Path, backend: &Path) -> Result<QuoteOnlyBridge
 }
 
 async fn run() -> Result<(), &'static str> {
-    if std::env::args_os().len() != 1 {
-        return Err("quote bridge takes no runtime options");
-    }
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let stock_preview = match args.as_slice() {
+        [] => false,
+        [flag] if flag == "--stock-preview" => true,
+        _ => return Err("quote bridge accepts only --stock-preview"),
+    };
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(|_| "shutdown signal unavailable")?;
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -38,7 +52,7 @@ async fn run() -> Result<(), &'static str> {
     let quote_dir = Path::new(QUOTE_SOCKET_PATH)
         .parent()
         .ok_or("quote bridge path unavailable")?;
-    let bridge = bind_ready_bridge(quote_dir, Path::new(DSTACK_SOCKET))?;
+    let bridge = bind_ready_bridge(quote_dir, Path::new(DSTACK_SOCKET), stock_preview)?;
     bridge
         .run(async move {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
@@ -179,7 +193,7 @@ mod tests {
         } else {
             "backend.sock"
         });
-        let bridge = bind_ready_bridge(&root.join("bridge"), &backend);
+        let bridge = bind_ready_bridge(&root.join("bridge"), &backend, false);
         if case == "ready" {
             let _bridge = bridge.expect("published bridge must notify");
             for name in ["quote.sock", "watch.sock"] {
