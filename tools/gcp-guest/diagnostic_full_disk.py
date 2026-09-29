@@ -329,7 +329,17 @@ def verify_diagnostic_signature(stage, builder_archives, workspace,
                             env={"HOME": "/nonexistent", "LC_ALL": "C",
                                  "PATH": "/usr/bin:/bin"})
     if result.returncode:
-        raise ValueError("pinned verifier rejected synthetic signed UKI")
+        try:
+            blocked = json.loads(result.stdout, object_pairs_hook=prepare.unique_object)
+            reason = (blocked.get("reason") if type(blocked) is dict
+                      and blocked.get("status") == "blocked"
+                      and blocked.get("private_mode_approved") is False else None)
+        except (ValueError, UnicodeError, TypeError):
+            reason = None
+        if (type(reason) is not str or not reason.isascii()
+                or not reason.isprintable() or len(reason) > 128):
+            reason = "no bounded verifier reason"
+        raise ValueError("pinned verifier rejected synthetic signed UKI: " + reason)
     signature = json.loads(result.stdout, object_pairs_hook=prepare.unique_object)
     if (type(signature) is not dict
             or signature.get("status") !=

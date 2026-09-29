@@ -712,6 +712,21 @@ class DiagnosticDiskTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][:3],
                              ["/usr/bin/python3", "-I", "-B"])
             self.assertIn("diagnostic-verify-uki", run.call_args.args[0])
+        blocked = {"status": "blocked", "private_mode_approved": False,
+                   "reason": "UKI Authenticode signature rejected by reviewed sbverify binary"}
+        with mock.patch.object(diagnostic.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=1,
+                                 stdout=json.dumps(blocked).encode())):
+            with self.assertRaisesRegex(ValueError, blocked["reason"]):
+                diagnostic.verify_diagnostic_signature(
+                    stage, self.root, self.root, bundle, "a" * 40, uki_sha256)
+        blocked["private_mode_approved"] = True
+        with mock.patch.object(diagnostic.subprocess, "run",
+                               return_value=SimpleNamespace(returncode=1,
+                                 stdout=json.dumps(blocked).encode())):
+            with self.assertRaisesRegex(ValueError, "no bounded verifier reason"):
+                diagnostic.verify_diagnostic_signature(
+                    stage, self.root, self.root, bundle, "a" * 40, uki_sha256)
         for changed in ({**accepted, "signed_uki_checked": False},
                         {**accepted, "uki_sha256": "0" * 64},
                         {**accepted, "signer_certificate_sha256": "0" * 64},
