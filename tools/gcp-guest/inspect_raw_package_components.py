@@ -268,7 +268,12 @@ def inspect_components(plan, verified_overlay, inventory, lookup_inode,
                        ("mode", "uid", "gid"))
                 or (inode["mode"], inode["uid"], inode["gid"]) !=
                    (expected["mode"], expected["uid"], expected["gid"])):
-            raise ValueError("raw package component type, mode, or owner differs: " + path)
+            fields = ("type", "mode", "uid", "gid")
+            observed = {field: inode.get(field) for field in fields}
+            reviewed = {field: expected[field] for field in fields}
+            raise ValueError("raw package component type, mode, or owner differs: "
+                             + path + " observed=" + repr(observed)
+                             + " expected=" + repr(reviewed))
         if "mtime_ns" in expected:
             if (type(inode.get("mtime_ns")) is not int
                     or inode["mtime_ns"] != expected["mtime_ns"]):
