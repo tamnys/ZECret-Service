@@ -160,6 +160,10 @@ class RawRootfsTest(unittest.TestCase):
         metadata = {"filesystem_uuid": "2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
                     "filesystem_created_utc": "Mon Sep 28 12:34:56 2026",
                     "directory_hash_seed": "3b84d5f6-2c3d-4e5f-901a-b2c3d4e5f607"}
+        inventory = {"": {"inode": 2, "type": "directory", "mode": 0o755,
+                          "uid": 0, "gid": 0, "size": None}}
+        package_report = {"components_checked": {"regular": 1, "directory": 1,
+                                                 "symlink": 0, "removed": 1}}
         with mock.patch.object(rootfs.platform, "system", return_value="Linux"), \
                 mock.patch.object(rootfs.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(rootfs.verity.esp, "workspace_scratch", return_value=self.root), \
@@ -172,6 +176,9 @@ class RawRootfsTest(unittest.TestCase):
                                   return_value=nullcontext((Path("/synthetic/debugfs"), 7))), \
                 mock.patch.object(rootfs, "inspect_entries", return_value={
                     "file": 0, "directory": 0, "symlink": 0}), \
+                mock.patch.object(rootfs.forbidden, "inspect", return_value=inventory) as surfaces, \
+                mock.patch.object(rootfs.components, "inspect_authenticated_components",
+                                  return_value=package_report) as components, \
                 mock.patch.object(rootfs, "run_superblock_stats", return_value=metadata) as stats:
             result = rootfs.inspect(self.root / "disk.raw", raw_sha256, 8192, 512,
                                     layout, verified, self.root / "InRelease",
@@ -179,9 +186,17 @@ class RawRootfsTest(unittest.TestCase):
                                     self.stage, self.manifest, self.root)
         self.assertEqual(stats.call_args.args[1], root)
         self.assertEqual(stats.call_args.kwargs["pass_fds"], (7,))
+        self.assertEqual(surfaces.call_args.args[:2], (Path("/synthetic/debugfs"), root))
+        self.assertEqual(surfaces.call_args.kwargs["pass_fds"], (7,))
+        self.assertEqual(components.call_args.args[:3],
+                         (self.root, self.stage / "packages", {}))
         self.assertEqual({key: result[key] for key in metadata}, metadata)
         self.assertEqual(result["root_partition_sha256"], digest(root.read_bytes()))
         self.assertEqual(result["status"], rootfs.STATUS)
+        self.assertEqual(result["raw_root_inventory_entries"], 1)
+        self.assertEqual(result["authenticated_package_components_checked"],
+                         package_report["components_checked"])
+        self.assertIs(result["forbidden_surfaces_checked"], True)
         self.assertIs(result["boot_verified"], False)
         self.assertIs(result["private_mode_approved"], False)
 

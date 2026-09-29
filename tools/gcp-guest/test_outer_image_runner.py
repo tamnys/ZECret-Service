@@ -482,6 +482,11 @@ class OuterImageRunnerTest(unittest.TestCase):
                              "raw_disk_bytes": files["zrpc-gcp.raw"][0],
                              "root_partition_guid": "root-guid",
                              "reader_executable_matches_signed_package": True,
+                             "forbidden_surfaces_checked": True,
+                             "raw_root_inventory_entries": 1,
+                             "authenticated_package_components_checked": {
+                                 "regular": 1, "directory": 1,
+                                 "symlink": 0, "removed": 1},
                              "private_mode_approved": False}
             rootfs_inspect = mock.Mock(return_value=rootfs_report)
             source = types.SimpleNamespace(
@@ -538,6 +543,20 @@ class OuterImageRunnerTest(unittest.TestCase):
             self.assertEqual(result["final_initrd_audit"]["final_initrd_sha256"],
                              files["zrpc-gcp.initrd"][1])
             self.assertFalse(result["gcp_import_package_size_eligible"])
+            rootfs_report["forbidden_surfaces_checked"] = False
+            with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
+                    "signature must not run without forbidden-surface audit")):
+                with self.assertRaisesRegex(ValueError, "raw rootfs workload inspection"):
+                    runner.inspect_outputs(context, stage, rust, metadata, archives,
+                                           workspace, {}, files, {})
+            rootfs_report["forbidden_surfaces_checked"] = True
+            rootfs_report["authenticated_package_components_checked"]["regular"] = 0
+            with mock.patch.object(runner.subprocess, "run", side_effect=AssertionError(
+                    "signature must not run without package identity audit")):
+                with self.assertRaisesRegex(ValueError, "raw rootfs workload inspection"):
+                    runner.inspect_outputs(context, stage, rust, metadata, archives,
+                                           workspace, {}, files, {})
+            rootfs_report["authenticated_package_components_checked"]["regular"] = 1
             verity_report["one_byte_root_change_rejected"] = False
             with self.assertRaisesRegex(ValueError, "signed verity negative check"):
                 runner.inspect_outputs(context, stage, rust, metadata, archives,

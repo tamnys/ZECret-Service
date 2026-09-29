@@ -58,6 +58,8 @@ ADDITIONAL_SCRIPTS = (
     "tools/gcp-guest/inspect_final_initrd.py",
     "tools/gcp-guest/inspect_raw_rootfs.py",
     "tools/gcp-guest/prepare_import_disk.py",
+    "tools/gcp-guest/inspect_raw_package_components.py",
+    "tools/gcp-guest/inspect_raw_forbidden.py",
 )
 STATIC_SOURCE_FILES = (
     "tools/gcp-guest/audit-rootfs.py",
@@ -245,9 +247,13 @@ def source_context(revision, rust_bundle):
     gpt = bind_file_module("inspect_raw_gpt", ADDITIONAL_SCRIPTS[1], selected, revision)
     esp = bind_file_module("inspect_raw_esp", ADDITIONAL_SCRIPTS[2], selected, revision)
     verity = bind_file_module("inspect_raw_verity", ADDITIONAL_SCRIPTS[3], selected, revision)
+    forbidden = bind_file_module(
+        "inspect_raw_forbidden", ADDITIONAL_SCRIPTS[12], selected, revision)
+    package_components = bind_file_module(
+        "inspect_raw_package_components", ADDITIONAL_SCRIPTS[11], selected, revision)
     return types.SimpleNamespace(
         selected=selected, source=source, package=package, gpt=gpt, esp=esp,
-        verity=verity,
+        verity=verity, package_components=package_components, forbidden=forbidden,
         packages=bind_file_module("outer_package_closure", ADDITIONAL_SCRIPTS[0],
                                   selected, revision),
         roothash=bind_file_module("inspect_raw_roothash", ADDITIONAL_SCRIPTS[4],
@@ -642,6 +648,15 @@ def inspect_outputs(context, stage, rust_bundle, metadata, builder_archives,
             or rootfs.get("raw_disk_bytes") != raw_bytes
             or rootfs.get("root_partition_guid") != verity.get("root_partition_guid")
             or rootfs.get("reader_executable_matches_signed_package") is not True
+            or rootfs.get("forbidden_surfaces_checked") is not True
+            or type(rootfs.get("raw_root_inventory_entries")) is not int
+            or rootfs["raw_root_inventory_entries"] <= 0
+            or type(rootfs.get("authenticated_package_components_checked")) is not dict
+            or set(rootfs["authenticated_package_components_checked"])
+            != {"regular", "directory", "symlink", "removed"}
+            or any(type(count) is not int or count < 0 for count in
+                   rootfs["authenticated_package_components_checked"].values())
+            or rootfs["authenticated_package_components_checked"]["regular"] == 0
             or rootfs.get("private_mode_approved") is not False):
         raise ValueError("raw rootfs workload inspection did not bind output")
     if (files["zrpc-gcp.efi"][1] != esp["uki_sha256"]
@@ -986,6 +1001,11 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
             or workload.get("root_partition_sha256") !=
                original["raw_rootfs_audit"]["root_partition_sha256"]
             or workload.get("reader_executable_matches_signed_package") is not True
+            or workload.get("forbidden_surfaces_checked") is not True
+            or workload.get("raw_root_inventory_entries") !=
+               original["raw_rootfs_audit"]["raw_root_inventory_entries"]
+            or workload.get("authenticated_package_components_checked") !=
+               original["raw_rootfs_audit"]["authenticated_package_components_checked"]
             or workload.get("private_mode_approved") is not False
             or boot.get("uki_sha256") != original["uki_sha256"]
             or binding.get("roothash") != original["roothash"]

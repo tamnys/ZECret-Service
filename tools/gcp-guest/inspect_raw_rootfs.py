@@ -23,6 +23,8 @@ import subprocess
 import tempfile
 
 import inspect_raw_verity as verity
+import inspect_raw_forbidden as forbidden
+import inspect_raw_package_components as components
 
 
 STATUS = "diagnostic-raw-root-overlay-bytes-matched-unapproved"
@@ -229,7 +231,7 @@ def run_stat(reader, image, relative, *, env=ENV, pass_fds=()):
     link = FAST_LINK.findall(output)
     if len(link) > 1:
         raise ValueError("signed debugfs symlink report is ambiguous")
-    return {"type": header[2], "mode": int(header[3], 8),
+    return {"inode": int(header[1]), "type": header[2], "mode": int(header[3], 8),
             "uid": int(owner_size[0][0]), "gid": int(owner_size[0][1]),
             "size": int(owner_size[0][2]), "link": link[0] if link else None}
 
@@ -338,6 +340,9 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
             or verified_verity.get("private_mode_approved") is not False):
         raise ValueError("raw rootfs inspection requires matching verified disk reports")
     workspace = verity.esp.workspace_scratch(workspace)
+    if (inrelease.name != "InRelease"
+            or packages_index != inrelease.with_name("Packages.xz")):
+        raise ValueError("rootfs package authentication requires matching metadata paths")
     selected = checked_overlay(manifest, stage)
     signed_reader, archive_sha256 = signed_reader_bytes(inrelease, packages_index, archives)
     reader_sha256 = checked_reader(signed_reader)
@@ -354,8 +359,30 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
         # The installed executable is checked for build consistency, but the
         # inspected bytes are read using this immutable package-member fd.
         with verity.closure.sealed_elf_bytes(signed_reader) as (reader, descriptor):
+            inventory = forbidden.inspect(reader, root, scratch,
+                                          pass_fds=(descriptor,))
             checked = inspect_entries(reader, root, selected, scratch,
                                       pass_fds=(descriptor,))
+            def lookup_inode(path):
+                entry = inventory.get(path)
+                if entry is None:
+                    return None
+                observed = {**entry, "type": "regular" if entry["type"] == "file"
+                            else entry["type"]}
+                if entry["type"] == "symlink":
+                    link = run_stat(reader, root, path, pass_fds=(descriptor,))
+                    if any(link[field] != observed[field] for field in
+                           ("inode", "type", "mode", "uid", "gid", "size")):
+                        raise ValueError("raw rootfs symlink inventory differs: " + path)
+                    observed["link"] = link["link"]
+                return observed
+
+            package = components.inspect_authenticated_components(
+                inrelease.parent, stage / "packages", selected, inventory,
+                lookup_inode,
+                lambda path, size: run_cat(reader, root, path, size, scratch,
+                                           pass_fds=(descriptor,)),
+            )
             superblock = run_superblock_stats(reader, root, pass_fds=(descriptor,))
     return {"status": STATUS, "raw_disk_sha256": expected_sha256,
             "raw_disk_bytes": expected_bytes,
@@ -363,6 +390,9 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
             "root_partition_sha256": root_sha256,
             **superblock,
             "overlay_entries_checked": checked,
+            "raw_root_inventory_entries": len(inventory),
+            "authenticated_package_components_checked": package["components_checked"],
+            "forbidden_surfaces_checked": True,
             "staged_builder_debugfs_sha256": reader_sha256,
             "signed_e2fsprogs_archive_sha256": archive_sha256,
             "reader_executable_matches_signed_package": True,
