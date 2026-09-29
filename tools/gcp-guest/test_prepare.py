@@ -83,6 +83,9 @@ class CandidateTests(unittest.TestCase):
         self.audit_mount_owner_patch = mock.patch.object(
             audit_rootfs, "MOUNT_OWNER", (os.getuid(), os.getgid()))
         self.audit_mount_owner_patch.start()
+        self.audit_machine_id_owner_patch = mock.patch.object(
+            audit_rootfs, "MACHINE_ID_OWNER", (os.getuid(), os.getgid()))
+        self.audit_machine_id_owner_patch.start()
         self.audit_disk_elf_patch = mock.patch.dict(
             audit_rootfs.SIGNED_DISK_ELFS,
             {name: (len(b"SYNTHETIC"), hashlib.sha256(b"SYNTHETIC").hexdigest(), mode)
@@ -99,6 +102,7 @@ class CandidateTests(unittest.TestCase):
             path.chmod(mode)
 
     def tearDown(self):
+        self.audit_machine_id_owner_patch.stop()
         self.audit_mount_owner_patch.stop()
         self.audit_mount_hash_patch.stop()
         self.mount_identity_patch.stop()
@@ -345,6 +349,12 @@ class CandidateTests(unittest.TestCase):
         for unit in ("systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service",
                      "systemd-udev-load-credentials.service", "systemd-network-generator.service"):
             self.assertEqual((output / "rootfs/etc/systemd/system" / unit).readlink(), Path("/dev/null"))
+        self.assertEqual(set(prepare.RETAINED_UNIT_LINKS), set(audit_rootfs.RETAINED_UNIT_LINKS))
+        for relative, target in prepare.RETAINED_UNIT_LINKS.items():
+            self.assertEqual((output / "rootfs/etc/systemd/system" / relative).readlink(),
+                             Path("/usr/lib/systemd/system") / target)
+        self.assertFalse((output / "rootfs/etc/systemd/system/ctrl-alt-del.target").exists())
+        self.assertIn("systemd.mask=ctrl-alt-del.target", prepare.FIXED_KERNEL_CMDLINE)
         self.assertEqual(
             (output / "rootfs/etc/systemd/system/systemd-resolved.service.d/10-no-credentials.conf").read_bytes(),
             audit_rootfs.RESOLVED_CREDENTIAL_DROPIN_BYTES,
@@ -370,6 +380,7 @@ class CandidateTests(unittest.TestCase):
         self.assertFalse((output / "rootfs/run/zrpc-build-signing").exists())
         self.assertIn("PackageDirectories=packages", config)
         self.assertIn("PackageCacheDirectory=package-cache", config)
+        self.assertEqual(config.count("CleanPackageMetadata=yes\n"), 1)
         self.assertEqual(config.count("RemoveFiles="), 1)
         self.assertIn("RemoveFiles=" + ",".join(prepare.ROOT_REMOVE_FILES) + "\n", config)
         self.assertEqual(config.count("FinalizeScripts=seal-shadow.py,sanitize-mount.py,audit-rootfs.py\n"), 1)
@@ -502,6 +513,7 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.conf", "KernelModulesInitrdInclude=^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdInclude=.*"),
             ("mkosi.conf", "KernelModulesInitrdExclude=.*", "KernelModulesInitrdExclude="),
             ("mkosi.conf", "systemd.import_credentials=no", "systemd.import_credentials=yes"),
+            ("mkosi.conf", "systemd.mask=ctrl-alt-del.target", ""),
             ("mkosi.conf", "systemd.import_credentials=no ", ""),
             ("mkosi.conf", "systemd.import_credentials=no", "systemd.import_credentials=no systemd.import_credentials=yes"),
             ("mkosi.conf", "pstore.backend=none ", ""),
@@ -510,6 +522,7 @@ class CandidateTests(unittest.TestCase):
             ("mkosi.conf", "Dependencies=initrd", "Dependencies="),
             ("mkosi.conf", "Bootloader=uki", "Bootloader=systemd-boot"),
             ("mkosi.conf", "ExtraTrees=rootfs", "ExtraTrees=rootfs\nPostOutputScripts=unreviewed.sh"),
+            ("mkosi.conf", "CleanPackageMetadata=yes", "CleanPackageMetadata=auto"),
             ("mkosi.conf", "RemoveFiles=/usr/sbin/unix_chkpwd,", "RemoveFiles="),
             ("mkosi.images/initrd/mkosi.conf", "MakeInitrd=yes", "MakeInitrd=no"),
             ("mkosi.images/initrd/mkosi.conf", "Ssh=no", "Ssh=yes"),
@@ -824,6 +837,10 @@ class CandidateTests(unittest.TestCase):
         wants.mkdir()
         for unit in ("systemd-networkd.service", "systemd-resolved.service"):
             (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
+        for relative, target in audit_rootfs.RETAINED_UNIT_LINKS.items():
+            path = root / "etc/systemd/system" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to("/usr/lib/systemd/system/" + target)
         for unit in audit_rootfs.MASKED_UNITS:
             (root / "etc/systemd/system" / unit).symlink_to("/dev/null")
         resolved_dropins = root / "etc/systemd/system/systemd-resolved.service.d"
@@ -833,8 +850,6 @@ class CandidateTests(unittest.TestCase):
             / audit_rootfs.RESOLVED_CREDENTIAL_DROPIN,
             resolved_dropins / audit_rootfs.RESOLVED_CREDENTIAL_DROPIN,
         )
-        (root / "etc/systemd/system/dbus-org.freedesktop.resolve1.service").symlink_to(
-            "/usr/lib/systemd/system/systemd-resolved.service")
         (root / "etc/passwd").write_text(
             "root:x:0:0::/:/usr/sbin/nologin\n"
             "systemd-network:x:998:998::/:/usr/sbin/nologin\n"
@@ -854,6 +869,7 @@ class CandidateTests(unittest.TestCase):
             "zrpc-node:x:101:\n"
             "zrpc-wrapper:x:102:\n"
             "zrpc-cookie:x:103:zrpc-node,zrpc-wrapper\n")
+        (root / "etc/machine-id").write_bytes(b"")
         for name in prepare.BINARIES.values():
             (root / "usr/lib/zrpc" / name).write_text("SYNTHETIC")
             (root / "usr/lib/zrpc" / name).chmod(0o555)
@@ -891,7 +907,7 @@ class CandidateTests(unittest.TestCase):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(contents)
-                with self.assertRaisesRegex(ValueError, "appliance unit override or dependency|appliance boot dependencies|appliance unit replaced"):
+                with self.assertRaisesRegex(ValueError, "appliance unit override or dependency|appliance boot dependencies|appliance unit replaced|postinst-generated path remains"):
                     audit_rootfs.audit(root)
 
         root = self.synthetic_guest_root("-replacement")
@@ -922,7 +938,22 @@ class CandidateTests(unittest.TestCase):
         root = self.synthetic_guest_root("-redirected-parent")
         (root / "usr/local/lib").mkdir(parents=True)
         (root / "usr/local/lib/systemd").symlink_to("/var/lib/zebra")
-        with self.assertRaisesRegex(ValueError, "system unit load path redirected"):
+        with self.assertRaisesRegex(ValueError, "postinst-generated path remains"):
+            audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_retained_link_substitution(self):
+        for index, relative in enumerate(audit_rootfs.RETAINED_UNIT_LINKS):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-retained-link-{index}")
+                path = root / "etc/systemd/system" / relative
+                path.unlink()
+                path.symlink_to("/usr/lib/systemd/system/rogue.service")
+                with self.assertRaisesRegex(ValueError, "retained system unit link differs"):
+                    audit_rootfs.audit(root)
+        root = self.synthetic_guest_root("-retained-extra")
+        (root / "etc/systemd/system/sockets.target.wants/rogue.socket").symlink_to(
+            "/usr/lib/systemd/system/rogue.socket")
+        with self.assertRaisesRegex(ValueError, "retained system unit wants differ"):
             audit_rootfs.audit(root)
 
     def test_rootfs_audit_rejects_base_tree_kernel_cmdline(self):
@@ -987,20 +1018,37 @@ class CandidateTests(unittest.TestCase):
         root = self.synthetic_guest_root("-privileged-package-files")
         audit_rootfs.audit(root)
         for relative in prepare.ROOT_REMOVE_FILES:
+            if relative in (*prepare.REMOVED_GENERATED_UNIT_DIRECTORIES,
+                            *prepare.REMOVED_GENERATED_UNIT_LINKS,
+                            *prepare.REMOVED_ALTERNATIVES_PATHS,
+                            *prepare.REMOVED_GENERATED_ETC_PATHS,
+                            *prepare.REMOVED_LDCONFIG_PATHS,
+                            *prepare.REMOVED_HWDB_PATHS):
+                continue
             with self.subTest(relative=relative):
                 path = root / relative.lstrip("/")
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(b"SYNTHETIC")
-                expected = ("build-generated file remains: " + relative.lstrip("/")
+                generated_directory = relative in ("/opt", "/usr/local", "/etc/opt")
+                if generated_directory:
+                    path.mkdir()
+                else:
+                    path.write_bytes(b"SYNTHETIC")
+                expected = ("postinst-generated path remains: " + relative.lstrip("/")
+                            if generated_directory else
+                            "build-generated file remains: " + relative.lstrip("/")
                             if relative in ("/var/cache/ldconfig/aux-cache", "/var/log/alternatives.log")
                             else "administrative binary present")
                 with self.assertRaisesRegex(ValueError, expected):
                     audit_rootfs.audit(root)
-                path.unlink()
+                if generated_directory:
+                    path.rmdir()
+                else:
+                    path.unlink()
         cache = root / "var/cache/ldconfig/aux-cache"
         cache.symlink_to("/var/lib/zebra/aux-cache")
         with self.assertRaisesRegex(ValueError, "build-generated file remains: var/cache/ldconfig/aux-cache"):
             audit_rootfs.audit(root)
+
         cache.unlink()
         privileged = {
             root / "usr/bin/unreviewed-setuid": stat.S_ISUID,
@@ -1023,16 +1071,113 @@ class CandidateTests(unittest.TestCase):
                          "setuid/setgid executable remains: "
                          "['usr/bin/unreviewed-setgid', 'usr/bin/unreviewed-setuid']")
 
+    def test_rootfs_audit_requires_package_manager_metadata_absent(self):
+        for name in ("var/lib/dpkg", "var/lib/apt", "var/cache/apt"):
+            with self.subTest(name=name):
+                root = self.synthetic_guest_root("-package-metadata-" + name.replace("/", "-"))
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.mkdir()
+                with self.assertRaisesRegex(ValueError, "package-manager metadata remains: " + name):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_generated_unit_paths(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         (*prepare.REMOVED_GENERATED_UNIT_DIRECTORIES,
+                          *prepare.REMOVED_GENERATED_UNIT_LINKS))
+        directories = {path.removeprefix("/") for path in
+                       prepare.REMOVED_GENERATED_UNIT_DIRECTORIES}
+        self.assertEqual(expected, audit_rootfs.REMOVED_GENERATED_UNIT_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-generated-unit-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if relative in directories:
+                    path.mkdir()
+                else:
+                    path.symlink_to("/usr/lib/systemd/system/rogue.socket")
+                with self.assertRaisesRegex(ValueError, "generated startup path remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_alternative_frontends(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_ALTERNATIVES_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_ALTERNATIVES_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-alternative-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if relative == "etc/alternatives":
+                    path.mkdir()
+                else:
+                    path.symlink_to("/etc/alternatives/rogue")
+                with self.assertRaisesRegex(ValueError,
+                                            "unused alternative frontend remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_rejects_generated_configuration(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_GENERATED_ETC_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_GENERATED_ETC_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-generated-etc-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("generated or mutable data\n")
+                with self.assertRaisesRegex(ValueError,
+                                            "generated configuration remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_requires_ldconfig_cache_and_unit_absent(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_LDCONFIG_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_LDCONFIG_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-ldconfig-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"generated cache or active unit")
+                with self.assertRaisesRegex(
+                        ValueError, "ldconfig cache or boot activation remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_rootfs_audit_requires_hwdb_and_updater_absent(self):
+        expected = tuple(path.removeprefix("/") for path in
+                         prepare.REMOVED_HWDB_PATHS)
+        self.assertEqual(expected, audit_rootfs.REMOVED_HWDB_PATHS)
+        for index, relative in enumerate(expected):
+            with self.subTest(relative=relative):
+                root = self.synthetic_guest_root(f"-hwdb-{index}")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"generated database or signed updater")
+                with self.assertRaisesRegex(
+                        ValueError, "generated hwdb or boot activation remains: " + relative):
+                    audit_rootfs.audit(root)
+
+    def test_machine_id_source_and_final_root_must_be_empty(self):
+        prepare.validate_boot_profile()
+        source = prepare.PROFILE / "rootfs/etc/machine-id"
+        self.assertEqual(source.read_bytes(), b"")
+        root = self.synthetic_guest_root("-machine-id")
+        audit_rootfs.audit(root)
+        target = root / "etc/machine-id"
+        target.write_bytes(b"uninitialized\n")
+        with self.assertRaisesRegex(ValueError, "generic read-only machine-id differs"):
+            audit_rootfs.audit(root)
+        target.write_bytes(b"")
+        target.unlink()
+        target.symlink_to("/var/lib/zebra/machine-id")
+        with self.assertRaisesRegex(ValueError, "generic read-only machine-id differs"):
+            audit_rootfs.audit(root)
+
     def test_rootfs_audit_rejects_admin_and_boot_companions(self):
         self.assertEqual(set(audit_rootfs.MASKED_UNITS), set(prepare.MASKS))
         root = self.synthetic_guest_root()
-        # Debian's post-install steps may enable these vendor services in
-        # sysinit.target. The immutable same-name masks must still win.
-        wants = root / "etc/systemd/system/sysinit.target.wants"
-        wants.mkdir()
-        for unit in ("systemd-udev-load-credentials.service",
-                     "systemd-network-generator.service"):
-            (wants / unit).symlink_to("/usr/lib/systemd/system/" + unit)
         audit_rootfs.audit(root)
         group = root / "etc/group"
         good_group = group.read_text()
@@ -1102,7 +1247,7 @@ class CandidateTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("[Service]\nImportCredential=network.dns\n")
                 with self.assertRaisesRegex(
-                    ValueError, "resolved credential override differs|"
+                    ValueError, "postinst-generated path remains|resolved credential override differs|"
                                 "appliance unit override or dependency|appliance unit replaced"
                 ):
                     audit_rootfs.audit(root)

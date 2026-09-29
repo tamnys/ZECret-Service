@@ -143,13 +143,20 @@ jobs:
               raise ValueError("QEMU resource inputs require observation selection")
           PY
 
-      - name: Test optional QEMU observation guards
+      - name: Test QEMU and raw-disk inspection guards
         shell: bash
         run: |
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
           python3 -B "$source/tools/gcp-guest/test_boot_observe_qemu.py"
           python3 -B "$source/tools/gcp-guest/test_qemu_isolation.py"
+          python3 -B "$source/tools/gcp-guest/test_inspect_raw_generated_kernel.py"
+          python3 -B "$source/tools/gcp-guest/test_inspect_raw_generated_usr.py"
+          python3 -B "$source/tools/gcp-guest/test_inspect_raw_generated_etc.py"
+          python3 -B "$source/tools/gcp-guest/test_inspect_raw_package_components.py"
+          python3 -B "$source/tools/gcp-guest/test_inspect_raw_forbidden.py"
+          python3 -B "$source/tools/gcp-guest/test_inspect_raw_rootfs.py"
+          python3 -B "$source/tools/gcp-guest/test_outer_image_runner.py"
           test -z "$(git -C "$source" status --porcelain --untracked-files=all --ignored)"
 
       - name: Fetch selected exact-commit native Rust receipt for boot-test preparation

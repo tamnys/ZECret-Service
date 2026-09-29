@@ -10,6 +10,7 @@ import sys
 
 EXPECTED_MOUNT_SHA256 = "__STAGED_MOUNT_SHA256__"
 MOUNT_OWNER = (0, 0)
+MACHINE_ID_OWNER = (0, 0)
 FORBIDDEN_BINARIES = ("usr/sbin/sshd", "usr/bin/docker", "usr/bin/containerd", "usr/bin/ctr", "usr/bin/google_guest_agent", "usr/bin/google_osconfig_agent", "usr/bin/dstack-guest-agent", "usr/bin/sudo", "usr/bin/pkexec", "usr/sbin/unix_chkpwd", "usr/bin/umount", "usr/bin/su", "usr/sbin/losetup", "usr/sbin/swapon", "usr/sbin/swapoff", "usr/lib/dbus-1.0/dbus-daemon-launch-helper")
 FORBIDDEN_NVME_SURFACE = (
     "etc/nvme/discovery.conf", "usr/sbin/uuidd", "usr/bin/adduser", "usr/bin/passwd",
@@ -54,6 +55,53 @@ APPLIANCE_UNITS = (
 PROTECTED_UNITS = (*APPLIANCE_UNITS, "var-lib-zebra.mount", "multi-user.target", "systemd-resolved.service")
 RESOLVED_CREDENTIAL_DROPIN = "10-no-credentials.conf"
 RESOLVED_CREDENTIAL_DROPIN_BYTES = b"[Service]\nImportCredential=\n"
+RETAINED_UNIT_LINKS = {
+    "dbus-org.freedesktop.network1.service": "systemd-networkd.service",
+    "dbus-org.freedesktop.resolve1.service": "systemd-resolved.service",
+    "sockets.target.wants/systemd-networkd.socket": "systemd-networkd.socket",
+    "network-online.target.wants/systemd-networkd-wait-online.service":
+        "systemd-networkd-wait-online.service",
+    "local-fs.target.wants/run-lock.mount": "run-lock.mount",
+}
+REMOVED_GENERATED_UNIT_PATHS = (
+    "etc/systemd/system/getty.target.wants",
+    "etc/systemd/system/sysinit.target.wants",
+    "etc/systemd/system/systemd-journald.service.wants",
+    "etc/systemd/system/timers.target.wants",
+    "etc/systemd/user",
+    "etc/systemd/system/ctrl-alt-del.target",
+    "etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
+    "etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
+)
+REMOVED_ALTERNATIVES_PATHS = (
+    "etc/alternatives",
+    "usr/bin/awk", "usr/bin/nawk", "usr/bin/mt",
+    "usr/sbin/rmt", "usr/bin/pager", "usr/bin/which",
+)
+REMOVED_GENERATED_ETC_PATHS = (
+    "etc/apt/sources.list.d/trixie.sources", "etc/dpkg/origins/default",
+    "etc/.pwd.lock", "etc/group-", "etc/gshadow", "etc/gshadow-",
+    "etc/passwd-", "etc/shadow-", "etc/security/opasswd",
+    "etc/subgid", "etc/subuid",
+    "etc/pam.d/common-account", "etc/pam.d/common-auth",
+    "etc/pam.d/common-password", "etc/pam.d/common-session",
+    "etc/pam.d/common-session-noninteractive",
+    "etc/environment", "etc/profile", "etc/shells", "etc/motd",
+    "etc/default/locale", "etc/vconsole.conf",
+    "etc/modules", "etc/initramfs-tools/modules",
+    "etc/rc2.d/S01dbus", "etc/rc3.d/S01dbus",
+    "etc/rc4.d/S01dbus", "etc/rc5.d/S01dbus",
+)
+REMOVED_LDCONFIG_PATHS = (
+    "etc/ld.so.cache",
+    "usr/lib/systemd/system/ldconfig.service",
+    "usr/lib/systemd/system/sysinit.target.wants/ldconfig.service",
+)
+REMOVED_HWDB_PATHS = (
+    "usr/lib/udev/hwdb.bin",
+    "usr/lib/systemd/system/systemd-hwdb-update.service",
+    "usr/lib/systemd/system/sysinit.target.wants/systemd-hwdb-update.service",
+)
 # Debian trixie's systemd.unit(5) load path. Runtime generators and transient
 # units must also be checked on the exact booted image; they do not exist in a
 # finalized rootfs and this audit does not claim to check their later output.
@@ -143,6 +191,17 @@ def audit_appliance_units(root):
         path = wants / unit
         if not path.is_symlink() or path.readlink() != Path("/usr/lib/systemd/system") / unit:
             raise ValueError("appliance network dependency differs")
+    for relative, target in RETAINED_UNIT_LINKS.items():
+        path = configured / relative
+        if not path.is_symlink() or path.readlink() != Path("/usr/lib/systemd/system") / target:
+            raise ValueError("retained system unit link differs: " + relative)
+    for directory in ("sockets.target.wants", "network-online.target.wants",
+                      "local-fs.target.wants"):
+        wanted = {Path(relative).name for relative in RETAINED_UNIT_LINKS
+                  if relative.startswith(directory + "/")}
+        path = configured / directory
+        if path.is_symlink() or not path.is_dir() or {child.name for child in path.iterdir()} != wanted:
+            raise ValueError("retained system unit wants differ: " + directory)
 
     additions = protected_unit_additions(protected_aliases(root))
     for relative in UNIT_DIRS:
@@ -326,6 +385,34 @@ def audit(root):
         generated = root / name
         if generated.exists() or generated.is_symlink():
             raise ValueError("build-generated file remains: " + name)
+    for name in ("opt", "usr/local", "etc/opt"):
+        if present(root / name):
+            raise ValueError("postinst-generated path remains: " + name)
+    for name in ("var/lib/dpkg", "var/lib/apt", "var/cache/apt"):
+        if present(root / name):
+            raise ValueError("package-manager metadata remains: " + name)
+    for name in REMOVED_GENERATED_UNIT_PATHS:
+        if present(root / name):
+            raise ValueError("generated startup path remains: " + name)
+    for name in REMOVED_ALTERNATIVES_PATHS:
+        if present(root / name):
+            raise ValueError("unused alternative frontend remains: " + name)
+    for name in REMOVED_GENERATED_ETC_PATHS:
+        if present(root / name):
+            raise ValueError("generated configuration remains: " + name)
+    for name in REMOVED_LDCONFIG_PATHS:
+        if present(root / name):
+            raise ValueError("ldconfig cache or boot activation remains: " + name)
+    for name in REMOVED_HWDB_PATHS:
+        if present(root / name):
+            raise ValueError("generated hwdb or boot activation remains: " + name)
+    machine_id = root / "etc/machine-id"
+    if (machine_id.is_symlink() or not machine_id.is_file()
+            or machine_id.stat().st_nlink != 1
+            or (machine_id.stat().st_uid, machine_id.stat().st_gid) != MACHINE_ID_OWNER
+            or stat.S_IMODE(machine_id.stat().st_mode) != 0o644
+            or machine_id.stat().st_size != 0):
+        raise ValueError("generic read-only machine-id differs")
     if not re.fullmatch(r"[0-9a-f]{64}", EXPECTED_MOUNT_SHA256):
         raise ValueError("signed mount ELF identity absent")
     mount = root / "usr/bin/mount"

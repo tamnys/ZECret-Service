@@ -23,6 +23,9 @@ import subprocess
 import tempfile
 
 import inspect_raw_verity as verity
+import inspect_raw_forbidden as forbidden
+import inspect_raw_generated_usr as generated_usr
+import inspect_raw_package_components as components
 
 
 STATUS = "diagnostic-raw-root-overlay-bytes-matched-unapproved"
@@ -33,6 +36,7 @@ STAT_HEADER = re.compile(
     r"Inode: ([1-9][0-9]*) +Type: (regular|directory|symlink) +Mode: +([0-7]{4}) +Flags: 0x[0-9a-f]+"
 )
 STAT_OWNER_SIZE = re.compile(r"(?m)^User: +([0-9]+) +Group: +([0-9]+) +Project: +[0-9]+ +Size: ([0-9]+)$")
+STAT_MTIME = re.compile(r" ?mtime: 0x([0-9a-f]{8})(?::([0-9a-f]{8}))? -- .+\Z")
 FAST_LINK = re.compile(r'(?m)^Fast link dest: "([^"\n]*)"$')
 SAFE_PATH = re.compile(r"[A-Za-z0-9_./@+-]+\Z")
 HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -41,8 +45,10 @@ ACCOUNT_FILES = {
     "etc/group": (661, "c2209f60f6d80a4b10479c1ba9e2df7877bb8a648911a45629f0dc6d86bb1b00", 0o644, 0o644),
     "etc/shadow": (509, "92ec1ef612eb9c38cbe22403a595d268bf38546cadded7d8e0471bf271f15d13", 0o400, 0o000),
 }
+MACHINE_ID_FILE = "etc/machine-id"
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 REQUIRED_FILES = frozenset({
-    "etc/fstab", "etc/zrpc/zebra.toml", *ACCOUNT_FILES,
+    "etc/fstab", "etc/zrpc/zebra.toml", MACHINE_ID_FILE, *ACCOUNT_FILES,
     "usr/lib/zrpc/zrpc-node-wrapper", "usr/lib/zrpc/zrpc-gcp-quote-broker",
     "usr/lib/zrpc/zrpc-gcp-guard", "usr/lib/zrpc/zrpc-gcp-disk-id", "usr/lib/zrpc/zrpc-gcp-cookie",
     "usr/lib/zrpc/zebrad",
@@ -160,6 +166,9 @@ def checked_overlay(manifest, stage):
         if selected.get(name) != {"type": "file", "mode": staged_mode,
                                    "sha256": digest, "size": size}:
             raise ValueError("staged account differs from reviewed source: " + name)
+    if selected.get(MACHINE_ID_FILE) != {"type": "file", "mode": 0o644,
+                                         "sha256": EMPTY_SHA256, "size": 0}:
+        raise ValueError("generic read-only machine-id differs from reviewed source")
     return selected
 
 
@@ -211,7 +220,21 @@ def checked_reader(signed_bytes):
     return hashlib.sha256(signed_bytes).hexdigest()
 
 
-def run_stat(reader, image, relative, *, env=ENV, pass_fds=()):
+def clock_mtime_ns(lines):
+    """Decode the pinned debugfs raw ext4 mtime fields, not its local date."""
+    candidates = [line for line in lines if line.lstrip().startswith("mtime")]
+    match = STAT_MTIME.fullmatch(candidates[0]) if len(candidates) == 1 else None
+    if match is None:
+        raise ValueError("signed debugfs clock mtime report is absent or ambiguous")
+    extra = int(match[2], 16) if match[2] is not None else 0
+    nanoseconds = extra >> 2
+    if nanoseconds >= 1_000_000_000:
+        raise ValueError("signed debugfs clock mtime nanoseconds differ")
+    seconds = int(match[1], 16) + ((extra & 3) << 32)
+    return seconds * 1_000_000_000 + nanoseconds
+
+
+def run_stat(reader, image, relative, *, env=ENV, pass_fds=(), require_mtime=False):
     result = subprocess.run([str(reader), "-R", "stat /" + relative, str(image)],
                             stdin=subprocess.DEVNULL, capture_output=True, env=env,
                             pass_fds=pass_fds, check=False)
@@ -229,9 +252,12 @@ def run_stat(reader, image, relative, *, env=ENV, pass_fds=()):
     link = FAST_LINK.findall(output)
     if len(link) > 1:
         raise ValueError("signed debugfs symlink report is ambiguous")
-    return {"type": header[2], "mode": int(header[3], 8),
+    result = {"inode": int(header[1]), "type": header[2], "mode": int(header[3], 8),
             "uid": int(owner_size[0][0]), "gid": int(owner_size[0][1]),
             "size": int(owner_size[0][2]), "link": link[0] if link else None}
+    if require_mtime:
+        result["mtime_ns"] = clock_mtime_ns(lines)
+    return result
 
 
 def checked_superblock_metadata(report):
@@ -308,15 +334,23 @@ def inspect_entries(reader, image, selected, scratch, *, env=ENV, pass_fds=()):
         if expected["type"] == "file":
             final_mode = (ACCOUNT_FILES[relative][3] if relative in ACCOUNT_FILES
                           else expected["mode"])
+            root_owned = relative in ACCOUNT_FILES or relative == MACHINE_ID_FILE
             if (inode["mode"] != final_mode or inode["size"] != expected["size"]
-                    or (relative in ACCOUNT_FILES
-                        and (inode["uid"], inode["gid"]) != (0, 0))):
+                    or (root_owned and (inode["uid"], inode["gid"]) != (0, 0))):
                 raise ValueError("raw rootfs file metadata differs: " + relative)
             if run_cat(reader, image, relative, expected["size"], scratch,
                        env=env, pass_fds=pass_fds) != expected["sha256"]:
                 raise ValueError("raw rootfs file bytes differ: " + relative)
         elif expected["type"] == "symlink":
-            if inode["link"] != expected["target"]:
+            target = inode["link"]
+            if target is None:
+                # debugfs stat omits Fast link dest for block-backed links.
+                # The no-follow reader validates the same inode's metadata
+                # and bounds the exact target read before comparison.
+                target = forbidden._unit_target(
+                    reader, image, inode, scratch, Path(image).stat().st_size,
+                    env=env, pass_fds=pass_fds)
+            if target != expected["target"]:
                 raise ValueError("raw rootfs symlink target differs: " + relative)
         checked[expected["type"]] += 1
     return checked
@@ -338,6 +372,9 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
             or verified_verity.get("private_mode_approved") is not False):
         raise ValueError("raw rootfs inspection requires matching verified disk reports")
     workspace = verity.esp.workspace_scratch(workspace)
+    if (inrelease.name != "InRelease"
+            or packages_index != inrelease.with_name("Packages.xz")):
+        raise ValueError("rootfs package authentication requires matching metadata paths")
     selected = checked_overlay(manifest, stage)
     signed_reader, archive_sha256 = signed_reader_bytes(inrelease, packages_index, archives)
     reader_sha256 = checked_reader(signed_reader)
@@ -354,8 +391,35 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
         # The installed executable is checked for build consistency, but the
         # inspected bytes are read using this immutable package-member fd.
         with verity.closure.sealed_elf_bytes(signed_reader) as (reader, descriptor):
+            inventory = forbidden.inspect(reader, root, scratch,
+                                          pass_fds=(descriptor,))
             checked = inspect_entries(reader, root, selected, scratch,
                                       pass_fds=(descriptor,))
+            def lookup_inode(path):
+                entry = inventory.get(path)
+                if entry is None:
+                    return None
+                observed = {**entry, "type": "regular" if entry["type"] == "file"
+                            else entry["type"]}
+                if entry["type"] == "symlink" or path == generated_usr.CLOCK_EPOCH:
+                    detail = run_stat(reader, root, path, pass_fds=(descriptor,),
+                                      require_mtime=path == generated_usr.CLOCK_EPOCH)
+                    if any(detail[field] != observed[field] for field in
+                           ("inode", "type", "mode", "uid", "gid", "size")):
+                        raise ValueError("raw rootfs inode inventory differs: " + path)
+                    if entry["type"] == "symlink":
+                        observed["link"] = detail["link"]
+                    if path == generated_usr.CLOCK_EPOCH:
+                        observed["mtime_ns"] = detail["mtime_ns"]
+                return observed
+
+            package = components.inspect_authenticated_components(
+                inrelease.parent, stage / "packages", selected, inventory,
+                lookup_inode,
+                lambda path, size: run_cat(reader, root, path, size, scratch,
+                                           pass_fds=(descriptor,)),
+                workspace=scratch,
+            )
             superblock = run_superblock_stats(reader, root, pass_fds=(descriptor,))
     return {"status": STATUS, "raw_disk_sha256": expected_sha256,
             "raw_disk_bytes": expected_bytes,
@@ -363,6 +427,9 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
             "root_partition_sha256": root_sha256,
             **superblock,
             "overlay_entries_checked": checked,
+            "raw_root_inventory_entries": len(inventory),
+            "authenticated_package_components_checked": package["components_checked"],
+            "forbidden_surfaces_checked": True,
             "staged_builder_debugfs_sha256": reader_sha256,
             "signed_e2fsprogs_archive_sha256": archive_sha256,
             "reader_executable_matches_signed_package": True,

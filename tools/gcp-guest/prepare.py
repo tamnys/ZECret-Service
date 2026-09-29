@@ -61,18 +61,80 @@ PINNED_DISK_FILES = {
     "usr/lib/udev/rules.d/65-gce-disk-naming.rules": "b06b83104359437859d4f497973eede0da1d8b3958afc4aab073d9f94e9d7b19",
     "usr/lib/systemd/system/zrpc-gcp-disk-trigger.service": "60da51b2fb02e6591a42bdce024594c3f891a314d5622ab88237049ae3ac9737",
 }
+MACHINE_ID_PATH = "etc/machine-id"
 ROLES = set(BINARIES) | set(DISK_TOOL_PACKAGES) | {EARLY_INIT_ROLE, "secure_boot_certificate", "package_manifest", "snapshot_inrelease", "packages_index", "boot_policy"}
 # Builder-only handoff. A later operator build must supply this private key
 # from a memory-backed mount. Staging never checks that mount, copies the key,
 # or treats this reference as evidence of a signed image.
 EXTERNAL_SECURE_BOOT_KEY = "/run/zrpc-build-signing/secure-boot.key"
 INITRD_PACKAGES = {"systemd", "udev", "systemd-cryptsetup", "dmsetup", "kmod", "mount"}
+REMOVED_GENERATED_UNIT_DIRECTORIES = (
+    "/etc/systemd/system/getty.target.wants",
+    "/etc/systemd/system/sysinit.target.wants",
+    "/etc/systemd/system/systemd-journald.service.wants",
+    "/etc/systemd/system/timers.target.wants",
+    "/etc/systemd/user",
+)
+REMOVED_GENERATED_UNIT_LINKS = (
+    "/etc/systemd/system/ctrl-alt-del.target",
+    "/etc/systemd/system/sockets.target.wants/systemd-journald-audit.socket",
+    "/etc/systemd/system/sockets.target.wants/systemd-pcrextend.socket",
+)
+REMOVED_ALTERNATIVES_PATHS = (
+    "/etc/alternatives",
+    "/usr/bin/awk", "/usr/bin/nawk", "/usr/bin/mt",
+    "/usr/sbin/rmt", "/usr/bin/pager", "/usr/bin/which",
+)
+REMOVED_GENERATED_ETC_PATHS = (
+    # These are post-install or builder outputs. The appliance has no package
+    # manager, login, PAM session, SysV boot, or interactive console path.
+    "/etc/apt/sources.list.d/trixie.sources", "/etc/dpkg/origins/default",
+    "/etc/.pwd.lock", "/etc/group-", "/etc/gshadow", "/etc/gshadow-",
+    "/etc/passwd-", "/etc/shadow-", "/etc/security/opasswd",
+    "/etc/subgid", "/etc/subuid",
+    "/etc/pam.d/common-account", "/etc/pam.d/common-auth",
+    "/etc/pam.d/common-password", "/etc/pam.d/common-session",
+    "/etc/pam.d/common-session-noninteractive",
+    "/etc/environment", "/etc/profile", "/etc/shells", "/etc/motd",
+    "/etc/default/locale", "/etc/vconsole.conf",
+    "/etc/modules", "/etc/initramfs-tools/modules",
+    "/etc/rc2.d/S01dbus", "/etc/rc3.d/S01dbus",
+    "/etc/rc4.d/S01dbus", "/etc/rc5.d/S01dbus",
+)
+REMOVED_LDCONFIG_PATHS = (
+    # libc-bin postinst generates a cache that is not a package member.
+    # Without these vendor unit paths, the read-only guest cannot launch
+    # ldconfig.service to regenerate it during sysinit.
+    "/etc/ld.so.cache",
+    "/usr/lib/systemd/system/ldconfig.service",
+    "/usr/lib/systemd/system/sysinit.target.wants/ldconfig.service",
+)
+REMOVED_HWDB_PATHS = (
+    # mkosi compiles this database after extraction. The signed udev updater
+    # must also be absent so boot cannot regenerate it from writable state.
+    "/usr/lib/udev/hwdb.bin",
+    "/usr/lib/systemd/system/systemd-hwdb-update.service",
+    "/usr/lib/systemd/system/sysinit.target.wants/systemd-hwdb-update.service",
+)
 ROOT_REMOVE_FILES = (
     "/usr/sbin/unix_chkpwd", "/usr/bin/umount", "/usr/bin/su",
     "/usr/sbin/losetup", "/usr/sbin/swapon", "/usr/sbin/swapoff",
     "/usr/lib/dbus-1.0/dbus-daemon-launch-helper",
     "/var/cache/ldconfig/aux-cache",
     "/var/log/alternatives.log",
+    # Signed base-files postinst creates these otherwise empty roots after
+    # package extraction; remove them before sealing the guest image.
+    "/opt", "/usr/local", "/etc/opt",
+    # Pinned package postinst and mkosi preset-all create these after the
+    # source overlay. None belongs to the appliance's required unit graph.
+    *REMOVED_GENERATED_UNIT_DIRECTORIES,
+    *REMOVED_GENERATED_UNIT_LINKS,
+    # Pinned postinst alternatives provide interactive/tape commands only;
+    # no reviewed guest startup path invokes these frontends.
+    *REMOVED_ALTERNATIVES_PATHS,
+    *REMOVED_GENERATED_ETC_PATHS,
+    *REMOVED_LDCONFIG_PATHS,
+    *REMOVED_HWDB_PATHS,
 )
 INITRD_REMOVE_FILES = (
     "/usr/lib/systemd/system/rescue.service",
@@ -161,8 +223,16 @@ REPART_SEED_NAME_PREFIX = "https://github.com/tamnys/ZECret-service/gcp-guest-se
 # external credential imports disabled by the fixed kernel command line.
 # In the pinned kernel, pstore_register() rejects every backend except the
 # selected name; no shipped backend is named "none".
-FIXED_KERNEL_CMDLINE = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service pstore.backend=none panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality"
+FIXED_KERNEL_CMDLINE = "ro systemd.gpt_auto=0 rd.systemd.gpt_auto=0 rd.modules_load=dm-verity systemd.import_credentials=no systemd.unit=zrpc.target systemd.crash_shell=0 systemd.crash_action=poweroff systemd.dump_core=0 systemd.mask=debug-shell.service systemd.mask=ctrl-alt-del.target systemd.mask=systemd-hibernate.service systemd.mask=systemd-hybrid-sleep.service systemd.mask=systemd-suspend-then-hibernate.service pstore.backend=none panic=-1 oops=panic module.sig_enforce=1 lockdown=confidentiality"
 MASKS = ("ssh.service", "sshd.service", "ssh.socket", "getty.target", "getty@.service", "serial-getty@.service", "console-getty.service", "container-getty@.service", "debug-shell.service", "rescue.service", "rescue.target", "emergency.service", "emergency.target", "systemd-hibernate.service", "systemd-suspend.service", "systemd-hybrid-sleep.service", "systemd-suspend-then-hibernate.service", "systemd-coredump.socket", "systemd-pstore.service", "systemd-sysext.service", "systemd-sysext.socket", "systemd-sysext@.service", "systemd-confext.service", "systemd-udev-load-credentials.service", "systemd-network-generator.service", "systemd-sysupdate.service", "systemd-sysupdate.timer", "systemd-firstboot.service", "systemd-sysusers.service", "systemd-user-sessions.service", "cloud-init.service", "cloud-final.service", "google-guest-agent.service", "google-osconfig-agent.service", "apt-daily.timer", "apt-daily-upgrade.timer")
+RETAINED_UNIT_LINKS = {
+    "dbus-org.freedesktop.network1.service": "systemd-networkd.service",
+    "dbus-org.freedesktop.resolve1.service": "systemd-resolved.service",
+    "sockets.target.wants/systemd-networkd.socket": "systemd-networkd.socket",
+    "network-online.target.wants/systemd-networkd-wait-online.service":
+        "systemd-networkd-wait-online.service",
+    "local-fs.target.wants/run-lock.mount": "run-lock.mount",
+}
 FORBIDDEN_PACKAGES = {"openssh-server", "cloud-init", "google-guest-agent", "google-osconfig-agent", "docker.io", "containerd", "systemd-container", "sudo", "polkitd", "nvme-cli", "libnvme1t64", "libkeyutils1", "uuid-runtime", "adduser", "passwd"}
 
 def install_boot_overrides(rootfs):
@@ -175,6 +245,10 @@ def install_boot_overrides(rootfs):
     (masks / "multi-user.target.wants").mkdir()
     for name in ("systemd-networkd.service", "systemd-resolved.service"):
         (masks / "multi-user.target.wants" / name).symlink_to("/usr/lib/systemd/system/" + name)
+    for relative, target in RETAINED_UNIT_LINKS.items():
+        path = masks / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to("/usr/lib/systemd/system/" + target)
     (rootfs / "etc/resolv.conf").symlink_to("/run/systemd/resolve/stub-resolv.conf")
 
 def validate_boot_profile(profile=PROFILE, staged_copy=False):
@@ -194,7 +268,7 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
         "Distribution": {"Distribution": "debian", "Release": "trixie", "Architecture": "x86-64", "RepositoryKeyCheck": "yes", "RepositoryKeyFetch": "no"},
         "Output": {"Format": "disk", "Output": "zrpc-gcp", "ManifestFormat": "json", "RepartDirectories": "repart", "SectorSize": "512"},
         "Config": {"Dependencies": "initrd"},
-        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": FIXED_KERNEL_CMDLINE, "ExtraTrees": "rootfs", "RemoveFiles": ",".join(ROOT_REMOVE_FILES)},
+        "Content": {"Bootable": "yes", "Bootloader": "uki", "BiosBootloader": "none", "ShimBootloader": "none", "UnifiedKernelImages": "yes", "KernelModulesInitrd": "yes", "KernelModulesInitrdInclude": "^drivers/md/dm-verity[.]ko[.]xz$", "KernelModulesInitrdExclude": ".*", "Autologin": "no", "Ssh": "no", "KernelCommandLine": FIXED_KERNEL_CMDLINE, "ExtraTrees": "rootfs", "CleanPackageMetadata": "yes", "RemoveFiles": ",".join(ROOT_REMOVE_FILES)},
         "Validation": {"SecureBoot": "yes", "SecureBootAutoEnroll": "no", "SignExpectedPcr": "no", "Checksum": "yes"},
         "Build": {"WithNetwork": "no", "CacheOnly": "always", "Incremental": "no"},
     }
@@ -236,6 +310,13 @@ def validate_boot_profile(profile=PROFILE, staged_copy=False):
                 or stat.S_IMODE(path.stat().st_mode) != 0o644
                 or digest(path) != expected_sha256):
             raise ValueError("measured public-disk boot input differs: " + relative)
+    # An empty regular file lets systemd use a transient ID with a read-only
+    # root. mkosi's earlier `uninitialized\n` image marker is not acceptable.
+    machine_id = profile / "rootfs" / MACHINE_ID_PATH
+    if (machine_id.is_symlink() or not machine_id.is_file()
+            or stat.S_IMODE(machine_id.stat().st_mode) != 0o644
+            or machine_id.stat().st_size != 0):
+        raise ValueError("generic read-only machine-id source differs")
     repart = profile / "repart"
     expected = {"10-root.conf", "20-root-verity.conf", "30-esp.conf"}
     if {path.name for path in repart.iterdir()} != expected:

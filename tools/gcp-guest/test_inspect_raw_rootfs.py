@@ -10,6 +10,7 @@ import types
 import unittest
 from unittest import mock
 
+import fetch_guest_closure as guest
 import inspect_raw_rootfs as rootfs
 
 
@@ -38,6 +39,7 @@ class RawRootfsTest(unittest.TestCase):
             path = self.stage / "rootfs" / relative
             data = ((Path(__file__).resolve().parents[2] / "deploy/gcp/guest/rootfs" / relative).read_bytes()
                     if relative in rootfs.ACCOUNT_FILES
+                    else b"" if relative == rootfs.MACHINE_ID_FILE
                     else ("approved " + relative + "\n").encode())
             path.write_bytes(data)
             path.chmod(rootfs.ACCOUNT_FILES[relative][2] if relative in rootfs.ACCOUNT_FILES
@@ -111,6 +113,32 @@ class RawRootfsTest(unittest.TestCase):
                     rootfs.run_stat(Path("/synthetic/debugfs"), self.root,
                                     "usr/lib/zrpc/zebrad")
 
+    def test_signed_debugfs_clock_mtime_requires_exact_raw_fields(self):
+        epoch = guest.SIGNED_RELEASE_EPOCH
+        header = (b"Inode: 20   Type: regular    Mode:  0644   Flags: 0x80000\n"
+                  b"User: 0   Group: 0   Project: 0   Size: 0\n")
+        def read(record):
+            with mock.patch.object(rootfs.subprocess, "run", return_value=
+                    types.SimpleNamespace(returncode=0, stderr=rootfs.READER_BANNER,
+                                          stdout=record)):
+                return rootfs.run_stat(Path("/synthetic/debugfs"), self.root,
+                                       rootfs.generated_usr.CLOCK_EPOCH,
+                                       require_mtime=True)
+        for suffix in ("", ":00000000"):
+            with self.subTest(suffix=suffix):
+                line = f" mtime: 0x{epoch:08x}{suffix} -- synthetic date\n".encode()
+                self.assertEqual(read(header + line)["mtime_ns"],
+                                 epoch * 1_000_000_000)
+        nanos = f" mtime: 0x{epoch:08x}:00000004 -- synthetic date\n".encode()
+        self.assertEqual(read(header + nanos)["mtime_ns"],
+                         epoch * 1_000_000_000 + 1)
+        for tail in (b"", nanos + nanos,
+                     b" mtime: malformed\n",
+                     f" mtime: 0x{epoch:08x}:ee6b2800 -- synthetic date\n".encode()):
+            with self.subTest(tail=tail):
+                with self.assertRaisesRegex(ValueError, "clock mtime"):
+                    read(header + tail)
+
     def test_superblock_metadata_requires_three_unambiguous_valid_fields(self):
         lines = ["Filesystem UUID:          2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
                  "Filesystem created:       Mon Sep 28 12:34:56 2026",
@@ -160,6 +188,10 @@ class RawRootfsTest(unittest.TestCase):
         metadata = {"filesystem_uuid": "2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
                     "filesystem_created_utc": "Mon Sep 28 12:34:56 2026",
                     "directory_hash_seed": "3b84d5f6-2c3d-4e5f-901a-b2c3d4e5f607"}
+        inventory = {"": {"inode": 2, "type": "directory", "mode": 0o755,
+                          "uid": 0, "gid": 0, "size": None}}
+        package_report = {"components_checked": {"regular": 1, "directory": 1,
+                                                 "symlink": 0, "removed": 1}}
         with mock.patch.object(rootfs.platform, "system", return_value="Linux"), \
                 mock.patch.object(rootfs.platform, "machine", return_value="x86_64"), \
                 mock.patch.object(rootfs.verity.esp, "workspace_scratch", return_value=self.root), \
@@ -172,6 +204,9 @@ class RawRootfsTest(unittest.TestCase):
                                   return_value=nullcontext((Path("/synthetic/debugfs"), 7))), \
                 mock.patch.object(rootfs, "inspect_entries", return_value={
                     "file": 0, "directory": 0, "symlink": 0}), \
+                mock.patch.object(rootfs.forbidden, "inspect", return_value=inventory) as surfaces, \
+                mock.patch.object(rootfs.components, "inspect_authenticated_components",
+                                  return_value=package_report) as components, \
                 mock.patch.object(rootfs, "run_superblock_stats", return_value=metadata) as stats:
             result = rootfs.inspect(self.root / "disk.raw", raw_sha256, 8192, 512,
                                     layout, verified, self.root / "InRelease",
@@ -179,9 +214,20 @@ class RawRootfsTest(unittest.TestCase):
                                     self.stage, self.manifest, self.root)
         self.assertEqual(stats.call_args.args[1], root)
         self.assertEqual(stats.call_args.kwargs["pass_fds"], (7,))
+        self.assertEqual(surfaces.call_args.args[:2], (Path("/synthetic/debugfs"), root))
+        self.assertEqual(surfaces.call_args.kwargs["pass_fds"], (7,))
+        self.assertEqual(components.call_args.args[:3],
+                         (self.root, self.stage / "packages", {}))
+        self.assertEqual(components.call_args.kwargs["workspace"].parent, self.root)
+        self.assertTrue(components.call_args.kwargs["workspace"].name.startswith(
+            "zrpc-raw-rootfs-"))
         self.assertEqual({key: result[key] for key in metadata}, metadata)
         self.assertEqual(result["root_partition_sha256"], digest(root.read_bytes()))
         self.assertEqual(result["status"], rootfs.STATUS)
+        self.assertEqual(result["raw_root_inventory_entries"], 1)
+        self.assertEqual(result["authenticated_package_components_checked"],
+                         package_report["components_checked"])
+        self.assertIs(result["forbidden_surfaces_checked"], True)
         self.assertIs(result["boot_verified"], False)
         self.assertIs(result["private_mode_approved"], False)
 
@@ -247,6 +293,50 @@ class RawRootfsTest(unittest.TestCase):
                 mock.patch.object(rootfs, "run_cat", return_value="0" * 64):
             with self.assertRaisesRegex(ValueError, "raw rootfs file bytes differ"):
                 rootfs.inspect_entries(None, None, {file: account}, self.root)
+
+    def test_machine_id_cannot_be_replaced_or_owned_by_guest_service(self):
+        relative = rootfs.MACHINE_ID_FILE
+        path = self.stage / "rootfs" / relative
+        source = self.entries["rootfs/" + relative]
+        self.assertEqual(rootfs.checked_overlay(self.manifest, self.stage)[relative]["size"], 0)
+        path.write_bytes(b"uninitialized\n")
+        source["sha256"] = digest(path.read_bytes())
+        with self.assertRaisesRegex(ValueError, "generic read-only machine-id differs"):
+            rootfs.checked_overlay(self.manifest, self.stage)
+        path.write_bytes(b"")
+        source["sha256"] = rootfs.EMPTY_SHA256
+        selected = rootfs.checked_overlay(self.manifest, self.stage)[relative]
+        observed = {"type": "regular", "mode": 0o644, "uid": 0, "gid": 0,
+                    "size": 0, "link": None}
+        with mock.patch.object(rootfs, "run_stat", return_value=observed), \
+                mock.patch.object(rootfs, "run_cat", return_value=rootfs.EMPTY_SHA256):
+            self.assertEqual(rootfs.inspect_entries(None, None, {relative: selected}, self.root),
+                             {"file": 1, "directory": 0, "symlink": 0})
+        with mock.patch.object(rootfs, "run_stat", return_value={**observed, "uid": 101}), \
+                mock.patch.object(rootfs, "run_cat", side_effect=AssertionError(
+                    "machine-id owner must reject before extraction")):
+            with self.assertRaisesRegex(ValueError, "raw rootfs file metadata differs"):
+                rootfs.inspect_entries(None, None, {relative: selected}, self.root)
+
+    def test_long_overlay_symlink_uses_bounded_inode_target_reader(self):
+        relative = "etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service"
+        target = "/usr/lib/systemd/system/systemd-networkd-wait-online.service"
+        self.assertEqual(len(target.encode()), 60)
+        image = self.root / "root.ext4"
+        image.write_bytes(b"synthetic ext4 placeholder")
+        inode = {"inode": 80, "type": "symlink", "mode": 0o777,
+                 "uid": 0, "gid": 0, "size": 60, "link": None}
+        selected = {relative: {"type": "symlink", "target": target}}
+        with mock.patch.object(rootfs, "run_stat", return_value=inode), \
+                mock.patch.object(rootfs.forbidden, "_unit_target", return_value=target) as read:
+            self.assertEqual(rootfs.inspect_entries(None, image, selected, self.root),
+                             {"file": 0, "directory": 0, "symlink": 1})
+            read.assert_called_once_with(None, image, inode, self.root,
+                                         image.stat().st_size, env=rootfs.ENV, pass_fds=())
+        with mock.patch.object(rootfs, "run_stat", return_value=inode), \
+                mock.patch.object(rootfs.forbidden, "_unit_target", return_value="/dev/null"):
+            with self.assertRaisesRegex(ValueError, "raw rootfs symlink target differs"):
+                rootfs.inspect_entries(None, image, selected, self.root)
 
     def test_mismatched_verity_evidence_rejects_before_partition_read(self):
         layout = {"status": "diagnostic-gpt-only-unapproved",
