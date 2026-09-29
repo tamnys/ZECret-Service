@@ -85,6 +85,21 @@ class NativeRustReceiptTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "escapes bundle"):
             receipt.safe_name("./../manifest.json")
 
+    def test_only_regular_host_verifier_can_be_made_executable(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            bundle = Path(scratch)
+            artifacts = bundle / "artifacts"
+            artifacts.mkdir()
+            verifier = artifacts / "zrpc-uki-digest"
+            verifier.write_bytes(b"checked native verifier")
+            verifier.chmod(0o600)
+            receipt.enable_verified_host_verifier(bundle)
+            self.assertEqual(verifier.stat().st_mode & 0o777, 0o500)
+            verifier.unlink()
+            verifier.symlink_to(bundle / "elsewhere")
+            with self.assertRaises(OSError):
+                receipt.enable_verified_host_verifier(bundle)
+
     def test_reject_digest_change_and_tar_escape_before_exporter(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)

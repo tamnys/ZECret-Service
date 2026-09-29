@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import urllib.parse
@@ -90,6 +91,21 @@ def safe_name(name):
     return Path(*parts)
 
 
+def enable_verified_host_verifier(bundle):
+    """Make only the inspected host verifier executable after receipt checks."""
+    binary = bundle / "artifacts/zrpc-uki-digest"
+    descriptor = os.open(binary, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+            raise ValueError("native UKI verifier is not one regular file")
+        os.fchmod(descriptor, 0o500)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o500:
+            raise ValueError("native UKI verifier executable mode was not set")
+    finally:
+        os.close(descriptor)
+
+
 def unpack_receipt(archive, output, revision, digest):
     if not SHA.fullmatch(revision) or not HEX.fullmatch(digest):
         raise ValueError("exact Rust artifact identity required")
@@ -140,6 +156,7 @@ def unpack_receipt(archive, output, revision, digest):
     exporter = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(exporter)
     report = exporter.inspect(bundle, revision)
+    enable_verified_host_verifier(bundle)
     expected_files = {"manifest.json", "SHA256SUMS", "source.tar",
                       "dependency-gates/registry-age.json",
                       "dependency-gates/git-source-age.json",

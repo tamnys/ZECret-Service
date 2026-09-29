@@ -251,8 +251,34 @@ def receipt(manifest):
             "private_mode_approved": False}
 
 
-def inspect_staged_builder(root, expected):
+def checked_external_signing_mount(mount):
+    """Accept only the explicitly supplied, private tmpfs signer outside APT."""
+    if (mount != Path("/run/zrpc-build-signing") or mount.is_symlink()
+            or not mount.is_dir() or not os.path.ismount(mount)):
+        raise ValueError("external signing mount differs from fixed private tmpfs")
+    info = mount.stat()
+    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError("external signing mount is not root-owned private storage")
+    matches = [line.split(" - ", 1) for line in Path("/proc/self/mountinfo").read_text().splitlines()
+               if " - " in line and line.split(" - ", 1)[0].split()[4] == str(mount)]
+    if len(matches) != 1 or matches[0][1].split()[0] != "tmpfs":
+        raise ValueError("external signing mount is not an exact tmpfs mount")
+    if set(os.listdir(mount)) != {"secure-boot.key"}:
+        raise ValueError("external signing mount contains unreviewed entries")
+    key = mount / "secure-boot.key"
+    key_info = key.lstat()
+    if (not stat.S_ISREG(key_info.st_mode) or key_info.st_uid != 0
+            or key_info.st_nlink != 1 or key_info.st_size <= 0
+            or stat.S_IMODE(key_info.st_mode) & 0o077):
+        raise ValueError("external signing key is not a private regular file")
+
+
+def inspect_staged_builder(root, expected, *, external_signing_mount=False):
     """Compare every non-mounted staged object to signed package payloads."""
+    if external_signing_mount:
+        if root != Path("/"):
+            raise ValueError("external signer inventory requires chroot root")
+        checked_external_signing_mount(Path("/run/zrpc-build-signing"))
     actual = set()
     root_fd = os.open(root, builder.DIRECTORY_FLAGS)
     try:
@@ -263,6 +289,10 @@ def inspect_staged_builder(root, expected):
                 relative = f"{prefix}/{name}" if prefix else name
                 if not prefix and (name in MOUNTED_SCRATCH or
                                    name == builder.MANIFEST):
+                    continue
+                if external_signing_mount and relative == "run/zrpc-build-signing":
+                    if relative in expected:
+                        raise ValueError("signing mount shadows signed package payload")
                     continue
                 record = expected.get(relative)
                 if record is None:
@@ -316,7 +346,8 @@ def inspect_staged_builder(root, expected):
 
 
 def verify_execution_context(metadata, builder_archives, parent_net_ns,
-                             apt_scratch, parent_user_ns, parent_pid_ns):
+                             apt_scratch, parent_user_ns, parent_pid_ns,
+                             *, external_signing_mount=False):
     """Fail before mkosi unless signed tools and child isolation are live."""
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("native x86_64 Linux builder required")
@@ -399,7 +430,8 @@ def verify_execution_context(metadata, builder_archives, parent_net_ns,
         os.close(root_fd)
     if stored != encoded:
         raise ValueError("staged builder manifest differs from signed payloads")
-    count = inspect_staged_builder(Path("/"), expected)
+    count = inspect_staged_builder(Path("/"), expected,
+                                   external_signing_mount=external_signing_mount)
     return {"status": "diagnostic-signed-staged-builder-no-route",
             "signed_builder_package_count": len(lock["packages"]),
             "staged_entries_checked": count,

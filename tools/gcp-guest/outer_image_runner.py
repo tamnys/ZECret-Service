@@ -267,6 +267,63 @@ def source_context(revision, rust_bundle):
     )
 
 
+def diagnostic_verify_uki(stage, builder_archives, workspace, rust_bundle,
+                          revision, uki_sha256):
+    """Verify a synthetic signed UKI in a fresh selected-source process."""
+    context = source_context(revision, rust_bundle)
+    manifest = json.loads(regular_bytes(rust_bundle / "manifest.json"),
+                          object_pairs_hook=context.source.guest.prepare.unique_object)
+    binary = rust_bundle / "artifacts/zrpc-uki-digest"
+    if hash_regular(binary)[1] != manifest["artifact_sha256"]["zrpc-uki-digest"]:
+        raise ValueError("diagnostic UKI verifier differs from native Rust receipt")
+    output = stage / "output"
+    files = checked_outputs(output)
+    if files["zrpc-gcp.efi"][1] != uki_sha256:
+        raise ValueError("signed UKI differs from inspected ESP")
+    certificate = stage / "artifacts/secure_boot_certificate"
+    certificate_bytes = regular_bytes(certificate)
+    with tempfile.TemporaryDirectory(prefix="zrpc-diagnostic-sbverify-",
+                                     dir=workspace) as temporary:
+        runtime = Path(temporary) / "runtime"
+        staged = context.sbverify.stage(builder_archives, runtime)
+        if staged["status"] != "diagnostic-sbverify-objects-staged-unapproved":
+            raise ValueError("signed sbverify runtime stage differs")
+        command = [str(binary), "verify-signature", str(output / "zrpc-gcp.efi"),
+                   uki_sha256, str(files["zrpc-gcp.efi"][0]),
+                   str(runtime / "sbverify"), str(certificate),
+                   sha256(certificate_bytes), str(len(certificate_bytes)),
+                   *(str(runtime / name) for name in (
+                       "ld-linux-x86-64.so.2", "libc.so.6", "libz.so.1",
+                       "libzstd.so.1", "libcrypto.so.3"))]
+        result = subprocess.run(command, capture_output=True, check=False,
+                                stdin=subprocess.DEVNULL,
+                                env={"HOME": "/nonexistent", "LC_ALL": "C",
+                                     "PATH": "/usr/bin:/bin"})
+        if result.returncode:
+            try:
+                blocked = json.loads(result.stdout,
+                                     object_pairs_hook=context.source.guest.prepare.unique_object)
+                reason = blocked.get("reason") if type(blocked) is dict else None
+            except (ValueError, UnicodeError, TypeError):
+                reason = None
+            if (type(reason) is not str or not reason.isascii()
+                    or len(reason) > 128 or "\n" in reason or "\r" in reason):
+                reason = "no bounded verifier reason"
+            raise ValueError("pinned verifier rejected synthetic signed UKI: " + reason)
+        signature = json.loads(result.stdout,
+                               object_pairs_hook=context.source.guest.prepare.unique_object)
+        if (type(signature) is not dict
+                or signature.get("status") !=
+                    "diagnostic-supplied-signer-signature-verified-unapproved"
+                or signature.get("signed_uki_checked") is not True
+                or signature.get("uki_sha256") != uki_sha256
+                or signature.get("signer_certificate_sha256") != sha256(certificate_bytes)
+                or signature.get("private_mode_approved") is not False):
+            raise ValueError("reviewed UKI signature report differs from image bytes")
+    require_unchanged_outputs(output, files)
+    return signature
+
+
 def checked_zebra(context, lock, inputs, receipt_path, now=None):
     """Require eligible pinned ELF bytes and a source-reviewed staging receipt.
 
@@ -1037,6 +1094,11 @@ def main(argv=None):
     importer.add_argument("--mkosi-disk-sha256", required=True)
     importer.add_argument("--mkosi-disk-bytes", type=int, required=True)
     importer.add_argument("--native-rust-manifest-sha256", required=True)
+    signature = commands.add_parser("diagnostic-verify-uki")
+    for name in ("stage", "builder-archives", "workspace", "rust-bundle"):
+        signature.add_argument("--" + name, type=Path, required=True)
+    signature.add_argument("--revision", required=True)
+    signature.add_argument("--uki-sha256", required=True)
     for command in (builder, importer):
         command.add_argument("--revision", required=True)
         command.add_argument("--parent-network-namespace", required=True)
@@ -1050,6 +1112,10 @@ def main(argv=None):
                            args.parent_network_namespace, args.parent_mount_namespace)
             if args.report_path is not None:
                 write_diagnostic(args.report_path, report)
+        elif args.command == "diagnostic-verify-uki":
+            report = diagnostic_verify_uki(
+                args.stage, args.builder_archives, args.workspace,
+                args.rust_bundle, args.revision, args.uki_sha256)
         else:
             report = reinspect_import(
                 args.stage, args.inputs, args.rust_bundle, args.revision, args.metadata,

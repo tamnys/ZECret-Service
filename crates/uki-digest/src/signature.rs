@@ -117,6 +117,7 @@ fn check_loader_report(
         .map_err(|_| "reviewed sbverify loader report is not UTF-8")?;
     let mut expected = HashSet::from([loader]);
     expected.extend(preloads.iter().map(String::as_str));
+    let mut saw_vdso = false;
     for line in report.lines() {
         let (object, address) = line
             .trim()
@@ -128,11 +129,28 @@ fn check_loader_report(
         if address.is_empty() || !address.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("reviewed sbverify loader reported an unexpected object");
         }
-        let object = if let Some((interpreter, path)) = object.split_once(" => ") {
-            if interpreter != "/lib64/ld-linux-x86-64.so.2" || path != loader {
+        // The kernel vDSO is not a filesystem-backed DSO. Native TDX hosts
+        // report it; QEMU user-mode may omit it. Neither spelling may carry a
+        // path to executable bytes, and it may occur only once.
+        if matches!(object.trim_end(), "linux-vdso.so.1" | "linux-vdso.so.1 =>") {
+            if saw_vdso {
                 return Err("reviewed sbverify loader reported an unexpected object");
             }
-            path
+            saw_vdso = true;
+            continue;
+        }
+        let object = if let Some((interpreter, path)) = object.split_once(" => ") {
+            if interpreter == "/lib64/ld-linux-x86-64.so.2" && path == loader {
+                path
+            } else if preloads.iter().zip(SBVERIFY_RUNTIME.iter().skip(1)).any(
+                |(expected_path, (name, _, _))| {
+                    interpreter == *name && path == expected_path.as_str()
+                },
+            ) {
+                path
+            } else {
+                return Err("reviewed sbverify loader reported an unexpected object");
+            }
         } else {
             object
         };
@@ -144,6 +162,76 @@ fn check_loader_report(
         return Err("reviewed sbverify loader omitted a pinned object");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod loader_report_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    fn report(lines: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(0),
+            stdout: lines.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn accepts_only_pinned_file_backed_loader_objects() {
+        let loader = "/proc/self/fd/3";
+        let preloads = (4..8)
+            .map(|descriptor| format!("/proc/self/fd/{descriptor}"))
+            .collect::<Vec<_>>();
+        let native = report(&format!(
+            "linux-vdso.so.1 (0x1000)\n\
+             libc.so.6 => {} (0x2000)\n\
+             libz.so.1 => {} (0x3000)\n\
+             libzstd.so.1 => {} (0x4000)\n\
+             libcrypto.so.3 => {} (0x5000)\n\
+             /lib64/ld-linux-x86-64.so.2 => {loader} (0x6000)\n",
+            preloads[0], preloads[1], preloads[2], preloads[3]
+        ));
+        assert_eq!(check_loader_report(&native, loader, &preloads), Ok(()));
+        let vdso_alias = String::from_utf8(native.stdout.clone())
+            .unwrap()
+            .replace("linux-vdso.so.1 (", "linux-vdso.so.1 =>  (");
+        assert_eq!(
+            check_loader_report(&report(&vdso_alias), loader, &preloads),
+            Ok(())
+        );
+
+        let qemu = report(&format!(
+            "{} (0x1000)\n{} (0x2000)\n{} (0x3000)\n{} (0x4000)\n\
+             /lib64/ld-linux-x86-64.so.2 => {loader} (0x5000)\n",
+            preloads[0], preloads[1], preloads[2], preloads[3]
+        ));
+        assert_eq!(check_loader_report(&qemu, loader, &preloads), Ok(()));
+
+        let native_text = String::from_utf8(native.stdout.clone()).unwrap();
+        for changed in [
+            native_text
+                .replace("libcrypto.so.3", "libextra.so.3")
+                .into_bytes(),
+            native_text
+                .replace(&preloads[0], "/usr/lib/libc.so.6")
+                .into_bytes(),
+            [native.stdout.as_slice(), b"linux-vdso.so.1 (0x7000)\n"].concat(),
+        ] {
+            assert_eq!(
+                check_loader_report(
+                    &Output {
+                        stdout: changed,
+                        ..report("")
+                    },
+                    loader,
+                    &preloads
+                ),
+                Err("reviewed sbverify loader reported an unexpected object")
+            );
+        }
+    }
 }
 
 /// Verify an exact UKI against an exact supplied X.509 certificate with the
