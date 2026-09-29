@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -294,6 +296,30 @@ class DiskProfileTests(unittest.TestCase):
         (staged / "usr" / "bin" / "unreviewed").write_bytes(b"x")
         with self.assertRaisesRegex(ValueError, "unreviewed file"):
             disk.inspect_staged_builder(staged, expected)
+
+    def test_external_signer_inventory_requires_exact_private_tmpfs(self):
+        mount = Path("/run/zrpc-build-signing")
+        mount_info = SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o700)
+        key_info = SimpleNamespace(st_uid=0, st_mode=stat.S_IFREG | 0o600,
+                                   st_nlink=1, st_size=32)
+        record = "1 0 0:1 / /run/zrpc-build-signing rw - tmpfs tmpfs rw\n"
+        with (mock.patch.object(Path, "is_symlink", return_value=False),
+              mock.patch.object(Path, "is_dir", return_value=True),
+              mock.patch.object(disk.os.path, "ismount", return_value=True),
+              mock.patch.object(Path, "stat", return_value=mount_info),
+              mock.patch.object(Path, "lstat", return_value=key_info),
+              mock.patch.object(Path, "read_text", return_value=record),
+              mock.patch.object(disk.os, "listdir",
+                                return_value=["secure-boot.key"])):
+            disk.checked_external_signing_mount(mount)
+            with mock.patch.object(disk.os, "listdir",
+                                   return_value=["secure-boot.key", "rogue"]):
+                with self.assertRaisesRegex(ValueError, "unreviewed entries"):
+                    disk.checked_external_signing_mount(mount)
+            with mock.patch.object(Path, "read_text",
+                                   return_value=record.replace("tmpfs", "ext4")):
+                with self.assertRaisesRegex(ValueError, "exact tmpfs"):
+                    disk.checked_external_signing_mount(mount)
 
 
 if __name__ == "__main__":

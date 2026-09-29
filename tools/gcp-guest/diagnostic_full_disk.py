@@ -379,7 +379,8 @@ def build(lock_path, inputs, stage, metadata, guest_archives, builder_archives,
         raise ValueError("fresh rehearsal stage and workspace required")
     execution = builder.verify_execution_context(
         metadata, builder_archives, parent_net_ns, apt_scratch,
-        parent_user_ns, parent_pid_ns)
+        parent_user_ns, parent_pid_ns,
+        external_signing_mount=signed_boot)
     if execution["status"] != "diagnostic-signed-staged-builder-no-route":
         raise ValueError("no-route signed builder context did not verify")
     guest_receipt = guest.verify_cached_archives(metadata, guest_archives)
