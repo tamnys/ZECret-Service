@@ -7,6 +7,7 @@ it does not approve the signer, firmware policy, boot, TDX, or private mode.
 """
 
 import argparse
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
@@ -34,6 +35,17 @@ OUTPUT_FILES = {
     "initrd.cpio.zst", "initrd.manifest",
 }
 OUTPUT_ALIASES = {"zrpc-gcp": "zrpc-gcp.raw", "initrd": "initrd.cpio.zst"}
+# Direct and transitive DT_NEEDED providers of the reviewed Debian sfdisk ELF.
+# The signed loader's --list result must contain only these sealed objects.
+SFDISK_ELF_PROVIDERS = (
+    ("libfdisk.so.1", "libfdisk1"),
+    ("libsmartcols.so.1", "libsmartcols1"),
+    ("libtinfo.so.6", "libtinfo6"),
+    ("libreadline.so.8", "libreadline8t64"),
+    ("libuuid.so.1", "libuuid1"),
+    ("libblkid.so.1", "libblkid1"),
+    ("libc.so.6", "libc6"),
+)
 ADDITIONAL_SCRIPTS = (
     "tools/gcp-guest/verify-package-closure.py",
     "tools/gcp-guest/inspect_raw_gpt.py",
@@ -647,7 +659,7 @@ def inspected_uki_digest(context, rust_bundle, output, boot):
 
 
 def checked_sfdisk_package(context, metadata, builder_archives, sfdisk):
-    """Reconstruct the exact sfdisk executable from the signed builder deb."""
+    """Reconstruct sfdisk and its initial ELF objects from signed builder debs."""
     import debian_snapshot
     import verify_builder_closure as closure
 
@@ -692,10 +704,66 @@ def checked_sfdisk_package(context, metadata, builder_archives, sfdisk):
             or sha256(executable) != context.import_disk.SFDISK_SHA256
             or hash_regular(sfdisk)[1] != context.import_disk.SFDISK_SHA256):
         raise ValueError("sfdisk executable differs from signed fdisk package")
-    return {"sfdisk_sha256": context.import_disk.SFDISK_SHA256,
-            "sfdisk_package_archive_sha256": entry["sha256"],
-            "sfdisk_archive_membership_rechecked": True,
-            "sfdisk_dynamic_runtime_authenticated": False}
+    needed = {"libc6", *(package for _, package in SFDISK_ELF_PROVIDERS)}
+    runtime_entries = {}
+    for candidate in lock["packages"]:
+        if candidate["name"] in needed:
+            if candidate["name"] in runtime_entries:
+                raise ValueError("duplicate signed sfdisk runtime provider")
+            runtime_entries[candidate["name"]] = candidate
+    if set(runtime_entries) != needed:
+        raise ValueError("signed sfdisk runtime provider missing")
+    runtime_archives = {}
+    for name, candidate in runtime_entries.items():
+        record = records.get((name, candidate["version"], candidate["architecture"]))
+        runtime_archives[name] = closure.indexed_archive(
+            candidate, record, builder_archives, keep_bytes=True)
+    loader = closure.package_elf(runtime_archives["libc6"], "ld-linux-x86-64.so.2")
+    libraries = tuple(
+        closure.package_elf(runtime_archives[package], soname)
+        for soname, package in SFDISK_ELF_PROVIDERS)
+    report = {"sfdisk_sha256": context.import_disk.SFDISK_SHA256,
+              "sfdisk_package_archive_sha256": entry["sha256"],
+              "sfdisk_archive_membership_rechecked": True,
+              "sfdisk_dynamic_runtime_authenticated": False}
+    return report, (executable, loader, libraries)
+
+
+def signed_sfdisk_runtime(runtime, scratch, disk=None):
+    """Inspect sealed initial ELF objects, then optionally relocate one GPT.
+
+    This does not establish absence of later dynamic loads or approve an image.
+    The caller must separately authenticate the disk and re-inspect its output.
+    """
+    import verify_builder_closure as closure
+
+    if scratch.is_symlink() or not scratch.is_dir():
+        raise ValueError("signed sfdisk scratch directory missing or redirected")
+    program_bytes, loader_bytes, libraries = runtime
+    with (tempfile.TemporaryDirectory(prefix="zrpc-sfdisk-libs-", dir=scratch) as empty_lib,
+          ExitStack() as stack):
+        program, program_fd = stack.enter_context(closure.sealed_elf_bytes(program_bytes))
+        loader, loader_fd = stack.enter_context(closure.sealed_elf_bytes(loader_bytes))
+        preloads = []
+        descriptors = [program_fd, loader_fd]
+        for data in libraries:
+            library, descriptor = stack.enter_context(closure.sealed_elf_bytes(data))
+            preloads.append(library)
+            descriptors.append(descriptor)
+        prefix = [str(loader), "--inhibit-cache", "--preload",
+                  ":".join(map(str, preloads)), "--library-path", empty_lib]
+        environment = {"LC_ALL": "C", "PATH": empty_lib, "HOME": empty_lib}
+        inspected = subprocess.run(
+            [*prefix, "--list", str(program)], pass_fds=descriptors,
+            env=environment, capture_output=True, text=True, check=False)
+        closure.check_loader_report(inspected, loader, preloads)
+        if disk is not None:
+            result = subprocess.run(
+                [*prefix, str(program), "--relocate", "gpt-bak-std", str(disk)],
+                pass_fds=descriptors, env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if result.returncode:
+                raise ValueError("signed sfdisk could not relocate the backup GPT")
 
 
 def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_archives,
@@ -747,10 +815,11 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
         if lock["artifacts"][role]["sha256"] != rust["artifacts"][role]["sha256"]:
             raise ValueError("import source guest role differs from native Rust receipt")
     checked_zebra(context, lock, inputs, zebra_receipt)
-    sfdisk_membership = checked_sfdisk_package(
-        context, metadata, builder_archives, sfdisk)
     namespace = context.package.check_loopback_only_ip_state(
         parent_network_namespace, parent_mount_namespace)
+    sfdisk_membership, sfdisk_runtime = checked_sfdisk_package(
+        context, metadata, builder_archives, sfdisk)
+    signed_sfdisk_runtime(sfdisk_runtime, workspace / ".codex-tmp")
     output = stage / "output"
     files = checked_outputs(output)
     if files["zrpc-gcp.raw"] != (source_bytes, source_sha256):
@@ -761,7 +830,9 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
     raw = import_directory / "disk.raw"
     sizing = context.import_disk._prepare(
         output / "zrpc-gcp.raw", source_sha256, source_bytes, raw, sfdisk,
-        gpt_module=context.gpt)
+        gpt_module=context.gpt,
+        sfdisk_runner=lambda disk: signed_sfdisk_runtime(
+            sfdisk_runtime, import_directory, disk))
     if (sizing.get("status") != "diagnostic-import-sized-gpt-unapproved"
             or sizing.get("mkosi_disk_sha256") != source_sha256
             or sizing.get("mkosi_disk_bytes") != source_bytes

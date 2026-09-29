@@ -103,7 +103,8 @@ def _remove_old_backup(fd, old_start, old_end, new_start, new_end):
 
 
 def _prepare(source, expected_sha256, expected_bytes, destination, sfdisk,
-             *, allow_non_workspace_paths=False, sfdisk_env=None, gpt_module=None):
+             *, allow_non_workspace_paths=False, sfdisk_env=None, gpt_module=None,
+             sfdisk_runner=None):
     source, destination, sfdisk = map(Path, (source, destination, sfdisk))
     if (not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
             or type(expected_bytes) is not int or expected_bytes <= 0
@@ -152,15 +153,18 @@ def _prepare(source, expected_sha256, expected_bytes, destination, sfdisk,
                 os.ftruncate(temporary_fd, target_bytes)
                 os.fsync(temporary_fd)
                 if target_bytes != expected_bytes:
-                    environment = ({"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C",
-                                    "HOME": "/nonexistent"} if sfdisk_env is None else sfdisk_env)
-                    result = subprocess.run(
-                        [str(sfdisk), "--relocate", "gpt-bak-std", str(temp_path)],
-                        executable=f"/proc/self/fd/{tool_fd}", pass_fds=(tool_fd,),
-                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL, env=environment, check=False)
-                    if result.returncode:
-                        raise ValueError("pinned sfdisk could not relocate the backup GPT")
+                    if sfdisk_runner is None:
+                        environment = ({"PATH": "/usr/sbin:/usr/bin:/bin", "LC_ALL": "C",
+                                        "HOME": "/nonexistent"} if sfdisk_env is None else sfdisk_env)
+                        result = subprocess.run(
+                            [str(sfdisk), "--relocate", "gpt-bak-std", str(temp_path)],
+                            executable=f"/proc/self/fd/{tool_fd}", pass_fds=(tool_fd,),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, env=environment, check=False)
+                        if result.returncode:
+                            raise ValueError("pinned sfdisk could not relocate the backup GPT")
+                    else:
+                        sfdisk_runner(temp_path)
                     new_last_lba = target_bytes // SECTOR_SIZE - 1
                     new_backup_start = gpt.header(temporary_fd, new_last_lba,
                                                   SECTOR_SIZE, new_last_lba)[3] * SECTOR_SIZE

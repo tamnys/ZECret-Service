@@ -19,6 +19,21 @@ SPEC.loader.exec_module(runner)
 
 
 class OuterImageRunnerTest(unittest.TestCase):
+    def test_sfdisk_rejects_ambient_loader_object_before_disk_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            disk = root / "disk.raw"
+            disk.write_bytes(b"unchanged")
+            runtime = (b"\x7fELFprogram", b"\x7fELFloader", (b"\x7fELFlibrary",))
+            ambient = types.SimpleNamespace(
+                returncode=0, stderr="",
+                stdout="\t/proc/self/fd/99 (0x1000)\n")
+            with mock.patch.object(runner.subprocess, "run", return_value=ambient) as invoked:
+                with self.assertRaisesRegex(ValueError, "ambient objects"):
+                    runner.signed_sfdisk_runtime(runtime, root, disk)
+            self.assertEqual(invoked.call_count, 1)
+            self.assertEqual(disk.read_bytes(), b"unchanged")
+
     def test_import_sfdisk_is_reconstructed_from_signed_package(self):
         with mock.patch.object(sys, "path", [str(HERE), *sys.path]):
             import debian_snapshot
@@ -53,8 +68,11 @@ class OuterImageRunnerTest(unittest.TestCase):
                      "filename": "pool/main/f/fdisk.deb", "size": len(package),
                      "sha256": package_hash}
             lock = root / "builder.json"
+            runtime_entries = [{**entry, "name": name}
+                               for name in {"libc6", *(package for _, package in
+                                              runner.SFDISK_ELF_PROVIDERS)}]
             lock.write_text(json.dumps({"snapshot": "https://example.invalid/snapshot/",
-                                        "packages": [entry]}))
+                                        "packages": [entry, *runtime_entries]}))
             guest = types.SimpleNamespace(
                 SNAPSHOT="https://example.invalid/snapshot/",
                 INRELEASE_SHA256="a" * 64, SIGNED_RELEASE_EPOCH=1,
@@ -68,16 +86,23 @@ class OuterImageRunnerTest(unittest.TestCase):
             records = {("fdisk", "synthetic", "amd64"):
                        {"Filename": entry["filename"], "Size": str(entry["size"]),
                         "SHA256": entry["sha256"]}}
+            records.update({(candidate["name"], "synthetic", "amd64"):
+                            {"Filename": entry["filename"], "Size": str(entry["size"]),
+                             "SHA256": entry["sha256"]}
+                            for candidate in runtime_entries})
             with (mock.patch.object(closure, "LOCK", lock),
                   mock.patch.object(closure, "LOCK_BYTES", lock.stat().st_size),
                   mock.patch.object(closure, "LOCK_SHA256", runner.sha256(lock.read_bytes())),
                   mock.patch.object(debian_snapshot, "authenticated_index_bytes",
                                     return_value=(1, ("b" * 64, 4), b"test")),
-                  mock.patch.object(debian_snapshot, "package_records", return_value=records)):
-                checked = runner.checked_sfdisk_package(
+                  mock.patch.object(debian_snapshot, "package_records", return_value=records),
+                  mock.patch.object(closure, "package_elf", return_value=b"\x7fELFsynthetic-library")):
+                checked, runtime = runner.checked_sfdisk_package(
                     context, metadata, archives, installed)
                 self.assertTrue(checked["sfdisk_archive_membership_rechecked"])
                 self.assertFalse(checked["sfdisk_dynamic_runtime_authenticated"])
+                self.assertEqual(runtime[0], executable)
+                self.assertEqual(len(runtime[2]), len(runner.SFDISK_ELF_PROVIDERS))
                 installed.write_bytes(b"\x7fELFsubstituted")
                 with self.assertRaisesRegex(ValueError, "differs from signed fdisk package"):
                     runner.checked_sfdisk_package(context, metadata, archives, installed)
