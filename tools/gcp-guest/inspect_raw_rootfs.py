@@ -56,6 +56,13 @@ REQUIRED_FILES = frozenset({
 })
 ENV = {"HOME": "/nonexistent", "LC_ALL": "C", "PATH": "/usr/bin:/bin",
        "DEBUGFS_PAGER": "/usr/bin/cat"}
+SUPER_ENV = {**ENV, "TZ": "UTC"}
+SUPER_FIELDS = {
+    "Filesystem UUID": "filesystem_uuid",
+    "Filesystem created": "filesystem_created_utc",
+    "Directory Hash Seed": "directory_hash_seed",
+}
+UUID_TEXT = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\Z")
 
 
 def _file_identity(info):
@@ -227,6 +234,46 @@ def run_stat(reader, image, relative, *, env=ENV, pass_fds=()):
             "size": int(owner_size[0][2]), "link": link[0] if link else None}
 
 
+def checked_superblock_metadata(report):
+    fields = {field: report.get(field) for field in SUPER_FIELDS.values()}
+    if any(type(value) is not str for value in fields.values()):
+        raise ValueError("signed debugfs superblock report lacks required metadata")
+    if (not UUID_TEXT.fullmatch(fields["filesystem_uuid"])
+            or not UUID_TEXT.fullmatch(fields["directory_hash_seed"])):
+        raise ValueError("signed debugfs superblock UUID or hash seed is malformed")
+    created = fields["filesystem_created_utc"]
+    try:
+        parsed = datetime.strptime(created, "%a %b %d %H:%M:%S %Y")
+    except ValueError as error:
+        raise ValueError("signed debugfs filesystem creation time is malformed") from error
+    if (parsed.strftime("%a %b ") + f"{parsed.day:2d}"
+            + parsed.strftime(" %H:%M:%S %Y")) != created:
+        raise ValueError("signed debugfs filesystem creation time is malformed")
+    return fields
+
+
+def run_superblock_stats(reader, image, *, env=SUPER_ENV, pass_fds=()):
+    """Read three ext4 superblock values from the signed debugfs header."""
+    result = subprocess.run([str(reader), "-R", "stats -h", str(image)],
+                            stdin=subprocess.DEVNULL, capture_output=True, env=env,
+                            pass_fds=pass_fds, check=False)
+    if result.returncode or result.stderr != READER_BANNER:
+        raise ValueError("signed debugfs could not read rootfs superblock")
+    try:
+        output = result.stdout.decode("ascii")
+    except UnicodeError as error:
+        raise ValueError("signed debugfs superblock report is malformed") from error
+    fields = {}
+    for line in output.splitlines():
+        label, separator, value = line.partition(":")
+        if separator and label in SUPER_FIELDS:
+            field = SUPER_FIELDS[label]
+            if field in fields or not value.startswith(" ") or value != value.rstrip():
+                raise ValueError("signed debugfs superblock report is ambiguous or malformed")
+            fields[field] = value.strip()
+    return checked_superblock_metadata(fields)
+
+
 def run_cat(reader, image, relative, expected_size, scratch, *, env=ENV, pass_fds=()):
     # One extra byte is enough to detect a changed file while bounding output
     # to the exact staged size. The banner is the only allowed stderr output.
@@ -309,10 +356,12 @@ def inspect(raw, expected_sha256, expected_bytes, sector_size, layout,
         with verity.closure.sealed_elf_bytes(signed_reader) as (reader, descriptor):
             checked = inspect_entries(reader, root, selected, scratch,
                                       pass_fds=(descriptor,))
+            superblock = run_superblock_stats(reader, root, pass_fds=(descriptor,))
     return {"status": STATUS, "raw_disk_sha256": expected_sha256,
             "raw_disk_bytes": expected_bytes,
             "root_partition_guid": root_guid,
             "root_partition_sha256": root_sha256,
+            **superblock,
             "overlay_entries_checked": checked,
             "staged_builder_debugfs_sha256": reader_sha256,
             "signed_e2fsprogs_archive_sha256": archive_sha256,

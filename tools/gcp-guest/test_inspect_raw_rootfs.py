@@ -1,5 +1,6 @@
 """Synthetic rootfs inspector negatives; no fixture is a boot or release."""
 
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -109,6 +110,80 @@ class RawRootfsTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     rootfs.run_stat(Path("/synthetic/debugfs"), self.root,
                                     "usr/lib/zrpc/zebrad")
+
+    def test_superblock_metadata_requires_three_unambiguous_valid_fields(self):
+        lines = ["Filesystem UUID:          2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
+                 "Filesystem created:       Mon Sep 28 12:34:56 2026",
+                 "Directory Hash Seed:      3b84d5f6-2c3d-4e5f-901a-b2c3d4e5f607"]
+        expected = {"filesystem_uuid": "2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
+                    "filesystem_created_utc": "Mon Sep 28 12:34:56 2026",
+                    "directory_hash_seed": "3b84d5f6-2c3d-4e5f-901a-b2c3d4e5f607"}
+
+        def report(output, *, stderr=rootfs.READER_BANNER, returncode=0):
+            return types.SimpleNamespace(returncode=returncode, stderr=stderr,
+                                         stdout=(output + "\n").encode("ascii"))
+
+        with mock.patch.object(rootfs.subprocess, "run", return_value=report("\n".join(lines))) as run:
+            self.assertEqual(rootfs.run_superblock_stats(
+                Path("/synthetic/debugfs"), self.root), expected)
+            self.assertEqual(run.call_args.args[0],
+                             ["/synthetic/debugfs", "-R", "stats -h", str(self.root)])
+            self.assertEqual(run.call_args.kwargs["env"]["TZ"], "UTC")
+        malformed = ("\n".join(lines[:-1]),
+                     "\n".join(lines + [lines[0]]),
+                     "\n".join(lines).replace(expected["filesystem_uuid"], "not-a-uuid"),
+                     "\n".join(lines).replace(expected["directory_hash_seed"], "<>"),
+                     "\n".join(lines).replace("Sep 28", "Feb 30"),
+                     "\n".join(lines).replace("Mon Sep", "Tue Sep"))
+        for output in malformed:
+            with self.subTest(output=output), \
+                    mock.patch.object(rootfs.subprocess, "run", return_value=report(output)):
+                with self.assertRaises(ValueError):
+                    rootfs.run_superblock_stats(Path("/synthetic/debugfs"), self.root)
+        for result in (report("\n".join(lines), stderr=rootfs.READER_BANNER + b"error\n"),
+                       report("\n".join(lines), returncode=1)):
+            with mock.patch.object(rootfs.subprocess, "run", return_value=result):
+                with self.assertRaisesRegex(ValueError, "could not read rootfs superblock"):
+                    rootfs.run_superblock_stats(Path("/synthetic/debugfs"), self.root)
+
+    def test_inspection_reports_metadata_without_approving_image(self):
+        root = self.root / "copied-root.img"
+        root.write_bytes(b"synthetic ext4 placeholder")
+        raw_sha256 = "a" * 64
+        layout = {"status": "diagnostic-gpt-only-unapproved",
+                  "raw_disk_sha256": raw_sha256, "raw_disk_bytes": 8192}
+        verified = {"status": "diagnostic-raw-root-verity-unapproved",
+                    "raw_disk_sha256": raw_sha256, "raw_disk_bytes": 8192,
+                    "root_partition_guid": "root-guid",
+                    "root_partition_bytes": root.stat().st_size,
+                    "verity_userspace_verified": True, "private_mode_approved": False}
+        metadata = {"filesystem_uuid": "2a73c4e5-1b2c-4d5e-8f90-a1b2c3d4e5f6",
+                    "filesystem_created_utc": "Mon Sep 28 12:34:56 2026",
+                    "directory_hash_seed": "3b84d5f6-2c3d-4e5f-901a-b2c3d4e5f607"}
+        with mock.patch.object(rootfs.platform, "system", return_value="Linux"), \
+                mock.patch.object(rootfs.platform, "machine", return_value="x86_64"), \
+                mock.patch.object(rootfs.verity.esp, "workspace_scratch", return_value=self.root), \
+                mock.patch.object(rootfs, "checked_overlay", return_value={}), \
+                mock.patch.object(rootfs, "signed_reader_bytes", return_value=(b"ELF", "b" * 64)), \
+                mock.patch.object(rootfs, "checked_reader", return_value="c" * 64), \
+                mock.patch.object(rootfs.verity, "partition_images", return_value={
+                    "root-x86-64": (root, root.stat().st_size, "root-guid")}), \
+                mock.patch.object(rootfs.verity.closure, "sealed_elf_bytes",
+                                  return_value=nullcontext((Path("/synthetic/debugfs"), 7))), \
+                mock.patch.object(rootfs, "inspect_entries", return_value={
+                    "file": 0, "directory": 0, "symlink": 0}), \
+                mock.patch.object(rootfs, "run_superblock_stats", return_value=metadata) as stats:
+            result = rootfs.inspect(self.root / "disk.raw", raw_sha256, 8192, 512,
+                                    layout, verified, self.root / "InRelease",
+                                    self.root / "Packages.xz", self.root / "archives",
+                                    self.stage, self.manifest, self.root)
+        self.assertEqual(stats.call_args.args[1], root)
+        self.assertEqual(stats.call_args.kwargs["pass_fds"], (7,))
+        self.assertEqual({key: result[key] for key in metadata}, metadata)
+        self.assertEqual(result["root_partition_sha256"], digest(root.read_bytes()))
+        self.assertEqual(result["status"], rootfs.STATUS)
+        self.assertIs(result["boot_verified"], False)
+        self.assertIs(result["private_mode_approved"], False)
 
     def test_changed_raw_bytes_or_symlink_fail_before_diagnostic_result(self):
         selected = rootfs.checked_overlay(self.manifest, self.stage)
