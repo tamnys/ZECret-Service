@@ -691,7 +691,7 @@ fn import_receipt_binds_candidate_media_with_native_validation_without_approval(
     assert!(
         crate::gcp::LIVE_DEPLOYMENT_BLOCKERS
             .iter()
-            .any(|item| item.contains("import producer toolchain identity"))
+            .any(|item| item.contains("import producer executable identity"))
     );
 
     let mut missing = serde_json::to_value(&f.package.spec).unwrap();
