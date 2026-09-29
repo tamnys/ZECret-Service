@@ -10,9 +10,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import inspect_raw_verity as verity
 import test_inspect_raw_esp as esp_fixture
+import test_inspect_raw_gpt as gpt_fixture
 
 
 SECTOR = esp_fixture.SECTOR
@@ -68,6 +70,35 @@ class RawVerityInspectorTests(unittest.TestCase):
                       "image_built", "private_mode_approved"):
             self.assertIs(report[field], False)
 
+    def test_reports_digest_of_exact_copied_hash_partition(self):
+        header = ("Hash type: 1\nData blocks: 5\nData block size: 4096\n"
+                  "Hash block size: 4096\nHash algorithm: sha256\n")
+        disk_path = self.root / "disk.raw"
+        hash_start = HASH_FIRST * SECTOR
+        hash_end = (HASH_LAST + 1) * SECTOR
+        boot = {"uki_cmdline_for_review": "roothash=" + "a" * 64,
+                "uki_sha256": "b" * 64}
+        with (mock.patch.object(verity.platform, "machine", return_value="x86_64"),
+              mock.patch.object(verity.esp, "workspace_scratch", return_value=self.root),
+              mock.patch.object(verity.esp, "inspect", return_value=boot),
+              mock.patch.object(verity, "authenticated_toolchain",
+                                return_value=(None, None, None, {})),
+              mock.patch.object(verity, "run_verity", return_value=header) as run):
+            for value in (0x15, 0x2a):
+                with self.subTest(hash_byte=value):
+                    disk = gpt_fixture.synthetic_disk()
+                    disk[hash_start:hash_end] = bytes([value]) * PARTITION_BYTES
+                    disk_path.write_bytes(disk)
+                    report = verity.inspect(
+                        disk_path, hashlib.sha256(disk).hexdigest(), len(disk),
+                        SECTOR, self.root, self.root, self.root, self.root)
+                    self.assertEqual(report["verity_partition_sha256"],
+                                     hashlib.sha256(disk[hash_start:hash_end]).hexdigest())
+                    self.assertTrue(report["verity_userspace_verified"])
+                    self.assertIs(report["private_mode_approved"], False)
+            self.assertEqual([call.args[1][0] for call in run.call_args_list],
+                             ["dump", "verify", "dump", "verify"])
+
     def signed_verity_partition_pair(self):
         inrelease, index, archives = self.signed_inputs()
         toolchain = verity.authenticated_toolchain(inrelease, index, archives)
@@ -105,6 +136,8 @@ class RawVerityInspectorTests(unittest.TestCase):
         self.assertEqual(report["status"], "diagnostic-raw-root-verity-unapproved")
         self.assertTrue(report["verity_userspace_verified"])
         self.assertEqual(report["verity_header"]["data_blocks"], 5)
+        self.assertEqual(report["verity_partition_sha256"],
+                         hashlib.sha256(hashes).hexdigest())
         for field in ("complete_builder_toolchain", "signed_uki_checked",
                       "cmdline_approved", "dm_verity_boot_checked", "image_built",
                       "private_mode_approved"):
