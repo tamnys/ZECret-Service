@@ -76,12 +76,25 @@ impl PrivateDirectory {
         let metadata =
             fs::symlink_metadata(path).map_err(|_| StoreError::PrivateDirectoryRequired)?;
         let canonical = fs::canonicalize(path).map_err(|_| StoreError::PrivateDirectoryRequired)?;
+        let resolved =
+            fs::symlink_metadata(&canonical).map_err(|_| StoreError::PrivateDirectoryRequired)?;
+        let owner = rustix::process::geteuid().as_raw();
         if !metadata.is_dir()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.uid() != owner
             || metadata.mode() & 0o077 != 0
+            || metadata.dev() != resolved.dev()
+            || metadata.ino() != resolved.ino()
             || canonical
                 .ancestors()
                 .any(|parent| parent.join(".git").exists())
+            || canonical.ancestors().skip(1).any(|parent| {
+                let Ok(entry) = fs::symlink_metadata(parent) else {
+                    return true;
+                };
+                !entry.is_dir()
+                    || (entry.uid() != owner && entry.uid() != 0)
+                    || (entry.mode() & 0o022 != 0 && entry.mode() & 0o1000 == 0)
+            })
         {
             return Err(StoreError::PrivateDirectoryRequired);
         }

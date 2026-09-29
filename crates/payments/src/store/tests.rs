@@ -90,6 +90,27 @@ fn private_directory_and_existing_store_fail_closed() {
 }
 
 #[test]
+fn private_directory_rejects_replaceable_ancestor() {
+    let fixture = Fixture::new();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&fixture.path)
+        .unwrap();
+    let private_path = fixture.path.join("private");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&private_path)
+        .unwrap();
+    fs::set_permissions(&fixture.path, fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(matches!(
+        PrivateDirectory::open(&private_path),
+        Err(StoreError::PrivateDirectoryRequired)
+    ));
+    fs::set_permissions(&fixture.path, fs::Permissions::from_mode(0o1777)).unwrap();
+    assert!(PrivateDirectory::open(&private_path).is_ok());
+}
+
+#[test]
 fn bearer_store_directory_inside_checkout_is_rejected() {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).unwrap();
