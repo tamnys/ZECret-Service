@@ -149,7 +149,7 @@ Both timers target one service and request a startup check. Its explicit
 no restart loop and no inherited start-rate suppression. The periodic timer
 counts from service inactivity, including failure. The deadline timer retains
 the exact original `deadline − L − S` time in UTC and uses `Persistent=true`
-for missed calendar events after reactivation. Unit syntax targets systemd 257;
+for missed calendar events after reactivation. Unit syntax targets systemd 255;
 validate the complete files and effective configuration on the selected host.
 
 For this bundle, `S` must cover a skipped timer event while the service is
