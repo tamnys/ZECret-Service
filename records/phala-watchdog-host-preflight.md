@@ -111,3 +111,49 @@ It does not prove behavior after a Colima or Mac reboot, mount loss, provider
 outage, a slow deletion, or a real authenticated watchdog invocation. Those
 tests, the independent deadline backstop, current quote, and billing/storage
 reconciliation remain deployment prerequisites.
+
+## Isolated mount-loss and authenticated invocation rehearsal — 2026-09-30
+
+The earlier owner-private ARM64 CLI was found stale: its `export-watchdog`
+interface lacked the current `--ledger-mount-point` requirement. The current
+worktree was rebuilt inside the managed container with `cargo build --locked
+-p zrpc-cli`; `cargo test --locked -p zrpc-lifecycle schedule::` passed 17
+tests. The updated executable SHA-256 is
+`3b58199bdb2975ed58c100d15770966313b2deb28f76d6deef80e87a7fb1c6ba`.
+The VM copy matched and advertised the mount-bound export interface.
+
+A separate tmpfs was mounted at `/run/zrpc-watchdog-probe`, containing only a
+synthetic ledger with no tracked CVM. The current CLI exported four uninstalled
+units; a matching disposable mount unit was added under volatile
+`/run/systemd/system`. Colima's systemd 255 accepted the five units. Starting
+the mount gate activated both timers, and the generated service executed the
+current `zrpc lifecycle watchdog-once` binary successfully against the empty
+experiment. The provider credential and explicit TLS root were used for
+authenticated reads, but there was no tracked deletion target.
+
+Stopping the **disposable test mount**, without touching `/Users/j`, caused
+the gate and both timers to become inactive. The mount and all five volatile
+unit files were removed; both timers then reported `LoadState=not-found` and
+`ActiveState=inactive`. This proves effective fail-closed mount-loss behavior
+for an isolated synthetic ledger on this VM. It does not prove Mac reboot
+recovery, provider deletion latency, mounted production-ledger recovery,
+attached-storage deletion, or billing finality. No Phala CVM or billable
+resource was created.
+
+The retained inert `/usr/bin/false` bundle on the real `/Users/j` VirtioFS
+mount was then installed temporarily under `/etc/systemd/system` and enabled
+for `Users-j.mount`. Its gate and both timers were active before a Colima VM
+restart. An immediate force-stop lost those recently written `/etc` files;
+the VM disk uses an ext4 commit interval, so an unsynchronized force-stop is
+not a valid persistence test. Repeating the installation with `sync` before
+the force-stop preserved all four files and the enablement link. After boot,
+`Users-j.mount`, the gate, and both timers were active. The route still chose
+`col0`, and the current CLI survived on the VM disk. The synthetic units were
+stopped, disabled, removed, and synchronized; both timers then reported
+`LoadState=not-found` and `ActiveState=inactive`.
+
+This establishes one synchronized **Colima VM** restart recovery, not Mac
+power-loss recovery or an assurance that an abrupt crash immediately after
+installing production units preserves them. A production installation must
+sync its unit files and ledger before any billable call, then verify effective
+units and the mounted ledger again.
