@@ -67,6 +67,25 @@ the approved workload, private storage policy, administration boundary or
 genuine private-mode acceptance. The approved-release catalog remains empty,
 and private queries remain blocked.
 
+At 2026-09-30 23:50 UTC, the following command succeeded from the current
+managed browser-container checkout. The hostname is the live `prod9` app ID's
+TLS-passthrough route, not the gateway-terminated HTTPS route. The local
+collateral file is an explicitly staged input; the verifier did not fetch it
+while handling the query.
+
+```sh
+/Users/j/.codex/bin/codex-in-container --trust untrusted --profile browser --command cargo run --locked --manifest-path /workspace/.worktrees/phala-snapshot-preview/Cargo.toml -p zrpc-cli -- preview --platform phala-dstack --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network --endpoint-port 443 --tor-executable /workspace/.codex-tmp/phala-live-20260930/tor-tool/extract/usr/bin/tor --collateral /workspace/.codex-tmp/phala-live-20260930/collateral.json
+```
+
+The live result reported `public_preview_passed: true`, Intel-root TDX quote
+and public-preview TCB policy verified, fresh challenge and retained TLS key
+binding verified, Testnet height 4,424,560 and zero zatoshis for the synthetic
+fixture address. It reported `workload_identity_verified: false`,
+`private_accepted: false` and no private query. The height and balance are
+node-reported at different instants; synchronization completeness was not
+independently established. This command is a repeatable public demo, not a
+release-approval test.
+
 Phala's live stats reported zero swap and a running DStack 0.5.9 guest. The
 stock dashboard's container-log view returned `configured logging driver does
 not support reading`; the later end-to-end public RPC response, rather than
