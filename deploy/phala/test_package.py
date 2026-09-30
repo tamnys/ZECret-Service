@@ -6,7 +6,9 @@ import importlib.util
 import json
 from pathlib import Path
 import socket
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -342,6 +344,18 @@ class PackageTests(unittest.TestCase):
             finally:
                 for item in sockets:
                     item.close()
+
+    def test_app_startup_refuses_legacy_shared_backend_socket(self):
+        with socket.socket(socket.AF_UNIX) as backend:
+            backend.bind(str(self.root / "dstack.sock"))
+            snapshot = types.ModuleType("snapshot_import")
+            snapshot.ensure_snapshot = lambda: None
+            with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
+                  patch.object(supervisor, "RUN", self.root),
+                  patch.object(supervisor, "BACKEND", self.root / "quote-only.sock"),
+                  patch.object(supervisor, "mount_type", return_value="tmpfs")):
+                with self.assertRaisesRegex(RuntimeError, "app container exposes dstack socket"):
+                    supervisor.run_app()
 
 
 if __name__ == "__main__":
