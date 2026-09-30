@@ -430,6 +430,17 @@ fn issuer_partial_issuance_rolls_back_after_process_exit() {
 
 #[test]
 fn redeeming_same_marker_concurrently_admits_once_and_replay_survives_restart() {
+    const CHILD_DIR: &str = "ZRPC_PAYMENT_REDEEMER_RESTART_DIR";
+    if let Some(path) = std::env::var_os(CHILD_DIR) {
+        let directory = PrivateDirectory::open(Path::new(&path)).unwrap();
+        let mut store = RedeemerStore::open(&directory).unwrap();
+        assert_eq!(
+            store.admit_verified([8; 32], [9; 32]).unwrap(),
+            Admission::Accepted
+        );
+        std::process::exit(88);
+    }
+
     let fixture = Fixture::new();
     let directory = fixture.directory();
     RedeemerStore::create(&directory).unwrap();
@@ -454,6 +465,13 @@ fn redeeming_same_marker_concurrently_admits_once_and_replay_survives_restart() 
         Admission::Replay => 1,
     });
     assert_eq!(results, vec![Admission::Accepted, Admission::Replay]);
+    let child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("store::tests::redeeming_same_marker_concurrently_admits_once_and_replay_survives_restart")
+        .env(CHILD_DIR, &fixture.path)
+        .output()
+        .unwrap();
+    assert_eq!(child.status.code(), Some(88));
     let mut reopened = RedeemerStore::open(&directory).unwrap();
     assert_eq!(
         reopened.admit_verified([3; 32], [4; 32]).unwrap(),
@@ -462,6 +480,10 @@ fn redeeming_same_marker_concurrently_admits_once_and_replay_survives_restart() 
     assert_eq!(
         reopened.admit_verified([5; 32], [4; 32]).unwrap(),
         Admission::Accepted
+    );
+    assert_eq!(
+        reopened.admit_verified([8; 32], [9; 32]).unwrap(),
+        Admission::Replay
     );
 }
 
