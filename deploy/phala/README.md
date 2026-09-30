@@ -89,9 +89,10 @@ preview does not assert a no-swap policy or disk-key authorization policy.
 Verify the effective configuration through provider readback and live tests;
 private-mode approval remains blocked.
 
-The Compose design runs a quote bridge with the stock dstack socket mounted
-only in its container, and a separate application container with Zebra and the
-node wrapper. Both use the same supplied immutable image digest. A shared tmpfs volume
+The Compose design binds the host's `/run/dstack.sock` only into the quote
+container at `/dstack.sock`, outside the shared runtime mount. A separate
+application container runs Zebra and the node wrapper. Both use the same
+supplied immutable image digest. A shared tmpfs volume
 carries quote sockets and Zebra's cookie; `zebra_public_testnet` is the only
 application data volume and holds public chain state. Docker, containerd, and
 Sysbox still use the stock image's persistent data disk, so this configuration
