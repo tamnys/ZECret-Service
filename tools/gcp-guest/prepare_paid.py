@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import sys
 
@@ -31,6 +32,12 @@ GUARDED_UNITS = {
     "zrpc-cookie.service": "cookie",
     "zrpc-wrapper.service": "wrapper",
 }
+PAID_ROOTFS_FILES = frozenset({
+    "etc/fstab", "usr/lib/udev/rules.d/65-gce-disk-naming.rules",
+    "usr/lib/tmpfiles.d/zrpc.conf", "etc/zrpc/issuer.der",
+    "usr/lib/zrpc/zrpc-payment-crypto",
+    *(str(UNIT_DIR / unit) for unit in GUARDED_UNITS),
+})
 
 
 def sha256(data):
@@ -246,6 +253,16 @@ def verify(output, manifest_sha256, manifest_bytes):
                 or not re.fullmatch(r"[0-9a-f]{64}", manifest["base_stage_manifest_sha256"])
                 or not re.fullmatch(r"[0-9a-f]{64}", manifest["paid_inputs_lock_sha256"])):
             raise ValueError("paid overlay manifest has invalid fields")
+        expected_paths = {"paid-inputs.lock.json"}
+        for relative in PAID_ROOTFS_FILES:
+            path = Path("rootfs") / relative
+            expected_paths.add(path.as_posix())
+            expected_paths.update(parent.as_posix() for parent in path.parents
+                                  if parent != Path("."))
+        if (set(manifest["entries"]) != expected_paths
+                or any(item["type"] == "symlink"
+                       for item in manifest["entries"].values())):
+            raise ValueError("paid overlay contains an unreviewed path")
         prepare.staged_inventory(root_fd, manifest["entries"])
         if sha256(regular_bytes(output / "paid-inputs.lock.json")) != manifest["paid_inputs_lock_sha256"]:
             raise ValueError("paid input lock differs from overlay")
@@ -253,6 +270,86 @@ def verify(output, manifest_sha256, manifest_bytes):
         os.close(root_fd)
     return {"status": "paid-overlay-matches-pinned-manifest", "image_built": False,
             "private_mode_approved": False}
+
+
+def render_paid_auditor(base_auditor, overlay):
+    if b"__STAGED_MOUNT_SHA256__" in base_auditor:
+        raise ValueError("free rootfs audit has not been staged")
+    pins = {}
+    for relative in sorted(PAID_ROOTFS_FILES):
+        path = overlay / "rootfs" / relative
+        data = regular_bytes(path, executable=relative.endswith("/zrpc-payment-crypto"))
+        pins[relative] = (len(data), sha256(data), stat.S_IMODE(path.stat().st_mode))
+    result = base_auditor
+    for relative in ("etc/fstab", "usr/lib/udev/rules.d/65-gce-disk-naming.rules"):
+        result = exact_replace(result,
+            prepare.PINNED_DISK_FILES[relative].encode(), pins[relative][1].encode())
+    result = exact_replace(result, b"PAID_PINNED_FILES = {}\n",
+                           ("PAID_PINNED_FILES = " + repr(pins) + "\n").encode())
+    return result
+
+
+def apply(base_stage, base_sha256, base_bytes, overlay, overlay_sha256,
+          overlay_bytes, output):
+    prepare.verify_stage(base_stage, base_sha256, base_bytes)
+    verify(overlay, overlay_sha256, overlay_bytes)
+    overlay_manifest = json.loads(regular_bytes(overlay / "candidate-manifest.json"),
+                                  object_pairs_hook=prepare.unique_object,
+                                  parse_constant=prepare.reject_nonfinite_constant)
+    if overlay_manifest["base_stage_manifest_sha256"] != base_sha256:
+        raise ValueError("paid overlay belongs to another free stage")
+    destination = output.resolve()
+    if (not output.is_absolute() or output.exists() or output.is_symlink()
+            or not output.parent.resolve().is_relative_to(ROOT.resolve())
+            or destination.is_relative_to(base_stage.resolve())
+            or destination.is_relative_to(overlay.resolve())):
+        raise ValueError("fresh disjoint paid stage on workspace volume required")
+    shutil.copytree(base_stage, output, symlinks=True)
+    prepare.verify_stage(output, base_sha256, base_bytes)
+    for relative in sorted(PAID_ROOTFS_FILES):
+        source = overlay / "rootfs" / relative
+        target = output / "rootfs" / relative
+        parent = output
+        for component in Path("rootfs", relative).parts[:-1]:
+            parent = parent / component
+            if parent.is_symlink() or not parent.is_dir():
+                raise ValueError("paid stage file parent redirected")
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise ValueError("paid stage file redirected")
+        data = regular_bytes(source)
+        target.write_bytes(data)
+        target.chmod(stat.S_IMODE(source.stat().st_mode))
+    for name, source in (("paid-inputs.lock.json", overlay / "paid-inputs.lock.json"),
+                         ("paid-overlay-manifest.json", overlay / "candidate-manifest.json")):
+        with (output / name).open("xb") as stream:
+            stream.write(regular_bytes(source))
+    auditor = output / "audit-rootfs.py"
+    rendered = render_paid_auditor(regular_bytes(auditor, executable=True), overlay)
+    temporary = output / "audit-rootfs.paid.tmp"
+    with temporary.open("xb") as stream:
+        stream.write(rendered)
+    temporary.chmod(0o555)
+    temporary.replace(auditor)
+    base_manifest = json.loads(regular_bytes(output / "candidate-manifest.json"),
+                               object_pairs_hook=prepare.unique_object,
+                               parse_constant=prepare.reject_nonfinite_constant)
+    root_fd = prepare.open_stage_directory(output)
+    try:
+        base_manifest["entries"] = prepare.staged_inventory(root_fd)
+    finally:
+        os.close(root_fd)
+    base_manifest["remaining_gates"].extend([
+        "paid rootfs finalizer and raw-root audit on exact built image",
+        "preinitialized persistent spent disk and measured paid guest boot",
+        "operator release approval and live testnet ticket redemption",
+    ])
+    encoded = (json.dumps(base_manifest, indent=2) + "\n").encode()
+    (output / "candidate-manifest.json").write_bytes(encoded)
+    result = prepare.verify_stage(output, sha256(encoded), len(encoded))
+    return {"status": "paid-stage-staged-unbuilt-unapproved",
+            "manifest_sha256": result["manifest_sha256"],
+            "manifest_bytes": result["manifest_bytes"],
+            "image_built": False, "private_mode_approved": False}
 
 
 def main():
@@ -271,6 +368,14 @@ def main():
     verified.add_argument("--output", type=Path, required=True)
     verified.add_argument("--manifest-sha256", required=True)
     verified.add_argument("--manifest-bytes", type=int, required=True)
+    applied = sub.add_parser("apply")
+    applied.add_argument("--base-stage", type=Path, required=True)
+    applied.add_argument("--base-manifest-sha256", required=True)
+    applied.add_argument("--base-manifest-bytes", type=int, required=True)
+    applied.add_argument("--paid-overlay", type=Path, required=True)
+    applied.add_argument("--overlay-manifest-sha256", required=True)
+    applied.add_argument("--overlay-manifest-bytes", type=int, required=True)
+    applied.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "stage":
@@ -278,6 +383,11 @@ def main():
                            args.base_manifest_bytes, args.paid_lock,
                            args.paid_inputs, args.native_rust_bundle,
                            args.native_source_commit, args.output)
+        elif args.command == "apply":
+            result = apply(args.base_stage, args.base_manifest_sha256,
+                           args.base_manifest_bytes, args.paid_overlay,
+                           args.overlay_manifest_sha256,
+                           args.overlay_manifest_bytes, args.output)
         else:
             result = verify(args.output, args.manifest_sha256, args.manifest_bytes)
         print(json.dumps(result, sort_keys=True))

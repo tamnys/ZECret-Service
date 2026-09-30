@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -36,6 +37,12 @@ class PaidOverlayTests(unittest.TestCase):
         cookie = self.base / "rootfs" / paid.UNIT_DIR / "zrpc-cookie.service"
         with cookie.open("ab") as stream:
             stream.write(b"ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec cookie\n")
+        (self.base / "rootfs/etc/zrpc").mkdir(parents=True)
+        (self.base / "rootfs/usr/lib/zrpc").mkdir(parents=True)
+        auditor = self.base / "audit-rootfs.py"
+        auditor.write_bytes((Path(__file__).with_name("audit-rootfs.py").read_bytes()
+                             .replace(b"__STAGED_MOUNT_SHA256__", b"0" * 64)))
+        auditor.chmod(0o555)
         lock_bytes = b"{}\n"
         (self.base / "inputs.lock.json").write_bytes(lock_bytes)
         lock_sha256 = paid.sha256(lock_bytes)
@@ -183,6 +190,47 @@ class PaidOverlayTests(unittest.TestCase):
                        self.lock, self.inputs, self.native_bundle,
                        self.native_revision, self.base / "paid-overlay")
         self.assertFalse((self.base / "paid-overlay").exists())
+
+    def test_apply_creates_pinned_paid_stage_without_changing_free_stage(self):
+        overlay = self.stage()
+        applied = self.root / "paid-stage"
+        result = paid.apply(self.base, self.base_sha256, self.base_bytes,
+                            self.output, overlay["manifest_sha256"],
+                            overlay["manifest_bytes"], applied)
+        self.assertEqual(result["status"], "paid-stage-staged-unbuilt-unapproved")
+        prepare.verify_stage(applied, result["manifest_sha256"], result["manifest_bytes"])
+        self.assertEqual((applied / "rootfs/etc/zrpc/issuer.der").read_bytes(),
+                         (self.inputs / "issuer.der").read_bytes())
+        self.assertEqual((applied / "paid-overlay-manifest.json").read_bytes(),
+                         (self.output / "candidate-manifest.json").read_bytes())
+        auditor = (applied / "audit-rootfs.py").read_bytes()
+        self.assertIn(b"PAID_PINNED_FILES = {'etc/fstab':", auditor)
+        self.assertIn(paid.sha256((self.inputs / "issuer.der").read_bytes()).encode(), auditor)
+        self.assertNotIn(prepare.PINNED_DISK_FILES["etc/fstab"].encode(), auditor)
+        self.assertEqual((self.base / "rootfs/etc/fstab").read_bytes(),
+                         (prepare.PROFILE / "rootfs/etc/fstab").read_bytes())
+        key = applied / "rootfs/etc/zrpc/issuer.der"
+        key.chmod(0o644)
+        with key.open("ab") as stream:
+            stream.write(b"changed")
+        key.chmod(0o444)
+        with self.assertRaises(ValueError):
+            prepare.verify_stage(applied, result["manifest_sha256"], result["manifest_bytes"])
+
+    def test_overlay_rejects_extra_file_even_when_manifest_is_rewritten(self):
+        self.stage()
+        extra = self.output / "rootfs/etc/zrpc/private.key"
+        extra.write_bytes(b"must never be staged\n")
+        root_fd = prepare.open_stage_directory(self.output)
+        try:
+            manifest = json.loads((self.output / "candidate-manifest.json").read_bytes())
+            manifest["entries"] = prepare.staged_inventory(root_fd)
+        finally:
+            os.close(root_fd)
+        encoded = (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        (self.output / "candidate-manifest.json").write_bytes(encoded)
+        with self.assertRaisesRegex(ValueError, "unreviewed path"):
+            paid.verify(self.output, paid.sha256(encoded), len(encoded))
 
 
 if __name__ == "__main__":
