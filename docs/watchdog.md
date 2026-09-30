@@ -124,6 +124,7 @@ Supply all `watchdog-once` options above, plus:
 | `--executable ABSOLUTE_PATH` | Native `zrpc` binary selected for the external Linux host. |
 | `--service-user UID` | Existing nonroot numeric UID on that host; zero and the invalid UID sentinel are rejected. |
 | `--unit-name STEM` | Unique literal name using ASCII letters, digits, hyphens or underscores; begin with a letter or digit. |
+| `--ledger-mount-point ABSOLUTE_HOST_MOUNT` | Non-root mountpoint on the external Linux host that contains both the original binding and mutable ledger. Use a normalized absolute path made of ASCII letters, digits, slashes, hyphens, underscores, dots or colons. |
 | `--process-runtime-bound-ms T` | Positive whole-service timeout, including local work; must be at least `B`. |
 | `--manager-delay-allowance-ms J` | Explicit nonnegative allowance for manager/launch delays, timer slack and timeout-to-inactive overshoot outside `T`. |
 | `--output-directory ABSOLUTE_NEW_DIRECTORY` | New private review directory outside the retained ledger. |
@@ -135,21 +136,35 @@ it contains account identifiers and local paths. API-key contents never belong
 in unit text or command arguments. On export failure, inspect the retained
 partial directory and choose a new destination; no history or output is reset.
 
-The four files are `STEM.service`, `STEM-periodic.timer`, `STEM-deadline.timer`
-and `manifest.json`. The manifest records the original binding, reviewed
-generation, exact command arguments, timing calculation and file contents. The
-future command loads the latest committed ledger under its writer lock; it does
-not freeze that reviewed generation or accept new targets from a timer. The
-service uses the original absolute paths, which must be accessible to the
-selected UID on the external host. Export does not check host account existence,
-binary provenance, file ownership, installed systemd configuration or availability.
+The five files are `STEM.service`, `STEM-mount-ready.service`,
+`STEM-periodic.timer`, `STEM-deadline.timer` and `manifest.json`. The manifest
+records the selected mountpoint and its systemd mount unit, original binding,
+reviewed generation, exact command arguments, timing calculation and file
+contents. The future command loads the latest committed ledger under its writer
+lock; it does not freeze that reviewed generation or accept new targets from a
+timer. The service uses the original absolute paths, which must be accessible
+to the selected UID on the external host. Export checks that the original
+binding and mutable ledger paths are under the selected mountpoint. It cannot
+verify that the external host actually mounts them there. Confirm the effective
+mount unit and ledger location before installation. Export does not check host
+account existence, binary provenance, file ownership, installed systemd
+configuration or availability.
+
+Enable only the mount-ready service after installing and reviewing all four
+units. It is wanted by the selected `.mount` unit, waits for that unit to be
+active, and requires the configured path to be a mountpoint. It then starts
+both timers. The timers bind to the gate, and the watchdog service binds to the
+mount. A manual timer start or a lost mount cannot run the watchdog against an
+unmounted ledger path. Do not enable the timers directly under `timers.target`.
 
 Both timers target one service and request a startup check. Its explicit
 `Type=oneshot` timeout is `T`, with immediate final-signal handling on timeout,
 no restart loop and no inherited start-rate suppression. The periodic timer
 counts from service inactivity, including failure. The deadline timer retains
 the exact original `deadline − L − S` time in UTC and uses `Persistent=true`
-for missed calendar events after reactivation. Unit syntax targets systemd 255;
+for missed calendar events after reactivation when it has a prior timer stamp.
+On a timer's first activation after that event, the startup check still runs
+through the periodic timer. Unit syntax targets systemd 255;
 validate the complete files and effective configuration on the selected host.
 
 For this bundle, `S` must cover a skipped timer event while the service is

@@ -66,6 +66,7 @@ impl Fixture {
             executable: self.0.join("missing binary %n"),
             service_user: 1000,
             unit_name: "synthetic-watchdog".into(),
+            ledger_mount_point: self.0.parent().unwrap().to_path_buf(),
             api_key_file: self.0.join("unread-key"),
             trust_root_der_files: vec![self.0.join("missing root.der")],
             invocation_budget: Duration::from_millis(3000),
@@ -125,11 +126,19 @@ fn generated_jobs_share_one_service_and_preserve_original_policy_and_current_his
     assert_eq!(bundle.committed_ledger.generation(), 1);
     assert_eq!(bundle.original_binding, *store.ledger().unwrap().binding());
     assert!(bundle.decision_at_generation.deletion_required());
-    assert_eq!(bundle.files.len(), 3);
+    assert_eq!(bundle.files.len(), 4);
     let service = &bundle.files["synthetic-watchdog.service"];
+    let mount_point = fixture.0.parent().unwrap();
+    let mount_unit = mount_unit_name(mount_point).unwrap();
     for directive in [
         "Type=oneshot\n",
         "User=1000\n",
+        &format!("BindsTo={mount_unit}\nAfter={mount_unit}\n"),
+        &format!(
+            "ConditionPathIsMountPoint={}\nRequiresMountsFor={}\n",
+            mount_point.display(),
+            mount_point.display()
+        ),
         "UMask=0077\n",
         "NoNewPrivileges=yes\n",
         "TimeoutStartSec=5000ms\n",
@@ -142,15 +151,35 @@ fn generated_jobs_share_one_service_and_preserve_original_policy_and_current_his
     }
     assert!(service.contains("original %%n $$USER.json"));
     assert!(service.contains("synthetic %%n $$USER experiment"));
+    let gate = &bundle.files["synthetic-watchdog-mount-ready.service"];
+    assert!(gate.contains(&format!("BindsTo={mount_unit}\nAfter={mount_unit}\n")));
+    assert!(gate.contains(&format!(
+        "ConditionPathIsMountPoint={}\n",
+        mount_point.display()
+    )));
+    assert!(
+        gate.contains(
+            "Wants=synthetic-watchdog-periodic.timer synthetic-watchdog-deadline.timer\n"
+        )
+    );
+    assert!(
+        gate.contains(
+            "Before=synthetic-watchdog-periodic.timer synthetic-watchdog-deadline.timer\n"
+        )
+    );
+    assert!(gate.contains(&format!("WantedBy={mount_unit}\n")));
+    assert!(gate.contains("ExecStart=/usr/bin/true\nRemainAfterExit=yes\n"));
+    assert!(!gate.contains("watchdog-once"));
     for name in [
         "synthetic-watchdog-periodic.timer",
         "synthetic-watchdog-deadline.timer",
     ] {
         let timer = &bundle.files[name];
+        assert!(timer.contains("BindsTo=synthetic-watchdog-mount-ready.service\nAfter=synthetic-watchdog-mount-ready.service\n"));
         assert!(timer.contains("Wants=synthetic-watchdog.service\n"));
         assert!(timer.contains("Unit=synthetic-watchdog.service\n"));
         assert!(timer.contains("AccuracySec=1us\nRandomizedDelaySec=0\n"));
-        assert!(timer.contains("WantedBy=timers.target\n"));
+        assert!(!timer.contains("WantedBy=timers.target\n"));
     }
     assert!(
         bundle.files["synthetic-watchdog-periodic.timer"]
@@ -179,6 +208,8 @@ fn generated_jobs_share_one_service_and_preserve_original_policy_and_current_his
     }
     assert_eq!(fixture.bytes(), before);
     let value = serde_json::to_value(&bundle).unwrap();
+    assert_eq!(value["ledger_mount_point"], mount_point.to_str().unwrap());
+    assert_eq!(value["ledger_mount_unit"], mount_unit);
     for field in [
         "jobs_installed",
         "credentials_read",
@@ -215,7 +246,7 @@ fn export_creates_private_new_files_without_overwrite_or_ledger_mutation() {
         fs::metadata(&output).unwrap().permissions().mode() & 0o777,
         0o700
     );
-    assert_eq!(fs::read_dir(&output).unwrap().count(), 4);
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 5);
     for (name, text) in &bundle.files {
         let path = output.join(name);
         assert_eq!(fs::read_to_string(&path).unwrap(), *text);
@@ -270,8 +301,23 @@ fn mismatched_identity_invalid_paths_names_user_and_limits_are_rejected() {
         assert!(generate(&store, input).is_err());
     }
     let mut too_long = fixture.input();
-    too_long.unit_name = "a".repeat(SYSTEMD_UNIT_NAME_BYTES - "-periodic.timer".len() + 1);
+    too_long.unit_name = "a".repeat(SYSTEMD_UNIT_NAME_BYTES - "-mount-ready.service".len() + 1);
     assert!(generate(&store, too_long).is_err());
+    let mut outside = fixture.input();
+    outside.ledger_mount_point = "/operator/other-mount".into();
+    assert!(generate(&store, outside).is_err());
+    for mount in [
+        "/",
+        "relative",
+        "/double//slash",
+        "/trailing/",
+        "/percent%n",
+        "/spaced path",
+    ] {
+        let mut input = fixture.input();
+        input.ledger_mount_point = mount.into();
+        assert!(generate(&store, input).is_err());
+    }
     for path in [
         "relative",
         "/operator/../key",
@@ -290,6 +336,37 @@ fn mismatched_identity_invalid_paths_names_user_and_limits_are_rejected() {
     assert!(generate(&store, input).is_err());
     let mut input = fixture.input();
     input.limits.usage_page_size = 5001;
+    assert!(generate(&store, input).is_err());
+}
+
+#[test]
+fn mount_name_escape_distinguishes_paths_from_literal_hyphens() {
+    assert_eq!(
+        mount_unit_name(Path::new("/Users/j")).unwrap(),
+        "Users-j.mount"
+    );
+    assert_eq!(
+        mount_unit_name(Path::new("/mnt/a-b")).unwrap(),
+        "mnt-a\\x2db.mount"
+    );
+    assert_eq!(
+        mount_unit_name(Path::new("/.hidden")).unwrap(),
+        "\\x2ehidden.mount"
+    );
+}
+
+#[test]
+fn mount_gate_rejects_mutable_ledger_outside_selected_mount() {
+    let fixture = Fixture::new();
+    let mount = fixture.0.join("host-mount");
+    fs::create_dir(&mount).unwrap();
+    let original = mount.join("original.json");
+    let state = fixture.0.join("external-state");
+    let ledger = fixture.open().ledger().unwrap().clone();
+    create_original_binding(&original, &state, &ledger).unwrap();
+    let store = LedgerStore::initialize(&original).unwrap();
+    let mut input = fixture.input();
+    input.ledger_mount_point = mount;
     assert!(generate(&store, input).is_err());
 }
 

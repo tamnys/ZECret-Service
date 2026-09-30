@@ -41,6 +41,7 @@ pub struct BundleInput {
     pub executable: PathBuf,
     pub service_user: u32,
     pub unit_name: String,
+    pub ledger_mount_point: PathBuf,
     pub api_key_file: PathBuf,
     pub trust_root_der_files: Vec<PathBuf>,
     pub invocation_budget: Duration,
@@ -62,6 +63,8 @@ pub struct WatchdogBundle {
     committed_ledger: CommittedLedgerReference,
     generated_at_unix_millis: u64,
     service_user: u32,
+    ledger_mount_point: PathBuf,
+    ledger_mount_unit: String,
     executable: PathBuf,
     command_arguments: Vec<String>,
     timing: ScheduleTiming,
@@ -102,12 +105,44 @@ fn validate_name(name: &str) -> Result<(), LifecycleError> {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         || name
             .len()
-            .checked_add("-periodic.timer".len())
+            .checked_add("-mount-ready.service".len())
             .is_none_or(|len| len > SYSTEMD_UNIT_NAME_BYTES)
     {
         return Err(INVALID);
     }
     Ok(())
+}
+
+/// The systemd path-to-mount-unit encoding for literal mountpoint paths. The
+/// selected path is deliberately restricted to characters that need no quoting
+/// or specifier expansion in ConditionPathIsMountPoint=. Escaped hyphens still
+/// distinguish a literal hyphen from a path separator in the mount unit name.
+fn mount_unit_name(path: &Path) -> Result<String, LifecycleError> {
+    let value = path_text(path)?;
+    if value == "/"
+        || value.ends_with('/')
+        || value.contains("//")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/-_.:".contains(&byte))
+    {
+        return Err(INVALID);
+    }
+    let mut unit = String::new();
+    for (index, byte) in value.as_bytes()[1..].iter().copied().enumerate() {
+        match byte {
+            b'/' => unit.push('-'),
+            b'-' | b'.' if index == 0 || byte == b'-' => {
+                unit.push_str(&format!("\\x{byte:02x}"));
+            }
+            _ => unit.push(char::from(byte)),
+        }
+    }
+    unit.push_str(".mount");
+    if unit.len() > SYSTEMD_UNIT_NAME_BYTES {
+        return Err(INVALID);
+    }
+    Ok(unit)
 }
 
 pub fn generate(store: &LedgerStore, input: BundleInput) -> Result<WatchdogBundle, LifecycleError> {
@@ -145,6 +180,16 @@ fn generate_at(
         input.limits.max_usage_records_per_app,
     )?;
     let reference = store.planning_reference().map_err(|_| INVALID)?;
+    let ledger_mount_unit = mount_unit_name(&input.ledger_mount_point)?;
+    if !reference
+        .original_binding_path()
+        .starts_with(&input.ledger_mount_point)
+        || !reference
+            .snapshot_path()
+            .starts_with(&input.ledger_mount_point)
+    {
+        return Err(INVALID);
+    }
     let ledger = store.ledger().map_err(|_| INVALID)?;
     if input.experiment_id != ledger.binding().experiment_id() {
         return Err(INVALID);
@@ -218,38 +263,53 @@ fn generate_at(
     }
     let command = encoding::exec_command(&args)?;
     let service = format!("{}.service", input.unit_name);
+    let gate = format!("{}-mount-ready.service", input.unit_name);
+    let periodic = format!("{}-periodic.timer", input.unit_name);
+    let deadline = format!("{}-deadline.timer", input.unit_name);
+    let ledger_mount_point = path_text(&input.ledger_mount_point)?;
     let mut files = BTreeMap::new();
     files.insert(
         service.clone(),
         format!(
             "# UNINSTALLED: operator review and activation required.\n\
-         [Unit]\nDescription=Zcash RPC experiment watchdog\nStartLimitIntervalSec=0\n\n\
+         [Unit]\nDescription=Zcash RPC experiment watchdog\nBindsTo={ledger_mount_unit}\nAfter={ledger_mount_unit}\nConditionPathIsMountPoint={ledger_mount_point}\nRequiresMountsFor={ledger_mount_point}\nStartLimitIntervalSec=0\n\n\
          [Service]\nType=oneshot\nUser={}\nUMask=0077\nNoNewPrivileges=yes\n\
          ExecStart={}\nTimeoutStartSec={}ms\nTimeoutStartFailureMode=kill\n\
          Restart=no\nRemainAfterExit=no\n",
             input.service_user, command, timing.process_runtime_bound_ms,
         ),
     );
-    // Wants initiates a check when either timer is started. Timer units order
-    // themselves before their triggered service. Failure doesn't stop timers;
-    // OnUnitInactiveSec also follows a failed service's inactive timestamp.
+    files.insert(
+        gate.clone(),
+        format!(
+            "# UNINSTALLED: operator review and activation required.\n\
+         [Unit]\nDescription=Zcash RPC experiment watchdog mount gate\nBindsTo={ledger_mount_unit}\nAfter={ledger_mount_unit}\nConditionPathIsMountPoint={ledger_mount_point}\nWants={periodic} {deadline}\nBefore={periodic} {deadline}\n\n\
+         [Service]\nType=oneshot\nUser={}\nUMask=0077\nNoNewPrivileges=yes\nExecStart=/usr/bin/true\nRemainAfterExit=yes\nRestart=no\n\n\
+         [Install]\nWantedBy={ledger_mount_unit}\n",
+            input.service_user,
+        ),
+    );
+    // Wants initiates a check when either timer is started. BindsTo/After keeps
+    // each timer behind the gate, including a manual start, and stops it when
+    // the mount-bound gate goes away. Timer units order themselves before their
+    // triggered service. OnUnitInactiveSec follows a failed service's inactive
+    // timestamp.
     let timer = |role: &str, trigger: &str| {
         format!(
             "# UNINSTALLED: operator review and activation required.\n\
-         [Unit]\nDescription=Zcash RPC experiment {role}\nWants={service}\n\n\
-         [Timer]\n{trigger}\nUnit={service}\nAccuracySec=1us\nRandomizedDelaySec=0\n\n\
-         [Install]\nWantedBy=timers.target\n"
+         [Unit]\nDescription=Zcash RPC experiment {role}\nBindsTo={gate}\nAfter={gate}\nWants={service}\n\n\
+         [Timer]\n{trigger}\nUnit={service}\nAccuracySec=1us\nRandomizedDelaySec=0\n"
         )
     };
     files.insert(
-        format!("{}-periodic.timer", input.unit_name),
+        periodic,
         timer(
             "periodic watchdog",
             &format!("OnUnitInactiveSec={}us", timing.periodic_gap_microseconds),
         ),
     );
     files.insert(
-        format!("{}-deadline.timer", input.unit_name),
+        deadline,
         timer(
             "absolute deadline",
             &format!(
@@ -265,6 +325,8 @@ fn generate_at(
         committed_ledger: reference,
         generated_at_unix_millis: now,
         service_user: input.service_user,
+        ledger_mount_point: input.ledger_mount_point,
+        ledger_mount_unit,
         executable: input.executable,
         command_arguments: args,
         timing,
