@@ -2,9 +2,9 @@
 //! dstack socket; explicit stock preview tolerates the root-owned stock mode.
 
 use std::path::Path;
-use zrpc_server::quote_proxy::{QUOTE_SOCKET_PATH, QuoteOnlyBridge};
+use zrpc_server::quote_proxy::{QUOTE_SOCKET_PATH, QuoteOnlyBridge, STOCK_DSTACK_SOCKET_PATH};
 
-const DSTACK_SOCKET: &str = "/run/dstack.sock";
+const PRIVATE_DSTACK_SOCKET: &str = "/run/dstack.sock";
 
 fn bind_ready_bridge(
     quote_dir: &Path,
@@ -20,7 +20,7 @@ fn bind_ready_bridge(
         return Err("systemd notification socket must be an absolute pathname");
     }
     let bridge = if stock_preview {
-        if backend != Path::new(DSTACK_SOCKET) {
+        if backend != Path::new(STOCK_DSTACK_SOCKET_PATH) {
             return Err("stock preview requires the fixed dstack socket");
         }
         QuoteOnlyBridge::bind_stock_preview(quote_dir)
@@ -52,7 +52,12 @@ async fn run() -> Result<(), &'static str> {
     let quote_dir = Path::new(QUOTE_SOCKET_PATH)
         .parent()
         .ok_or("quote bridge path unavailable")?;
-    let bridge = bind_ready_bridge(quote_dir, Path::new(DSTACK_SOCKET), stock_preview)?;
+    let backend = if stock_preview {
+        Path::new(STOCK_DSTACK_SOCKET_PATH)
+    } else {
+        Path::new(PRIVATE_DSTACK_SOCKET)
+    };
+    let bridge = bind_ready_bridge(quote_dir, backend, stock_preview)?;
     bridge
         .run(async move {
             tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }

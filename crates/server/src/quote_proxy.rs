@@ -35,8 +35,9 @@ pub const QUOTE_SOCKET_PATH: &str = "/run/zrpc-quote/quote.sock";
 /// A second Unix socket carries only a one-byte liveness acknowledgement.
 /// Its held connection closes if either the bridge or wrapper exits.
 pub const QUOTE_WATCH_SOCKET_PATH: &str = "/run/zrpc-quote/watch.sock";
-/// Stock Phala preview permits this exact root-owned host socket path only.
-pub const STOCK_DSTACK_SOCKET_PATH: &str = "/run/dstack.sock";
+/// Stock Phala's host `/run/dstack.sock` is bind-mounted only into the quote
+/// container at this path, outside the runtime tmpfs shared with the app.
+pub const STOCK_DSTACK_SOCKET_PATH: &str = "/dstack.sock";
 
 #[derive(Clone, Copy)]
 enum BackendAccess {

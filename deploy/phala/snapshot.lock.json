@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "status": "operator_selected_unsigned_public_preview_only",
+  "network": "testnet",
+  "catalog_url": "https://snapshots.zfnd.org/testnet/snapshots.json",
+  "manifest_url": "https://snapshots.zfnd.org/testnet/20260923/zebrad-state-testnet-v28-20260923.manifest.json",
+  "manifest_sha256": "accce6049771e77bab07d6c9076dc232c0c06335ccaab2bff8d88eca9f218bcd",
+  "archive_url": "https://snapshots.zfnd.org/testnet/20260923/zebrad-state-testnet-v28-20260923.tar.zst",
+  "archive_size_bytes": 11137971554,
+  "archive_sha256": "e1702bb220a337f94496e1f65b683b63f22334fdc500c5421dd118e593358636",
+  "produced_at_utc": "2026-09-23T14:29:42Z",
+  "producer_zebrad_version": "6.3.0",
+  "target_zebrad_version": "6.4.2",
+  "target_zebrad_source_commit": "e3eef2f37c35127ad1769f19a1ebc7eaa5d5d291",
+  "target_database_format_source_url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/e3eef2f37c35127ad1769f19a1ebc7eaa5d5d291/zebra-state/src/constants.rs",
+  "target_database_format_source_sha256": "5cef6b843ceb3ef600a64cb4ca47782ffba0cbf1168a977df1b6c7f9204a1ec3",
+  "database_format_major_version": 28,
+  "archive_extraction_path": "state/v28/testnet",
+  "target_cache_dir": "/var/lib/zebra",
+  "snapshot_tip_height_approximate": 4383897,
+  "decompressor": {
+    "package": "zstandard",
+    "version": "0.25.0",
+    "pypi_metadata_url": "https://pypi.org/pypi/zstandard/0.25.0/json",
+    "wheel_filename": "zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    "wheel_url": "https://files.pythonhosted.org/packages/63/4b/e3678b4e776db00f9f7b2fe58e547e8928ef32727d7a1ff01dea010f3f13/zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+    "wheel_size_bytes": 5547173,
+    "wheel_sha256": "8e735494da3db08694d26480f1493ad2cf86e99bdd53e8e9771b2752a5c0246a",
+    "uploaded_at_utc": "2025-09-14T22:17:36.084316Z"
+  },
+  "manifest_signed": false,
+  "private_mode_approved": false
+}

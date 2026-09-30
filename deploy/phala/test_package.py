@@ -1,12 +1,14 @@
 """Synthetic checks for the offline Phala preview package boundary."""
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 from pathlib import Path
 import socket
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +30,8 @@ class PackageTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(dir=scratch)
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        self.wheel = self.root / "synthetic-zstandard.whl"
+        self.wheel.write_bytes(b"synthetic wheel")
 
     def test_hold_blocks_image_context_before_creating_output(self):
         _, zebra, _ = prepare.locks()
@@ -50,8 +54,209 @@ class PackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stock or Zebra identity"):
                 prepare.locks()
 
+    def test_image_context_check_rejects_changed_build_inputs(self):
+        stock, zebra, lock_digest = prepare.locks()
+        eligible_at = prepare.utc(zebra["asset"]["created_at"]) + timedelta(days=7)
+        elf = b"\x7fELF\x02\x01" + b"\x00" * 10 + b"\x03\x00\x3e\x00" + b"\x00" * 44
+        elf_hash = prepare.digest(elf)
+        zebra = {**zebra, "zebrad_elf_sha256": elf_hash, "zebrad_elf_size": len(elf)}
+        native = {name: elf_hash for name in prepare.NATIVE_BINARIES_SHA256}
+        stage = self.root / "stage"
+        stage.mkdir()
+        (stage / "zebrad").write_bytes(elf)
+        (stage / "receipt.json").write_bytes(prepare.canonical({
+            "schema_version": 1,
+            "status": "staged-diagnostic-unapproved",
+            "checked_at_utc": eligible_at.isoformat().replace("+00:00", "Z"),
+            "eligible_at_utc": eligible_at.isoformat().replace("+00:00", "Z"),
+            "archive_downloaded_by_tool": False,
+            "image_built": False,
+            "private_mode_approved": False,
+            "local_hold_exception": None,
+            "release_lock_sha256": lock_digest,
+            "asset_sha256": zebra["asset"]["sha256"],
+            "zebrad_elf_sha256": elf_hash,
+            "zebrad_elf_size": len(elf),
+            "verified_attestation_count": 1,
+            "gh_verifier_executable_sha256": zebra["gh_verifier_executable_sha256"],
+        }))
+        for name in native:
+            (self.root / name).write_bytes(elf)
+        args = argparse.Namespace(
+            zebra_stage=stage,
+            snapshot_wheel=self.wheel,
+            node_wrapper=self.root / "zrpc-node-wrapper",
+            node_wrapper_sha256=elf_hash,
+            quote_proxy=self.root / "zrpc-quote-proxy",
+            quote_proxy_sha256=elf_hash,
+            base_image=prepare.BASE_IMAGE,
+            base_image_created_at=prepare.BASE_IMAGE_CREATED_AT,
+            output=self.root / "context",
+        )
+        with (patch.object(prepare, "locks", return_value=(stock, zebra, lock_digest)),
+              patch.object(prepare, "NATIVE_BINARIES_SHA256", native),
+              patch.object(prepare.snapshot_package, "_checked_wheel",
+                           side_effect=lambda path, _wheel: Path(path).read_bytes()),
+              patch.object(prepare, "eligibility", return_value=(True, eligible_at))):
+            prepare.image_context(args)
+            checked = prepare.check_image_context(argparse.Namespace(context=args.output))
+            self.assertEqual(checked["status"], "local-image-context-checked-unapproved")
+            runtime = self.root / "runtime.json"
+            runtime.write_bytes(prepare.canonical({
+                "quote_startup_timeout_secs": 1,
+                "node_startup_timeout_secs": 1,
+                "node_poll_interval_ms": 1,
+                "max_connections": 1,
+                "max_quotes": 1,
+                "quote_spacing_ms": 1,
+            }))
+            render_args = argparse.Namespace(
+                image="registry.example.invalid/zrpc@sha256:" + "a" * 64,
+                image_inputs=args.output / "image-inputs.json",
+                runtime=runtime,
+                output=self.root / "rejected-launch",
+            )
+            (args.output / "supervisor.py").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "reviewed inputs"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+            with self.assertRaisesRegex(ValueError, "reviewed inputs"):
+                prepare.launch_documents(render_args)
+            self.assertFalse(render_args.output.exists())
+            (args.output / "supervisor.py").write_bytes(
+                (prepare.HERE / "image/supervisor.py").read_bytes())
+            (args.output / "snapshot.lock.json").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "snapshot image input"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+            (args.output / "snapshot.lock.json").write_bytes(
+                (prepare.HERE / "snapshot.lock.json").read_bytes())
+            native_file = args.output / "bin/zrpc-node-wrapper"
+            native_file.chmod(0o755)
+            native_file.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "reviewed inputs"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+            native_file.write_bytes(elf)
+            (args.output / ".dockerignore").write_text("bin/\n")
+            with self.assertRaisesRegex(ValueError, "missing, extra"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+
+    def test_exact_stage_exception_allows_local_context_only(self):
+        stock, zebra, lock_digest = prepare.locks()
+        due = prepare.utc(zebra["asset"]["created_at"]) + timedelta(days=7)
+        checked = due - timedelta(days=1)
+        elf = b"\x7fELF\x02\x01" + b"\x00" * 10 + b"\x03\x00\x3e\x00" + b"\x00" * 44
+        elf_hash = prepare.digest(elf)
+        zebra = {**zebra, "zebrad_elf_sha256": elf_hash, "zebrad_elf_size": len(elf)}
+        native = {name: elf_hash for name in prepare.NATIVE_BINARIES_SHA256}
+        stage = self.root / "stage"
+        stage.mkdir()
+        (stage / "zebrad").write_bytes(elf)
+        receipt = {
+            "schema_version": 1,
+            "status": "staged-diagnostic-unapproved",
+            "checked_at_utc": checked.isoformat().replace("+00:00", "Z"),
+            "eligible_at_utc": due.isoformat().replace("+00:00", "Z"),
+            "archive_downloaded_by_tool": False,
+            "image_built": False,
+            "private_mode_approved": False,
+            "local_hold_exception": prepare.LOCAL_HOLD_EXCEPTION,
+            "release_lock_sha256": lock_digest,
+            "asset_sha256": zebra["asset"]["sha256"],
+            "zebrad_elf_sha256": elf_hash,
+            "zebrad_elf_size": len(elf),
+            "verified_attestation_count": 1,
+            "gh_verifier_executable_sha256": zebra["gh_verifier_executable_sha256"],
+        }
+        (stage / "receipt.json").write_bytes(prepare.canonical(receipt))
+        synthetic_receipt_hash = prepare.digest((stage / "receipt.json").read_bytes())
+        for name in native:
+            (self.root / name).write_bytes(elf)
+        args = argparse.Namespace(
+            zebra_stage=stage,
+            snapshot_wheel=self.wheel,
+            node_wrapper=self.root / "zrpc-node-wrapper",
+            node_wrapper_sha256=elf_hash,
+            quote_proxy=self.root / "zrpc-quote-proxy",
+            quote_proxy_sha256=elf_hash,
+            base_image=prepare.BASE_IMAGE,
+            base_image_created_at=prepare.BASE_IMAGE_CREATED_AT,
+            output=self.root / "context",
+            allow_v642_local_hold_exception=True,
+        )
+        with (patch.object(prepare, "locks", return_value=(stock, zebra, lock_digest)),
+              patch.object(prepare, "NATIVE_BINARIES_SHA256", native),
+              patch.object(prepare.snapshot_package, "_checked_wheel",
+                           side_effect=lambda path, _wheel: Path(path).read_bytes()),
+              patch.object(prepare, "eligibility", return_value=(False, due))):
+            with self.assertRaisesRegex(ValueError, "approved asset"):
+                prepare.image_context(args)
+        stock = {**stock, "reviewed_zebra_local_hold_receipt_sha256":
+                 synthetic_receipt_hash}
+        with (patch.object(prepare, "locks", return_value=(stock, zebra, lock_digest)),
+              patch.object(prepare, "NATIVE_BINARIES_SHA256", native),
+              patch.object(prepare.snapshot_package, "_checked_wheel",
+                           side_effect=lambda path, _wheel: Path(path).read_bytes()),
+              patch.object(prepare, "eligibility", return_value=(False, due))):
+            context = prepare.image_context(args)
+            self.assertEqual(context["zebra_local_hold_exception"],
+                             prepare.LOCAL_HOLD_EXCEPTION)
+            self.assertEqual(context["zebra_stage_receipt_sha256"],
+                             synthetic_receipt_hash)
+            self.assertEqual(prepare.check_image_context(
+                argparse.Namespace(context=args.output))["status"],
+                "local-image-context-checked-unapproved")
+            runtime = self.root / "runtime.json"
+            runtime.write_bytes(prepare.canonical({
+                "quote_startup_timeout_secs": 1,
+                "node_startup_timeout_secs": 1,
+                "node_poll_interval_ms": 1,
+                "max_connections": 1,
+                "max_quotes": 1,
+                "quote_spacing_ms": 1,
+            }))
+            inputs_path = args.output / "image-inputs.json"
+            inputs_bytes = inputs_path.read_bytes()
+            render_args = argparse.Namespace(
+                image="registry.example.invalid/zrpc@sha256:" + "a" * 64,
+                image_inputs=inputs_path,
+                runtime=runtime,
+                output=self.root / "launch",
+                allow_v642_local_hold_exception=False,
+            )
+            with self.assertRaisesRegex(ValueError, "release hold"):
+                prepare.launch_documents(render_args)
+            render_args.allow_v642_local_hold_exception = True
+            inputs = prepare.parse_json(inputs_bytes)
+            inputs["zebra_stage_receipt_sha256"] = "0" * 64
+            inputs_path.write_bytes(prepare.canonical(inputs))
+            with self.assertRaisesRegex(ValueError, "reviewed receipt"):
+                prepare.launch_documents(render_args)
+            inputs["zebra_stage_receipt_sha256"] = synthetic_receipt_hash
+            inputs["zebra_local_hold_exception"] = {
+                **prepare.LOCAL_HOLD_EXCEPTION, "asset_id": 1}
+            inputs_path.write_bytes(prepare.canonical(inputs))
+            with self.assertRaisesRegex(ValueError, "reviewed receipt"):
+                prepare.launch_documents(render_args)
+            inputs_path.write_bytes(inputs_bytes)
+            receipt["local_hold_exception"] = {
+                **prepare.LOCAL_HOLD_EXCEPTION, "asset_id": 1}
+            (args.output / "zebra-stage-receipt.json").write_bytes(
+                prepare.canonical(receipt))
+            with self.assertRaisesRegex(ValueError, "approved asset"):
+                prepare.launch_documents(render_args)
+            (args.output / "zebra-stage-receipt.json").write_bytes(
+                (stage / "receipt.json").read_bytes())
+            rendered = prepare.launch_documents(render_args)
+            self.assertEqual(rendered["zebra_local_hold_exception"],
+                             prepare.LOCAL_HOLD_EXCEPTION)
+            self.assertEqual(rendered["zebra_stage_receipt_sha256"],
+                             synthetic_receipt_hash)
+            self.assertFalse(rendered["private_accepted"])
+            self.assertFalse(rendered["deployment_enabled"])
+            self.assertFalse(rendered["cloud_calls"])
+
     def test_render_binds_exact_bytes_and_isolates_backend_socket(self):
         stock, zebra, lock_digest = prepare.locks()
+        snapshot_lock, _ = prepare.snapshot_package.reviewed_lock()
         inputs = self.root / "image-inputs.json"
         inputs.write_bytes(prepare.canonical({
             "status": "local-image-context-unapproved",
@@ -59,6 +264,9 @@ class PackageTests(unittest.TestCase):
             "zebra_asset_sha256": zebra["asset"]["sha256"],
             "stock_os_image_sha256": stock["os_image_sha256"],
             "stock_candidate_lock_sha256": prepare.STOCK_LOCK_SHA256,
+            "snapshot_lock_sha256": prepare.snapshot_package.LOCK_SHA256,
+            "snapshot_archive_sha256": snapshot_lock["archive_sha256"],
+            "snapshot_manifest_signed": False,
             "private_accepted": False,
             "deployment_enabled": False,
         }))
@@ -74,13 +282,19 @@ class PackageTests(unittest.TestCase):
         image = "registry.example.invalid/zrpc@sha256:" + "a" * 64
         args = argparse.Namespace(image=image, image_inputs=inputs, runtime=runtime,
                                   output=self.root / "render")
-        with patch.object(prepare, "eligibility", return_value=(True, datetime.now(timezone.utc))):
+        with (patch.object(prepare, "eligibility",
+                           return_value=(True, datetime.now(timezone.utc))),
+              patch.object(prepare, "check_image_context") as checked_context):
             receipt = prepare.launch_documents(args)
+            checked_context.assert_called_once()
+            self.assertEqual(checked_context.call_args.args[0].context, inputs.parent)
         compose_bytes = (args.output / "compose.json").read_bytes()
         app_bytes = (args.output / "app-compose.json").read_bytes()
         compose = json.loads(compose_bytes)
         app = json.loads(app_bytes)
         self.assertEqual(app["docker_compose_file"].encode(), compose_bytes)
+        self.assertNotIn("swap_size", app)
+        self.assertNotIn("key_provider", app)
         self.assertEqual(receipt["docker_compose_file_sha256"], prepare.digest(compose_bytes))
         self.assertEqual(receipt["app_compose_file_sha256"], prepare.digest(app_bytes))
         self.assertEqual(compose["services"]["app"]["ports"], ["8443:8443"])
@@ -90,7 +304,10 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(compose["services"]["app"]["image"], image)
         self.assertEqual(compose["services"]["quote"]["image"], image)
         self.assertEqual(compose["volumes"]["runtime_tmpfs"]["driver_opts"]["type"], "tmpfs")
-        self.assertIn("/run/dstack.sock", json.dumps(compose["services"]["quote"]))
+        quote_bind = compose["services"]["quote"]["volumes"][1]
+        self.assertEqual(quote_bind["source"], "/run/dstack.sock")
+        self.assertEqual(quote_bind["target"], "/dstack.sock")
+        self.assertNotIn("/dstack.sock", json.dumps(compose["services"]["app"]))
         self.assertNotIn("/run/dstack.sock", json.dumps(compose["services"]["app"]))
         self.assertFalse(receipt["private_accepted"])
         self.assertFalse(receipt["deployment_enabled"])
@@ -127,6 +344,18 @@ class PackageTests(unittest.TestCase):
             finally:
                 for item in sockets:
                     item.close()
+
+    def test_app_startup_refuses_legacy_shared_backend_socket(self):
+        with socket.socket(socket.AF_UNIX) as backend:
+            backend.bind(str(self.root / "dstack.sock"))
+            snapshot = types.ModuleType("snapshot_import")
+            snapshot.ensure_snapshot = lambda: None
+            with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
+                  patch.object(supervisor, "RUN", self.root),
+                  patch.object(supervisor, "BACKEND", self.root / "quote-only.sock"),
+                  patch.object(supervisor, "mount_type", return_value="tmpfs")):
+                with self.assertRaisesRegex(RuntimeError, "app container exposes dstack socket"):
+                    supervisor.run_app()
 
 
 if __name__ == "__main__":

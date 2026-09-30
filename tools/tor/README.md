@@ -20,6 +20,18 @@ The pinned package's seven-day release hold ends **September 30, 2026 at
 signed repository snapshot expires **November 4, 2026 at 11:28:01 UTC**; staging
 after that date requires a refreshed, reviewed pin.
 
+For the operator-authorized **local preview** before the hold ends, use the
+exact-package exception:
+
+```sh
+python3 tools/tor/prepare.py --output /workspace/.codex-tmp/tor-package \
+  --allow-v04913-local-hold-exception
+```
+
+This flag accepts only the committed Tor 0.4.9.13 arm64 package lock. It does
+not skip the Tor Project repository signature, index, package hash, architecture,
+or executable-version checks. It does not authorize deployment or private mode.
+
 Pass `/workspace/.codex-tmp/tor-package/bin/tor` as the native client's
 `--tor-executable`. The client launches its own Tor process with a private
 Unix SOCKS socket and requires that process for the connection. The managed

@@ -45,11 +45,29 @@ bundle = run("lifecycle", "export-watchdog", "--original-binding", str(original)
     "--maximum-detection-interval-ms", "120000", "--deletion-latency-upper-bound-ms", "60000",
     "--scheduler-delay-allowance-ms", "60000", "--reconciliation-budget-ms", "1000",
     "--deletion-dispatch-budget-ms", "2000", "--fee-upper-bounds-microusd", "0",
-    "--executable", str(BIN), "--service-user", "1000", "--unit-name", "synthetic-watchdog",
+    # Accidental activation of this parser fixture must fail, never delete or succeed.
+    "--executable", "/usr/bin/false", "--service-user", "1000", "--unit-name", "synthetic-watchdog",
+    "--ledger-mount-point", "/workspace",
     "--process-runtime-bound-ms", "5000", "--manager-delay-allowance-ms", "1000",
     "--output-directory", str(output))
+assert bundle["executable"] == "/usr/bin/false"
+assert bundle["ledger_mount_point"] == "/workspace"
+assert bundle["ledger_mount_unit"] == "workspace.mount"
+for name in ("synthetic-watchdog.service", "synthetic-watchdog-mount-ready.service"):
+    assert "ConditionPathIsMountPoint=/workspace\n" in bundle["files"][name]
+# systemd-analyze needs the externally supplied mount unit in its parser input.
+# This file is synthetic and lives outside the exported, uninstalled bundle.
+parser_only = directory / "parser-only"
+parser_only.mkdir()
+mount_fixture = parser_only / "workspace.mount"
+mount_fixture.write_text(
+    "# SYNTHETIC PARSER INPUT ONLY; NEVER INSTALL.\n"
+    "[Unit]\nDescription=Synthetic workspace mount\n"
+    "[Mount]\nWhat=tmpfs\nWhere=/workspace\nType=tmpfs\n"
+)
 verification = subprocess.run(
-    ["systemd-analyze", "verify", "--man=no", *(str(output / name) for name in sorted(bundle["files"]))],
+    ["systemd-analyze", "verify", "--man=no", str(mount_fixture),
+     *(str(output / name) for name in sorted(bundle["files"]))],
     cwd=ROOT, capture_output=True, text=True,
 )
 (directory / "systemd-version.txt").write_text(version.stdout)
@@ -63,6 +81,7 @@ print(json.dumps({
     "mode": "synthetic_offline_unit_parser_check",
     "systemd_version": version.stdout.splitlines()[0],
     "artifact_directory": str(directory), "unit_files_verified": len(bundle["files"]),
+    "synthetic_mount_parser_fixture": True,
     "ledger_unchanged": True, "jobs_started": False, "network_used": False,
     "timing_verified": False, "private_accepted": False,
 }, indent=2))

@@ -27,6 +27,7 @@ pub(super) const USAGE: &str = r"zrpc lifecycle export-watchdog \
   --executable ABSOLUTE_PATH \
   --service-user NONROOT_NUMERIC_UID \
   --unit-name STEM \
+  --ledger-mount-point ABSOLUTE_HOST_MOUNT \
   --process-runtime-bound-ms POSITIVE_INTEGER \
   --manager-delay-allowance-ms NONNEGATIVE_INTEGER \
   --output-directory ABSOLUTE_NEW_DIRECTORY
@@ -34,6 +35,8 @@ zrpc lifecycle export-watchdog --help
 Every option is required. This OFFLINE export writes uninstalled systemd files for review.
 It opens the existing ledger only; it never reads the API key, trust roots or executable, and makes no network request.
 The selected service UID must be greater than zero and less than 4294967295.
+The ledger mountpoint must be a non-root absolute systemd mount path containing both the original binding and mutable ledger.
+Use literal ASCII letters, digits, slash, hyphen, underscore, dot or colon in that path.
 The process runtime bound must cover the invocation budget; manager delay may explicitly be zero.
 Supplied timing bounds remain operator assumptions, not measured scheduler or deletion guarantees.
 Output must be a new directory. Existing output is never overwritten; retained ledger history is unchanged.
@@ -46,6 +49,7 @@ struct Settings {
     executable: PathBuf,
     service_user: u32,
     unit_name: String,
+    ledger_mount_point: PathBuf,
     process_runtime_bound: Duration,
     manager_delay_allowance: Duration,
     output_directory: PathBuf,
@@ -68,11 +72,15 @@ fn parse_settings(mut args: Vec<String>) -> Result<Settings, String> {
         .filter(|uid| *uid != 0 && *uid != u32::MAX)
         .ok_or_else(|| "service user requires a nonroot numeric UID below 4294967295".to_owned())?;
     let unit_name = required(&mut args, "--unit-name")?;
+    let ledger_mount_point = PathBuf::from(required(&mut args, "--ledger-mount-point")?);
     let process_runtime_bound = milliseconds(&mut args, "--process-runtime-bound-ms")?;
     let manager_delay_allowance = milliseconds(&mut args, "--manager-delay-allowance-ms")?;
     let output_directory = PathBuf::from(required(&mut args, "--output-directory")?);
-    if !executable.is_absolute() || !output_directory.is_absolute() {
-        return Err("schedule executable and output paths must be absolute".to_owned());
+    if !executable.is_absolute()
+        || !output_directory.is_absolute()
+        || !ledger_mount_point.is_absolute()
+    {
+        return Err("schedule executable, mountpoint and output paths must be absolute".to_owned());
     }
     let watchdog = provider_watchdog::parse_settings(args)?;
     if process_runtime_bound.is_zero()
@@ -85,6 +93,7 @@ fn parse_settings(mut args: Vec<String>) -> Result<Settings, String> {
         executable,
         service_user,
         unit_name,
+        ledger_mount_point,
         process_runtime_bound,
         manager_delay_allowance,
         output_directory,
@@ -116,6 +125,7 @@ fn run_inner(args: Vec<String>) -> Result<(), String> {
             executable: settings.executable,
             service_user: settings.service_user,
             unit_name: settings.unit_name,
+            ledger_mount_point: settings.ledger_mount_point,
             api_key_file: provider.api_key_file,
             trust_root_der_files: provider.trust_root_der_files,
             invocation_budget: provider.invocation_budget,
@@ -184,6 +194,8 @@ mod tests {
             "1000",
             "--unit-name",
             "synthetic-watchdog",
+            "--ledger-mount-point",
+            "/operator",
             "--process-runtime-bound-ms",
             "2",
             "--manager-delay-allowance-ms",
@@ -263,6 +275,7 @@ mod tests {
         for flag in [
             "--executable",
             "--output-directory",
+            "--ledger-mount-point",
             "--original-binding",
             "--api-key-file",
             "--trust-root",

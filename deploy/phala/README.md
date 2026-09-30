@@ -2,11 +2,11 @@
 
 This directory prepares local image inputs and an exact dstack launch document
 for a public Zebra testnet preview. It makes no Phala API call, creates no CVM,
-and never approves private requests. The current Zebra v6.4.2 x86_64 asset is
-inside the repository's seven-day release hold until
-`2026-10-02T19:59:10Z`; its ELF identity and the application image are not
-pinned yet. Run `python3 deploy/phala/prepare.py status` to inspect the local
-blockers.
+and never approves private requests. The Zebra v6.4.2 x86_64 asset normally
+remains inside the repository's seven-day release hold until
+`2026-10-02T19:59:10Z`. The approved exception applies only to exact-asset
+local staging, image-context preparation, and launch-document rendering. Run
+`python3 deploy/phala/prepare.py status` to inspect the normal age gate.
 
 The candidate stock tuple is `dstack-0.5.9-bd369a8c` on `prod9` with
 `phala-prod9` KMS, as observed in the account on September 25. The exact image
@@ -15,19 +15,63 @@ digest, KMS catalog identity, and source commits are in
 identity, and pricing before any deployment decision. A passing local package
 check cannot establish those live facts.
 
-The image recipe takes a reviewed, immutable Linux amd64 Python runtime base
-and checked Linux x86_64 binaries for `zebrad`, `zrpc-node-wrapper`, and
-`zrpc-quote-proxy`. `prepare.py image-context` accepts a Zebra staging receipt
-from `tools/gcp-guest/verify_zebra_release.py stage`, explicit hashes for the
-two Rust binaries, and an exact base image digest. It refuses the current Zebra
-hold or an unpinned ELF. It only copies checked local bytes into a fresh build
-context; it does not build, pull, or publish an image. Use `--help` for the
-required file paths and values. Build and registry publication need their own
-reviewed workflow.
+The image recipe pins the Linux amd64
+`python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332`
+manifest and the two native Rust binary hashes. It also requires a checked
+Linux x86_64 `zebrad` and the Zebra staging receipt from
+`tools/gcp-guest/verify_zebra_release.py stage`. During the Zebra hold, pass
+`--allow-v642-local-hold-exception` to `stage`, `prepare.py image-context`,
+and `prepare.py launch-documents`. The latter requires the checked image
+context and its exact staged receipt. `image-context` also requires
+`--snapshot-wheel` pointing to the exact Linux x86_64 CPython 3.13 wheel
+`zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl`
+identified in `snapshot.lock.json`. Download that wheel through the managed
+container and pass its absolute workspace path; the preparation command checks
+its pinned size, SHA-256, and archive contents. Image-context preparation
+refuses an unpinned ELF, different base manifest, or different native binaries.
+It copies checked bytes, the snapshot importer and lock, the wheel, and the
+Zebra receipt into a fresh local build context and hashes every file in it.
+Before building, run
+`python3 deploy/phala/prepare.py check-image-context --context ABSOLUTE_CONTEXT_PATH`.
+The check detects changed or extra build inputs; it does not build, pull, or
+publish an image. Use `--help` for the full preparation arguments. Build and
+registry publication remain separate operator actions.
+
+This public preview uses the Zcash Foundation's September 23, 2026 Testnet
+snapshot pinned in `snapshot.lock.json`. On a fresh
+`zebra_public_testnet` volume, the app downloads the pinned 11,137,971,554-byte
+archive over HTTPS, checks its exact size and SHA-256, and imports its
+`state/v28/testnet` database before starting Zebra or the wrapper. Allow disk
+space for both the compressed download and extracted database during import.
+An interrupted download or import is retried at the next start; an existing
+state directory without the expected import marker blocks startup. Once
+imported, the marker permits reuse on later starts and Zebra synchronizes from
+the snapshot tip. The marker does not revalidate all existing database bytes.
+The snapshot and its manifest come from the same publisher, and the manifest
+is **unsigned**. Their checksums pin the selected bytes but are not an
+independent authenticity proof or a private-mode approval. Treat the imported
+database as public Testnet input; use
+[Zebra's snapshot guidance](https://zebra.zfnd.org/user/snapshots.html) when
+assessing its trust model.
+
+To rehearse the same public snapshot import on native ARM64 Linux without
+creating a CVM, run this from the repository root in the managed container:
+
+```sh
+mkdir -p /workspace/.codex-tmp
+python3 tools/phala-local/import_snapshot_arm64.py \
+  --work-dir /workspace/.codex-tmp/phala-local-sync
+```
+
+The work directory holds the downloaded archive during import and the
+resulting public Zebra state. This local state is separate from the Phala CVM
+volume and does not approve private mode.
 
 After an exact application image digest and reviewed runtime limits exist,
 `prepare.py launch-documents` writes `compose.json`, `app-compose.json`, and a
-receipt into a fresh local directory. The receipt hashes the exact candidate
+receipt into a fresh local directory. During the hold, pass the
+`image-inputs.json` path within the checked local context and the explicit
+exception flag. The receipt hashes the exact candidate
 bytes intended for dstack. The Phala Cloud form may rewrite the launch
 document; after an approved deployment, compare the emitted bytes with the
 provider's `GET /api/v1/cvms/{id}/compose_file` response before using the local
@@ -39,9 +83,16 @@ Zebra's loopback RPC or P2P listener. See the
 [pinned dstack v0.5.9 usage guide](https://raw.githubusercontent.com/Dstack-TEE/dstack/v0.5.9/docs/usage.md)
 for the `s` route syntax.
 
-The Compose design runs a quote bridge with the stock dstack socket mounted
-only in its container, and a separate application container with Zebra and the
-node wrapper. Both use the same checked image digest. A shared tmpfs volume
+The current Phala Cloud `AppComposeV2` schema declares `storage_fs` and
+`kms_enabled`, but does not declare `swap_size` or `key_provider`. This public
+preview does not assert a no-swap policy or disk-key authorization policy.
+Verify the effective configuration through provider readback and live tests;
+private-mode approval remains blocked.
+
+The Compose design binds the host's `/run/dstack.sock` only into the quote
+container at `/dstack.sock`, outside the shared runtime mount. A separate
+application container runs Zebra and the node wrapper. Both use the same
+supplied immutable image digest. A shared tmpfs volume
 carries quote sockets and Zebra's cookie; `zebra_public_testnet` is the only
 application data volume and holds public chain state. Docker, containerd, and
 Sysbox still use the stock image's persistent data disk, so this configuration
@@ -52,8 +103,10 @@ The wrapper serves public chain status and a user-supplied valid testnet
 transparent-address lookup only through the local preview path. The client
 must label the result as public and unverified for private use. No private
 release catalog entry exists. The local demo client requires a managed Tor
-SOCKS endpoint; no Tor executable is currently prepared for the chosen Mac
-mini/Colima client host. Direct network access is not a fallback.
+SOCKS endpoint. Stage the pinned Linux arm64 Tor binary as described in
+[`tools/tor/README.md`](../../tools/tor/README.md), then pass its absolute
+`/workspace/.codex-tmp/tor-package/bin/tor` path as `--tor-executable`.
+Direct network access is not a fallback.
 
 For a live quote diagnostic, obtain an exact quote from the same deployed CVM
 using the [Phala attestation command](https://github.com/Phala-Network/phala-cloud/blob/main/skills/usecase/verify-attestation.md),
@@ -103,7 +156,7 @@ hardware quote and session binding, but does not establish the full workload
 identity required for private RPC.
 
 Before a billable public demo, the operator must
-also select an age-eligible Zebra artifact and exact app image, test the
+also select the exact staged Zebra artifact and app image, test the
 container mount/permission behavior and live quote/TLS route, measure node
 resource fit, obtain a current quote from the selected CVM, and arm the external deletion
 deadline on the chosen always-on host. A local render receipt is not a deploy

@@ -15,6 +15,7 @@ struct SocketPaths {
 
 #[test]
 fn stock_preview_socket_exception_is_exact_and_private_path_stays_strict() {
+    assert_eq!(STOCK_DSTACK_SOCKET_PATH, "/dstack.sock");
     let stock = Path::new(STOCK_DSTACK_SOCKET_PATH);
     assert!(backend_permissions_ok(
         stock,
