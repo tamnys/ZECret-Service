@@ -208,5 +208,5 @@ jobs:
           set -euo pipefail
           python3 -I "$GITHUB_WORKSPACE/source/deploy/phala/check_native_mounts.py" \
             --image "zrpc-phala-native-smoke:$GITHUB_SHA"
-          echo 'Local tmpfs, synthetic quote backend, Zebra Testnet RPC, wrapper TLS rejection before attestation and quote-loss shutdown passed; no snapshot import, live dstack or TDX guest was used.' \
+          echo 'Local tmpfs, synthetic quote backend, Zebra Testnet RPC, wrapper TLS rejection before attestation, and existing-session closure on quote loss passed; no snapshot import, live dstack or TDX guest was used.' \
             >> "$GITHUB_STEP_SUMMARY"
