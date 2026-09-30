@@ -26,16 +26,19 @@ is not final storage or billing evidence. The separately issued workspace API
 token must be revoked after cleanup. No watchdog unit or timer was armed.
 
 Phala's authenticated inventory, detail and attestation responses all reported
-`instance_id: null` even though the CVM was running. The current ledger
-`record-cvm` command requires that field, so the resource is **not yet in the
-ledger's tracked-resource set**; its durable creation attempt is committed and
-a private, fsynced observation receipt containing exact CVM/app/VM UUID IDs,
-provider creation time, workspace match and rate is retained under the ignored
-`.codex-tmp/phala-live-20260930/` directory. Do not fabricate an instance ID,
-reinitialize the original ledger or create a second CVM. Manual deletion is
-available in the signed-in Phala dashboard while this provider field remains
-null. Any lifecycle adapter change must preserve the distinct CVM, VM UUID and
-usage identifiers.
+`instance_id: null` even though the CVM was running. [PR #271](https://github.com/tamnys/ZECret-Service/pull/271)
+added an explicit pending-instance ledger state, and the existing CVM was
+recorded at ledger generation 2 without inventing an instance ID. Its canonical
+ID is `cvm_MeD4o0eQ`, app ID is
+`5af400d6c4fd5312a9b9693fe0988d5bdc0ee726`, and VM UUID is
+`05decd53-6a57-4b1d-97f5-ecff44749040`. The private, fsynced original
+binding and ledger remain under the ignored
+`.codex-tmp/phala-live-20260930/` directory. A fresh authenticated read at
+2026-09-30 23:40 UTC found exactly this one running, tracked CVM, zero
+untracked CVMs, and an incomplete usage-identity match. The modeled cost floor
+was $0.793450 at that read; provider usage rows were empty, so this is not a
+billing reconciliation. Do not reinitialize the original ledger, fabricate an
+instance ID, or create another CVM.
 
 The stock HTTPS gateway URL terminated TLS outside the guest and could not
 carry the wrapper's retained TLS session. The documented `-8443s` gateway
@@ -43,26 +46,62 @@ hostname passed TLS through to the guest: a separate diagnostic reached its
 self-signed TLS 1.3 certificate. The native client used a freshly staged Tor
 0.4.9.13 package whose Tor Project repository signature, package hash and
 release age were checked by `tools/tor/prepare.py` without a hold exception.
-The live `zrpc preview` call reached the attestation exchange through Tor and
-sent **zero** public or private RPC requests because quote appraisal failed.
+The first live `zrpc preview` call reached the attestation exchange through Tor
+and sent **zero** RPC requests because quote appraisal failed.
 
 Phala's attestation response supplied a 7,247-byte quote field whose TDX
 quote declares 4,940 bytes of signed quote data followed by 2,307 extra bytes.
 The project's exact-format decoder rejected the entire field as malformed.
-For a separate **diagnostic only**, the declared prefix was copied into a new
-file and checked with the existing offline `dcap-qvl` 0.6.3 verifier and
-collateral fetched explicitly from Phala PCCS. Intel-root cryptographic
-verification passed, TDX TCB status was `UpToDate`, no advisory IDs were
-reported, and the collateral expiration was in the future. The project's
-strict security policy still rejected this quote; the specific rejected
-condition has not been established. Neither that prefix check nor Phala's own
-verification response proves the live session key, approved workload, private
-storage policy or genuine private-mode acceptance. The native client continues
-to fail closed.
+For a separate initial diagnostic, the declared prefix was checked with the
+existing offline `dcap-qvl` 0.6.3 verifier and collateral fetched explicitly
+from Phala PCCS. [PR #271](https://github.com/tamnys/ZECret-Service/pull/271)
+then taught the native client to accept only the quote-declared signed prefix
+when Phala supplies trailing bytes, while retaining strict local quote, TCB,
+collateral, freshness and TLS-exporter checks. Subsequent live public-preview
+calls through the managed local Tor process passed those checks and returned
+Testnet status and the synthetic transparent-address balance. The local
+dashboard used the same Rust client core and was checked at desktop and narrow
+widths. [PR #272](https://github.com/tamnys/ZECret-Service/pull/272) labels this
+as a public preview. Neither Phala's `verified: true` nor the preview proves
+the approved workload, private storage policy, administration boundary or
+genuine private-mode acceptance. The approved-release catalog remains empty,
+and private queries remain blocked.
 
 Phala's live stats reported zero swap and a running DStack 0.5.9 guest. The
 stock dashboard's container-log view returned `configured logging driver does
-not support reading`; it did not establish Zebra readiness. A live Testnet RPC
-response and dashboard behavior remain unverified. Keep this CVM's elapsed
-time and manual teardown obligation visible while debugging; no additional
+not support reading`; the later end-to-end public RPC response, rather than
+that log view, established Zebra readiness for the preview. No additional
 billable resource has been authorized by this observation.
+
+## Manual deletion and follow-up
+
+The operator chose manual cleanup. Before requesting deletion, run the native
+`zrpc lifecycle ledger inspect` against the original binding and read its
+current generation, tracked CVM ID, deletion intents, modeled cost and deadline.
+Then run `zrpc lifecycle observe` with the same original binding, workspace API
+key file, pinned TLS trust root and the approved 1 MiB response cap. Confirm
+that authenticated inventory contains the expected single CVM and no other
+experiment-owned resource. Both commands are read-only. The original binding
+is `/Users/j/Code/phala-zcash-rpc/.codex-tmp/phala-live-20260930/original.json`;
+the credential and trust root are stored in the Colima VM, not in this repo.
+
+Request deletion no later than the time above using `zrpc lifecycle
+delete-tracked` with the **generation just inspected** and exact CVM ID
+`cvm_MeD4o0eQ`. This command records a durable intent before making one
+provider DELETE request. A 204 or 404 response records the outcome but does
+not prove cleanup. If it fails or is interrupted, inspect the retained ledger
+first; `retry-tracked` requires an explicit prior intent generation and must
+not be replayed blindly. The signed-in Phala dashboard is the manual fallback
+if the CLI cannot dispatch, with the provider result and time recorded beside
+the original ledger. Do not stop the CVM as a substitute for deletion.
+
+After deletion, inspect the ledger and repeat authenticated observation until
+the CVM is absent from inventory and detail. Check for remaining attached
+storage in the Phala console and preserve the provider's deletion or storage
+evidence. Separately inspect subsequent usage/billing until charges through
+the deletion time are accounted for; `instance_id: null` means the current
+automated usage join remains incomplete. An empty usage page, DELETE response
+or missing CVM alone is not a final billing or disk-deletion receipt. Revoke
+the workspace API token after the cleanup evidence is retained. If provider
+storage or billing evidence remains unavailable, record cleanup as unresolved
+and contact Phala support with the CVM/app/VM UUID and deletion time.
