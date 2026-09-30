@@ -39,3 +39,28 @@ start the complete service pair, measure resource fit, use Tor, inspect a live
 quote, or approve private mode. It made no Phala API call, created no CVM,
 activated no scheduler and spent no Phala credits. A real Phala boot and
 provider readback remain necessary before any TEE-hosted demo claim.
+
+## Reproducibility check on the current native candidate
+
+At source commit `054aa11da2eb8cedfcb449b8c871fc9eba438474`, independent
+[runner 36712817820](https://github.com/tamnys/ZECret-service/actions/runs/36712817820)
+and [runner 36712958264](https://github.com/tamnys/ZECret-service/actions/runs/36712958264)
+both passed the image and service smoke. Each runner made two uncached builds
+from the same checked context and pinned `moby/buildkit:v0.33.0` index
+`sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3`.
+All four local Docker archives had SHA-256
+`65b65737031256ba16c4d7194951282a1d5aa82def48844ef83cdafabfbb0099`;
+all four local image config IDs were
+`sha256:ba4bef9fce41866e8353dc8510b6c0ae6d39125864164b7643de9850915365cc`.
+The exporter reported digest
+`sha256:cac592db30e3587cc400f9a2a4ac0b7caa20a857eadb27505c5537f4d0c5d46b`
+on each build. This is an exporter-reported digest, not a registry readback.
+
+The first attempts with the runner's default Docker builder produced different
+filesystem layer timestamps despite a fixed `SOURCE_DATE_EPOCH`. The pinned
+`docker-container` builder and `rewrite-timestamp=true` tar export made the
+complete local archive byte-identical across these two fresh runners. No image
+was uploaded or pushed, so no immutable registry identity or production guest
+measurement exists yet. Reproducibility is established for this local build
+recipe and exact inputs; a later packaging, registry, or deployment step needs
+its own identity readback.
