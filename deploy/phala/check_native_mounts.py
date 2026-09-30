@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Exercise the preview image's local Docker mounts on a native Linux runner.
+"""Exercise the preview image's local mounts and cold Zebra RPC on native Linux.
 
-This is a Docker namespace and ownership smoke, not a dstack or TDX boot.
+This is not a snapshot import, dstack boot, TDX boot, or full-guest fit test.
 """
 
 import argparse
@@ -66,6 +66,52 @@ assert state.stat().st_uid == 10001
 assert stat.S_IMODE(state.stat().st_mode) & 0o007 == 0
 (state / 'zrpc-volume-probe').write_bytes(b'public state')
 Path('/run/zrpc-cookie-probe').write_bytes(b'ephemeral')
+cookie_dir = Path('/run/zrpc-node')
+cookie_dir.mkdir(mode=0o700)
+assert cookie_dir.stat().st_uid == 10001
+assert stat.S_IMODE(cookie_dir.stat().st_mode) == 0o700
+"""
+
+
+ZEBRA_RPC_CHECK = r"""
+import base64
+import json
+from pathlib import Path
+import time
+import urllib.error
+import urllib.request
+
+cookie_path = Path('/run/zrpc-node/.cookie')
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+body = json.dumps({
+    'jsonrpc': '2.0', 'method': 'getblockchaininfo', 'params': [], 'id': 1,
+}).encode()
+while True:
+    try:
+        cookie = cookie_path.read_bytes().strip()
+    except FileNotFoundError:
+        time.sleep(1)
+        continue
+    request = urllib.request.Request('http://127.0.0.1:18232/', body, {
+        'Content-Type': 'application/json',
+        'Authorization': 'Basic ' + base64.b64encode(cookie).decode(),
+    })
+    try:
+        with opener.open(request) as response:
+            content = response.read(65537)
+    except urllib.error.URLError:
+        time.sleep(1)
+        continue
+    if len(content) > 65536:
+        raise ValueError('Zebra RPC response exceeded the client bound')
+    result = json.loads(content)
+    if result.get('error') is not None or result['result']['chain'] != 'test':
+        raise ValueError('unexpected Zebra Testnet RPC response')
+    print(json.dumps({
+        'chain': result['result']['chain'],
+        'blocks': result['result']['blocks'],
+    }, sort_keys=True))
+    break
 """
 
 
@@ -96,8 +142,10 @@ def main():
     runtime = f"zrpc-mount-smoke-run-{suffix}"
     state = f"zrpc-mount-smoke-state-{suffix}"
     quote_name = f"zrpc-mount-smoke-quote-{suffix}"
+    zebra_name = f"zrpc-mount-smoke-zebra-{suffix}"
     created = []
     quote_started = False
+    zebra_started = False
     try:
         docker("volume", "create", "--driver", "local", "--opt", "type=tmpfs",
                "--opt", "device=tmpfs", "--opt", "o=uid=0,gid=0,mode=1775",
@@ -122,8 +170,23 @@ def main():
                     logs.terminate()
                 container(args.image, "10001:0", runtime, state, None,
                           APP_CHECK)
-        print("Native Docker mount/ownership smoke passed; no dstack guest was used.")
+                docker(
+                    "run", "--detach", "--name", zebra_name, "--pull=never",
+                    "--network", "none", "--read-only", "--memory", "8g",
+                    "--cap-drop=ALL", "--security-opt", "no-new-privileges:true",
+                    "--user", "10001:0",
+                    "--mount", f"type=volume,source={runtime},target=/run",
+                    "--mount", f"type=volume,source={state},target=/var/lib/zebra",
+                    "--entrypoint", "/opt/zrpc/bin/zebrad", args.image,
+                    "-c", "/opt/zrpc/zebra.toml", "start",
+                )
+                zebra_started = True
+                docker("exec", "--user", "10001:0", zebra_name,
+                       "python3", "-I", "-c", ZEBRA_RPC_CHECK)
+        print("Native mount and cold Zebra Testnet RPC smoke passed; no dstack guest was used.")
     finally:
+        if zebra_started:
+            docker("rm", "--force", zebra_name)
         if quote_started:
             docker("rm", "--force", quote_name)
         for volume in reversed(created):
