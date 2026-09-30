@@ -16,6 +16,28 @@ second in the sampled checks. The Colima login user had numeric UID 502.
 they do not validate the future watchdog executable, retained ledger mount,
 service account, credentials, effective units or timer behavior.
 
+The current Phala-primary `zrpc` was built with `cargo build --locked -p
+zrpc-cli` in the managed ARM64 container. Its SHA-256 was
+`4f53e45c1d4726d8302f4558bc842f2b9a83cf6f1fec041dd8547324d9508edc`.
+Running that exact shared-workspace binary's `doctor` command inside Colima
+exited 0, reported `primary_platform: phala-dstack` and kept private mode
+blocked. Colima recomputed the same binary hash. This proves basic binary
+compatibility on the selected VM, not an immutable host installation or a
+successful provider deletion.
+
+The repository's synthetic schedule checker had become stale: it omitted the
+required `--ledger-mount-point` argument. After that repair, the managed
+browser-profile container's systemd 257 parser accepted all four generated
+service/timer files plus an explicit synthetic `workspace.mount` parser
+fixture. The same exact generated files and fixture passed
+`systemd-analyze verify --man=no` on this Colima VM's systemd 255 with exit 0
+and no systemd diagnostic. The synthetic watchdog service executes
+`/usr/bin/false`, not `zrpc`, so accidental activation fails; it and the mount
+fixture are uninstalled. The synthetic ledger was
+unchanged, no job ran, and no provider network call occurred. This is parser
+and static dependency evidence only, not effective-unit, timer, restart,
+latency or deletion evidence.
+
 `launchctl list` showed no Colima, Phala or `zrpc` job, and a file inventory of
 the inspected macOS LaunchAgents and LaunchDaemons found no Colima auto-start
 definition. This is bounded evidence, not proof that every possible startup
