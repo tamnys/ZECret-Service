@@ -31,6 +31,9 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture(PathBuf);
 impl Fixture {
     fn new(workspace: &str, id: &str, start: u64) -> Self {
+        Self::with_instance(workspace, id, start, Some(INSTANCE))
+    }
+    fn with_instance(workspace: &str, id: &str, start: u64, instance: Option<&str>) -> Self {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../.codex-tmp/provider-deletion-tests");
         fs::create_dir_all(&base).unwrap();
@@ -59,7 +62,7 @@ impl Fixture {
                 TrackedCvm {
                     cvm_id: id.into(),
                     app_id: APP.into(),
-                    instance_id: INSTANCE.into(),
+                    instance_id: instance.map(str::to_owned),
                     created_at_unix_seconds: start,
                     compute_and_disk_microusd_per_hour: 243_120,
                 },
@@ -789,6 +792,35 @@ async fn incomplete_detail_and_get_404_remain_distinct_from_delete_outcomes() {
         server.wait_closed(3).await;
         assert_eq!(request_methods(&server).len(), 3);
     }
+}
+
+#[tokio::test]
+async fn null_instance_can_prepare_exact_tracked_deletion_without_claiming_identity_match() {
+    let fixture = Fixture::with_instance(WORKSPACE, CVM, START, None);
+    let mut store = fixture.open();
+    let detail = DETAIL.replace(&format!("\"{INSTANCE}\""), "null");
+    let server = Server::start(
+        vec![response("200 OK", AUTH), response("200 OK", &detail)],
+        HOST,
+    )
+    .await;
+    let prepared = authenticate(&server)
+        .await
+        .prepare_with_clock(&mut store, 0, CVM, || Ok(START))
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.preparation_readback(),
+        PreparationReadback::IncompleteCvmFields
+    );
+    drop(prepared);
+    assert_pending(&store);
+    server.wait_closed(2).await;
+    assert!(
+        request_methods(&server)
+            .iter()
+            .all(|method| method.starts_with("GET "))
+    );
 }
 
 #[tokio::test]

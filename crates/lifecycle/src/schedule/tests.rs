@@ -41,7 +41,7 @@ impl Fixture {
                 TrackedCvm {
                     cvm_id: "synthetic-cvm".into(),
                     app_id: "synthetic-app".into(),
-                    instance_id: "synthetic-instance".into(),
+                    instance_id: Some("synthetic-instance".into()),
                     created_at_unix_seconds: START,
                     compute_and_disk_microusd_per_hour: 243_120,
                 },

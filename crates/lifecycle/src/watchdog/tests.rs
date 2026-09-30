@@ -95,7 +95,7 @@ fn target(id: &str, instance: &str, created: u64) -> TrackedCvm {
     TrackedCvm {
         cvm_id: id.into(),
         app_id: "a".repeat(40),
-        instance_id: instance.repeat(40),
+        instance_id: Some(instance.repeat(40)),
         created_at_unix_seconds: created,
         compute_and_disk_microusd_per_hour: 243_120,
     }

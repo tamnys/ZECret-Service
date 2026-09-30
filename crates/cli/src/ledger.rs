@@ -7,7 +7,7 @@ use zrpc_lifecycle::controller::TrackedCvm;
 
 pub(super) const USAGE: &str = r"zrpc lifecycle ledger init --original-binding FILE --store-directory DIR --experiment-id ID --workspace-id ID --deletion-deadline UNIX_SECONDS --initial-cost-microusd INTEGER
 zrpc lifecycle ledger record-attempt --original-binding FILE --expected-generation INTEGER --attempt-id ID
-zrpc lifecycle ledger record-cvm --original-binding FILE --expected-generation INTEGER --attempt-id ID --cvm-id CANONICAL_ID --app-id ID --instance-id ID --created-at UNIX_SECONDS --compute-and-disk-microusd-per-hour INTEGER
+zrpc lifecycle ledger record-cvm --original-binding FILE --expected-generation INTEGER --attempt-id ID --cvm-id CANONICAL_ID --app-id ID (--instance-id ID | --instance-id-pending) --created-at UNIX_SECONDS --compute-and-disk-microusd-per-hour INTEGER
 zrpc lifecycle ledger inspect --original-binding FILE
 zrpc lifecycle ledger discard-draft --original-binding FILE --expected-generation INTEGER
 zrpc lifecycle ledger --help
@@ -15,6 +15,7 @@ All paths are absolute. All listed options are required. These commands make no 
 Initialize before resources are created: the original experiment starts at the actual system time.
 The deadline must be within 168 hours of that start and is never renewed. Initial cost must include prior experiment expenses.
 Record the attempt before creation, then each returned canonical CVM identity and its conservative rate before the next resource.
+Use --instance-id-pending only when the provider reports null; it does not prove a usage-identity mapping.
 Identity, rates and creation time are operator assertions, not authenticated provider evidence or permission to spend.
 inspect is read-only, including when a draft is pending. It computes a current modeled floor without committing it.
 discard-draft explicitly removes only an uncommitted draft; it never promotes it, erases a committed intent or authorizes retry.
@@ -69,6 +70,18 @@ fn absolute(args: &mut Vec<String>, flag: &str) -> Result<PathBuf, String> {
     }
     Ok(value)
 }
+fn pending_instance(args: &mut Vec<String>) -> Result<Option<String>, String> {
+    let pending = args.iter().position(|arg| arg == "--instance-id-pending");
+    let supplied = args.iter().any(|arg| arg == "--instance-id");
+    match (pending, supplied) {
+        (Some(_), true) => Err("choose exactly one instance identity option".into()),
+        (Some(index), false) => {
+            args.remove(index);
+            Ok(None)
+        }
+        (None, _) => text_arg(args, "--instance-id").map(Some),
+    }
+}
 fn parse(mut args: Vec<String>) -> Result<Operation, String> {
     if args.is_empty() {
         return Err("ledger operation required; use lifecycle ledger --help".into());
@@ -96,7 +109,7 @@ fn parse(mut args: Vec<String>) -> Result<Operation, String> {
             target: TrackedCvm {
                 cvm_id: text_arg(&mut args, "--cvm-id")?,
                 app_id: text_arg(&mut args, "--app-id")?,
-                instance_id: text_arg(&mut args, "--instance-id")?,
+                instance_id: pending_instance(&mut args)?,
                 created_at_unix_seconds: number(&mut args, "--created-at")?,
                 compute_and_disk_microusd_per_hour: number(
                     &mut args,
@@ -323,5 +336,17 @@ mod tests {
             };
             assert!(!error.contains("SENSITIVE-MARKER"));
         }
+    }
+    #[test]
+    fn null_instance_requires_explicit_pending_flag() {
+        let mut args = arguments("record-cvm");
+        let index = args.iter().position(|arg| arg == "--instance-id").unwrap();
+        args.splice(index..index + 2, ["--instance-id-pending".into()]);
+        let Operation::Cvm { target, .. } = parse(args.clone()).unwrap() else {
+            panic!("wrong operation")
+        };
+        assert!(target.instance_id.is_none());
+        args.extend(["--instance-id".into(), "invented".into()]);
+        assert!(parse(args).is_err());
     }
 }

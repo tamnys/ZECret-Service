@@ -6,7 +6,7 @@ use dcap_qvl::{
     quote::{Quote, Report},
     verify::QuoteVerifier,
 };
-use parity_scale_codec::{DecodeAll, Encode};
+use parity_scale_codec::{Decode, DecodeAll, Encode};
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,6 +41,8 @@ pub struct OfflineInspection {
     pub hardware_authenticity: InspectionStatus,
     pub security_policy: InspectionStatus,
     pub policy: &'static str,
+    /// Bytes after the canonical signed quote envelope. They are not evidence.
+    pub untrusted_trailing_bytes: usize,
     pub tee: Option<&'static str>,
     pub tcb_status: Option<String>,
     pub advisory_ids: Vec<String>,
@@ -73,6 +75,7 @@ impl OfflineInspection {
             hardware_authenticity: InspectionStatus::NotChecked,
             security_policy: InspectionStatus::NotChecked,
             policy: "dcap-qvl strict; TDX only; no unapproved advisories; no grace or override",
+            untrusted_trailing_bytes: 0,
             tee: None,
             tcb_status: None,
             advisory_ids: Vec::new(),
@@ -118,6 +121,41 @@ pub fn inspect_quote_and_report_data(
     }
 }
 
+/// Phala public-read preview only. Phala's attestation response may append an
+/// untrusted trailer to the signed Intel quote. Verify exactly the canonical
+/// quote envelope and ignore the trailer; never expose this path to private
+/// authorization or approved-release matching.
+pub fn inspect_phala_public_preview_quote_and_report_data(
+    quote: &[u8],
+    collateral_json: &[u8],
+    expected_report_data: &[u8; 64],
+) -> BoundQuoteInspection {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(now) => inspect_bound_at(
+            quote,
+            collateral_json,
+            expected_report_data,
+            now.as_secs(),
+            "system_clock",
+            Appraisal::PhalaPublicPreview,
+        ),
+        Err(_) => {
+            let mut report = OfflineInspection::new(None, "system_clock");
+            report.issue = Some(InspectionIssue::ClockUnavailable);
+            BoundQuoteInspection {
+                quote: report,
+                authenticated_report_data_match: InspectionStatus::NotChecked,
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Appraisal {
+    Strict,
+    PhalaPublicPreview,
+}
+
 fn inspect_quote_and_report_data_at(
     quote: &[u8],
     collateral_json: &[u8],
@@ -125,18 +163,43 @@ fn inspect_quote_and_report_data_at(
     now: u64,
     time_source: &'static str,
 ) -> BoundQuoteInspection {
+    inspect_bound_at(
+        quote,
+        collateral_json,
+        expected_report_data,
+        now,
+        time_source,
+        Appraisal::Strict,
+    )
+}
+
+fn inspect_bound_at(
+    quote: &[u8],
+    collateral_json: &[u8],
+    expected_report_data: &[u8; 64],
+    now: u64,
+    time_source: &'static str,
+    appraisal: Appraisal,
+) -> BoundQuoteInspection {
     let mut binding = InspectionStatus::NotChecked;
-    let quote = inspect_at_with_claims(quote, collateral_json, now, time_source, |claims| {
-        binding = if claims
-            .report
-            .as_td10()
-            .is_some_and(|td| td.report_data == *expected_report_data)
-        {
-            InspectionStatus::Verified
-        } else {
-            InspectionStatus::Rejected
-        };
-    });
+    let quote = inspect_at_with_appraisal(
+        quote,
+        collateral_json,
+        now,
+        time_source,
+        appraisal,
+        |claims| {
+            binding = if claims
+                .report
+                .as_td10()
+                .is_some_and(|td| td.report_data == *expected_report_data)
+            {
+                InspectionStatus::Verified
+            } else {
+                InspectionStatus::Rejected
+            };
+        },
+    );
     BoundQuoteInspection {
         quote,
         authenticated_report_data_match: binding,
@@ -199,18 +262,44 @@ fn inspect_at_with_claims(
     time_source: &'static str,
     inspect: impl FnOnce(&QuoteClaims),
 ) -> OfflineInspection {
+    inspect_at_with_appraisal(
+        quote,
+        collateral_json,
+        now,
+        time_source,
+        Appraisal::Strict,
+        inspect,
+    )
+}
+
+fn inspect_at_with_appraisal(
+    quote: &[u8],
+    collateral_json: &[u8],
+    now: u64,
+    time_source: &'static str,
+    appraisal: Appraisal,
+    inspect: impl FnOnce(&QuoteClaims),
+) -> OfflineInspection {
     let mut result = OfflineInspection::new(Some(now), time_source);
+    if matches!(appraisal, Appraisal::PhalaPublicPreview) {
+        result.policy = "public preview only: Intel-root TDX, UpToDate TCB, no advisories; dynamic platform, cached keys, SMT and untrusted quote trailer allowed; no private authority";
+    }
     // Upstream parse() permits trailing bytes. Use its complete decoder and
     // encoder to reject ignored bytes inside length envelopes too. Never use
     // parsed (unauthenticated) report fields as acceptance evidence.
     let mut input = quote;
-    let canonical =
-        Quote::decode_all(&mut input).is_ok_and(|parsed| parsed.encode().as_slice() == quote);
-    if !canonical {
+    let parsed = match appraisal {
+        Appraisal::Strict => Quote::decode_all(&mut input),
+        Appraisal::PhalaPublicPreview => Quote::decode(&mut input),
+    };
+    let signed_length = quote.len() - input.len();
+    if !parsed.is_ok_and(|parsed| parsed.encode().as_slice() == &quote[..signed_length]) {
         result.hardware_authenticity = InspectionStatus::Rejected;
         result.issue = Some(InspectionIssue::MalformedQuote);
         return result;
     }
+    result.untrusted_trailing_bytes = input.len();
+    let signed_quote = &quote[..signed_length];
     // Serde structs can accept positional arrays: require the documented JSON
     // object representation before handing collateral to the maintained parser.
     if collateral_json
@@ -233,8 +322,12 @@ fn inspect_at_with_claims(
     // still checks Intel trust, signatures, validity, CRLs and non-debug attrs.
     let claims = match QuoteVerifier::new_prod()
         .with_config::<RingConfig>()
-        .verify_with_policy(quote, collateral, now, &QuotePolicy::claims_only(now))
-    {
+        .verify_with_policy(
+            signed_quote,
+            collateral,
+            now,
+            &QuotePolicy::claims_only(now),
+        ) {
         Ok(claims) => claims,
         Err(_) => {
             result.hardware_authenticity = InspectionStatus::Rejected;
@@ -253,7 +346,11 @@ fn inspect_at_with_claims(
     result.tcb_status = Some(claims.tcb.status.to_string());
     result.advisory_ids = claims.tcb.advisory_ids.clone();
     result.collateral_earliest_expiration_unix_seconds = Some(claims.earliest_expiration_date);
-    match appraise(&claims, now) {
+    let appraisal_result = match appraisal {
+        Appraisal::Strict => appraise(&claims, now),
+        Appraisal::PhalaPublicPreview => appraise_phala_public_preview(&claims, now),
+    };
+    match appraisal_result {
         Ok(()) => {
             result.security_policy = InspectionStatus::Verified;
             inspect(&claims);
@@ -267,6 +364,20 @@ fn inspect_at_with_claims(
 }
 
 fn appraise(claims: &QuoteClaims, now: u64) -> Result<(), InspectionIssue> {
+    appraise_with_policy(claims, QuotePolicy::strict(now))
+}
+
+fn appraise_phala_public_preview(claims: &QuoteClaims, now: u64) -> Result<(), InspectionIssue> {
+    appraise_with_policy(
+        claims,
+        QuotePolicy::strict(now)
+            .allow_dynamic_platform(true)
+            .allow_cached_keys(true)
+            .allow_smt(true),
+    )
+}
+
+fn appraise_with_policy(claims: &QuoteClaims, policy: QuotePolicy) -> Result<(), InspectionIssue> {
     // 0x81 is Intel's TDX quote TEE discriminator, checked alongside the decoded body.
     if claims.tee_type != 0x81 || !matches!(claims.report, Report::TD10(_) | Report::TD15(_)) {
         return Err(InspectionIssue::UnsupportedTee);
@@ -278,7 +389,7 @@ fn appraise(claims: &QuoteClaims, now: u64) -> Result<(), InspectionIssue> {
     {
         return Err(InspectionIssue::AdvisoryNotApproved);
     }
-    QuotePolicy::strict(now)
+    policy
         .validate(claims)
         .map_err(|_| InspectionIssue::StrictSecurityPolicyRejected)
 }
@@ -379,6 +490,74 @@ mod tests {
         );
         assert_eq!(
             expired.authenticated_report_data_match,
+            InspectionStatus::NotChecked
+        );
+    }
+    #[test]
+    fn phala_public_preview_verifies_only_the_canonical_quote_and_never_grants_private_authority() {
+        let expected = Quote::parse(QUOTE)
+            .unwrap()
+            .report
+            .as_td10()
+            .unwrap()
+            .report_data;
+        let mut with_trailer = QUOTE.to_vec();
+        with_trailer.extend_from_slice(b"untrusted provider trailer");
+        let preview = inspect_bound_at(
+            &with_trailer,
+            COLLATERAL,
+            &expected,
+            FIXTURE_TIME,
+            "historical_upstream_fixture_test",
+            Appraisal::PhalaPublicPreview,
+        );
+        assert_eq!(
+            preview.quote.hardware_authenticity,
+            InspectionStatus::Verified
+        );
+        assert_eq!(preview.quote.security_policy, InspectionStatus::Verified);
+        assert_eq!(
+            preview.authenticated_report_data_match,
+            InspectionStatus::Verified
+        );
+        assert_eq!(preview.quote.untrusted_trailing_bytes, 26);
+        assert_no_private_authority(&preview.quote);
+        assert_eq!(
+            historical(&with_trailer, COLLATERAL).issue,
+            Some(InspectionIssue::MalformedQuote)
+        );
+
+        let mut wrong = expected;
+        wrong[0] ^= 1;
+        let mismatch = inspect_bound_at(
+            &with_trailer,
+            COLLATERAL,
+            &wrong,
+            FIXTURE_TIME,
+            "historical_upstream_fixture_test",
+            Appraisal::PhalaPublicPreview,
+        );
+        assert_eq!(
+            mismatch.authenticated_report_data_match,
+            InspectionStatus::Rejected
+        );
+
+        let mut changed = with_trailer;
+        changed[100] ^= 1;
+        let invalid = inspect_bound_at(
+            &changed,
+            COLLATERAL,
+            &expected,
+            FIXTURE_TIME,
+            "historical_upstream_fixture_test",
+            Appraisal::PhalaPublicPreview,
+        );
+        assert_eq!(
+            invalid.quote.hardware_authenticity,
+            InspectionStatus::Rejected
+        );
+        assert_eq!(
+            invalid.authenticated_report_data_match,
             InspectionStatus::NotChecked
         );
     }

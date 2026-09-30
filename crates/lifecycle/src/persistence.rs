@@ -1125,7 +1125,7 @@ mod tests {
                 TrackedCvm {
                     cvm_id: "one".into(),
                     app_id: "app".into(),
-                    instance_id: "instance".into(),
+                    instance_id: Some("instance".into()),
                     created_at_unix_seconds: 1000,
                     compute_and_disk_microusd_per_hour: 243_120,
                 },
@@ -1204,7 +1204,7 @@ mod tests {
             TrackedCvm {
                 cvm_id: "two".into(),
                 app_id: "app2".into(),
-                instance_id: "instance2".into(),
+                instance_id: Some("instance2".into()),
                 created_at_unix_seconds: 1000,
                 compute_and_disk_microusd_per_hour: 243_120,
             },
@@ -1519,7 +1519,7 @@ mod tests {
             TrackedCvm {
                 cvm_id: "two".into(),
                 app_id: "app2".into(),
-                instance_id: "instance2".into(),
+                instance_id: Some("instance2".into()),
                 created_at_unix_seconds: 1000,
                 compute_and_disk_microusd_per_hour: 243_120,
             },

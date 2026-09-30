@@ -90,7 +90,7 @@ fn new_cvm() -> TrackedCvm {
     TrackedCvm {
         cvm_id: "synthetic_new_cvm".into(),
         app_id: "synthetic_app".into(),
-        instance_id: "synthetic_instance".into(),
+        instance_id: Some("synthetic_instance".into()),
         created_at_unix_seconds: START,
         compute_and_disk_microusd_per_hour: 1,
     }

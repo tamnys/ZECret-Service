@@ -67,7 +67,7 @@ impl From<ProviderHttpError> for ObservationError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityMatch {
-    /// Both app_id and the CVM object's instance_id equal the retained target.
+    /// Both app_id and the CVM object's known instance_id equal the retained target.
     /// This does not establish any usage.instance_id mapping.
     CvmFieldsMatch,
     Incomplete,
@@ -321,15 +321,17 @@ fn compare_identity(item: &Cvm, target: &TrackedCvm) -> Result<IdentityMatch, Ob
         || item
             .instance_id
             .as_ref()
-            .is_some_and(|id| id != &target.instance_id)
+            .is_some_and(|id| target.instance_id.as_ref().is_some_and(|known| id != known))
     {
         return Err(ObservationError::IdentityConflict);
     }
-    Ok(if item.app_id.is_some() && item.instance_id.is_some() {
-        IdentityMatch::CvmFieldsMatch
-    } else {
-        IdentityMatch::Incomplete
-    })
+    Ok(
+        if item.app_id.is_some() && item.instance_id.is_some() && target.instance_id.is_some() {
+            IdentityMatch::CvmFieldsMatch
+        } else {
+            IdentityMatch::Incomplete
+        },
+    )
 }
 fn wall_time() -> Result<u64, ObservationError> {
     SystemTime::now()

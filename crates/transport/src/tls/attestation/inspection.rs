@@ -11,7 +11,9 @@ use zrpc_protocol::Backend;
 use zrpc_verifier::{
     ApprovedRelease, ReleasePolicy,
     gcp::BoundGcpWorkloadInspection,
-    offline::{BoundQuoteInspection, InspectionStatus, inspect_quote_and_report_data},
+    offline::{
+        BoundQuoteInspection, InspectionStatus, inspect_phala_public_preview_quote_and_report_data,
+    },
     workload::{BoundWorkloadInspection, WorkloadPolicy, inspect_workload_and_report_data},
 };
 
@@ -146,7 +148,7 @@ impl UnverifiedPublicEvidence {
         self.inspect_against(collateral_json, raw_app_compose, policy)
     }
 
-    /// Retain the original connection only for typed public reads after strict
+    /// Retain the original connection only for typed public reads after
     /// current-time QVL, nonce and exporter checks. No workload measurement is
     /// accepted or inferred. A failed report returns no RPC session.
     pub fn inspect_for_public_preview(
@@ -195,7 +197,7 @@ impl UnverifiedPublicEvidence {
                 return report;
             }
         };
-        report.hardware_evidence = Some(inspect_quote_and_report_data(
+        report.hardware_evidence = Some(inspect_phala_public_preview_quote_and_report_data(
             &quote,
             collateral_json,
             &self.expected_report_data,
@@ -206,7 +208,7 @@ impl UnverifiedPublicEvidence {
             .unwrap()
             .authenticated_report_data_match;
         // The response's nonce echo alone is not authenticated freshness.
-        // It becomes a signed claim only when the strict quote authenticates
+        // It becomes a signed claim only when the verified quote authenticates
         // REPORTDATA bound to this nonce-context TLS exporter.
         if report.live_key_binding == InspectionStatus::Verified {
             report.freshness = InspectionStatus::Verified;

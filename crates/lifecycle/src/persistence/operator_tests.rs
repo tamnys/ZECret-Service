@@ -63,7 +63,7 @@ fn cvm(id: &str, created_at: u64) -> TrackedCvm {
     TrackedCvm {
         cvm_id: id.into(),
         app_id: "app".into(),
-        instance_id: format!("instance-{id}"),
+        instance_id: Some(format!("instance-{id}")),
         created_at_unix_seconds: created_at,
         compute_and_disk_microusd_per_hour: 243_120,
     }
