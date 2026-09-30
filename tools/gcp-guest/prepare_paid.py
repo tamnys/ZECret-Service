@@ -210,14 +210,18 @@ def write_overlay(output, files, lock_bytes, base_manifest_sha256):
 
 
 def stage(base_stage, base_sha256, base_bytes, lock_path, inputs,
-          native_bundle, native_revision, output):
+          native_bundle, native_revision, output, *, selected_output=None):
     prepare.verify_stage(base_stage, base_sha256, base_bytes)
     destination = output.resolve()
     if (destination.is_relative_to(base_stage.resolve())
             or destination.is_relative_to(inputs.resolve())
             or destination.is_relative_to(native_bundle.resolve())):
         raise ValueError("paid overlay output must not mutate pinned inputs")
-    native_report = export_rust_inputs.inspect(native_bundle, native_revision)
+    if selected_output is None:
+        native_report = export_rust_inputs.inspect(native_bundle, native_revision)
+    else:
+        native_report = export_rust_inputs.inspect(
+            native_bundle, native_revision, selected_output=selected_output)
     lock_bytes, issuer_name, artifacts = checked_inputs(
         lock_path, inputs, base_sha256, native_report)
     files = {

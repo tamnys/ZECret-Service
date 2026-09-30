@@ -133,6 +133,7 @@ class PaidOverlayTests(unittest.TestCase):
         self.assertNotIn("/var/lib/zrpc-spent ext4 rw,nosuid,nodev,noexec,x-systemd.makefs", fstab)
         rules = (rootfs / "usr/lib/udev/rules.d/65-gce-disk-naming.rules").read_text()
         self.assertIn("zrpc-gcp-disk-id --spent $devnode", rules)
+
         for unit, service in paid.GUARDED_UNITS.items():
             contents = (rootfs / paid.UNIT_DIR / unit).read_text()
             self.assertIn("--paid-mark-start " + service, contents)
@@ -156,6 +157,14 @@ class PaidOverlayTests(unittest.TestCase):
             stream.write(b"# changed\n")
         with self.assertRaises(ValueError):
             paid.verify(self.output, result["manifest_sha256"], result["manifest_bytes"])
+
+    def test_paid_stage_uses_selected_source_reader_in_builder(self):
+        reader = mock.Mock()
+        paid.stage(self.base, self.base_sha256, self.base_bytes,
+                   self.lock, self.inputs, self.native_bundle,
+                   self.native_revision, self.output, selected_output=reader)
+        self.inspection.assert_called_once_with(
+            self.native_bundle, self.native_revision, selected_output=reader)
 
     def test_rejects_wrong_lock_and_changed_free_disk_rule(self):
         locked = json.loads(self.lock.read_text())
