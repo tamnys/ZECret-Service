@@ -64,3 +64,21 @@ was uploaded or pushed, so no immutable registry identity or production guest
 measurement exists yet. Reproducibility is established for this local build
 recipe and exact inputs; a later packaging, registry, or deployment step needs
 its own identity readback.
+
+The merged [main run 36714132961](https://github.com/tamnys/ZECret-service/actions/runs/36714132961)
+passed the same smoke at commit `f5b7074e2c11f74a512fd9be618722c4ccf91144`.
+Its checked context remained `019600c63c557870223a4ee67bfd1acb4576c98af08672f8477247d5168857e8`,
+but its archive SHA-256 changed to
+`e18024cc0f8149b365323d7928f8b7a57e938ff065a903b5b1044e2048ed5042`
+because the workflow had used the Git commit time as `SOURCE_DATE_EPOCH`.
+This made an evidence-only commit alter the local image identity. The revised
+workflow derives that timestamp from the checked context's pinned base-image
+Created annotation (`2026-09-19T00:58:14Z`). Its first
+[run 36714625090](https://github.com/tamnys/ZECret-service/actions/runs/36714625090)
+at source `4ee0891c2ed13c43820869fce2a9d4c39bb8d7df` produced twice-matching
+archive SHA-256
+`7666369a61754e2d5f2fa338674e4696cfe107cda238d342fc5f0496e896c6cb`
+and local image config ID
+`sha256:e126a22b330b47da87299cadef6ead7ee6e53a8008d2588bf9e90fb5739b3df2`.
+The same-context, later-commit check is still needed before calling that
+identity stable across evidence-only changes.
