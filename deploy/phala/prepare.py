@@ -4,6 +4,7 @@
 import argparse
 from datetime import datetime, timedelta, timezone
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -12,6 +13,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
+snapshot_spec = importlib.util.spec_from_file_location(
+    "phala_snapshot_package", HERE / "snapshot_package.py")
+snapshot_package = importlib.util.module_from_spec(snapshot_spec)
+snapshot_spec.loader.exec_module(snapshot_package)
 STOCK_LOCK = HERE / "stock-candidate.lock.json"
 ZEBRA_LOCK = ROOT / "deploy/gcp/zebra-release.lock.json"
 REVIEWED_ZEBRA_RECEIPT = ROOT / "records/zebra-v642-local-staging-receipt.json"
@@ -26,7 +31,8 @@ NATIVE_BINARIES_SHA256 = {
 }
 CONTEXT_FILES = ("Dockerfile", "supervisor.py", "zebra.toml", "state/.keep",
                  "zebra-stage-receipt.json",
-                 "bin/zebrad", "bin/zrpc-node-wrapper", "bin/zrpc-quote-proxy")
+                 "bin/zebrad", "bin/zrpc-node-wrapper", "bin/zrpc-quote-proxy") + \
+                snapshot_package.CONTEXT_FILES
 IMAGE_REF = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 LOCAL_HOLD_EXCEPTION = {
@@ -221,17 +227,23 @@ def image_context(args):
         "zrpc-quote-proxy": checked_elf(args.quote_proxy,
                                         args.quote_proxy_sha256),
     }
+    snapshot_inputs = snapshot_package.reviewed_context_inputs(
+        inside_workspace(args.snapshot_wheel))
+    snapshot_lock, _ = snapshot_package.reviewed_lock()
     dockerfile = dockerfile_bytes(BASE_IMAGE)
     output = fresh_output(args.output)
     output.mkdir()
     (output / "bin").mkdir()
     (output / "state").mkdir()
+    (output / "vendor").mkdir()
     for name, data in binaries.items():
         destination = output / "bin" / name
         destination.write_bytes(data)
         destination.chmod(0o555)
     for name in ("supervisor.py", "zebra.toml"):
         (output / name).write_bytes(regular_bytes(HERE / "image" / name))
+    for name, data in snapshot_inputs.items():
+        (output / name).write_bytes(data)
     (output / "zebra-stage-receipt.json").write_bytes(receipt_bytes)
     (output / "state/.keep").write_bytes(b"")
     (output / "Dockerfile").write_bytes(dockerfile)
@@ -247,6 +259,9 @@ def image_context(args):
         "zebra_asset_sha256": zebra["asset"]["sha256"],
         "zebra_local_hold_exception": exception,
         "zebra_stage_receipt_sha256": digest(receipt_bytes),
+        "snapshot_lock_sha256": snapshot_package.LOCK_SHA256,
+        "snapshot_archive_sha256": snapshot_lock["archive_sha256"],
+        "snapshot_manifest_signed": False,
         "binaries_sha256": {name: digest(data) for name, data in binaries.items()},
         "dockerfile_sha256": digest(dockerfile),
         "context_files_sha256": files_sha256,
@@ -264,10 +279,12 @@ def check_image_context(args):
     directory = inside_workspace(args.context)
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("regular image context directory required")
-    expected_paths = set(CONTEXT_FILES) | {"image-inputs.json", "bin", "state"}
+    expected_paths = set(CONTEXT_FILES) | {"image-inputs.json", "bin", "state", "vendor"}
     actual_paths = {str(path.relative_to(directory)) for path in directory.rglob("*")}
     if actual_paths != expected_paths or any(path.is_symlink() for path in directory.rglob("*")):
         raise ValueError("image context has missing, extra, or symlink paths")
+    snapshot_package.check_context(directory)
+    snapshot_lock, _ = snapshot_package.reviewed_lock()
     receipt = read_json(directory / "image-inputs.json")
     stage_receipt_bytes = regular_bytes(directory / "zebra-stage-receipt.json")
     stage_receipt = parse_json(stage_receipt_bytes)
@@ -285,6 +302,8 @@ def check_image_context(args):
                          "stock_candidate_lock_sha256", "zebra_release_lock_sha256",
                          "zebra_asset_sha256", "zebra_local_hold_exception",
                          "zebra_stage_receipt_sha256",
+                         "snapshot_lock_sha256", "snapshot_archive_sha256",
+                         "snapshot_manifest_signed",
                          "binaries_sha256",
                          "dockerfile_sha256", "context_files_sha256",
                          "context_sha256", "private_accepted", "deployment_enabled"}
@@ -298,6 +317,9 @@ def check_image_context(args):
             or receipt["zebra_asset_sha256"] != zebra["asset"]["sha256"]
             or receipt["zebra_local_hold_exception"] != exception
             or receipt["zebra_stage_receipt_sha256"] != digest(stage_receipt_bytes)
+            or receipt["snapshot_lock_sha256"] != snapshot_package.LOCK_SHA256
+            or receipt["snapshot_archive_sha256"] != snapshot_lock["archive_sha256"]
+            or receipt["snapshot_manifest_signed"] is not False
             or receipt["binaries_sha256"] != {
                 "zebrad": zebra["zebrad_elf_sha256"], **NATIVE_BINARIES_SHA256}
             or receipt["dockerfile_sha256"] != files_sha256["Dockerfile"]
@@ -317,6 +339,9 @@ def check_image_context(args):
         "context_sha256": receipt["context_sha256"],
         "context_files_sha256": files_sha256,
         "base_image": BASE_IMAGE,
+        "snapshot_lock_sha256": snapshot_package.LOCK_SHA256,
+        "snapshot_archive_sha256": snapshot_lock["archive_sha256"],
+        "snapshot_manifest_signed": False,
         "private_accepted": False,
         "deployment_enabled": False,
         "cloud_calls": False,
@@ -336,6 +361,7 @@ def runtime_config(path):
 
 def launch_documents(args):
     stock, zebra, lock_digest = locks()
+    snapshot_lock, _ = snapshot_package.reviewed_lock()
     eligible, eligible_at = eligibility(zebra)
     if not eligible and not getattr(args, "allow_v642_local_hold_exception", False):
         raise ValueError(f"Zebra release hold ends {eligible_at.isoformat()}")
@@ -349,6 +375,9 @@ def launch_documents(args):
             or inputs.get("zebra_asset_sha256") != zebra["asset"]["sha256"]
             or inputs.get("stock_os_image_sha256") != stock["os_image_sha256"]
             or inputs.get("stock_candidate_lock_sha256") != STOCK_LOCK_SHA256
+            or inputs.get("snapshot_lock_sha256") != snapshot_package.LOCK_SHA256
+            or inputs.get("snapshot_archive_sha256") != snapshot_lock["archive_sha256"]
+            or inputs.get("snapshot_manifest_signed") is not False
             or inputs.get("private_accepted") is not False
             or inputs.get("deployment_enabled") is not False):
         raise ValueError("image context receipt differs from reviewed inputs")
@@ -434,6 +463,9 @@ def launch_documents(args):
         "zebra_release_lock_sha256": lock_digest,
         "zebra_local_hold_exception": inputs.get("zebra_local_hold_exception"),
         "zebra_stage_receipt_sha256": inputs.get("zebra_stage_receipt_sha256"),
+        "snapshot_lock_sha256": snapshot_package.LOCK_SHA256,
+        "snapshot_archive_sha256": snapshot_lock["archive_sha256"],
+        "snapshot_manifest_signed": False,
         "image_ref": args.image,
         "image_inputs_sha256": digest(inputs_bytes),
         "docker_compose_file_sha256": digest(compose_bytes),
@@ -453,6 +485,7 @@ def main():
     commands.add_parser("status")
     image = commands.add_parser("image-context")
     image.add_argument("--zebra-stage", required=True, type=Path)
+    image.add_argument("--snapshot-wheel", required=True, type=Path)
     image.add_argument("--node-wrapper", required=True, type=Path)
     image.add_argument("--node-wrapper-sha256", required=True)
     image.add_argument("--quote-proxy", required=True, type=Path)
@@ -474,6 +507,7 @@ def main():
         stock, zebra, _ = locks()
         if args.command == "status":
             eligible, eligible_at = eligibility(zebra)
+            snapshot_lock, _ = snapshot_package.reviewed_lock()
             result = {
                 "status": "age-eligible-artifacts-still-unapproved" if eligible
                 else "held-artifacts-unapproved",
@@ -483,6 +517,9 @@ def main():
                 "zebra_asset_sha256": zebra["asset"]["sha256"],
                 "zebra_eligible_at_utc": eligible_at.isoformat().replace("+00:00", "Z"),
                 "zebra_elf_identity_pinned": zebra["zebrad_elf_sha256"] is not None,
+                "snapshot_lock_sha256": snapshot_package.LOCK_SHA256,
+                "snapshot_archive_sha256": snapshot_lock["archive_sha256"],
+                "snapshot_manifest_signed": False,
                 "private_accepted": False,
                 "deployment_enabled": False,
                 "cloud_calls": False,

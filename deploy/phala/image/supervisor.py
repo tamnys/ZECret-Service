@@ -145,6 +145,8 @@ def run_quote():
 
 
 def run_app():
+    from snapshot_import import ensure_snapshot
+
     require_runtime_mount()
     if BACKEND.exists() and stat.S_ISSOCK(BACKEND.stat().st_mode):
         raise RuntimeError("app container exposes dstack socket")
@@ -155,6 +157,7 @@ def run_app():
         raise RuntimeError("public Zebra state ownership is unavailable")
     if stat.S_IMODE(state.st_mode) & 0o007:
         raise RuntimeError("public Zebra state is world-accessible")
+    ensure_snapshot()
     COOKIE_DIR.mkdir(mode=0o700)
     if COOKIE_DIR.stat().st_uid != os.geteuid():
         raise RuntimeError("cookie directory ownership is unavailable")

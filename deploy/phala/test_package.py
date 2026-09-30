@@ -28,6 +28,8 @@ class PackageTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(dir=scratch)
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        self.wheel = self.root / "synthetic-zstandard.whl"
+        self.wheel.write_bytes(b"synthetic wheel")
 
     def test_hold_blocks_image_context_before_creating_output(self):
         _, zebra, _ = prepare.locks()
@@ -80,6 +82,7 @@ class PackageTests(unittest.TestCase):
             (self.root / name).write_bytes(elf)
         args = argparse.Namespace(
             zebra_stage=stage,
+            snapshot_wheel=self.wheel,
             node_wrapper=self.root / "zrpc-node-wrapper",
             node_wrapper_sha256=elf_hash,
             quote_proxy=self.root / "zrpc-quote-proxy",
@@ -90,6 +93,8 @@ class PackageTests(unittest.TestCase):
         )
         with (patch.object(prepare, "locks", return_value=(stock, zebra, lock_digest)),
               patch.object(prepare, "NATIVE_BINARIES_SHA256", native),
+              patch.object(prepare.snapshot_package, "_checked_wheel",
+                           side_effect=lambda path, _wheel: Path(path).read_bytes()),
               patch.object(prepare, "eligibility", return_value=(True, eligible_at))):
             prepare.image_context(args)
             checked = prepare.check_image_context(argparse.Namespace(context=args.output))
@@ -99,6 +104,11 @@ class PackageTests(unittest.TestCase):
                 prepare.check_image_context(argparse.Namespace(context=args.output))
             (args.output / "supervisor.py").write_bytes(
                 (prepare.HERE / "image/supervisor.py").read_bytes())
+            (args.output / "snapshot.lock.json").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "snapshot image input"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+            (args.output / "snapshot.lock.json").write_bytes(
+                (prepare.HERE / "snapshot.lock.json").read_bytes())
             native_file = args.output / "bin/zrpc-node-wrapper"
             native_file.chmod(0o755)
             native_file.write_bytes(b"changed")
@@ -142,6 +152,7 @@ class PackageTests(unittest.TestCase):
             (self.root / name).write_bytes(elf)
         args = argparse.Namespace(
             zebra_stage=stage,
+            snapshot_wheel=self.wheel,
             node_wrapper=self.root / "zrpc-node-wrapper",
             node_wrapper_sha256=elf_hash,
             quote_proxy=self.root / "zrpc-quote-proxy",
@@ -153,6 +164,8 @@ class PackageTests(unittest.TestCase):
         )
         with (patch.object(prepare, "locks", return_value=(stock, zebra, lock_digest)),
               patch.object(prepare, "NATIVE_BINARIES_SHA256", native),
+              patch.object(prepare.snapshot_package, "_checked_wheel",
+                           side_effect=lambda path, _wheel: Path(path).read_bytes()),
               patch.object(prepare, "eligibility", return_value=(False, due))):
             with self.assertRaisesRegex(ValueError, "approved asset"):
                 prepare.image_context(args)
@@ -160,6 +173,8 @@ class PackageTests(unittest.TestCase):
                  synthetic_receipt_hash}
         with (patch.object(prepare, "locks", return_value=(stock, zebra, lock_digest)),
               patch.object(prepare, "NATIVE_BINARIES_SHA256", native),
+              patch.object(prepare.snapshot_package, "_checked_wheel",
+                           side_effect=lambda path, _wheel: Path(path).read_bytes()),
               patch.object(prepare, "eligibility", return_value=(False, due))):
             context = prepare.image_context(args)
             self.assertEqual(context["zebra_local_hold_exception"],
@@ -221,6 +236,7 @@ class PackageTests(unittest.TestCase):
 
     def test_render_binds_exact_bytes_and_isolates_backend_socket(self):
         stock, zebra, lock_digest = prepare.locks()
+        snapshot_lock, _ = prepare.snapshot_package.reviewed_lock()
         inputs = self.root / "image-inputs.json"
         inputs.write_bytes(prepare.canonical({
             "status": "local-image-context-unapproved",
@@ -228,6 +244,9 @@ class PackageTests(unittest.TestCase):
             "zebra_asset_sha256": zebra["asset"]["sha256"],
             "stock_os_image_sha256": stock["os_image_sha256"],
             "stock_candidate_lock_sha256": prepare.STOCK_LOCK_SHA256,
+            "snapshot_lock_sha256": prepare.snapshot_package.LOCK_SHA256,
+            "snapshot_archive_sha256": snapshot_lock["archive_sha256"],
+            "snapshot_manifest_signed": False,
             "private_accepted": False,
             "deployment_enabled": False,
         }))
