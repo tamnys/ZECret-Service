@@ -3108,6 +3108,7 @@ dependencies = [
  "zcash_primitives",
  "zcash_protocol",
  "zeroize",
+ "zrpc-payments",
  "zrpc-protocol",
  "zrpc-transport",
 ]

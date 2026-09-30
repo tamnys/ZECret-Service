@@ -26,6 +26,8 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
 };
 use tokio_rustls::server::TlsStream;
+use zeroize::Zeroizing;
+use zrpc_payments::{Admission, Redeemer};
 #[cfg(test)]
 use zrpc_protocol::MAX_CONNECTION_LIFETIME_SECONDS;
 use zrpc_protocol::{
@@ -176,6 +178,7 @@ impl Drop for AbortOnDrop {
 struct Shared<Q> {
     source: Q,
     node: Option<LocalNode>,
+    payment: Option<Arc<Redeemer>>,
     connections: Arc<Semaphore>,
     quotes: Semaphore,
     quote_spacing: Duration,
@@ -186,6 +189,7 @@ impl<Q: QuoteSource> Shared<Q> {
         Self {
             source,
             node: None,
+            payment: None,
             connections: Arc::new(Semaphore::new(limits.connections.get())),
             quotes: Semaphore::new(limits.quotes.get()),
             quote_spacing: limits.quote_spacing,
@@ -240,6 +244,20 @@ impl AttestationService {
     pub fn with_node(mut self, node: LocalNode) -> Result<Self, SafeError> {
         let shared = Arc::get_mut(&mut self.shared).ok_or_else(unavailable)?;
         shared.node = Some(node);
+        Ok(self)
+    }
+
+    /// Require a locally verified, unspent ticket before every allowlisted
+    /// node query. The caller must open the spent store and validate the shared
+    /// issuer configuration before constructing this service.
+    pub fn with_paid_node(
+        mut self,
+        node: LocalNode,
+        payment: Arc<Redeemer>,
+    ) -> Result<Self, SafeError> {
+        let shared = Arc::get_mut(&mut self.shared).ok_or_else(unavailable)?;
+        shared.node = Some(node);
+        shared.payment = Some(payment);
         Ok(self)
     }
     // Only tests may inject a pre-negotiated stream. Production listener owns
@@ -546,6 +564,21 @@ async fn handle_rpc<Q: QuoteSource>(
     if !session.attestation_issued.load(Ordering::SeqCst) || session.io.check_deadline().is_err() {
         return failure(StatusCode::FORBIDDEN);
     }
+    let authorization = if shared.payment.is_some() {
+        let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
+        let Some(value) = values.next() else {
+            return failure(StatusCode::FORBIDDEN);
+        };
+        if values.next().is_some() {
+            return failure(StatusCode::FORBIDDEN);
+        }
+        Some(Zeroizing::new(value.as_bytes().to_vec()))
+    } else {
+        if request.headers().contains_key(header::AUTHORIZATION) {
+            return failure(StatusCode::FORBIDDEN);
+        }
+        None
+    };
     if request.headers().contains_key(header::CONTENT_ENCODING)
         || request
             .headers()
@@ -571,6 +604,20 @@ async fn handle_rpc<Q: QuoteSource>(
         Ok(parsed) => parsed,
         Err(_) => return failure(StatusCode::BAD_REQUEST),
     };
+    if let Some(payment) = &shared.payment {
+        let Some(header) = authorization.as_ref() else {
+            return failure(StatusCode::FORBIDDEN);
+        };
+        if !matches!(
+            payment.redeem(header, session.io.1).await,
+            Ok(Admission::Accepted)
+        ) {
+            return failure(StatusCode::FORBIDDEN);
+        }
+        if session.io.check_deadline().is_err() {
+            return failure(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
     let result = match node.query(&parsed).await {
         Ok(value) => value,
         Err(error) => {

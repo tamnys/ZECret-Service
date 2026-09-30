@@ -294,6 +294,18 @@ async fn optional_rpc_route_requires_attestation_then_enforces_method_allowlist(
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let unexpected_ticket = Request::post("/rpc")
+        .header(header::HOST, "fixture.invalid")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "PrivateToken token=\"unexpected\"")
+        .body(Full::new(Bytes::from_static(body)))
+        .unwrap();
+    assert_eq!(
+        read(client.send_request(unexpected_ticket).await.unwrap())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
     let forbidden =
         br#"{"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":["PRIVATE_MARKER"]}"#;
     let (status, reply) = read(
@@ -317,6 +329,77 @@ async fn optional_rpc_route_requires_attestation_then_enforces_method_allowlist(
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+#[ignore = "requires the separately locked payment helper in the managed container"]
+async fn paid_rpc_fails_closed_without_a_valid_ticket() {
+    let helper = std::path::PathBuf::from(
+        std::env::var_os("ZRPC_PAYMENT_CRYPTO_HELPER")
+            .expect("set ZRPC_PAYMENT_CRYPTO_HELPER to the helper executable"),
+    );
+    let fixture = include_str!("../../../../tools/payment-crypto/tests/rfc9578_public_vector.json");
+    let prefix = "\"pkI\": \"";
+    let start = fixture.find(prefix).unwrap() + prefix.len();
+    let spki = hex::decode(fixture[start..].split('"').next().unwrap()).unwrap();
+    let issuer =
+        zrpc_payments::IssuerPublic::from_public_der(&helper, &spki, "issuer.example").unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "zrpc-paid-rpc-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let directory = zrpc_payments::PrivateDirectory::create(&root).unwrap();
+    let spent = zrpc_payments::RedeemerStore::create(&directory).unwrap();
+    let mut shared = Shared::new(FakeQuote::new(), limits(1, 1, Duration::from_nanos(1)));
+    shared.node = Some(
+        LocalNode::new(
+            "127.0.0.1:1".parse().unwrap(),
+            CookieAuth::from_cookie(b"fixture:fixture").unwrap(),
+        )
+        .unwrap(),
+    );
+    shared.payment = Some(Arc::new(Redeemer::new(issuer, helper, spent)));
+    let (mut client, _, _driver, _server) = connect(Arc::new(shared), &[31; 32]).await;
+    let nonce = [31; 32];
+    assert_eq!(
+        read(
+            client
+                .send_request(request("/attestation", nonce_body(nonce)))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#;
+    assert_eq!(
+        read(
+            client
+                .send_request(request("/rpc", body.to_vec()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let invalid = Request::post("/rpc")
+        .header(header::HOST, "fixture.invalid")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "PrivateToken token=\"invalid\"")
+        .body(Full::new(Bytes::from_static(body)))
+        .unwrap();
+    assert_eq!(
+        read(client.send_request(invalid).await.unwrap()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    drop(client);
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[tokio::test]
