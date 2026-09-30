@@ -40,3 +40,25 @@ form offers no delete-only scope. Revoke that token after cleanup. This is
 credential authorization, not permission to expose its value, put it in the
 repository, expand the spending ceiling, or skip the watchdog and deletion
 checks above.
+
+The operator later selected the full **one-week (168-hour) experiment window**,
+including synchronization and cleanup, and accepted a **one-hour assumed
+deletion-latency allowance** within that window. The previously proposed
+close-of-Thursday cutoff is withdrawn. The operator also accepted a **1 MiB
+(1,048,576-byte) per-response cap** for the Phala management API watchdog.
+These selections are not Phala guarantees, additional spending authority, or
+permission to run the service for 168 hours and then begin cleanup.
+
+The operator then **waived the external watchdog for this public preview**,
+choosing manual operation of the single CPU CVM instead. This supersedes the
+earlier watchdog prerequisite above for this preview only; the private-mode
+release gates are unchanged. Keep the original durable ledger and record the
+exact start and deadline before the
+billable create call. Manually request **deletion**, not merely stop, no later
+than one hour before that deadline, and earlier if the demo is complete, the
+$45 experiment trigger is reached, or the selected configuration would exhaust
+the $50 ceiling. Verify the CVM and attached storage disappear and reconcile
+billing afterward. There is no automatic spending cap or guarantee that an
+unattended manual plan will run on time. The accepted 1 MiB cap remains
+available for optional manual management-API diagnostics but no watchdog job
+will be installed or activated.
