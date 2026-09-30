@@ -28,9 +28,10 @@ actual quote bridge. The later [actual-service probe](https://github.com/tamnys/
 found that binding the host socket at `/run/dstack.sock` inside the quote
 container made it visible through the shared `/run` volume in the app. The
 corrected candidate binds that source at `/dstack.sock`, outside the shared
-volume, and keeps app startup checks for both paths. This layout still needs
-the new native binary smoke and then Phala's effective mount readback and
-failure tests; a Compose text comparison does not establish isolation.
+volume, and keeps app startup checks for both paths. The rebuilt image passed
+the [native service smoke](https://github.com/tamnys/ZECret-service/actions/runs/36705200448)
+with a synthetic root-owned backend. Phala's effective mount readback and
+failure tests remain open; a local Docker run does not establish provider behavior.
 
 The official Phala Cloud OpenAPI at commit
 `7b36622c6eb4ff691b5818546c04c61b26e08809`, `AppComposeV2`, declares
