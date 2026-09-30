@@ -26,7 +26,9 @@ button:disabled{cursor:wait;opacity:.65}
 .header-inner{min-height:77px;display:flex;align-items:center;justify-content:space-between;gap:26px}
 .brand{display:inline-flex;align-items:center;gap:9px;text-decoration:none;font-size:20px;font-weight:650;line-height:1;letter-spacing:-.035em;white-space:nowrap}
 .brand img{width:24px;height:39px;flex:none}
-.brand small{margin-left:4px;color:var(--muted);font-size:12px;font-weight:400;letter-spacing:0}
+.brand-wordmark{display:flex;flex-direction:column;gap:3px;transform:translateY(-2px)}
+.brand-name{display:block}
+.brand small{display:block;color:var(--text);font-size:12px;font-weight:600;letter-spacing:.3em;line-height:1}
 nav{display:flex;align-items:center;gap:24px;font-size:13px}
 nav a{text-decoration:none;color:var(--muted)}
 nav a:hover,nav a[aria-current="page"]{color:var(--text)}
