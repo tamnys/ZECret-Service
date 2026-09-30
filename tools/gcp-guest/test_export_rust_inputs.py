@@ -96,6 +96,8 @@ class GuestRustInputTests(unittest.TestCase):
         result = exporter.inspect(self.bundle, self.revision)
         self.assertEqual(set(result["artifacts"]), set(exporter.EXPECTED_GUEST_BINARIES))
         self.assertEqual(result["artifacts"]["early_init"]["path"], "early_init")
+        self.assertEqual(result["payment_crypto_sha256"],
+                         self.manifest["artifact_sha256"]["zrpc-payment-crypto"])
         self.assertFalse(result["image_built"])
         self.assertFalse(result["private_mode_approved"])
 

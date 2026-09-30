@@ -225,6 +225,7 @@ def inspect(bundle, revision, *, selected_output=None):
         "reproduction_manifest_sha256": sha256(manifest_bytes),
         "cargo_lock_sha256": input_hashes["Cargo.lock"],
         "payment_crypto_lock_sha256": input_hashes["tools/payment-crypto/Cargo.lock"],
+        "payment_crypto_sha256": digests["zrpc-payment-crypto"],
         "rust_toolchain_sha256": input_hashes["rust-toolchain.toml"],
         "rustc_host": "x86_64-unknown-linux-gnu",
         "artifacts": {role: {"path": role, "sha256": digests[name]}

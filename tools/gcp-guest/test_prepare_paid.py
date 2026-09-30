@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 import prepare
@@ -73,10 +74,24 @@ class PaidOverlayTests(unittest.TestCase):
         binary = self.inputs / "zrpc-payment-crypto"
         binary.write_bytes(helper)
         binary.chmod(0o555)
+        self.native_bundle = self.root / "native-bundle"
+        self.native_bundle.mkdir()
+        self.native_revision = "a" * 40
+        self.native_manifest = "b" * 64
+        self.native_inspect = mock.patch.object(
+            paid.export_rust_inputs, "inspect", return_value={
+                "source_commit": self.native_revision,
+                "reproduction_manifest_sha256": self.native_manifest,
+                "payment_crypto_sha256": paid.sha256(helper),
+            })
+        self.inspection = self.native_inspect.start()
+        self.addCleanup(self.native_inspect.stop)
         self.lock = self.root / "paid.lock.json"
         self.lock.write_text(json.dumps({
             "schema_version": 1,
             "base_stage_manifest_sha256": self.base_sha256,
+            "native_source_commit": self.native_revision,
+            "native_rust_manifest_sha256": self.native_manifest,
             "issuer_name": "issuer.example",
             "artifacts": {
                 role: {"path": filename, "sha256": hashlib.sha256((self.inputs / filename).read_bytes()).hexdigest(),
@@ -91,14 +106,17 @@ class PaidOverlayTests(unittest.TestCase):
 
     def stage(self):
         return paid.stage(self.base, self.base_sha256, self.base_bytes,
-                          self.lock, self.inputs, self.output)
+                          self.lock, self.inputs, self.native_bundle,
+                          self.native_revision, self.output)
 
     def test_paid_overlay_is_pinned_and_never_enables_free_access(self):
         result = self.stage()
         self.assertEqual(result["status"], paid.STATUS)
         second = paid.stage(self.base, self.base_sha256, self.base_bytes,
-                            self.lock, self.inputs, self.root / "second-overlay")
+                            self.lock, self.inputs, self.native_bundle,
+                            self.native_revision, self.root / "second-overlay")
         self.assertEqual(result["manifest_sha256"], second["manifest_sha256"])
+        self.inspection.assert_any_call(self.native_bundle, self.native_revision)
         self.assertEqual(paid.verify(self.output, result["manifest_sha256"],
                                      result["manifest_bytes"])["status"],
                          "paid-overlay-matches-pinned-manifest")
@@ -154,10 +172,16 @@ class PaidOverlayTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.stage()
 
+    def test_rejects_helper_not_in_native_receipt(self):
+        self.inspection.return_value["payment_crypto_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "verified native receipt"):
+            self.stage()
+
     def test_rejects_output_nested_in_verified_free_stage(self):
         with self.assertRaises(ValueError):
             paid.stage(self.base, self.base_sha256, self.base_bytes,
-                       self.lock, self.inputs, self.base / "paid-overlay")
+                       self.lock, self.inputs, self.native_bundle,
+                       self.native_revision, self.base / "paid-overlay")
         self.assertFalse((self.base / "paid-overlay").exists())
 
 

@@ -15,6 +15,7 @@ import stat
 import sys
 
 import prepare
+import export_rust_inputs
 
 
 ROOT = prepare.ROOT
@@ -77,15 +78,18 @@ def checked_artifact(path, record, *, executable=False):
     return data
 
 
-def checked_inputs(lock_path, inputs, base_manifest_sha256):
+def checked_inputs(lock_path, inputs, base_manifest_sha256, native_report):
     lock_bytes = regular_bytes(lock_path)
     lock = json.loads(lock_bytes, object_pairs_hook=prepare.unique_object,
                       parse_constant=prepare.reject_nonfinite_constant)
     if (not isinstance(lock, dict)
             or set(lock) != {"schema_version", "base_stage_manifest_sha256",
+                             "native_source_commit", "native_rust_manifest_sha256",
                              "issuer_name", "artifacts"}
             or type(lock["schema_version"]) is not int or lock["schema_version"] != 1
             or lock["base_stage_manifest_sha256"] != base_manifest_sha256
+            or lock["native_source_commit"] != native_report["source_commit"]
+            or lock["native_rust_manifest_sha256"] != native_report["reproduction_manifest_sha256"]
             or not isinstance(lock["artifacts"], dict)
             or set(lock["artifacts"]) != set(FILES)):
         raise ValueError("paid input lock differs from verified free stage")
@@ -98,6 +102,8 @@ def checked_inputs(lock_path, inputs, base_manifest_sha256):
                                executable=role == "crypto_helper")
         for role, name in FILES.items()
     }
+    if lock["artifacts"]["crypto_helper"]["sha256"] != native_report["payment_crypto_sha256"]:
+        raise ValueError("paid crypto helper differs from verified native receipt")
     public = artifacts["issuer_public_der"]
     helper = artifacts["crypto_helper"]
     if len(public) > 65535:
@@ -196,13 +202,17 @@ def write_overlay(output, files, lock_bytes, base_manifest_sha256):
             "private_mode_approved": False}
 
 
-def stage(base_stage, base_sha256, base_bytes, lock_path, inputs, output):
+def stage(base_stage, base_sha256, base_bytes, lock_path, inputs,
+          native_bundle, native_revision, output):
     prepare.verify_stage(base_stage, base_sha256, base_bytes)
     destination = output.resolve()
     if (destination.is_relative_to(base_stage.resolve())
-            or destination.is_relative_to(inputs.resolve())):
+            or destination.is_relative_to(inputs.resolve())
+            or destination.is_relative_to(native_bundle.resolve())):
         raise ValueError("paid overlay output must not mutate pinned inputs")
-    lock_bytes, issuer_name, artifacts = checked_inputs(lock_path, inputs, base_sha256)
+    native_report = export_rust_inputs.inspect(native_bundle, native_revision)
+    lock_bytes, issuer_name, artifacts = checked_inputs(
+        lock_path, inputs, base_sha256, native_report)
     files = {
         "rootfs/" + relative: (data, 0o644)
         for relative, data in render_paid_rootfs(base_stage / "rootfs", issuer_name).items()
@@ -254,6 +264,8 @@ def main():
     staged.add_argument("--base-manifest-bytes", type=int, required=True)
     staged.add_argument("--paid-lock", type=Path, required=True)
     staged.add_argument("--paid-inputs", type=Path, required=True)
+    staged.add_argument("--native-rust-bundle", type=Path, required=True)
+    staged.add_argument("--native-source-commit", required=True)
     staged.add_argument("--output", type=Path, required=True)
     verified = sub.add_parser("verify")
     verified.add_argument("--output", type=Path, required=True)
@@ -264,7 +276,8 @@ def main():
         if args.command == "stage":
             result = stage(args.base_stage, args.base_manifest_sha256,
                            args.base_manifest_bytes, args.paid_lock,
-                           args.paid_inputs, args.output)
+                           args.paid_inputs, args.native_rust_bundle,
+                           args.native_source_commit, args.output)
         else:
             result = verify(args.output, args.manifest_sha256, args.manifest_bytes)
         print(json.dumps(result, sort_keys=True))
