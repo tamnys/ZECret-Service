@@ -82,3 +82,21 @@ and local image config ID
 `sha256:e126a22b330b47da87299cadef6ead7ee6e53a8008d2588bf9e90fb5739b3df2`.
 The same-context, later-commit check is still needed before calling that
 identity stable across evidence-only changes.
+
+That check exposed a second archive-only input. At records-only source commit
+`3949620041a2c7f86f910267bcefa74b20dc2ffc`,
+[run 36714945133](https://github.com/tamnys/ZECret-service/actions/runs/36714945133)
+kept the image config ID above but produced archive SHA-256
+`aac4bafbe540932e5c644ede686ee8614b762c6537b4e4ef0e458742fbf302bb`:
+the Docker archive's `manifest.json` contained the Git-SHA-derived local tag.
+Its build comparison passed, but the service smoke failed on an invalid
+`blocks == 0` assertion after the live Zebra testnet node had advanced. The
+smoke now accepts a nonnegative integer block height with headers at least as
+high. A later [run 36715240699](https://github.com/tamnys/ZECret-service/actions/runs/36715240699)
+passed the complete service smoke and retained the same image config ID; its
+archive still changed with the tag. The workflow now uses a fixed, local-only
+tag. Its first [run 36715501053](https://github.com/tamnys/ZECret-service/actions/runs/36715501053)
+passed with twice-matching archive SHA-256
+`2bafc4b766d7ff71b36a04bd4a0581b0ccd875a0cc099db5a77014666cca22c8`
+and the same image config ID. A fresh run after this records-only commit will
+test complete-archive stability across commits.
