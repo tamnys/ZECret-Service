@@ -33,11 +33,11 @@ Do not add accounts, email/password signup, OAuth, API keys tied to customers, c
 
 ## Payment integration contract
 
-The planned CLI-first payment POC uses publicly verifiable Privacy Pass type-2 blind RSA tickets under RFC 9578 §6. Its proposed commands are `zrpc payments prepare`, `mock-settle`, `collect`, and `balance`, plus a ticket-store option on native `query`. Verify actual flags and availability before publishing commands.
+As of 2026-09-30, the isolated `codex/payment-tickets` branch implements the CLI-first payment POC using publicly verifiable Privacy Pass type-2 blind RSA tickets under RFC 9578 §6. It includes `zrpc payments prepare`, `prepare --resume`, `pending`, `mock-settle`, `collect`, `balance`, and `init-redeemer`, plus a ticket-store option on native `zrpc query`. The branch is not merged into main, and no ticket-required measured deployment is approved. Inspect the current branch, flags, and deployment state before publishing commands or marking paid RPC available.
 
 The POC simulates settlement using private file exchange with an operator. It does **not** accept real ZEC or actual testnet ZEC payments yet, and it does not expose a public minting endpoint. `mock-settle` is an operator-side action; never make it an unauthenticated website operation. The browser may illustrate this workflow using fixtures and direct users to native instructions. It must not upload or hold real ticket material.
 
-The intended stores are separate transactional SQLite databases:
+The local POC uses separate transactional SQLite databases:
 
 - Client: pending purchases, blinding state, finalized tickets, and available/uncertain ticket state, in an explicitly selected private directory outside the repository.
 - Issuer: authorized quantity, blinded-request commitments, and repeatable issuance responses. It never receives finalized tokens.
