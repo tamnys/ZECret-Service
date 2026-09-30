@@ -3,8 +3,14 @@
 The Phala package reuses the reviewed Zebra v6.4.2 metadata lock at
 `deploy/gcp/zebra-release.lock.json` and the stage-only verifier at
 `tools/gcp-guest/verify_zebra_release.py`. This is generic Zebra artifact
-provenance, not a GCP deploy dependency or permission to bypass the release
-hold. `stock-candidate.lock.json` pins the exact release-lock SHA-256, and
+provenance, not a GCP deploy dependency. The explicit v6.4.2 exception permits
+only local staging and image-context preparation while the seven-day hold is
+active. It is bound to the exact release asset ID and digest in the stage
+receipt and copied into the local image context; launch-document rendering and
+the GCP image runner retain their age checks. The verified stage receipt is
+committed under `records/` and its exact SHA-256 is pinned in
+`stock-candidate.lock.json`, so a caller-written receipt cannot exercise the
+exception. The stock lock also pins the exact release-lock SHA-256, and
 `prepare.py` verifies it before rendering. A later move of those shared inputs
 must preserve the reviewed bytes and staging receipt contract.
 

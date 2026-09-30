@@ -17,17 +17,22 @@
     "updated_at": "2026-09-25T19:59:12Z"
   },
   "signer_workflow": "ZcashFoundation/zebra/.github/workflows/zfnd-release-binaries.yml",
+  "attestation_bundle": {
+    "source_url": "https://api.github.com/repos/ZcashFoundation/zebra/attestations/sha256:505cab2c616dac1a5bc1c414716206a775f38f41ca6f70a60729df40c29e7b8b",
+    "size": 10824,
+    "sha256": "db9668a46cd12317f1623c54b787519ffd9e54c176dc823804eb5aedbb8fb000"
+  },
   "reviewed_advisory_count": 45,
   "reviewed_advisory_snapshot_sha256": "4ce49bd8f88fa6f14d19f7900d83778437d69536393339f98b37d0cae95f6c3c",
   "gh_verifier_source": {
     "repository": "cli/cli",
-    "tag": "v2.101.0",
-    "asset_name": "gh_2.101.0_linux_amd64.tar.gz",
-    "asset_size": 15282175,
-    "asset_sha256": "9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8",
-    "archive_member": "gh_2.101.0_linux_amd64/bin/gh"
+    "tag": "v2.100.0",
+    "asset_name": "gh_2.100.0_linux_arm64.tar.gz",
+    "asset_size": 13783869,
+    "asset_sha256": "ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961",
+    "archive_member": "gh_2.100.0_linux_arm64/bin/gh"
   },
-  "gh_verifier_executable_sha256": "ea857a3f0f7d4276cf5848b236542c5048e2eaa7bdd1b6ddec238f8793e74bff",
-  "zebrad_elf_sha256": null,
-  "zebrad_elf_size": null
+  "gh_verifier_executable_sha256": "28a037b967065aa314cb6d539943b55d27ef2f97c523ab2b6023ccf284e1828d",
+  "zebrad_elf_sha256": "ccf1d3c82a1c23deb1dd535cfb442c5507107a16a23f6da2531be4132e95f517",
+  "zebrad_elf_size": 89613680
 }
