@@ -276,14 +276,16 @@ impl ScopedDeletion {
             CvmDetail::NotFound => PreparationReadback::DetailNotFound,
             CvmDetail::Present(item) => {
                 if item.app_id.as_ref().is_some_and(|id| id != &target.app_id)
-                    || item
-                        .instance_id
-                        .as_ref()
-                        .is_some_and(|id| id != &target.instance_id)
+                    || item.instance_id.as_ref().is_some_and(|id| {
+                        target.instance_id.as_ref().is_some_and(|known| id != known)
+                    })
                 {
                     return Err(DeletionError::IdentityConflict);
                 }
-                if item.app_id.is_some() && item.instance_id.is_some() {
+                if item.app_id.is_some()
+                    && item.instance_id.is_some()
+                    && target.instance_id.is_some()
+                {
                     PreparationReadback::CvmFieldsMatch
                 } else {
                     PreparationReadback::IncompleteCvmFields

@@ -96,7 +96,8 @@ pub enum DeletionState {
 pub struct TrackedCvm {
     pub cvm_id: String,
     pub app_id: String,
-    pub instance_id: String,
+    #[serde(default)]
+    pub instance_id: Option<String>,
     pub created_at_unix_seconds: u64,
     pub compute_and_disk_microusd_per_hour: u64,
 }
@@ -535,7 +536,13 @@ impl ExperimentLedger {
         let mut instances = BTreeSet::new();
         for (id, resource) in &self.0.resources {
             self.validate_resource(&resource.attempt_id, &resource.cvm)?;
-            if id != &resource.cvm.cvm_id || !instances.insert(&resource.cvm.instance_id) {
+            if id != &resource.cvm.cvm_id
+                || resource
+                    .cvm
+                    .instance_id
+                    .as_ref()
+                    .is_some_and(|instance| !instances.insert(instance))
+            {
                 return Err(LifecycleError("invalid or duplicate tracked resource"));
             }
         }
@@ -693,7 +700,7 @@ impl ExperimentLedger {
             .ok_or(LifecycleError("unknown attempt"))?;
         if !nonempty(&cvm.cvm_id)
             || !nonempty(&cvm.app_id)
-            || !nonempty(&cvm.instance_id)
+            || cvm.instance_id.as_ref().is_some_and(|id| !nonempty(id))
             || cvm.created_at_unix_seconds < attempt.started_at_unix_seconds
             || cvm.compute_and_disk_microusd_per_hour == 0
         {
@@ -717,7 +724,7 @@ impl ExperimentLedger {
                 .0
                 .resources
                 .values()
-                .any(|r| r.cvm.instance_id == cvm.instance_id)
+                .any(|r| cvm.instance_id.is_some() && r.cvm.instance_id == cvm.instance_id)
         {
             return Err(LifecycleError("resource is already tracked"));
         }
@@ -759,11 +766,10 @@ impl ExperimentLedger {
     fn validate_usage(&self, usage: &UsageRecord) -> Result<u64, LifecycleError> {
         if !nonempty(&usage.billing_key)
             || !nonempty(&usage.usage_type)
-            || !self
-                .0
-                .resources
-                .values()
-                .any(|r| r.cvm.app_id == usage.app_id && r.cvm.instance_id == usage.instance_id)
+            || !self.0.resources.values().any(|r| {
+                r.cvm.app_id == usage.app_id
+                    && r.cvm.instance_id.as_deref() == Some(usage.instance_id.as_str())
+            })
         {
             return Err(LifecycleError(
                 "billing record is outside tracked experiment",
@@ -1191,7 +1197,7 @@ mod tests {
         TrackedCvm {
             cvm_id: id.into(),
             app_id: "app".into(),
-            instance_id: format!("instance-{id}"),
+            instance_id: Some(format!("instance-{id}")),
             created_at_unix_seconds: created,
             compute_and_disk_microusd_per_hour: 243_120,
         }
@@ -1237,6 +1243,30 @@ mod tests {
             usage_type: "storage".into(),
             cost_usd_decimal: cost.into(),
         }
+    }
+
+    #[test]
+    fn null_instance_tracks_cost_without_fabricating_billing_identity() {
+        let binding = ExperimentBinding::new(
+            "experiment".into(),
+            "workspace".into(),
+            START,
+            START + MAX_LIFETIME_SECONDS,
+        )
+        .unwrap();
+        let mut ledger = ExperimentLedger::new(binding.clone(), 0).unwrap();
+        ledger.begin_attempt("first".into(), START).unwrap();
+        let mut first = cvm("one", START);
+        first.instance_id = None;
+        ledger.track_cvm("workspace", "first", first).unwrap();
+        let mut second = cvm("two", START);
+        second.instance_id = None;
+        ledger.track_cvm("workspace", "first", second).unwrap();
+        assert!(ledger.record_usage(usage("unjoined", "1.00")).is_err());
+        assert_eq!(ledger.planning_cost_at(START + 3600).unwrap(), 2 * 243_120);
+        let restored =
+            ExperimentLedger::from_json(&serde_json::to_vec(&ledger).unwrap(), &binding).unwrap();
+        assert_eq!(restored.tracked_cvms().count(), 2);
     }
 
     #[test]

@@ -54,7 +54,7 @@ impl Fixture {
                 TrackedCvm {
                     cvm_id: "synthetic-cvm-1".into(),
                     app_id: APP.into(),
-                    instance_id: "1".repeat(40),
+                    instance_id: Some("1".repeat(40)),
                     created_at_unix_seconds: START,
                     compute_and_disk_microusd_per_hour: 243_120,
                 },
@@ -72,7 +72,7 @@ impl Fixture {
                     TrackedCvm {
                         cvm_id: id.into(),
                         app_id: app.into(),
-                        instance_id: instance.repeat(40),
+                        instance_id: Some(instance.repeat(40)),
                         created_at_unix_seconds: START + 1,
                         compute_and_disk_microusd_per_hour: 243_120,
                     },
@@ -453,7 +453,7 @@ async fn missing_cvm_fields_and_equal_usage_text_remain_unconfirmed() {
     );
     assert_eq!(
         report.unjoined_usage_by_app()[APP].rows()[0].instance_id,
-        report.tracked()[0].target().instance_id
+        report.tracked()[0].target().instance_id.clone().unwrap()
     );
     assert!(!report.billing_reconciled());
 }

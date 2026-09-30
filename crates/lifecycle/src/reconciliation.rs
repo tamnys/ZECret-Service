@@ -129,7 +129,7 @@ impl ObservedCvm {
             || self
                 .instance_id
                 .as_ref()
-                .is_some_and(|id| id != &target.instance_id)
+                .is_some_and(|id| target.instance_id.as_ref().is_some_and(|known| id != known))
             || self
                 .workspace_id
                 .as_deref()
@@ -276,12 +276,15 @@ impl ObservationRecord {
             let target = &observed.target;
             if !nonempty(&target.cvm_id)
                 || !nonempty(&target.app_id)
-                || !nonempty(&target.instance_id)
+                || target.instance_id.as_ref().is_some_and(|id| !nonempty(id))
                 || target.compute_and_disk_microusd_per_hour == 0
                 || target.created_at_unix_seconds < self.usage_start_unix_seconds
                 || target.created_at_unix_seconds > self.usage_cutoff_unix_seconds
                 || !targets.insert(target.cvm_id.as_str())
-                || !instances.insert(target.instance_id.as_str())
+                || target
+                    .instance_id
+                    .as_deref()
+                    .is_some_and(|instance| !instances.insert(instance))
             {
                 return Err(INVALID);
             }
@@ -346,7 +349,7 @@ mod tests {
                 TrackedCvm {
                     cvm_id: id.into(),
                     app_id: format!("app-{id}"),
-                    instance_id: format!("instance-{id}"),
+                    instance_id: Some(format!("instance-{id}")),
                     created_at_unix_seconds: created,
                     compute_and_disk_microusd_per_hour: 3600,
                 },
@@ -384,7 +387,7 @@ mod tests {
                     id: target.cvm_id.clone(),
                     status: "stopped".into(),
                     app_id: Some(target.app_id.clone()),
-                    instance_id: Some(target.instance_id.clone()),
+                    instance_id: target.instance_id.clone(),
                     vm_uuid: Some(format!("uuid-{}", target.cvm_id)),
                     workspace_id: Some("workspace".into()),
                     created_at: None,

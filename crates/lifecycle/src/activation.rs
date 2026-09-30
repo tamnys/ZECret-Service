@@ -510,7 +510,7 @@ mod tests {
             TrackedCvm {
                 cvm_id: "one".into(),
                 app_id: "app".into(),
-                instance_id: "instance".into(),
+                instance_id: Some("instance".into()),
                 created_at_unix_seconds: input.start_unix_seconds,
                 compute_and_disk_microusd_per_hour: 243_120,
             },
