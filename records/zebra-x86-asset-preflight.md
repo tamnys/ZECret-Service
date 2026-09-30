@@ -3,8 +3,8 @@
 This is an internal local-staging record, not image-build, deployment, or
 private-mode acceptance. The default seven-day Zebra hold remains until
 2026-10-02T19:59:10Z. The exact-asset exception permits only local staging
-and Phala image-context preparation; GCP image execution and Phala
-launch-document rendering retain their age gates.
+and Phala image-context and launch-document preparation; GCP image execution
+retains its age gate.
 
 The [official release](https://api.github.com/repos/ZcashFoundation/zebra/releases/tags/v6.4.2)
 identifies release ID `396882484`, source commit

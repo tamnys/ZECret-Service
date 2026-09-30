@@ -5,7 +5,7 @@ for a public Zebra testnet preview. It makes no Phala API call, creates no CVM,
 and never approves private requests. The Zebra v6.4.2 x86_64 asset normally
 remains inside the repository's seven-day release hold until
 `2026-10-02T19:59:10Z`. The approved exception applies only to exact-asset
-local staging and image-context preparation. Run
+local staging, image-context preparation, and launch-document rendering. Run
 `python3 deploy/phala/prepare.py status` to inspect the normal age gate.
 
 The candidate stock tuple is `dstack-0.5.9-bd369a8c` on `prod9` with
@@ -20,8 +20,9 @@ The image recipe pins the Linux amd64
 manifest and the two native Rust binary hashes. It also requires a checked
 Linux x86_64 `zebrad` and the Zebra staging receipt from
 `tools/gcp-guest/verify_zebra_release.py stage`. During the Zebra hold, pass
-`--allow-v642-local-hold-exception` to both `stage` and `prepare.py
-image-context`. The latter requires the exact staged receipt and still refuses
+`--allow-v642-local-hold-exception` to `stage`, `prepare.py image-context`,
+and `prepare.py launch-documents`. The latter requires the checked image
+context and its exact staged receipt. Image-context preparation still refuses
 an unpinned ELF, different base manifest, or different native binaries. It
 copies checked bytes and the Zebra receipt into a fresh local build context
 and hashes every file in it. Before building, run
@@ -32,7 +33,9 @@ registry publication remain separate operator actions.
 
 After an exact application image digest and reviewed runtime limits exist,
 `prepare.py launch-documents` writes `compose.json`, `app-compose.json`, and a
-receipt into a fresh local directory. The receipt hashes the exact candidate
+receipt into a fresh local directory. During the hold, pass the
+`image-inputs.json` path within the checked local context and the explicit
+exception flag. The receipt hashes the exact candidate
 bytes intended for dstack. The Phala Cloud form may rewrite the launch
 document; after an approved deployment, compare the emitted bytes with the
 provider's `GET /api/v1/cvms/{id}/compose_file` response before using the local

@@ -164,17 +164,60 @@ class PackageTests(unittest.TestCase):
             context = prepare.image_context(args)
             self.assertEqual(context["zebra_local_hold_exception"],
                              prepare.LOCAL_HOLD_EXCEPTION)
+            self.assertEqual(context["zebra_stage_receipt_sha256"],
+                             synthetic_receipt_hash)
             self.assertEqual(prepare.check_image_context(
                 argparse.Namespace(context=args.output))["status"],
                 "local-image-context-checked-unapproved")
+            runtime = self.root / "runtime.json"
+            runtime.write_bytes(prepare.canonical({
+                "quote_startup_timeout_secs": 1,
+                "node_startup_timeout_secs": 1,
+                "node_poll_interval_ms": 1,
+                "max_connections": 1,
+                "max_quotes": 1,
+                "quote_spacing_ms": 1,
+            }))
+            inputs_path = args.output / "image-inputs.json"
+            inputs_bytes = inputs_path.read_bytes()
+            render_args = argparse.Namespace(
+                image="registry.example.invalid/zrpc@sha256:" + "a" * 64,
+                image_inputs=inputs_path,
+                runtime=runtime,
+                output=self.root / "launch",
+                allow_v642_local_hold_exception=False,
+            )
             with self.assertRaisesRegex(ValueError, "release hold"):
-                prepare.launch_documents(argparse.Namespace())
+                prepare.launch_documents(render_args)
+            render_args.allow_v642_local_hold_exception = True
+            inputs = prepare.parse_json(inputs_bytes)
+            inputs["zebra_stage_receipt_sha256"] = "0" * 64
+            inputs_path.write_bytes(prepare.canonical(inputs))
+            with self.assertRaisesRegex(ValueError, "reviewed receipt"):
+                prepare.launch_documents(render_args)
+            inputs["zebra_stage_receipt_sha256"] = synthetic_receipt_hash
+            inputs["zebra_local_hold_exception"] = {
+                **prepare.LOCAL_HOLD_EXCEPTION, "asset_id": 1}
+            inputs_path.write_bytes(prepare.canonical(inputs))
+            with self.assertRaisesRegex(ValueError, "reviewed receipt"):
+                prepare.launch_documents(render_args)
+            inputs_path.write_bytes(inputs_bytes)
             receipt["local_hold_exception"] = {
                 **prepare.LOCAL_HOLD_EXCEPTION, "asset_id": 1}
             (args.output / "zebra-stage-receipt.json").write_bytes(
                 prepare.canonical(receipt))
             with self.assertRaisesRegex(ValueError, "approved asset"):
-                prepare.check_image_context(argparse.Namespace(context=args.output))
+                prepare.launch_documents(render_args)
+            (args.output / "zebra-stage-receipt.json").write_bytes(
+                (stage / "receipt.json").read_bytes())
+            rendered = prepare.launch_documents(render_args)
+            self.assertEqual(rendered["zebra_local_hold_exception"],
+                             prepare.LOCAL_HOLD_EXCEPTION)
+            self.assertEqual(rendered["zebra_stage_receipt_sha256"],
+                             synthetic_receipt_hash)
+            self.assertFalse(rendered["private_accepted"])
+            self.assertFalse(rendered["deployment_enabled"])
+            self.assertFalse(rendered["cloud_calls"])
 
     def test_render_binds_exact_bytes_and_isolates_backend_socket(self):
         stock, zebra, lock_digest = prepare.locks()
