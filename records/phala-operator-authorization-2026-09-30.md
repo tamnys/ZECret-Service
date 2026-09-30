@@ -33,3 +33,10 @@ approved-release catalog and the blocked private-mode indicator. Shut down
 and delete every experiment-owned billable resource as soon as the preview
 objectives are met, then retain the ledger until storage inventory and billing
 evidence are reconciled.
+
+The operator subsequently explicitly authorized creating a **workspace-scoped
+Phala API token with no expiry** for the deletion watchdog, since the signed-in
+form offers no delete-only scope. Revoke that token after cleanup. This is
+credential authorization, not permission to expose its value, put it in the
+repository, expand the spending ceiling, or skip the watchdog and deletion
+checks above.
