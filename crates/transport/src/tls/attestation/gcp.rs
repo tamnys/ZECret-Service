@@ -372,6 +372,7 @@ mod tests {
             test_promotion.send(()).unwrap();
             server_ready.await.unwrap();
             let claimed = std::cell::Cell::new(false);
+            let released = std::cell::Cell::new(false);
             let result = if paid {
                 session
                     .query_from_body_authorized(
@@ -381,7 +382,10 @@ mod tests {
                         || {
                             Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
                                 claimed.set(true);
-                                Ok(())
+                                Ok(|| {
+                                    released.set(true);
+                                    Ok(())
+                                })
                             }))
                         },
                     )
@@ -395,6 +399,7 @@ mod tests {
                     .await
             };
             assert_eq!(claimed.get(), paid);
+            assert!(!released.get());
             if oversized_result {
                 assert_eq!(result.unwrap_err().code, ErrorCode::InvalidBackendResponse);
             } else {
@@ -465,7 +470,9 @@ mod tests {
                 },
                 || {
                     selected.set(true);
-                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || Ok(())))
+                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                        Ok(|| Ok(()))
+                    }))
                 },
             )
             .await
@@ -518,7 +525,9 @@ mod tests {
                     },
                     || {
                         ticket_selected.set(true);
-                        Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || Ok(())))
+                        Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                            Ok(|| Ok(()))
+                        }))
                     },
                 )
                 .await
@@ -567,7 +576,7 @@ mod tests {
                 || {
                     Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
                         claimed.set(true);
-                        Err(SafeError::new(
+                        Err::<fn() -> Result<(), SafeError>, _>(SafeError::new(
                             ErrorCode::InvalidRequest,
                             "Ticket authorization unavailable.",
                         ))
@@ -599,6 +608,7 @@ mod tests {
         )
         .unwrap();
         let claimed = std::cell::Cell::new(false);
+        let released = std::cell::Cell::new(false);
         let error = session
             .query_from_body_authorized(
                 || async {
@@ -611,7 +621,10 @@ mod tests {
                     Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
                         claimed.set(true);
                         tor.terminate_synthetic_child();
-                        Ok(())
+                        Ok(|| {
+                            released.set(true);
+                            Ok(())
+                        })
                     }))
                 },
             )
@@ -619,6 +632,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::TorUnavailable);
         assert!(claimed.get());
+        assert!(released.get());
         // The fixture peer fails if it sees any RPC byte on this TLS stream.
         peer.await.unwrap();
     }
@@ -641,6 +655,7 @@ mod tests {
         )
         .unwrap();
         let claimed = std::cell::Cell::new(false);
+        let released = std::cell::Cell::new(false);
         let error = session
             .query_from_body_authorized(
                 || async {
@@ -653,7 +668,10 @@ mod tests {
                     Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
                         claimed.set(true);
                         std::thread::sleep(Duration::from_millis(250));
-                        Ok(())
+                        Ok(|| {
+                            released.set(true);
+                            Ok(())
+                        })
                     }))
                 },
             )
@@ -661,6 +679,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::ExpiredCollateral);
         assert!(claimed.get());
+        assert!(released.get());
         peer.await.unwrap();
     }
 

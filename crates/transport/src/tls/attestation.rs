@@ -537,7 +537,7 @@ impl VerifiedRpcSession {
     /// It returns a locally formatted header and a claim callback. The header
     /// is checked and inserted before the claim is made; after a successful
     /// claim, the next operation is the retained connection's wire send.
-    pub async fn query_from_body_authorized<F, Fut, P, C, H, R>(
+    pub async fn query_from_body_authorized<F, Fut, P, C, A, H, R>(
         self,
         body: F,
         prepare: P,
@@ -547,7 +547,8 @@ impl VerifiedRpcSession {
         Fut: Future<Output = Result<Vec<u8>, SafeError>>,
         P: FnOnce() -> Result<(H, R, C), SafeError>,
         H: AsRef<[u8]>,
-        C: FnOnce() -> Result<(), SafeError>,
+        C: FnOnce() -> Result<A, SafeError>,
+        A: FnOnce() -> Result<(), SafeError>,
     {
         self.ensure_private_ready()?;
         let deadline = self.private_operation_deadline()?;
@@ -564,12 +565,12 @@ impl VerifiedRpcSession {
     }
 
     pub async fn query(self, request: &RpcRequest) -> Result<Value, SafeError> {
-        self.query_with_claim(request, || Ok((None::<&[u8]>, (), || Ok(()))))
+        self.query_with_claim(request, || Ok((None::<&[u8]>, (), || Ok(|| Ok(())))))
             .await
             .map(|(value, ())| value)
     }
 
-    async fn query_with_claim<P, C, H, R>(
+    async fn query_with_claim<P, C, A, H, R>(
         mut self,
         request: &RpcRequest,
         prepare: P,
@@ -577,7 +578,8 @@ impl VerifiedRpcSession {
     where
         P: FnOnce() -> Result<(Option<H>, R, C), SafeError>,
         H: AsRef<[u8]>,
-        C: FnOnce() -> Result<(), SafeError>,
+        C: FnOnce() -> Result<A, SafeError>,
+        A: FnOnce() -> Result<(), SafeError>,
     {
         self.ensure_private_ready()?;
         ensure_private_method(request)?;
@@ -591,7 +593,14 @@ impl VerifiedRpcSession {
             http.headers_mut().insert(header::AUTHORIZATION, value);
         }
         self.ensure_private_ready()?;
-        claim()?;
+        let release_untransmitted = claim()?;
+        // A failed check here precedes the first send attempt. Restore only
+        // this confirmed unsent claim; after send_rpc starts, any failure is
+        // ambiguous and the caller must leave the ticket uncertain.
+        if let Err(error) = self.ensure_private_ready() {
+            release_untransmitted()?;
+            return Err(error);
+        }
         // The only sender here is the one retained from POST /attestation.
         let operation = send_rpc(&mut self.session, request, http);
         let result = tokio::time::timeout_at(

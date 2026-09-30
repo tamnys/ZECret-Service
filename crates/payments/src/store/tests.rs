@@ -322,6 +322,39 @@ fn previewed_ticket_is_claimed_once_without_switching_to_another() {
 }
 
 #[test]
+fn confirmed_unsent_claim_can_be_released_after_restart() {
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    let mut client = ClientStore::create(&directory).unwrap();
+    let id = [13; 32];
+    client
+        .store_prepared(id, &[pending(b"blind", b"state")])
+        .unwrap();
+    client
+        .collect_verified(id, &[SecretBytes::new(b"ticket".to_vec())])
+        .unwrap();
+    let ticket = client.preview_available().unwrap().unwrap();
+    client.claim_available(&ticket).unwrap();
+    drop(client);
+
+    let mut client = ClientStore::open(&directory).unwrap();
+    assert_eq!(client.balance().unwrap().uncertain, 1);
+    client.release_untransmitted(&ticket).unwrap();
+    assert_eq!(client.balance().unwrap().available, 1);
+    assert_eq!(client.balance().unwrap().uncertain, 0);
+    assert_eq!(
+        client.release_untransmitted(&ticket),
+        Err(StoreError::InvalidTransition)
+    );
+    client.claim_available(&ticket).unwrap();
+    client.mark_spent(ticket.marker).unwrap();
+    assert_eq!(
+        client.release_untransmitted(&ticket),
+        Err(StoreError::InvalidTransition)
+    );
+}
+
+#[test]
 fn issuer_authorization_is_exact_and_issuance_is_idempotent() {
     let fixture = Fixture::new();
     let directory = fixture.directory();

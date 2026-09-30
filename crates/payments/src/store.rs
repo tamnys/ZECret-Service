@@ -571,6 +571,26 @@ impl ClientStore {
             .map_err(|_| StoreError::StorageUnavailable)
     }
 
+    /// Return an exact claim to the available pool only when the caller has
+    /// established that transmission was never attempted. A crash between
+    /// claim and this call deliberately leaves the ticket uncertain.
+    pub fn release_untransmitted(&mut self, ticket: &SelectedTicket) -> Result<(), StoreError> {
+        if digest(ticket.token.expose()) != ticket.marker {
+            return Err(StoreError::MissingOrCorrupt);
+        }
+        let changed = self
+            .0
+            .execute(
+                "UPDATE tickets SET state='available' WHERE marker=?1 AND token=?2 AND state='uncertain'",
+                params![ticket.marker.as_slice(), ticket.token.expose()],
+            )
+            .map_err(|_| StoreError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(StoreError::InvalidTransition);
+        }
+        Ok(())
+    }
+
     /// Call only after all local release, transport, attestation, and request
     /// checks pass. `validate` checks the selected ticket while the write
     /// transaction is open; failure leaves it available. A successful take

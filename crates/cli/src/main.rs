@@ -246,8 +246,11 @@ async fn run() -> Result<(), String> {
                                 .map_err(|_|ticket_query_error())?;
                             let marker=ticket.marker;
                             let claim_store=&mut store;
-                            Ok((authorization,marker,move || claim_store.claim_available(&ticket)
-                                .map_err(|_|ticket_query_error())))
+                            Ok((authorization,marker,move || {
+                                claim_store.claim_available(&ticket).map_err(|_|ticket_query_error())?;
+                                Ok(move || claim_store.release_untransmitted(&ticket)
+                                    .map_err(|_|ticket_query_error()))
+                            }))
                         }
                     ).await;
                     match result {
