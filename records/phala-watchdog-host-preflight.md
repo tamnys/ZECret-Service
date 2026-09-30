@@ -82,4 +82,32 @@ bundle, and validate its effective units and restart behavior on this host.
 Provide a separate deadline/manual backstop that still works if the Mac or
 Colima is down. Provider deletion must later be reconciled with attached
 storage inventory and billing evidence; a stopped VM or DELETE response is
-insufficient. None of those prerequisites is satisfied by this inventory.
+insufficient. The initial inventory alone satisfied none of those prerequisites.
+
+## Volatile effective-unit rehearsal — 2026-09-30
+
+The existing four synthetic bundle files were copied into Colima's volatile
+`/run/systemd/system` and loaded with `systemctl daemon-reload`. The service's
+exact `ExecStart` begins with `/usr/bin/false`; its credential and trust-root
+paths do not exist. No provider-capable executable or credential was installed.
+Starting the generated mount-ready service activated both generated timers.
+The gate reported `active/exited` and `Result=success` while the actual
+`Users-j.mount` was mounted. The synthetic service ran at 10:25:59 EDT and
+failed with exit status 1 as designed. The periodic timer fired at 10:26:52
+EDT, ran the same inert service again, and scheduled its next firing for
+10:27:45 EDT. The absolute timer reported its next event as October 7 at
+05:21:56 UTC, matching the generated calendar value. This is observed systemd
+255 behavior on the selected Colima VM, not merely unit-file parsing.
+
+All four units were stopped, unlinked from `/run/systemd/system`, and removed
+from systemd's loaded configuration. A final `list-timers` showed zero matching
+timers, and both synthetic timers reported `LoadState=not-found` and
+`ActiveState=inactive`. The synthetic original-binding file still matched its
+initialized copy byte-for-byte. No Phala API call, deletion attempt, billable
+resource or real watchdog activation occurred.
+
+This rehearsal confirms initial gate activation and one periodic firing only.
+It does not prove behavior after a Colima or Mac reboot, mount loss, provider
+outage, a slow deletion, or a real authenticated watchdog invocation. Those
+tests, the independent deadline backstop, current quote, and billing/storage
+reconciliation remain deployment prerequisites.

@@ -16,3 +16,12 @@ The [published Phala instance list](https://cloud.phala.com/about/instance-types
 These totals exclude any unconfirmed fees, rounding, network charges, and account-specific credits or pricing. The 168 hours are a maximum, not a required rental duration. The existing **$50 total ceiling** and **$45 deletion trigger** remain in force. At published rates, a 168-hour `tdx.xlarge` run would exceed that ceiling; selecting it would require a shorter, separately approved evaluation or a changed operator budget, not an automatic size switch. The September 25 signed-in [account preflight](phala-account-preflight.md) is stale for availability and binding price.
 
 `tdx.large` remains an unproven preview candidate. Before selecting it for a billable run, test the exact x86_64 image with the snapshot import, Zebra, wrapper and quote bridge under the effective guest memory and disk limits; record peak use and failure behavior. Requote the selected account configuration and set external deletion controls before requesting separate spending approval. A native GitHub x86_64 [image smoke](phala-native-image-smoke.md) established basic loader/startup behavior but did not perform that resource-fit test. The stock Phala guest still fails the memory-only runtime and administration requirements for genuine private mode.
+
+The existing no-charge standard GitHub `ubuntu-24.04` x86_64 runner has
+[14 GB of storage](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
+below the measured **24,612,598,918-byte** simultaneous archive-plus-file-body
+floor for this snapshot. It cannot run the full import on its advertised disk,
+even before Docker image and filesystem overhead. The local ARM64 import and
+the native x86_64 cold-start smoke therefore remain separate evidence; neither
+proves the complete x86_64 import or 8 GB guest fit. No paid larger runner was
+started for this check.
