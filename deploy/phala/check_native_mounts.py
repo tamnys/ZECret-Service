@@ -178,7 +178,7 @@ def main():
                           APP_CHECK)
                 docker(
                     "run", "--detach", "--name", zebra_name, "--pull=never",
-                    "--network", "none", "--read-only", "--memory", "8g",
+                    "--network", "bridge", "--read-only", "--memory", "8g",
                     "--cap-drop=ALL", "--security-opt", "no-new-privileges:true",
                     "--user", "10001:0",
                     "--mount", f"type=volume,source={runtime},target=/run",
