@@ -137,9 +137,9 @@ except ConnectionRefusedError:
 
 
 ROOT_BACKEND_CHECK = r"""
+import json
 import os
 from pathlib import Path
-import signal
 import socket
 import stat
 
@@ -151,7 +151,31 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
     assert path.stat().st_uid == 0
     assert stat.S_ISSOCK(path.stat().st_mode)
     print('READY', flush=True)
-    signal.pause()
+    while True:
+        connection, _ = listener.accept()
+        with connection, connection.makefile('rb') as request:
+            line = request.readline()
+            if not line:
+                continue
+            assert line == b'POST /GetQuote HTTP/1.1\r\n'
+            headers = {}
+            while (line := request.readline()) != b'\r\n':
+                name, value = line.decode('ascii').split(':', 1)
+                headers[name.lower()] = value.strip()
+            assert headers['content-type'] == 'application/json'
+            body = json.loads(request.read(int(headers['content-length'])))
+            assert list(body) == ['report_data']
+            assert len(bytes.fromhex(body['report_data'])) == 64
+            evidence = json.dumps({
+                'quote': 'SYNTHETIC_NOT_A_HARDWARE_QUOTE',
+                'event_log': '[]',
+                'report_data': body['report_data'],
+                'vm_config': '{}',
+            }).encode()
+            connection.sendall(
+                b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
+                + f'Content-Length: {len(evidence)}\r\n'.encode()
+                + b'Connection: close\r\n\r\n' + evidence)
 """
 
 
@@ -213,6 +237,61 @@ try:
         raise AssertionError('wrapper listener survived quote bridge loss')
 except ConnectionRefusedError:
     print('Wrapper listener closed after quote bridge loss', flush=True)
+"""
+
+
+WRAPPER_PUBLIC_RPC_CHECK = r"""
+import http.client
+import json
+import ssl
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+# Synthetic quote/certificate diagnostic only; no client release is approved.
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+context.minimum_version = ssl.TLSVersion.TLSv1_3
+context.maximum_version = ssl.TLSVersion.TLSv1_3
+context.set_alpn_protocols(['http/1.1'])
+client = http.client.HTTPSConnection('127.0.0.1', 8443, context=context,
+                                     timeout=15)
+client.connect()
+session = client.sock
+assert session.version() == 'TLSv1.3'
+assert session.selected_alpn_protocol() == 'http/1.1'
+
+def post(path, value):
+    body = json.dumps(value).encode()
+    client.request('POST', path, body=body,
+                   headers={'Content-Type': 'application/json'})
+    response = client.getresponse()
+    result = response.status, response.read()
+    assert client.sock is session, 'HTTP client replaced the TLS session'
+    return result
+
+nonce = [21] * 32
+status, body = post('/attestation', {'nonce': nonce})
+assert status == 200
+evidence = json.loads(body)
+assert evidence['nonce'] == nonce
+assert evidence['quote'] == 'SYNTHETIC_NOT_A_HARDWARE_QUOTE'
+assert len(bytes.fromhex(evidence['report_data'])) == 64
+
+status, body = post('/rpc', {
+    'jsonrpc': '2.0', 'id': 1, 'method': 'getblockchaininfo', 'params': [],
+})
+assert status == 200
+result = json.loads(body)
+assert result['result']['chain'] == 'test'
+assert result['result']['blocks'] == 0
+
+status, _ = post('/rpc', {
+    'jsonrpc': '2.0', 'id': 2, 'method': 'sendrawtransaction',
+    'params': ['SYNTHETIC_REJECTED'],
+})
+assert status == 400
+client.close()
+print('Synthetic quote exchange reached cold Zebra through retained TLS;'
+      ' write method refused', flush=True)
 """
 
 
@@ -407,6 +486,8 @@ def main():
                         docker("logs", wrapper_name)
                         raise RuntimeError("wrapper stopped or missed TLS readiness")
                     time.sleep(0.1)
+                docker("exec", "--user", "10001:0", zebra_name,
+                       "python3", "-I", "-c", WRAPPER_PUBLIC_RPC_CHECK)
                 held = subprocess.Popen(
                     ["docker", "exec", "--user", "10001:0", zebra_name,
                      "python3", "-I", "-c", WRAPPER_HELD_SESSION_CHECK],

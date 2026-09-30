@@ -96,3 +96,17 @@ This is a time-bound agreement between two node views, not proof of network
 wide consensus or finality. It does not establish a Phala boot, TEE evidence,
 private-query protection, or deployment readiness. No Phala resource or spend
 was involved.
+
+## Local TLS-to-live-node diagnostic — 2026-09-30
+
+The existing ignored Rust test
+`bootstrap::tests::node_listener_reaches_live_zebra_after_synthetic_attestation`
+passed inside the managed ARM64 container against the still-running local
+Zebra process at `127.0.0.1:18232` and its memory-backed cookie. It exercised
+the Rust node listener, an ephemeral TLS connection, a synthetic quote response,
+and `getblockchaininfo` plus the public fixture-address balance on that same
+connection. The test checks `chain: test` and typed result fields but does not
+record a new block-height value. It does not verify the fake quote, use Tor or
+the native client, start a Phala guest, or approve private mode. The packaged
+x86_64 cold-node counterpart is recorded in
+[the native image smoke](phala-native-mount-smoke.md).
