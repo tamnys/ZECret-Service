@@ -59,3 +59,22 @@ These are local node-only samples, not a sizing result for the complete Phala
 guest. The detached Zebra process continued after its launcher shell exited.
 This evidence does not establish current peer-tip agreement, sustained memory
 fit, Phala guest integrity, attestation, deletion readiness, or private mode.
+
+## Later catch-up observation — 2026-09-30 06:34 UTC
+
+The same running native ARM64 Zebra process returned Testnet block and header
+height **4,419,929** with `verificationprogress: 1.0` through authenticated
+loopback `getblockchaininfo`. A separate authenticated `getpeerinfo` request
+returned **26 peers**. The process had run for 2 hours 16 minutes in that
+container and had RSS **841,200 kB**; its container cgroup reported
+**3,605,852,160 bytes** of memory in use, including other processes and cache.
+The imported public-state directory occupied about **13 GiB** on the workspace
+volume, which reported **18 GiB** available. The compressed snapshot archive
+was already removed. No port was published and no cloud resource was created.
+
+This is stronger evidence that local import and network catch-up work, but the
+height was not independently compared with an authoritative public Testnet
+tip. The ARM64 node-only measurements do not establish the full x86_64 Phala
+guest's 8 GB memory fit, 80 GB storage fit, startup timing or private mode.
+The production `LocalNode` integration test above was not rerun: its code and
+the node configuration had not changed since its passing run.
