@@ -147,7 +147,7 @@ def render_paid_rootfs(base_rootfs, issuer_name):
     if b"zrpc-spent" in tmpfiles:
         raise ValueError("free tmpfiles profile already contains spent state")
     overlay["usr/lib/tmpfiles.d/zrpc.conf"] = (
-        tmpfiles + b"d /var/lib/zrpc-spent 0700 root root -\n"
+        tmpfiles + b"d /var/lib/zrpc-spent 0700 zrpc-wrapper zrpc-wrapper -\n"
     )
     for unit, service in GUARDED_UNITS.items():
         path = UNIT_DIR / unit

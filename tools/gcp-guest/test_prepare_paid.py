@@ -133,6 +133,9 @@ class PaidOverlayTests(unittest.TestCase):
         self.assertNotIn("/var/lib/zrpc-spent ext4 rw,nosuid,nodev,noexec,x-systemd.makefs", fstab)
         rules = (rootfs / "usr/lib/udev/rules.d/65-gce-disk-naming.rules").read_text()
         self.assertIn("zrpc-gcp-disk-id --spent $devnode", rules)
+        tmpfiles = (rootfs / "usr/lib/tmpfiles.d/zrpc.conf").read_text()
+        self.assertIn("d /var/lib/zrpc-spent 0700 zrpc-wrapper zrpc-wrapper -\n", tmpfiles)
+        self.assertNotIn("d /var/lib/zrpc-spent 0700 root root -\n", tmpfiles)
 
         for unit, service in paid.GUARDED_UNITS.items():
             contents = (rootfs / paid.UNIT_DIR / unit).read_text()
