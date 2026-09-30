@@ -47,6 +47,31 @@ public page describes CPU machines in US East, while the September 25
 `US-WEST-1`; the effective account region, image/KMS availability and total
 price require fresh provider readback.
 
+## Extracted amd64 binary smoke — 2026-09-30
+
+The existing local OCI archive was read without rebuilding or publishing it.
+The archive's top-level index was read; the nested image index, `linux/amd64`
+manifest and every selected layer blob passed SHA-256 checks against their
+OCI descriptors. The selected image manifest was the same
+`sha256:0f3b5ece5a8a806402fdb384d38e264b596b6c0f4621e38695c478ba41ec7c97`
+identified above. Three regular files at exact `opt/zrpc/bin/` layer paths
+were extracted into ignored workspace scratch storage. Their SHA-256 values
+matched the checked packaging inputs:
+
+| Extracted binary | SHA-256 | Managed amd64 smoke result |
+| --- | --- | --- |
+| `zebrad` | `ccf1d3c82a1c23deb1dd535cfb442c5507107a16a23f6da2531be4132e95f517` | `--version` exited 0 and reported `zebrad 6.4.2` |
+| `zrpc-node-wrapper` | `372771455c84710f82d5c404825e587440993e13a0a5b9aa16b5bdf7cfab3ed0` | `--help` exited 0 and printed the measured-guest launcher usage |
+| `zrpc-quote-proxy` | `b1d6f3ed2e6cf39d53f6f75e588f20ae046e8b28e7fa2eb9a54b676292f5304c` | Unsupported `--help` exited 1 with `quote bridge accepts only --stock-preview` |
+
+The execution environment reported `x86_64`, but it is the managed amd64
+container under emulation on this Apple Silicon host. This checks the exact
+extracted binary bytes and their basic loader paths. It does **not** run the
+complete OCI image, its supervisor, the quote bridge with dstack, a node
+database, or a native x86_64/Phala guest. It does not establish memory fit,
+runtime mounts, attestation, or private mode. No QEMU build, image publication,
+Phala resource or account spend occurred.
+
 Before a billable launch, the exact image must be published by a separate
 operator action and its remote immutable digest checked; a local archive or
 image ID is not that digest. The remaining package also needs reviewed
