@@ -163,8 +163,21 @@ jobs:
           base=docker.io/library/python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332
           builder_image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
           image="zrpc-phala-native-smoke:$GITHUB_SHA"
-          source_epoch="$(git -C "$source" show -s --format=%ct "$GITHUB_SHA")"
-          test "$source_epoch" -gt 0
+          # The checked context pins the base image's Created annotation. A
+          # commit time would make a records-only commit change image bytes.
+          image_epoch="$(python3 -I - "$context/image-inputs.json" <<'PY'
+          import json
+          from datetime import datetime
+          from pathlib import Path
+          import sys
+
+          receipt = json.loads(Path(sys.argv[1]).read_bytes())
+          created = datetime.fromisoformat(
+              receipt["base_image_created_at"].replace("Z", "+00:00"))
+          print(int(created.timestamp()))
+          PY
+          )"
+          test "$image_epoch" -gt 0
           docker pull --platform linux/amd64 "$base"
           docker pull --platform linux/amd64 "$builder_image"
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$builder_image")" = linux/amd64
@@ -175,7 +188,7 @@ jobs:
           for pass in first second; do
             docker buildx build --builder zrpc-repro --platform linux/amd64 --network none \
               --pull=false --no-cache \
-              --build-arg "SOURCE_DATE_EPOCH=$source_epoch" \
+              --build-arg "SOURCE_DATE_EPOCH=$image_epoch" \
               --tag "$image" \
               --output "type=docker,dest=$scratch/image-$pass.tar,rewrite-timestamp=true" \
               --metadata-file "$scratch/build-$pass.json" "$context"
@@ -280,7 +293,7 @@ jobs:
             echo 'Native amd64 twice-matching image build and fail-closed smoke passed.'
             echo "Local image ID: $(docker image inspect --format '{{.Id}}' "$image")"
             echo "Builder: $(docker buildx version)"
-            echo "Source date epoch: $source_epoch"
+            echo "Pinned image epoch: $image_epoch"
             echo "Local Docker archive SHA-256: $(cat "$scratch/image-archive-sha256")"
             echo 'No image was uploaded, pushed, or deployed; no private mode was approved.'
           } >> "$GITHUB_STEP_SUMMARY"
