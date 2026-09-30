@@ -169,27 +169,35 @@ jobs:
             docker buildx build --platform linux/amd64 --network none \
               --pull=false --no-cache \
               --build-arg "SOURCE_DATE_EPOCH=$source_epoch" \
-              --output "type=image,name=$image,push=false,rewrite-timestamp=true" \
+              --tag "$image" \
+              --output "type=docker,dest=$scratch/image-$pass.tar,rewrite-timestamp=true" \
               --metadata-file "$scratch/build-$pass.json" "$context"
+            docker load --input "$scratch/image-$pass.tar"
             docker image inspect --format '{{.Id}}' "$image" \
               > "$scratch/image-$pass.id"
             docker image inspect "$image" > "$scratch/image-$pass.inspect.json"
           done
-          if ! cmp -s "$scratch/image-first.id" "$scratch/image-second.id"; then
-            for pass in first second; do
-              docker save --output "$scratch/image-$pass.tar" \
-                "$(cat "$scratch/image-$pass.id")"
-            done
-          fi
           python3 -I - "$scratch/build-first.json" "$scratch/build-second.json" \
             "$scratch/image-first.inspect.json" "$scratch/image-second.inspect.json" \
-            "$scratch/image-manifest-digest" "$scratch" <<'PY'
+            "$scratch/image-archive-sha256" "$scratch" <<'PY'
           import json
+          import hashlib
           from pathlib import Path
           import sys
           import tarfile
 
           first, second = [json.loads(Path(path).read_bytes()) for path in sys.argv[1:3]]
+          def archive_sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as archive:
+                  for block in iter(lambda: archive.read(1024 * 1024), b""):
+                      digest.update(block)
+              return digest.hexdigest()
+          first_archive, second_archive = [
+              archive_sha256(Path(sys.argv[6]) / f"image-{name}.tar")
+              for name in ("first", "second")
+          ]
+          print(f"Docker archive SHA-256: {first_archive} {second_archive}")
           first_image, second_image = [
               json.loads(Path(path).read_bytes())[0] for path in sys.argv[3:5]
           ]
@@ -219,15 +227,15 @@ jobs:
                   if pair[0] != pair[1]:
                       print(f"First changed tar entry {position}: {pair}")
           digest = first.get("containerimage.digest")
-          print(f"Manifest digests: {digest} {second.get('containerimage.digest')}")
-          if not isinstance(digest, str) or not digest.startswith("sha256:"):
-              raise SystemExit("first build lacks an image manifest digest")
-          if second.get("containerimage.digest") != digest:
-              raise SystemExit("native image manifest changed across independent builds")
+          print(f"Exporter digests: {digest} {second.get('containerimage.digest')}")
+          if digest is not None and second.get("containerimage.digest") != digest:
+              raise SystemExit("native image exporter digest changed across builds")
           if first_image["Id"] != second_image["Id"]:
               raise SystemExit("native image config changed across independent builds")
-          Path(sys.argv[5]).write_text(digest + "\n")
-          print(f"Twice-matching local manifest digest: {digest}")
+          if first_archive != second_archive:
+              raise SystemExit("native Docker archives changed across builds")
+          Path(sys.argv[5]).write_text(first_archive + "\n")
+          print(f"Twice-matching local Docker archive SHA-256: {first_archive}")
           PY
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
           test "$(docker image inspect --format '{{.Config.User}}' "$image")" = 10001:0
@@ -266,7 +274,7 @@ jobs:
             echo "Local image ID: $(docker image inspect --format '{{.Id}}' "$image")"
             echo "Builder: $(docker buildx version)"
             echo "Source date epoch: $source_epoch"
-            echo "Local manifest digest: $(cat "$scratch/image-manifest-digest")"
+            echo "Local Docker archive SHA-256: $(cat "$scratch/image-archive-sha256")"
             echo 'No image was uploaded, pushed, or deployed; no private mode was approved.'
           } >> "$GITHUB_STEP_SUMMARY"
 
