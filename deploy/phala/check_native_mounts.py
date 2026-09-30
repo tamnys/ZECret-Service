@@ -216,6 +216,31 @@ except ConnectionRefusedError:
 """
 
 
+WRAPPER_HELD_SESSION_CHECK = r"""
+import socket
+import ssl
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+# Synthetic connection-lifetime probe, without certificate or quote approval.
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+context.minimum_version = ssl.TLSVersion.TLSv1_3
+context.maximum_version = ssl.TLSVersion.TLSv1_3
+context.set_alpn_protocols(['http/1.1'])
+with socket.create_connection(('127.0.0.1', 8443), timeout=15) as raw:
+    with context.wrap_socket(raw, server_hostname='localhost') as tls:
+        assert tls.version() == 'TLSv1.3'
+        print('SESSION_READY', flush=True)
+        tls.settimeout(None)
+        try:
+            received = tls.recv(1)
+        except (ssl.SSLEOFError, ConnectionResetError):
+            received = b''
+        assert received == b'', 'session remained open or received unexpected data'
+print('SESSION_CLOSED', flush=True)
+"""
+
+
 def docker(*args):
     subprocess.run(["docker", *args], check=True)
 
@@ -382,14 +407,34 @@ def main():
                         docker("logs", wrapper_name)
                         raise RuntimeError("wrapper stopped or missed TLS readiness")
                     time.sleep(0.1)
-                docker("rm", "--force", bridge_name)
-                bridge_started = False
-                stopped = subprocess.run(
-                    ["docker", "wait", wrapper_name], capture_output=True,
-                    text=True, check=True,
+                held = subprocess.Popen(
+                    ["docker", "exec", "--user", "10001:0", zebra_name,
+                     "python3", "-I", "-c", WRAPPER_HELD_SESSION_CHECK],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 )
-                if stopped.stdout.strip() != "1":
-                    raise AssertionError("wrapper did not fail closed on quote loss")
+                try:
+                    if held.stdout.readline().strip() != "SESSION_READY":
+                        _, error = held.communicate()
+                        raise RuntimeError(f"held TLS session did not start: {error}")
+                    if held.poll() is not None:
+                        raise AssertionError("held TLS session ended before quote loss")
+                    docker("rm", "--force", bridge_name)
+                    bridge_started = False
+                    stopped = subprocess.run(
+                        ["docker", "wait", wrapper_name], capture_output=True,
+                        text=True, check=True,
+                    )
+                    if stopped.stdout.strip() != "1":
+                        raise AssertionError("wrapper did not fail closed on quote loss")
+                    output, error = held.communicate()
+                    if held.returncode != 0 or output.strip() != "SESSION_CLOSED":
+                        raise AssertionError(
+                            f"existing TLS session survived quote loss: {error}")
+                    print("Existing synthetic TLS session closed after quote loss")
+                finally:
+                    if held.poll() is None:
+                        held.terminate()
+                        held.communicate()
                 docker("exec", "--user", "10001:0", zebra_name,
                        "python3", "-I", "-c", WRAPPER_DOWN_CHECK)
         print("Native quote, Zebra and wrapper shutdown smoke passed; no dstack guest was used.")
