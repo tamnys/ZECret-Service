@@ -86,19 +86,25 @@ opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 body = json.dumps({
     'jsonrpc': '2.0', 'method': 'getblockchaininfo', 'params': [], 'id': 1,
 }).encode()
+cookie_seen = False
 while True:
     try:
         cookie = cookie_path.read_bytes().strip()
     except FileNotFoundError:
         time.sleep(1)
         continue
+    if not cookie_seen:
+        print('Zebra cookie is present; waiting for authenticated RPC', flush=True)
+        cookie_seen = True
     request = urllib.request.Request('http://127.0.0.1:18232/', body, {
         'Content-Type': 'application/json',
         'Authorization': 'Basic ' + base64.b64encode(cookie).decode(),
     })
     try:
-        with opener.open(request) as response:
+        with opener.open(request, timeout=15) as response:
             content = response.read(65537)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f'Zebra RPC returned HTTP {error.code}') from error
     except urllib.error.URLError:
         time.sleep(1)
         continue
