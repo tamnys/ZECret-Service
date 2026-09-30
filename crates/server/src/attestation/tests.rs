@@ -193,6 +193,16 @@ async fn read(response: Response<Incoming>) -> (StatusCode, Bytes) {
     )
 }
 
+fn assert_private_store_excludes(directory: &std::path::Path, forbidden: &[&[u8]]) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        for value in forbidden {
+            assert!(!value.is_empty());
+            assert!(!bytes.windows(value.len()).any(|window| window == *value));
+        }
+    }
+}
+
 #[tokio::test]
 async fn quote_uses_own_live_session_exporter_and_connection_nonce_only_once() {
     let source = FakeQuote::new();
@@ -352,6 +362,7 @@ async fn optional_rpc_route_requires_attestation_then_enforces_method_allowlist(
 #[tokio::test]
 #[ignore = "requires OpenSSL and the separately locked payment helper in the managed container"]
 async fn paid_rpc_admits_once_before_node_failure() {
+    const PRIVATE_QUERY_MARKER: &[u8] = b"SYNTHETIC_PRIVATE_REQUEST_MARKER";
     let helper = std::path::PathBuf::from(
         std::env::var_os("ZRPC_PAYMENT_CRYPTO_HELPER")
             .expect("set ZRPC_PAYMENT_CRYPTO_HELPER to the helper executable"),
@@ -454,7 +465,7 @@ async fn paid_rpc_admits_once_before_node_failure() {
     let shared = Arc::new(shared);
     let nonce = [31; 32];
     let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
-    let body = br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#;
+    let body = br#"{"jsonrpc":"2.0","id":"SYNTHETIC_PRIVATE_REQUEST_MARKER","method":"getblockcount","params":[]}"#;
     assert_eq!(
         read(
             client
@@ -491,16 +502,18 @@ async fn paid_rpc_admits_once_before_node_failure() {
             .body(Full::new(Bytes::from_static(body)))
             .unwrap()
     };
-    assert_eq!(
-        read(
-            client
-                .send_request(paid_request(authorization.as_ref()))
-                .await
-                .unwrap()
-        )
-        .await
-        .0,
-        StatusCode::SERVICE_UNAVAILABLE
+    let (status, node_failure) = read(
+        client
+            .send_request(paid_request(authorization.as_ref()))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        !node_failure
+            .windows(PRIVATE_QUERY_MARKER.len())
+            .any(|window| window == PRIVATE_QUERY_MARKER)
     );
     // A second, independently valid ticket cannot be linked to the first on
     // this attested connection. It remains redeemable on a fresh connection.
@@ -566,6 +579,21 @@ async fn paid_rpc_admits_once_before_node_failure() {
     drop((client, driver, server));
     drop(ticket_store);
     drop(operator);
+    assert_private_store_excludes(
+        &root.join("issuer"),
+        &[ticket.token.expose(), other_ticket.token.expose()],
+    );
+    assert_private_store_excludes(
+        &root.join("redeemer"),
+        &[
+            PRIVATE_QUERY_MARKER,
+            &purchase,
+            ticket.token.expose(),
+            other_ticket.token.expose(),
+            authorization.as_ref(),
+            other_authorization.as_ref(),
+        ],
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 
