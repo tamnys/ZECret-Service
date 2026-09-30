@@ -44,16 +44,21 @@ jobs:
           else
             registry_status=$?
           fi
+          if python3 -I "$source/scripts/check-cargo-registry-age.py" --payment-helper | tee "$scratch/payment-registry-age.json"; then
+            payment_status=0
+          else
+            payment_status=$?
+          fi
           if python3 -I "$source/scripts/check-cargo-git-source.py" | tee "$scratch/git-source-age.json"; then
             git_status=0
           else
             git_status=$?
           fi
-          if (( registry_status != 0 || git_status != 0 )); then
+          if (( registry_status != 0 || payment_status != 0 || git_status != 0 )); then
             echo 'Native Cargo fetch and build refused by live source preflight.' >&2
             exit 1
           fi
-          echo 'Both live source preflights passed; no dependency bytes have been fetched.'
+          echo 'Workspace, payment helper, and Git source preflights passed; no dependency bytes have been fetched.'
 
       - name: Fetch and inspect the reviewed dstack Git object
         shell: bash
@@ -98,9 +103,12 @@ jobs:
             RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 \
             RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu \
             LANG=C LC_ALL=C TZ=UTC \
-            cargo fetch --locked --target x86_64-unknown-linux-gnu
+            sh -ceu '
+              cargo fetch --locked --target x86_64-unknown-linux-gnu
+              cargo fetch --locked --manifest-path tools/payment-crypto/Cargo.toml --target x86_64-unknown-linux-gnu
+            '
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
-          git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
+          git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml tools/payment-crypto/Cargo.lock tools/payment-crypto/Cargo.toml
           echo 'Locked native dependency fetch completed; no code built or guest image created.'
 
       - name: Run lifecycle package tests on native Linux without network
@@ -165,7 +173,7 @@ jobs:
                 --output "/workspace/.codex-tmp/rust-inputs-$1"
             ' sh "$GITHUB_SHA"
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
-          git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml
+          git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml tools/payment-crypto/Cargo.lock tools/payment-crypto/Cargo.toml
 
       - name: Exercise the exact matched static import producer on synthetic media
         shell: bash
@@ -396,6 +404,13 @@ jobs:
               if report.get(passed) is not True or report.get("cargo_lock_sha256") != manifest["input_sha256"]["Cargo.lock"]:
                   raise ValueError("dependency gate receipt differs from matched build")
               shutil.copy2(path, gates / name)
+          payment_gate = release.parents[1] / "payment-registry-age.json"
+          payment_report = json.loads(payment_gate.read_text())
+          if (payment_report.get("registry_preflight_passed") is not True
+                  or payment_report.get("cargo_lock_sha256") !=
+                     manifest["input_sha256"]["tools/payment-crypto/Cargo.lock"]):
+              raise ValueError("payment dependency gate differs from matched build")
+          shutil.copy2(payment_gate, gates / "payment-registry-age.json")
           for name in ("manifest.json", "SHA256SUMS", "source.tar"):
               shutil.copy2(release / name, bundle / name)
           for name in names:

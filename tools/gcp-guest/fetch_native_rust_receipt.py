@@ -38,6 +38,27 @@ def digest_file(path):
     return value.hexdigest()
 
 
+def check_payment_gate(bundle, lock_sha256):
+    gate = json.loads((bundle / "dependency-gates/payment-registry-age.json").read_bytes(),
+                      object_pairs_hook=unique_object)
+    if (gate.get("cargo_lock_sha256") != lock_sha256
+            or gate.get("registry_preflight_passed") is not True
+            or gate.get("younger_than_hold") != []
+            or gate.get("cargo_fetch_executed") is not False
+            or gate.get("cargo_build_executed") is not False
+            or gate.get("private_mode_approved") is not False):
+        raise ValueError("payment helper dependency gate differs from matched build")
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate dependency gate field")
+        result[key] = value
+    return result
+
+
 def timestamp(value):
     if not isinstance(value, str):
         raise ValueError("workflow attempt timestamp missing")
@@ -156,9 +177,11 @@ def unpack_receipt(archive, output, revision, digest):
     exporter = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(exporter)
     report = exporter.inspect(bundle, revision)
+    check_payment_gate(bundle, report["payment_crypto_lock_sha256"])
     enable_verified_host_verifier(bundle)
     expected_files = {"manifest.json", "SHA256SUMS", "source.tar",
                       "dependency-gates/registry-age.json",
+                      "dependency-gates/payment-registry-age.json",
                       "dependency-gates/git-source-age.json",
                       "dependency-gates/git-object.json",
                       "guest-inputs/diagnostic-rust-inputs.json"}

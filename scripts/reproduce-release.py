@@ -42,6 +42,8 @@ ARTIFACTS = (
     ("zrpc-lifecycle", "zrpc-gcp-import-producer"),
     ("zrpc-uki-digest", "zrpc-uki-digest"),
 )
+PAYMENT_HELPER = ("zrpc-payment-crypto", "zrpc-payment-crypto")
+ALL_ARTIFACTS = (*ARTIFACTS, PAYMENT_HELPER)
 
 STATIC_IMPORT_PRODUCER = "zrpc-gcp-import-producer"
 
@@ -76,6 +78,18 @@ def check_project_artifacts(source):
                              if path.relative_to(package_root).as_posix() not in explicit_paths)
     if found != set(ARTIFACTS) or len(ARTIFACTS) != len(found):
         raise Refusal("project Rust binary inventory differs from double build")
+
+
+def check_payment_helper(source):
+    """The separately locked Privacy Pass helper must remain a local binary."""
+    root = source / "tools/payment-crypto"
+    manifest = tomllib.loads((root / "Cargo.toml").read_text())
+    if (manifest.get("package", {}).get("name") != PAYMENT_HELPER[0]
+            or manifest.get("workspace") != {}
+            or manifest.get("dependencies", {}).get("blind-rsa-signatures") != "=0.17.2"
+            or not (root / "Cargo.lock").is_file()
+            or not (root / "src/main.rs").is_file()):
+        raise Refusal("separately locked payment helper differs from review")
 
 
 def check_guest_artifacts(source):
@@ -323,7 +337,7 @@ def reproduce(args):
                 "private_accepted": False, "deployment_enabled": False,
                 "published": False, "signed": False, "reproducible": False,
                 "selected_binaries": [{"package": package, "name": name}
-                                      for package, name in ARTIFACTS],
+                                      for package, name in ALL_ARTIFACTS],
                 "source_commit": args.revision, "source_tree": tree,
                 "source_commit_timestamp": epoch, "script_sha256": digest(script),
                 "script_in_source_sha256": None, "script_matches_source": None,
@@ -347,10 +361,12 @@ def reproduce(args):
             extract_source(archive, source)
             require_source_script(source, manifest["script_sha256"], manifest)
             check_project_artifacts(source)
+            check_payment_helper(source)
             check_guest_artifacts(source)
             target.mkdir()
             temporary.mkdir()
-            inputs = [source / "Cargo.lock", source / "rust-toolchain.toml"]
+            inputs = [source / "Cargo.lock", source / "rust-toolchain.toml",
+                      source / "tools/payment-crypto/Cargo.lock"]
             inputs += list(source.rglob("Cargo.toml"))
             inputs += [p for p in (source / "ui" / "local").rglob("*") if p.is_file()]
             input_hashes = {str(p.relative_to(source)): digest(p) for p in sorted(set(inputs))}
@@ -382,6 +398,17 @@ def reproduce(args):
             record["static_import_producer_exit_code"] = result.returncode
             if result.returncode:
                 raise Refusal(f"{label} static import producer failed (exit {result.returncode}); retained static-import.log has diagnostics")
+            helper_argv = [tools["cargo"]["path"], "build", "--locked", "--offline",
+                           "--release", "--manifest-path",
+                           "tools/payment-crypto/Cargo.toml", "--bin", PAYMENT_HELPER[1]]
+            record["payment_helper_command"] = helper_argv
+            print(f"Building payment helper for {label}; diagnostics: {root / 'payment-helper.log'}", flush=True)
+            with (root / "payment-helper.log").open("xb") as log:
+                result = subprocess.run(helper_argv, cwd=source, env=build_env,
+                                        stdout=log, stderr=subprocess.STDOUT, check=False)
+            record["payment_helper_exit_code"] = result.returncode
+            if result.returncode:
+                raise Refusal(f"{label} payment helper failed (exit {result.returncode}); retained payment-helper.log has diagnostics")
             static_binary = target / "release" / STATIC_IMPORT_PRODUCER
             segments = command([tools["readelf"]["path"], "--wide", "--program-headers",
                                 str(static_binary)], cwd=source, env=build_env)
@@ -391,7 +418,7 @@ def reproduce(args):
                 raise Refusal(f"{label} import producer retains a dynamic loader or shared library")
             record["static_import_producer_no_dynamic_loader"] = True
             record["artifact_sha256"] = {name: digest(target / "release" / name)
-                                          for _, name in ARTIFACTS}
+                                          for _, name in ALL_ARTIFACTS}
         first, second = manifest["builds"]
         if first["artifact_sha256"] != second["artifact_sha256"]:
             raise Refusal("independent binary checksums differ; outputs retained, reproducibility not established")
