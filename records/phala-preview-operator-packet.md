@@ -1,6 +1,9 @@
 # Phala public Testnet preview operator packet — incomplete, 2026-09-30
 
-This collects the presently reviewable inputs for a **public, unverified-for-private-use** TDX-hosted demo. It is not a deployment instruction or spending request. A public application image has been published, but no Phala resource was created, deletion scheduler activated, or Phala credit used. The distributed approved-release list remains empty; the stock Phala image does not meet the genuine private-mode disk and administration policy.
+This is the prelaunch packet. The [live launch observation](phala-live-launch-2026-09-30.md)
+records the subsequently created CVM, current cost and manual teardown deadline.
+
+This collects the inputs reviewed before a **public, unverified-for-private-use** TDX-hosted demo. It is not a deployment instruction or spending request. At this packet's prelaunch readback, a public application image had been published, but no Phala resource had been created, deletion scheduler activated, or Phala credit used. The distributed approved-release list remains empty; the stock Phala image does not meet the genuine private-mode disk and administration policy.
 
 The operator subsequently [authorized deployment within the existing budget
 and cleanup limits](phala-operator-authorization-2026-09-30.md). That
