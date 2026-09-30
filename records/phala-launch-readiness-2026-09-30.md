@@ -41,6 +41,12 @@ initialized, and no real deletion timer armed.
   in New York (`2026-10-02T04:00:00Z`) would cost about $8.05 from the
   September 30 readback time. That is a proposed earlier deadline within the
   authorized 168-hour maximum, not an initialized ledger or billing promise.
+- A fresh `HEAD` of the [pinned public Testnet archive](../deploy/phala/snapshot.lock.json)
+  at 2026-09-30 19:07 UTC returned HTTP 200 at the locked URL with
+  `Content-Length: 11137971554`, matching the lock's expected byte count, and
+  `Accept-Ranges: bytes`. This is an availability check, not a repeat of the
+  completed full-download SHA-256 verification or a guarantee that the archive
+  will remain available during the Phala boot.
 
 ## External control status
 
@@ -56,13 +62,20 @@ synchronized Colima VM restart rehearsals passed, then all synthetic units
 were removed. An empty mode-0700 directory for the original ledger exists at
 `/Users/j/Code/phala-zcash-rpc/.codex-tmp/phala-live-20260930` on that mount.
 
-The provider's current OpenAPI lists `PATCH
-/api/v1/cvms/{cvm_id}/scheduled-delete`, while the ordinary create request
-has no scheduled-delete field. A provider-side scheduled delete could therefore
-be set only **after** creation and verified by CVM readback. It would be an
-independent backstop, not a substitute for the external watchdog or proof that
-attached storage and billing have ended. If setting or verifying it fails,
-the new CVM must be deleted promptly using its retained ledger identity.
+The [pinned provider OpenAPI](https://github.com/Phala-Network/phala-docs/blob/5176d4c53fcee5aec3a8ccbbb05840a0a678c553/openapi.json)
+lists `PATCH /api/v1/cvms/{cvm_id}/scheduled-delete`, while the ordinary create
+request has no scheduled-delete field. It can therefore be set only **after**
+creation. The documented PATCH 200 body is `VM`, which omits
+`scheduled_delete_at`; `GET /api/v1/cvms/{cvm_id}` may return either
+`CvmBasicInfo`, where that field is optional, or `CVMInfoDetail`, which omits
+it. Thus a 200 PATCH alone does not prove the provider retained the deadline,
+and the documented GET contract does not guarantee a readable confirmation.
+The schedule cannot count as the separate deadline backstop until a live
+readback actually exposes the exact time or Phala supplies another reliable
+confirmation path. It cannot substitute for the external watchdog or prove
+that attached storage and billing have ended. If setting or confirming it
+fails after creation, delete the new CVM promptly using its retained ledger
+identity.
 
 The remaining deployment input is an explicitly selected response-size and
 deletion-latency allowance: Phala's OpenAPI has no guaranteed maximum body
