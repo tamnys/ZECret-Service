@@ -20,7 +20,7 @@ zrpc payments mock-settle --issuer-store PRIVATE_DIR --issuer-public-der FILE --
 zrpc payments collect --ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE --purchase-id PURCHASE_ID --response-file PRIVATE_FILE
 zrpc payments init-redeemer --spent-store NEW_PRIVATE_DIR
 zrpc payments balance --ticket-store PRIVATE_DIR
-All exchange files and state directories must be owner-private and outside the checkout. Settlement is simulated; these commands do not transfer ZEC or enable paid RPC.";
+All exchange files and state directories must be owner-private and outside the checkout. Settlement is simulated and transfers no ZEC. Redeeming tickets with zrpc query requires an approved private deployment.";
 
 pub(super) fn run(mut args: Vec<String>) -> Result<(), String> {
     if args.is_empty() || (args.len() == 1 && args[0] == "--help") {
