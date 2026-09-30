@@ -9,29 +9,41 @@ from email.utils import parsedate_to_datetime
 import gzip
 import hashlib
 import json
-import os
 from pathlib import Path
 import platform
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from urllib.request import urlopen
 
 
 HERE = Path(__file__).resolve().parent
-LOCK = json.loads((HERE / "package.lock.json").read_text(encoding="utf-8"))
+LOCK_FILE = HERE / "package.lock.json"
+LOCK = json.loads(LOCK_FILE.read_text(encoding="utf-8"))
+# Operator-approved local age exception for this exact Tor 0.4.9.13 lock only.
+LOCAL_AGE_EXCEPTION_LOCK_SHA256 = "02cf93295cc3cb9b554a2d7d388b526f2916bd78c30ec7529376f2bfbe59c8f0"
 SIGNING_KEY = HERE / "tor-debian-signing-key.asc"
 INRELEASE = HERE / "trixie.InRelease"
 PACKAGES = HERE / "trixie-arm64-Packages.gz"
 
 
-def require_release_age(now: datetime | None = None) -> None:
+def require_release_age(
+    now: datetime | None = None, *, allow_v04913_local_hold_exception: bool = False
+) -> bool:
     published = datetime.fromisoformat(
         LOCK["package_last_modified_utc"].replace("Z", "+00:00")
     )
     eligible = published + timedelta(days=LOCK["minimum_age_days"])
     if (now or datetime.now(timezone.utc)) < eligible:
-        raise ValueError(f"pinned Tor package is inside the release hold until {eligible.isoformat()}")
+        if not allow_v04913_local_hold_exception:
+            raise ValueError(f"pinned Tor package is inside the release hold until {eligible.isoformat()}")
+        if (file_sha256(LOCK_FILE) != LOCAL_AGE_EXCEPTION_LOCK_SHA256
+                or LOCK["tor_version"] != "0.4.9.13"
+                or LOCK["architecture"] != "arm64"):
+            raise ValueError("local age exception does not match the reviewed Tor lock")
+        return True
+    return False
 
 
 def file_sha256(path: Path) -> str:
@@ -174,8 +186,37 @@ def require_tor_version(stdout: str, returncode: int) -> None:
         raise ValueError("verified Tor binary did not run at its pinned version")
 
 
-def stage(output: Path, package: Path | None) -> dict[str, str]:
-    require_release_age()
+def extract_tor_binary(deb: Path, scratch: Path, executable: Path) -> None:
+    """Extract only the executable from the already authenticated package."""
+    archive_path = scratch / "payload.tar"
+    with archive_path.open("xb") as archive_output:
+        archive = subprocess.run(
+            ["dpkg-deb", "--fsys-tarfile", str(deb)],
+            stdout=archive_output, stderr=subprocess.PIPE, text=True, check=False,
+        )
+    if archive.returncode:
+        raise ValueError("verified Tor Debian package payload could not be read")
+    with tarfile.open(archive_path, mode="r:") as payload:
+        matches = [member for member in payload.getmembers()
+                   if member.name in ("./usr/bin/tor", "usr/bin/tor")]
+        if len(matches) != 1 or not matches[0].isfile() or matches[0].size == 0:
+            raise ValueError("verified Tor Debian package has no unique regular Tor executable")
+        source = payload.extractfile(matches[0])
+        if source is None:
+            raise ValueError("verified Tor Debian package executable could not be read")
+        with source, executable.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        if executable.stat().st_size != matches[0].size:
+            raise ValueError("verified Tor executable length differs from package metadata")
+    executable.chmod(0o755)
+
+
+def stage(
+    output: Path, package: Path | None, *, allow_v04913_local_hold_exception: bool = False
+) -> dict[str, str | bool]:
+    hold_exception_used = require_release_age(
+        allow_v04913_local_hold_exception=allow_v04913_local_hold_exception
+    )
     if platform.system() != "Linux" or platform.machine() not in ("aarch64", "arm64"):
         raise ValueError("pinned Tor Debian package requires Linux arm64")
     if output.exists() or output.is_symlink():
@@ -194,23 +235,12 @@ def stage(output: Path, package: Path | None) -> dict[str, str]:
                 raise ValueError("local Tor package has the wrong size")
             shutil.copyfile(package, deb)
         require_hash(deb, LOCK["package_sha256"])
-        payload = scratch / "payload"
-        extracted = subprocess.run(
-            ["dpkg-deb", "--extract", str(deb), str(payload)],
-            capture_output=True, text=True, check=False,
-        )
-        if extracted.returncode:
-            raise ValueError("verified Tor Debian package could not be extracted")
-        binary = payload / "usr" / "bin" / "tor"
-        if not binary.is_file() or binary.is_symlink() or not os.access(binary, os.X_OK):
-            raise ValueError("verified Tor Debian package has no executable Tor binary")
         staged = scratch / "staged"
         staged.mkdir(mode=0o755)
         bin_dir = staged / "bin"
         bin_dir.mkdir(mode=0o755)
         executable = bin_dir / "tor"
-        shutil.copyfile(binary, executable)
-        executable.chmod(0o755)
+        extract_tor_binary(deb, scratch, executable)
         version = subprocess.run(
             [str(executable), "--version"], capture_output=True, text=True, check=False,
         )
@@ -221,6 +251,8 @@ def stage(output: Path, package: Path | None) -> dict[str, str]:
         "package_sha256": LOCK["package_sha256"],
         "repository_signing_key_primary_fingerprint": LOCK["repository_signing_key_primary_fingerprint"],
         "tor_version": LOCK["tor_version"],
+        "local_release_age_exception_used": hold_exception_used,
+        "package_lock_sha256": file_sha256(LOCK_FILE),
     }
 
 
@@ -228,8 +260,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--package", type=Path)
+    parser.add_argument("--allow-v04913-local-hold-exception", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(stage(args.output, args.package), indent=2))
+    print(json.dumps(stage(
+        args.output, args.package,
+        allow_v04913_local_hold_exception=args.allow_v04913_local_hold_exception,
+    ), indent=2))
 
 
 if __name__ == "__main__":
