@@ -162,7 +162,9 @@ jobs:
           scratch="$source/.codex-tmp/phala-native-image-smoke"
           base=docker.io/library/python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332
           builder_image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
-          image="zrpc-phala-native-smoke:$GITHUB_SHA"
+          # A commit-derived tag changes manifest.json inside the Docker tar
+          # even when every layer and the image config are identical.
+          image="zrpc-phala-native-smoke:checked-local"
           # The checked context pins the base image's Created annotation. A
           # commit time would make a records-only commit change image bytes.
           image_epoch="$(python3 -I - "$context/image-inputs.json" <<'PY'
@@ -303,6 +305,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I "$GITHUB_WORKSPACE/source/deploy/phala/check_native_mounts.py" \
-            --image "zrpc-phala-native-smoke:$GITHUB_SHA"
+            --image "zrpc-phala-native-smoke:checked-local"
           echo 'Local tmpfs, synthetic quote exchange, cold Zebra public RPC on retained TLS, write-method rejection, and existing-session closure on quote loss passed; no snapshot import, live dstack or TDX guest was used.' \
             >> "$GITHUB_STEP_SUMMARY"
