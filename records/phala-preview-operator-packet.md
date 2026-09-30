@@ -37,6 +37,13 @@ configuration Phala would actually launch. The September 25 lock remains a
 dated, unapproved observation; do not silently replace its values or treat this
 public recheck as the required signed-in quote.
 
+The newly listed upstream `dstack-0.6.0` source was also [reviewed for runtime
+persistence](phala-v060-runtime-source-review.md). Its early memory-backed
+`/var` is followed by persistent binds for five container-runtime roots, so
+that source does not resolve the genuine private-mode disk gate. The public
+KMS response supplied no full digest linking its entry to the upstream release;
+no new image was selected, staged or approved.
+
 ## Resource and lifecycle boundary
 
 The provisional size is `tdx.large` (4 vCPU, 8 GB) with 80 GB storage. [Local ARM64 node measurements](phala-resource-sizing.md) show a synced public Testnet state around 13.7 GB and roughly 4.1 GB total container memory at one observation, but do not prove whole-guest x86_64 fit or import peak. The [published instance](https://cloud.phala.com/about/instance-types) and [storage](https://cloud.phala.com/about/pricing) rates imply `$40.84416` for **168 hours** at this provisional size before fees, rounding, or account-specific terms. Storage continues billing while stopped. The September 25 signed-in form estimate is stale and not a binding quote; the public page's region description also differs from that observed account node. Keep the existing **$50 total ceiling, $45 deletion trigger, and 168-hour maximum including synchronization**. The larger 16 GB `tdx.xlarge` would cost `$79.82016` over 168 hours at the same published storage rate, so it is not an automatic fallback within the current ceiling.
