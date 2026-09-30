@@ -5,7 +5,6 @@ This is a Docker namespace and ownership smoke, not a dstack or TDX boot.
 """
 
 import argparse
-import os
 from pathlib import Path
 import socket
 import subprocess
@@ -16,6 +15,7 @@ import uuid
 QUOTE_CHECK = r"""
 import os
 from pathlib import Path
+import signal
 import stat
 
 def mount_type(path):
@@ -34,6 +34,8 @@ marker = Path('/run/zrpc-mount-probe')
 with marker.open('xb') as output:
     output.write(b'quote')
 marker.chmod(0o660)
+print('READY', flush=True)
+signal.pause()
 """
 
 
@@ -71,12 +73,13 @@ def docker(*args):
     subprocess.run(["docker", *args], check=True)
 
 
-def container(image, user, runtime, state, backend, code):
+def container(image, user, runtime, state, backend, code, name=None):
     args = [
-        "run", "--rm", "--pull=never", "--network", "none", "--read-only",
+        "run", "--pull=never", "--network", "none", "--read-only",
         "--cap-drop=ALL", "--security-opt", "no-new-privileges:true",
         "--user", user, "--mount", f"type=volume,source={runtime},target=/run",
     ]
+    args += ["--detach", "--name", name] if name else ["--rm"]
     if state is not None:
         args += ["--mount", f"type=volume,source={state},target=/var/lib/zebra"]
     if backend is not None:
@@ -92,7 +95,9 @@ def main():
     suffix = uuid.uuid4().hex
     runtime = f"zrpc-mount-smoke-run-{suffix}"
     state = f"zrpc-mount-smoke-state-{suffix}"
+    quote_name = f"zrpc-mount-smoke-quote-{suffix}"
     created = []
+    quote_started = False
     try:
         docker("volume", "create", "--driver", "local", "--opt", "type=tmpfs",
                "--opt", "device=tmpfs", "--opt", "o=uid=0,gid=0,mode=1775",
@@ -106,11 +111,21 @@ def main():
                 listener.bind(str(backend))
                 listener.listen(1)
                 container(args.image, "10002:0", runtime, None, backend,
-                          QUOTE_CHECK)
+                          QUOTE_CHECK, quote_name)
+                quote_started = True
+                with subprocess.Popen(
+                    ["docker", "logs", "--follow", quote_name],
+                    stdout=subprocess.PIPE, text=True,
+                ) as logs:
+                    if logs.stdout.readline().strip() != "READY":
+                        raise RuntimeError("quote mount probe stopped before readiness")
+                    logs.terminate()
                 container(args.image, "10001:0", runtime, state, None,
                           APP_CHECK)
         print("Native Docker mount/ownership smoke passed; no dstack guest was used.")
     finally:
+        if quote_started:
+            docker("rm", "--force", quote_name)
         for volume in reversed(created):
             docker("volume", "rm", volume)
 
