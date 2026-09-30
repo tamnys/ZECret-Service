@@ -67,12 +67,13 @@ Server-path inspection places paid admission in `crates/server/src/attestation.r
 
 | Area | Result |
 | --- | --- |
-| Simulated settlement and persistent issuance | Native prepare, resume, pending, mock-settle, collect, and balance commands passed a two-credit local round trip. Repeated issuer confirmation returned identical signatures; altered requests and responses were rejected; collection after restart credited once. No blockchain settlement occurs. |
-| Cryptography | Exact separate lock, RFC 9474 and RFC 9578 vectors, key normalization, blind/sign/finalize/verify round trip, and three cross-workspace payment tests passed. The service workspace still cannot resolve `blind-rsa-signatures =0.17.2` directly. |
-| Paid transport verification | The RFC 9577 authorization-header codec passed local tests; token transmission and server admission are not implemented or tested. Existing release, Tor, attestation, and connection gates are unchanged. |
-| Chain data / joint live acceptance | Not run. This checkout has no embedded approved private release; no synthetic approval was added. |
-| Native payment CLI | Local purchase and simulated-settlement commands implemented and smoke-tested. Paid RPC query and redemption are still unavailable. |
-| Website handoff | Prepared separately in `records/website-build-prompt.md`; requires the website chat to inspect actual payment availability. |
+| Simulated settlement and persistent issuance | Native prepare, resume, pending, mock-settle, collect, and balance passed a local two-credit round trip. Repeated confirmation returned identical signatures; altered requests and responses were rejected; collection after restart credited once. No blockchain settlement occurs. |
+| Cryptography | The separate exact lock, RFC 9474 and RFC 9578 vectors, key normalization, blind/sign/finalize/verify round trip, wrong-key rejection, and helper-backed cross-workspace tests passed. The main service graph still cannot resolve `blind-rsa-signatures =0.17.2` directly. |
+| Paid transport verification | Local helper-backed attested TLS tests issued and redeemed blinded tickets, rejected missing, invalid, duplicate, and restarted-store replays, and returned a synthetic testnet node result. Focused client tests kept ticket and query bytes off failed pre-transmission paths. No approved hardware release or live Tor-to-guest acceptance was tested. |
+| Paid guest image | Separate spent-state disk guard, paid rootfs overlay, source-bound candidate application, and explicit native image-build routing passed focused synthetic tests. No completed native double-build receipt, real paid image build, measured guest boot, or operator release approval exists. |
+| Chain data / joint live acceptance | Not run through a paid deployment. This checkout has no embedded approved private release; no synthetic approval was added. The local successful node fixture is not real Zcash testnet data. |
+| Native payment CLI | Purchase, settlement, collection, balance, redeemer initialization, and ticket-store query paths are implemented in the isolated branch. Local tests passed; a deployed ticket-required query for real testnet data remains unproven. |
+| Website handoff | Prepared in `records/website-build-prompt.md`; it requires the website chat to inspect the actual payment and deployment state before publishing claims. |
 
 ## Isolated local cryptography checkpoint
 
