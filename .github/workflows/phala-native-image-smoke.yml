@@ -267,7 +267,7 @@ jobs:
             --entrypoint /opt/zrpc/bin/zebrad "$image" --version)" = 'zebrad 6.4.2'
           docker run --rm --pull=never --network none --read-only \
             --entrypoint /opt/zrpc/bin/zrpc-node-wrapper "$image" --help \
-            | grep -F 'Measured guest only.'
+            | grep -F -- '--access free-demo|ticket-required'
           set +e
           proxy_error="$(docker run --rm --pull=never --network none --read-only \
             --entrypoint /opt/zrpc/bin/zrpc-quote-proxy "$image" --help 2>&1)"
