@@ -302,7 +302,10 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(compose["services"]["app"]["image"], image)
         self.assertEqual(compose["services"]["quote"]["image"], image)
         self.assertEqual(compose["volumes"]["runtime_tmpfs"]["driver_opts"]["type"], "tmpfs")
-        self.assertIn("/run/dstack.sock", json.dumps(compose["services"]["quote"]))
+        quote_bind = compose["services"]["quote"]["volumes"][1]
+        self.assertEqual(quote_bind["source"], "/run/dstack.sock")
+        self.assertEqual(quote_bind["target"], "/dstack.sock")
+        self.assertNotIn("/dstack.sock", json.dumps(compose["services"]["app"]))
         self.assertNotIn("/run/dstack.sock", json.dumps(compose["services"]["app"]))
         self.assertFalse(receipt["private_accepted"])
         self.assertFalse(receipt["deployment_enabled"])

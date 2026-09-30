@@ -32,7 +32,7 @@ assert os.geteuid() == 10002
 assert os.statvfs('/').f_flag & os.ST_RDONLY
 assert mount_type('/run') == 'tmpfs'
 assert stat.S_IMODE(os.stat('/run').st_mode) == 0o1775
-assert stat.S_ISSOCK(os.stat('/run/dstack.sock').st_mode)
+assert stat.S_ISSOCK(os.stat('/dstack.sock').st_mode)
 marker = Path('/run/zrpc-mount-probe')
 with marker.open('xb') as output:
     output.write(b'quote')
@@ -58,8 +58,8 @@ assert os.geteuid() == 10001
 assert os.statvfs('/').f_flag & os.ST_RDONLY
 assert mount_type('/run') == 'tmpfs'
 assert mount_type('/var/lib/zebra') != 'tmpfs'
-backend = Path('/run/dstack.sock')
-assert not backend.exists() or not stat.S_ISSOCK(backend.stat().st_mode)
+assert not Path('/run/dstack.sock').exists()
+assert not Path('/dstack.sock').exists()
 marker = Path('/run/zrpc-mount-probe')
 assert marker.read_bytes() == b'quote'
 with os.fdopen(os.open(marker, os.O_WRONLY | os.O_APPEND), 'wb') as output:
@@ -161,6 +161,7 @@ import socket
 import stat
 
 assert not Path('/run/dstack.sock').exists()
+assert not Path('/dstack.sock').exists()
 assert Path('/run/zrpc-quote-ready').stat().st_uid == 10002
 for name in ('quote.sock', 'watch.sock'):
     item = Path('/run/zrpc-quote') / name
@@ -193,7 +194,7 @@ def container(image, user, runtime, state, backend, code, name=None):
         args += ["--mount", f"type=volume,source={state},target=/var/lib/zebra"]
     if backend is not None:
         args += ["--mount", (
-            f"type=bind,source={backend},target=/run/dstack.sock,readonly")]
+            f"type=bind,source={backend},target=/dstack.sock,readonly")]
     docker(*args, "--entrypoint", "python3", image, "-I", "-c", code)
 
 
@@ -264,7 +265,7 @@ def main():
                     "--user", "10002:0", "--env", "QUOTE_STARTUP_TIMEOUT_SECS=1",
                     "--mount", f"type=volume,source={runtime},target=/run",
                     "--mount", (f"type=bind,source={stock_backend},"
-                                "target=/run/dstack.sock,readonly"),
+                                "target=/dstack.sock,readonly"),
                     args.image, "quote",
                 )
                 bridge_started = True

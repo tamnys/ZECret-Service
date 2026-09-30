@@ -405,7 +405,7 @@ def launch_documents(args):
             "QUOTE_STARTUP_TIMEOUT_SECS": str(limits["quote_startup_timeout_secs"]),
         },
         "volumes": base["volumes"] + [{
-            "type": "bind", "source": "/run/dstack.sock", "target": "/run/dstack.sock",
+            "type": "bind", "source": "/run/dstack.sock", "target": "/dstack.sock",
             "read_only": True, "bind": {"create_host_path": False},
         }],
         "healthcheck": {

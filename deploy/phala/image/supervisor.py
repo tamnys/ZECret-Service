@@ -19,7 +19,7 @@ QUOTE_READY = RUN / "zrpc-quote-ready"
 NOTIFY = RUN / "zrpc-notify.sock"
 COOKIE_DIR = RUN / "zrpc-node"
 COOKIE = COOKIE_DIR / ".cookie"
-BACKEND = RUN / "dstack.sock"
+BACKEND = Path("/dstack.sock")
 STATE = Path("/var/lib/zebra")
 BIN = Path("/opt/zrpc/bin")
 
