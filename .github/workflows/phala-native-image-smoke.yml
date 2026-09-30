@@ -159,11 +159,91 @@ jobs:
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
           context="$source/.codex-tmp/phala-native-image-smoke/image-context"
+          scratch="$source/.codex-tmp/phala-native-image-smoke"
           base=docker.io/library/python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332
+          builder_image=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
           image="zrpc-phala-native-smoke:$GITHUB_SHA"
+          source_epoch="$(git -C "$source" show -s --format=%ct "$GITHUB_SHA")"
+          test "$source_epoch" -gt 0
           docker pull --platform linux/amd64 "$base"
-          docker build --platform linux/amd64 --network none --pull=false --no-cache \
-            --tag "$image" "$context"
+          docker pull --platform linux/amd64 "$builder_image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$builder_image")" = linux/amd64
+          docker buildx create --name zrpc-repro --driver docker-container \
+            --driver-opt "image=$builder_image" --bootstrap
+          docker buildx inspect --bootstrap zrpc-repro | tee "$scratch/builder-inspect.txt"
+          grep -E '^BuildKit version:[[:space:]]+v0\.33\.0$' "$scratch/builder-inspect.txt"
+          for pass in first second; do
+            docker buildx build --builder zrpc-repro --platform linux/amd64 --network none \
+              --pull=false --no-cache \
+              --build-arg "SOURCE_DATE_EPOCH=$source_epoch" \
+              --tag "$image" \
+              --output "type=docker,dest=$scratch/image-$pass.tar,rewrite-timestamp=true" \
+              --metadata-file "$scratch/build-$pass.json" "$context"
+            docker load --input "$scratch/image-$pass.tar"
+            docker image inspect --format '{{.Id}}' "$image" \
+              > "$scratch/image-$pass.id"
+            docker image inspect "$image" > "$scratch/image-$pass.inspect.json"
+          done
+          python3 -I - "$scratch/build-first.json" "$scratch/build-second.json" \
+            "$scratch/image-first.inspect.json" "$scratch/image-second.inspect.json" \
+            "$scratch/image-archive-sha256" "$scratch" <<'PY'
+          import json
+          import hashlib
+          from pathlib import Path
+          import sys
+          import tarfile
+
+          first, second = [json.loads(Path(path).read_bytes()) for path in sys.argv[1:3]]
+          def archive_sha256(path):
+              digest = hashlib.sha256()
+              with path.open("rb") as archive:
+                  for block in iter(lambda: archive.read(1024 * 1024), b""):
+                      digest.update(block)
+              return digest.hexdigest()
+          first_archive, second_archive = [
+              archive_sha256(Path(sys.argv[6]) / f"image-{name}.tar")
+              for name in ("first", "second")
+          ]
+          print(f"Docker archive SHA-256: {first_archive} {second_archive}")
+          first_image, second_image = [
+              json.loads(Path(path).read_bytes())[0] for path in sys.argv[3:5]
+          ]
+          print(f"Image IDs: {first_image['Id']} {second_image['Id']}")
+          print(f"Image created: {first_image['Created']} {second_image['Created']}")
+          first_layers = first_image['RootFS']['Layers']
+          second_layers = second_image['RootFS']['Layers']
+          print(f"Layer counts: {len(first_layers)} {len(second_layers)}")
+          for index, (left, right) in enumerate(zip(first_layers, second_layers)):
+              if left != right:
+                  print(f"Differing layer {index}: {left} {right}")
+          if first_image["Id"] != second_image["Id"]:
+              index = next(index for index, (left, right) in
+                           enumerate(zip(first_layers, second_layers)) if left != right)
+              def layer_entries(name):
+                  with tarfile.open(Path(sys.argv[6]) / f"image-{name}.tar") as image:
+                      manifest = json.load(image.extractfile("manifest.json"))[0]
+                      layer = image.extractfile(manifest["Layers"][index])
+                      with tarfile.open(fileobj=layer, mode="r|") as archive:
+                          return [(entry.name, entry.type, entry.mode, entry.uid,
+                                   entry.gid, entry.mtime, entry.size,
+                                   entry.linkname, entry.pax_headers)
+                                  for entry in archive]
+              left, right = layer_entries("first"), layer_entries("second")
+              print(f"First changed layer entry counts: {len(left)} {len(right)}")
+              for position, pair in enumerate(zip(left, right)):
+                  if pair[0] != pair[1]:
+                      print(f"First changed tar entry {position}: {pair}")
+          digest = first.get("containerimage.digest")
+          print(f"Exporter digests: {digest} {second.get('containerimage.digest')}")
+          if digest is not None and second.get("containerimage.digest") != digest:
+              raise SystemExit("native image exporter digest changed across builds")
+          if first_image["Id"] != second_image["Id"]:
+              raise SystemExit("native image config changed across independent builds")
+          if first_archive != second_archive:
+              raise SystemExit("native Docker archives changed across builds")
+          Path(sys.argv[5]).write_text(first_archive + "\n")
+          print(f"Twice-matching local Docker archive SHA-256: {first_archive}")
+          PY
           test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
           test "$(docker image inspect --format '{{.Config.User}}' "$image")" = 10001:0
           test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = \
@@ -197,8 +277,11 @@ jobs:
             *) exit 1 ;;
           esac
           {
-            echo 'Native amd64 image build and fail-closed smoke passed.'
+            echo 'Native amd64 twice-matching image build and fail-closed smoke passed.'
             echo "Local image ID: $(docker image inspect --format '{{.Id}}' "$image")"
+            echo "Builder: $(docker buildx version)"
+            echo "Source date epoch: $source_epoch"
+            echo "Local Docker archive SHA-256: $(cat "$scratch/image-archive-sha256")"
             echo 'No image was uploaded, pushed, or deployed; no private mode was approved.'
           } >> "$GITHUB_STEP_SUMMARY"
 
