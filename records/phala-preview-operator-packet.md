@@ -14,6 +14,29 @@ This collects the presently reviewable inputs for a **public, unverified-for-pri
 | Native Rust image inputs | [Matched native build](https://github.com/tamnys/ZECret-service/actions/runs/36721090690) at source `f0c8709e073575296a17925851589f7c3a81337b`, artifact ID `11101841679`, artifact digest `sha256:650af5e939480aa8b997561e453368fd8f7301c45c3e9b094b3b3dcbb8f55cbd`; `zrpc-node-wrapper` SHA-256 `65dfeb3c43c403e71e4c4e635ee78decf73661bdf4fb020fa417905145fe4762`; `zrpc-quote-proxy` SHA-256 `6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186`. The local tar checksum and both binary hashes were checked against the matched-build manifest. The current image-context SHA-256 is `f9144a533c9ad5d8b943b241b8b912ab0ccde14648137643b3dc5194d70389ff`. |
 | Local image checks | The [current native x86_64 candidate smoke](https://github.com/tamnys/ZECret-service/actions/runs/36724823541) passed at source `c530147`. Two local Docker archives matched SHA-256 `026c4dc1d3756079a7ebeaff4e4cb28ac5cdb25d59f10fe3cc064e85370909de` and image config ID `sha256:db5640e760fc8c69acf2fe1637f71b56100469fc58e437fc68646f2679dfaed2`. It checked quote-backend mount isolation, synthetic quote exchange, cold Zebra public RPC on retained TLS, write-method refusal, and existing-session closure after quote loss. **No image was published and no immutable registry digest exists.** These tests skip quote and certificate verification and do not boot Phala or attest TDX. |
 
+## Public catalog recheck — 2026-09-30 14:56 UTC
+
+Unauthenticated, read-only [KMS info](https://cloud-api.phala.com/api/v1/kms/kms_opjg1KBD/info)
+still associated `kms_opjg1KBD` with `phala-prod9` and `prod9`. It reported
+KMS database/RPC version `v0.6.0 (git:4699c48ea3a7e568dff4)`, with
+`version_synced: true` and `is_dev: false`, and teepod database/real version
+`v0.6.0 (git:96583b6d6a5116c86be9)`. It still listed
+`dstack-0.5.9-bd369a8c` with `is_dev: false`. This differs from the
+September 25 KMS version recorded in the pinned stock-candidate lock. The
+public response supplies neither that OS image's full digest nor the effective
+KMS disk-key authorization policy; it is provider metadata, not independent
+attestation.
+
+The public [node list](https://cloud-api.phala.com/api/v1/attestations/nodes)
+still listed `prod9` in `US-WEST-1`, with no reported status. The public
+[instance catalog](https://cloud-api.phala.com/api/v1/instance-types) still
+reported `tdx.large` as 4 vCPU/8192 MB at `$0.232000/hour` and `tdx.xlarge`
+as 8 vCPU/16384 MB at `$0.464000/hour`. These GET responses do not establish
+current account capacity, credit balance, complete storage/fee terms, or the
+configuration Phala would actually launch. The September 25 lock remains a
+dated, unapproved observation; do not silently replace its values or treat this
+public recheck as the required signed-in quote.
+
 ## Resource and lifecycle boundary
 
 The provisional size is `tdx.large` (4 vCPU, 8 GB) with 80 GB storage. [Local ARM64 node measurements](phala-resource-sizing.md) show a synced public Testnet state around 13.7 GB and roughly 4.1 GB total container memory at one observation, but do not prove whole-guest x86_64 fit or import peak. The [published instance](https://cloud.phala.com/about/instance-types) and [storage](https://cloud.phala.com/about/pricing) rates imply `$40.84416` for **168 hours** at this provisional size before fees, rounding, or account-specific terms. Storage continues billing while stopped. The September 25 signed-in form estimate is stale and not a binding quote; the public page's region description also differs from that observed account node. Keep the existing **$50 total ceiling, $45 deletion trigger, and 168-hour maximum including synchronization**. The larger 16 GB `tdx.xlarge` would cost `$79.82016` over 168 hours at the same published storage rate, so it is not an automatic fallback within the current ceiling.
