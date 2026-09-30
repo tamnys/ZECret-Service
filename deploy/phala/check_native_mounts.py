@@ -5,6 +5,8 @@ This is not a snapshot import, dstack boot, TDX boot, or full-guest fit test.
 """
 
 import argparse
+import ipaddress
+import json
 from pathlib import Path
 import socket
 import subprocess
@@ -121,6 +123,18 @@ while True:
 """
 
 
+BRIDGE_RPC_CHECK = r"""
+import socket
+import sys
+
+try:
+    with socket.create_connection((sys.argv[1], 18232), timeout=15):
+        raise AssertionError('Zebra RPC accepted a bridge-network connection')
+except ConnectionRefusedError:
+    print('Zebra RPC refused bridge-network access', flush=True)
+"""
+
+
 def docker(*args):
     subprocess.run(["docker", *args], check=True)
 
@@ -189,7 +203,22 @@ def main():
                 zebra_started = True
                 docker("exec", "--user", "10001:0", zebra_name,
                        "python3", "-I", "-c", ZEBRA_RPC_CHECK)
-        print("Native mount and cold Zebra Testnet RPC smoke passed; no dstack guest was used.")
+                network = json.loads(subprocess.check_output(
+                    ["docker", "inspect", "--format",
+                     "{{json .NetworkSettings}}", zebra_name], text=True))
+                bridge_ip = network["Networks"]["bridge"]["IPAddress"]
+                address = ipaddress.ip_address(bridge_ip)
+                if (not isinstance(address, ipaddress.IPv4Address)
+                        or address.is_loopback or address.is_unspecified
+                        or any(bindings for bindings in
+                               (network.get("Ports") or {}).values())):
+                    raise AssertionError("Zebra network or published ports differ")
+                docker("run", "--rm", "--pull=never", "--network", "bridge",
+                       "--read-only", "--cap-drop=ALL", "--security-opt",
+                       "no-new-privileges:true", "--user", "10001:0",
+                       "--entrypoint", "python3", args.image, "-I", "-c",
+                       BRIDGE_RPC_CHECK, bridge_ip)
+        print("Native mount, cold Zebra RPC and bridge isolation smoke passed; no dstack guest was used.")
     finally:
         if zebra_started:
             docker("rm", "--force", zebra_name)
