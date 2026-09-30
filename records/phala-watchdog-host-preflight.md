@@ -1,9 +1,9 @@
 # Selected external watchdog host preflight — 2026-09-30
 
 The operator selected this Mac mini, if it stays on, as the candidate host for
-the independent Phala deletion watchdog. This is a read-only host inventory,
-not an installed scheduler, deletion rehearsal, provider quote, or spending
-approval.
+the independent Phala deletion watchdog. This records read-only host checks
+and synthetic offline bundle generation, not an installed scheduler, live
+deletion rehearsal, provider quote, or spending approval.
 
 At 05:02 UTC, `colima status` reported a running native ARM64 Linux VM under
 macOS Virtualization.Framework, using Docker and VirtioFS. In that VM,
@@ -38,15 +38,35 @@ unchanged, no job ran, and no provider network call occurred. This is parser
 and static dependency evidence only, not effective-unit, timer, restart,
 latency or deletion evidence.
 
+At 05:24 UTC, a second synthetic experiment was initialized directly on the
+selected Colima VM under ignored workspace scratch storage. Its original
+deadline remained within 168 hours; its experiment and workspace IDs do not
+name a provider resource. `systemctl show Users-j.mount` reported the actual
+`/Users/j` VirtioFS mount as loaded and active, with fragment
+`/run/systemd/generator/Users-j.mount`. An offline `export-watchdog` run used
+that exact mountpoint, UID 502, host-visible ledger paths, absent credential
+paths and a `/usr/bin/false` watchdog executable. The manifest records four
+uninstalled files, `jobs_installed: false`, `credentials_read: false`,
+`network_used: false` and `timing_verified: false`. Colima's systemd 255
+accepted those exact four files when the real generated mount unit was also
+given to `systemd-analyze verify --man=no`; without the mount unit in that
+parser invocation, it correctly reported an unresolved `Users-j.mount`
+dependency. `systemd-analyze condition ConditionPathIsMountPoint=/Users/j`
+succeeded. The retained scratch bundle is
+`.codex-tmp/watchdog-host-rehearsal-20260930/bundle/`; it is a synthetic
+artifact and grants no activation or deletion authority. On the selected VM,
+the scratch and bundle directories had mode 0700, the original binding mode
+0400, and the bundle manifest mode 0600, all owned by UID 502. All four unit
+files matched the manifest's embedded bytes, with no extra bundle file.
+
 `launchctl list` showed no Colima, Phala or `zrpc` job, and a file inventory of
 the inspected macOS LaunchAgents and LaunchDaemons found no Colima auto-start
 definition. This is bounded evidence, not proof that every possible startup
 mechanism is absent. The previous authorized Colima restart did not itself
 establish recovery after a Mac reboot. The selected host therefore cannot yet
-be treated as an independent, always-running deletion control. The synthetic
-systemd bundle checked earlier with systemd 257 was not installed here; no
-watchdog unit, timer, provider call or cloud resource was activated in this
-preflight.
+be treated as an independent, always-running deletion control. Neither
+synthetic bundle was installed here; no watchdog unit, timer, provider call or
+cloud resource was activated in this preflight.
 
 Before a billable Phala deployment, bind the original experiment ledger and
 selected native binary to a persistent mount accessible to the chosen nonroot
