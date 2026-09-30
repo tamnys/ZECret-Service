@@ -7,11 +7,11 @@ use crate::LifecycleError;
 /// that systemd cannot preserve as a literal executable path.
 ///
 /// Versioned upstream syntax and implementation references:
-/// - https://github.com/systemd/systemd/blob/v257/man/systemd.syntax.xml
-/// - https://github.com/systemd/systemd/blob/v257/man/systemd.service.xml
-/// - https://github.com/systemd/systemd/blob/v257/src/core/load-fragment.c
-/// - https://github.com/systemd/systemd/blob/v257/src/core/exec-invoke.c
-/// - https://github.com/systemd/systemd/blob/v257/src/basic/string-util.c
+/// - https://github.com/systemd/systemd/blob/v255/man/systemd.syntax.xml
+/// - https://github.com/systemd/systemd/blob/v255/man/systemd.service.xml
+/// - https://github.com/systemd/systemd/blob/v255/src/core/load-fragment.c
+/// - https://github.com/systemd/systemd/blob/v255/src/core/exec-invoke.c
+/// - https://github.com/systemd/systemd/blob/v255/src/basic/string-util.c
 ///
 /// Whole-token double quotes and C escapes preserve argument boundaries. `%%`
 /// escapes specifiers, and `$$` prevents environment expansion in arguments.

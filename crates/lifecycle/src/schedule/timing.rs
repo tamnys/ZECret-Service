@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::time::Duration;
 
 // systemd's documented best timer accuracy, not an inferred scheduling bound:
-// https://github.com/systemd/systemd/blob/a446e8ff2ccb76a8719cb5f06a7fcf785dc116e2/man/systemd.timer.xml
+// https://github.com/systemd/systemd/blob/v255/man/systemd.timer.xml
 const TIMER_ACCURACY_MICROSECONDS: u64 = 1;
 const MICROSECONDS_PER_MILLISECOND: u64 = 1_000;
 
@@ -49,7 +49,7 @@ fn calendar(timestamp_millis: u64) -> Result<String, LifecycleError> {
             "schedule timestamp is not representable in UTC",
         ))?;
     // The target parser uses MIN_YEAR=1970 and MAX_YEAR=2199:
-    // https://github.com/systemd/systemd/blob/a446e8ff2ccb76a8719cb5f06a7fcf785dc116e2/src/shared/calendarspec.c
+    // https://github.com/systemd/systemd/blob/v255/src/shared/calendarspec.c
     if !(1970..=2199).contains(&value.year()) {
         return Err(LifecycleError(
             "schedule year is outside the systemd calendar parser range",

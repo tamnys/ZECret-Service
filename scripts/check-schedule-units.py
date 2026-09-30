@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "target/debug/zrpc"
 version = subprocess.run(["systemd-analyze", "--version"], capture_output=True, text=True, check=True)
 major = int(version.stdout.splitlines()[0].split()[1])
-if major < 257:
-    raise SystemExit("systemd 257 or later is required to check the selected unit contract")
+if major < 255:
+    raise SystemExit("systemd 255 or later is required to check the selected unit contract")
 if not BIN.is_file():
     raise SystemExit("build zrpc-cli with cargo build --locked -p zrpc-cli before this check")
 base = ROOT / ".codex-tmp"

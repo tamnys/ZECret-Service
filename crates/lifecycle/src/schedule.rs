@@ -31,7 +31,7 @@ const OUTPUT: LifecycleError = LifecycleError(
     "watchdog bundle export failed; preserve and inspect any partial output; no replacement is allowed",
 );
 // Documented systemd unit-name limit, including its type suffix:
-// https://github.com/systemd/systemd/blob/v257/man/systemd.unit.xml
+// https://github.com/systemd/systemd/blob/v255/man/systemd.unit.xml
 const SYSTEMD_UNIT_NAME_BYTES: usize = 255;
 
 /// All values are selected explicitly. This neither opens the provider inputs
@@ -260,7 +260,7 @@ fn generate_at(
     );
     Ok(WatchdogBundle {
         mode: "offline_uninstalled_watchdog_bundle",
-        systemd_contract_version: "257",
+        systemd_contract_version: "255",
         original_binding: ledger.binding().clone(),
         committed_ledger: reference,
         generated_at_unix_millis: now,
