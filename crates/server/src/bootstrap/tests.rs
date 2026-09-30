@@ -597,6 +597,118 @@ async fn node_listener_uses_same_tls_session_and_only_typed_loopback_rpc() {
 }
 
 #[tokio::test]
+#[ignore = "requires a live local Zebra Testnet RPC and its tmpfs cookie; quote is synthetic"]
+async fn node_listener_reaches_live_zebra_after_synthetic_attestation() {
+    let zebra_address: std::net::SocketAddrV4 = std::env::var("ZRPC_LIVE_ZEBRA_RPC")
+        .expect("set ZRPC_LIVE_ZEBRA_RPC to a numeric loopback address")
+        .parse()
+        .expect("ZRPC_LIVE_ZEBRA_RPC must be numeric IPv4");
+    let cookie = PathBuf::from(
+        std::env::var_os("ZRPC_LIVE_ZEBRA_COOKIE")
+            .expect("set ZRPC_LIVE_ZEBRA_COOKIE to the tmpfs cookie path"),
+    );
+    let node = LocalNode::new(
+        zebra_address,
+        CookieAuth::from_tmpfs_file(&cookie).expect("valid owned tmpfs Zebra cookie"),
+    )
+    .expect("loopback node RPC");
+
+    let quote_path = SocketPath::new();
+    let guest = UnixListener::bind(&quote_path.0).unwrap();
+    let quote_task = tokio::spawn(async move {
+        let (stream, _) = guest.accept().await.unwrap();
+        let service = hyper::service::service_fn(|request: Request<Incoming>| async move {
+            assert_eq!(request.uri(), "/GetQuote");
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let reply = GetQuoteResponse {
+                quote: "SYNTHETIC_NOT_A_HARDWARE_QUOTE".into(),
+                event_log: "[]".into(),
+                report_data: value["report_data"].as_str().unwrap().to_owned(),
+                vm_config: "{}".into(),
+            };
+            Ok::<_, Infallible>(Response::new(Full::new(Bytes::from(
+                serde_json::to_vec(&reply).unwrap(),
+            ))))
+        });
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    });
+
+    let (bridge_watch, bridge_peer) = UnixStream::pair().unwrap();
+    let listener = BoundNodeListener::bind_fixture(
+        "127.0.0.1:0".parse().unwrap(),
+        &quote_path.0,
+        limits(1),
+        node,
+        Some(bridge_watch),
+    )
+    .await
+    .unwrap();
+    let address = listener.local_addr().unwrap();
+    let listener_task = tokio::spawn(listener.run(std::future::pending()));
+    let tls = connect(address, client_config()).await;
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
+        .await
+        .unwrap();
+    let driver = tokio::spawn(connection);
+
+    let status_body = br#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#;
+    let rpc = |body: Vec<u8>| {
+        Request::post("/rpc")
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap()
+    };
+    let denied = sender
+        .send_request(rpc(status_body.to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    denied.into_body().collect().await.unwrap();
+
+    let attestation = sender
+        .send_request(request("/attestation", [21; 32]))
+        .await
+        .unwrap();
+    assert_eq!(attestation.status(), StatusCode::OK);
+    let evidence = attestation.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        parse_attestation_response(&evidence).unwrap().quote,
+        "SYNTHETIC_NOT_A_HARDWARE_QUOTE"
+    );
+
+    let status = sender
+        .send_request(rpc(status_body.to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    let body = status.into_body().collect().await.unwrap().to_bytes();
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["result"]["chain"], "test");
+    assert!(response["result"]["blocks"].as_u64().is_some());
+
+    let balance_body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "getaddressbalance",
+        "params": [{"addresses": [zrpc_protocol::PREVIEW_TESTNET_ADDRESS]}]
+    }))
+    .unwrap();
+    let balance = sender.send_request(rpc(balance_body)).await.unwrap();
+    assert_eq!(balance.status(), StatusCode::OK);
+    let body = balance.into_body().collect().await.unwrap().to_bytes();
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(response["result"]["balance"].as_u64().is_some());
+    assert!(response["result"]["received"].as_u64().is_some());
+
+    drop(bridge_peer);
+    assert!(listener_task.await.unwrap().is_err());
+    let _ = driver.await;
+    quote_task.await.unwrap();
+}
+
+#[tokio::test]
 async fn shutdown_cancels_pending_quote_and_closes_its_unix_connection() {
     let path = SocketPath::new();
     let guest = UnixListener::bind(&path.0).unwrap();
