@@ -42,6 +42,17 @@ address `tmTc6trRhbv96kGfA99i7vrFwb5p7BVFwc3` returned `balance: 0` and
 accepted a TCP connection and the container's non-loopback address refused it.
 No container port was published.
 
+An opt-in Rust integration test now exercises the production `LocalNode`
+adapter against this same native Zebra process. Inside the managed container,
+with `ZRPC_LIVE_ZEBRA_RPC=127.0.0.1:18232` and
+`ZRPC_LIVE_ZEBRA_COOKIE=/dev/shm/zrpc-local-node-cookie/.cookie`,
+`cargo test --locked -p zrpc-server --test live_zebra -- --ignored` passed on
+2026-09-30. It loaded the cookie through the adapter's tmpfs/ownership checks,
+read Testnet `getblockchaininfo`, and sent a checksum-validated public
+transparent-address balance request. At 04:51 UTC the node reported equal
+block and header height 4,419,664. `cargo fmt --all -- --check` passed. The
+test does not use a TEE quote, TLS listener, Tor, or the native client.
+
 At the near-tip observation, Zebra's process RSS was 711,252 kB and its high
 water mark was 715,208 kB; container cgroup memory was 1,539,530,752 bytes.
 These are local node-only samples, not a sizing result for the complete Phala
