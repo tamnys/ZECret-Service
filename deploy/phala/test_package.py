@@ -99,9 +99,27 @@ class PackageTests(unittest.TestCase):
             prepare.image_context(args)
             checked = prepare.check_image_context(argparse.Namespace(context=args.output))
             self.assertEqual(checked["status"], "local-image-context-checked-unapproved")
+            runtime = self.root / "runtime.json"
+            runtime.write_bytes(prepare.canonical({
+                "quote_startup_timeout_secs": 1,
+                "node_startup_timeout_secs": 1,
+                "node_poll_interval_ms": 1,
+                "max_connections": 1,
+                "max_quotes": 1,
+                "quote_spacing_ms": 1,
+            }))
+            render_args = argparse.Namespace(
+                image="registry.example.invalid/zrpc@sha256:" + "a" * 64,
+                image_inputs=args.output / "image-inputs.json",
+                runtime=runtime,
+                output=self.root / "rejected-launch",
+            )
             (args.output / "supervisor.py").write_bytes(b"changed")
             with self.assertRaisesRegex(ValueError, "reviewed inputs"):
                 prepare.check_image_context(argparse.Namespace(context=args.output))
+            with self.assertRaisesRegex(ValueError, "reviewed inputs"):
+                prepare.launch_documents(render_args)
+            self.assertFalse(render_args.output.exists())
             (args.output / "supervisor.py").write_bytes(
                 (prepare.HERE / "image/supervisor.py").read_bytes())
             (args.output / "snapshot.lock.json").write_bytes(b"changed")
@@ -262,8 +280,12 @@ class PackageTests(unittest.TestCase):
         image = "registry.example.invalid/zrpc@sha256:" + "a" * 64
         args = argparse.Namespace(image=image, image_inputs=inputs, runtime=runtime,
                                   output=self.root / "render")
-        with patch.object(prepare, "eligibility", return_value=(True, datetime.now(timezone.utc))):
+        with (patch.object(prepare, "eligibility",
+                           return_value=(True, datetime.now(timezone.utc))),
+              patch.object(prepare, "check_image_context") as checked_context):
             receipt = prepare.launch_documents(args)
+            checked_context.assert_called_once()
+            self.assertEqual(checked_context.call_args.args[0].context, inputs.parent)
         compose_bytes = (args.output / "compose.json").read_bytes()
         app_bytes = (args.output / "app-compose.json").read_bytes()
         compose = json.loads(compose_bytes)
