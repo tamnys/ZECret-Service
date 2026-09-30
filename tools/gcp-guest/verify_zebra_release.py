@@ -2,8 +2,9 @@
 """Explicit Zebra release preflight and local, data-only artifact staging.
 
 Preflight reads only official GitHub release/tag/advisory metadata. Staging
-accepts an already-downloaded local archive after the policy hold, verifies it
-with a separately pinned GitHub CLI, and emits an unapproved diagnostic input.
+accepts an already-downloaded local archive after the policy hold, or with the
+explicit v6.4.2 local-only exception, verifies it with a separately pinned
+GitHub CLI, and emits an unapproved diagnostic input.
 Neither command downloads release assets, builds an image, or approves privacy.
 """
 
@@ -27,10 +28,18 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
 LOCK_PATH = ROOT / "deploy/gcp/zebra-release.lock.json"
+BUNDLE_PATH = ROOT / "records/zebra-v642-attestation-bundle.json"
 API = "https://api.github.com/repos/ZcashFoundation/zebra"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SHA1 = re.compile(r"[0-9a-f]{40}\Z")
 TAR_MEMBERS = {"zebrad", "LICENSE-APACHE", "LICENSE-MIT", "README.md"}
+LOCAL_HOLD_EXCEPTION = {
+    "scope": "local-stage-and-image-context-only",
+    "release_id": 396882484,
+    "tag": "v6.4.2",
+    "asset_id": 589132406,
+    "asset_sha256": "505cab2c616dac1a5bc1c414716206a775f38f41ca6f70a60729df40c29e7b8b",
+}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -77,6 +86,7 @@ def load_lock():
     required = {"schema_version", "status", "repository", "release_id",
                 "tag", "tag_object_sha", "source_commit", "published_at",
                 "minimum_age_days", "asset", "signer_workflow",
+                "attestation_bundle",
                 "reviewed_advisory_count", "reviewed_advisory_snapshot_sha256",
                 "gh_verifier_source",
                 "gh_verifier_executable_sha256", "zebrad_elf_sha256",
@@ -107,12 +117,19 @@ def load_lock():
         raise ValueError("reviewed x86_64 asset identity missing")
     utc(asset["created_at"])
     utc(asset["updated_at"])
+    bundle = lock["attestation_bundle"]
+    if (not isinstance(bundle, dict)
+            or set(bundle) != {"source_url", "size", "sha256"}
+            or bundle["source_url"] != API + "/attestations/sha256:" + asset["sha256"]
+            or type(bundle["size"]) is not int or bundle["size"] <= 0
+            or not SHA256.fullmatch(bundle["sha256"])):
+        raise ValueError("reviewed Zebra attestation bundle identity missing")
     if lock["gh_verifier_source"] != {
-            "repository": "cli/cli", "tag": "v2.101.0",
-            "asset_name": "gh_2.101.0_linux_amd64.tar.gz",
-            "asset_size": 15282175,
-            "asset_sha256": "9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8",
-            "archive_member": "gh_2.101.0_linux_amd64/bin/gh"}:
+            "repository": "cli/cli", "tag": "v2.100.0",
+            "asset_name": "gh_2.100.0_linux_arm64.tar.gz",
+            "asset_size": 13783869,
+            "asset_sha256": "ea4e7a581a32ccad6cc7923cb1576ac5859ba4b9a16ab22eb8f8a96e78e2e961",
+            "archive_member": "gh_2.100.0_linux_arm64/bin/gh"}:
         raise ValueError("maintained attestation verifier source differs")
     for field in ("gh_verifier_executable_sha256", "zebrad_elf_sha256"):
         if lock[field] is not None and (not isinstance(lock[field], str)
@@ -300,11 +317,15 @@ def sealed_verifier_fd(verifier, expected_sha256):
 def verify_gh(lock, verifier, archive):
     if lock["gh_verifier_executable_sha256"] is None:
         raise ValueError("pinned maintained attestation verifier is not reviewed")
+    if sha256_file(BUNDLE_PATH) != (lock["attestation_bundle"]["size"],
+                                    lock["attestation_bundle"]["sha256"]):
+        raise ValueError("Zebra attestation bundle differs from reviewed bytes")
     sealed_fd = sealed_verifier_fd(verifier, lock["gh_verifier_executable_sha256"])
     try:
         executable = f"/proc/self/fd/{sealed_fd}"
         command = [executable, "attestation", "verify", str(archive),
                    "--repo", lock["repository"],
+                   "--bundle", str(BUNDLE_PATH),
                    "--signer-workflow", lock["signer_workflow"],
                    "--signer-digest", lock["source_commit"],
                    "--source-digest", lock["source_commit"],
@@ -355,10 +376,27 @@ def extract_zebrad(archive, destination):
     return size, digest
 
 
-def stage(lock, lock_sha256, archive, verifier, output):
-    preflight = live_preflight(lock)
-    if preflight["status"] != "age-eligible-metadata-only-unapproved":
+def selected_hold_exception(lock, preflight, allow_local_hold_exception):
+    if preflight["status"] == "age-eligible-metadata-only-unapproved":
+        if allow_local_hold_exception:
+            raise ValueError("local Zebra hold exception is unnecessary after eligibility")
+        return None
+    if (preflight["status"] != "held-metadata-only-unapproved"
+            or not allow_local_hold_exception
+            or {"scope": "local-stage-and-image-context-only",
+                "release_id": lock["release_id"], "tag": lock["tag"],
+                "asset_id": lock["asset"]["id"],
+                "asset_sha256": lock["asset"]["sha256"]} != LOCAL_HOLD_EXCEPTION
+            or lock["minimum_age_days"] != 7
+            or utc(preflight["checked_at_utc"]) >= utc(preflight["eligible_at_utc"])):
         raise ValueError("Zebra x86_64 asset remains inside seven-day release hold")
+    return LOCAL_HOLD_EXCEPTION.copy()
+
+
+def stage(lock, lock_sha256, archive, verifier, output,
+          allow_local_hold_exception=False):
+    preflight = live_preflight(lock)
+    exception = selected_hold_exception(lock, preflight, allow_local_hold_exception)
     if not output.is_absolute() or output.exists() or output.is_symlink():
         raise ValueError("fresh absolute output directory required")
     repository = ROOT.resolve(strict=True)
@@ -384,6 +422,7 @@ def stage(lock, lock_sha256, archive, verifier, output):
             raise ValueError("Zebra ELF differs from reviewed identity")
         receipt = {**preflight,
                    "status": "staged-diagnostic-unapproved",
+                   "local_hold_exception": exception,
                    "asset_sha256": source_hash,
                    "zebrad_elf_sha256": digest,
                    "zebrad_elf_size": size,
@@ -406,13 +445,15 @@ def main():
     staging.add_argument("--archive", required=True, type=Path)
     staging.add_argument("--verifier", required=True, type=Path)
     staging.add_argument("--output", required=True, type=Path)
+    staging.add_argument("--allow-v642-local-hold-exception", action="store_true")
     args = parser.parse_args()
     try:
         lock, lock_sha256 = load_lock()
         if args.command == "preflight":
             report = live_preflight(lock)
         else:
-            report = stage(lock, lock_sha256, args.archive, args.verifier, args.output)
+            report = stage(lock, lock_sha256, args.archive, args.verifier, args.output,
+                           args.allow_v642_local_hold_exception)
         print(json.dumps(report, indent=2))
         return 0 if report["status"] != "held-metadata-only-unapproved" else 2
     except (OSError, ValueError, TypeError, KeyError, tarfile.TarError) as error:

@@ -12,7 +12,8 @@
   "kms_catalog_id": "kms_opjg1KBD",
   "kms_endpoint": "https://kms.dstack-pha-prod9.phala.network",
   "kms_reported_version": "v0.6.0-rc0 (git:cb4c3736c5f9323440a3)",
-  "zebra_release_lock_sha256": "2dd2f2d12b9b17e5c00781da6f8bb78b85127329e26a4325b371d0439260c0ae",
+  "zebra_release_lock_sha256": "cf3f96dec3c0f1374813373e24008a8a3444e23656442905e929b51e52a65445",
+  "reviewed_zebra_local_hold_receipt_sha256": "ad74233d1a88c047b5c67322164b9d60928d2373f683b045c90cdbcf706fa4b8",
   "private_accepted": false,
   "deployment_enabled": false
 }

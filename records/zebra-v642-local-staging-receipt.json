@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "status": "staged-diagnostic-unapproved",
+  "checked_at_utc": "2026-09-30T02:06:26Z",
+  "eligible_at_utc": "2026-10-02T19:59:10Z",
+  "archive_downloaded_by_tool": false,
+  "image_built": false,
+  "private_mode_approved": false,
+  "local_hold_exception": {
+    "scope": "local-stage-and-image-context-only",
+    "release_id": 396882484,
+    "tag": "v6.4.2",
+    "asset_id": 589132406,
+    "asset_sha256": "505cab2c616dac1a5bc1c414716206a775f38f41ca6f70a60729df40c29e7b8b"
+  },
+  "asset_sha256": "505cab2c616dac1a5bc1c414716206a775f38f41ca6f70a60729df40c29e7b8b",
+  "zebrad_elf_sha256": "ccf1d3c82a1c23deb1dd535cfb442c5507107a16a23f6da2531be4132e95f517",
+  "zebrad_elf_size": 89613680,
+  "verified_attestation_count": 1,
+  "gh_verifier_executable_sha256": "28a037b967065aa314cb6d539943b55d27ef2f97c523ab2b6023ccf284e1828d",
+  "release_lock_sha256": "cf3f96dec3c0f1374813373e24008a8a3444e23656442905e929b51e52a65445"
+}

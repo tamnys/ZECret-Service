@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 STOCK_LOCK = HERE / "stock-candidate.lock.json"
 ZEBRA_LOCK = ROOT / "deploy/gcp/zebra-release.lock.json"
-STOCK_LOCK_SHA256 = "76361686948794ad56b571c7ef640110d47c79d68618c960148c414286d01510"
+REVIEWED_ZEBRA_RECEIPT = ROOT / "records/zebra-v642-local-staging-receipt.json"
+STOCK_LOCK_SHA256 = "1f2f1936ec2c991162e8849bd907b72fe501a80b8f3863096dc21fa8992d170d"
 BASE_IMAGE = ("docker.io/library/python:3.13.15-slim-trixie@sha256:"
               "37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332")
 # Created annotation in the pinned linux/amd64 OCI manifest.
@@ -24,9 +25,17 @@ NATIVE_BINARIES_SHA256 = {
     "zrpc-quote-proxy": "b1d6f3ed2e6cf39d53f6f75e588f20ae046e8b28e7fa2eb9a54b676292f5304c",
 }
 CONTEXT_FILES = ("Dockerfile", "supervisor.py", "zebra.toml", "state/.keep",
+                 "zebra-stage-receipt.json",
                  "bin/zebrad", "bin/zrpc-node-wrapper", "bin/zrpc-quote-proxy")
 IMAGE_REF = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+LOCAL_HOLD_EXCEPTION = {
+    "scope": "local-stage-and-image-context-only",
+    "release_id": 396882484,
+    "tag": "v6.4.2",
+    "asset_id": 589132406,
+    "asset_sha256": "505cab2c616dac1a5bc1c414716206a775f38f41ca6f70a60729df40c29e7b8b",
+}
 
 
 def unique_object(pairs):
@@ -38,12 +47,16 @@ def unique_object(pairs):
     return result
 
 
-def read_json(path):
+def parse_json(data):
     def reject_nonfinite(_value):
         raise ValueError("nonfinite JSON")
 
-    return json.loads(regular_bytes(path), object_pairs_hook=unique_object,
+    return json.loads(data, object_pairs_hook=unique_object,
                       parse_constant=reject_nonfinite)
+
+
+def read_json(path):
+    return parse_json(regular_bytes(path))
 
 
 def regular_bytes(path):
@@ -69,16 +82,21 @@ def utc(value):
 
 
 def locks():
-    stock = read_json(STOCK_LOCK)
+    stock_bytes = regular_bytes(STOCK_LOCK)
     zebra_bytes = regular_bytes(ZEBRA_LOCK)
-    zebra = read_json(ZEBRA_LOCK)
-    if (digest(regular_bytes(STOCK_LOCK)) != STOCK_LOCK_SHA256
+    stock = parse_json(stock_bytes)
+    zebra = parse_json(zebra_bytes)
+    if (digest(stock_bytes) != STOCK_LOCK_SHA256
             or stock.get("schema_version") != 1
             or stock.get("status") != "observed-stock-candidate-unapproved"
             or stock.get("os_image_sha256") !=
             "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033"
             or stock.get("kms_catalog_id") != "kms_opjg1KBD"
             or stock.get("zebra_release_lock_sha256") != digest(zebra_bytes)
+            or not isinstance(stock.get("reviewed_zebra_local_hold_receipt_sha256"), str)
+            or not SHA256.fullmatch(stock["reviewed_zebra_local_hold_receipt_sha256"])
+            or digest(regular_bytes(REVIEWED_ZEBRA_RECEIPT)) !=
+            stock["reviewed_zebra_local_hold_receipt_sha256"]
             or stock.get("private_accepted") is not False
             or stock.get("deployment_enabled") is not False
             or zebra.get("status") != "reviewed-metadata-only-unapproved"
@@ -135,10 +153,52 @@ def context_files_sha256(directory):
     return {name: digest(regular_bytes(directory / name)) for name in CONTEXT_FILES}
 
 
+def checked_stage_receipt(stock, zebra, lock_digest, receipt, receipt_sha256,
+                          eligible, eligible_at):
+    required = {"schema_version", "status", "checked_at_utc", "eligible_at_utc",
+                "archive_downloaded_by_tool", "image_built", "private_mode_approved",
+                "local_hold_exception", "asset_sha256", "zebrad_elf_sha256",
+                "zebrad_elf_size", "verified_attestation_count",
+                "gh_verifier_executable_sha256", "release_lock_sha256"}
+    if (not isinstance(receipt, dict) or set(receipt) != required
+            or receipt["schema_version"] != 1
+            or receipt["status"] != "staged-diagnostic-unapproved"
+            or receipt["release_lock_sha256"] != lock_digest
+            or receipt["asset_sha256"] != zebra["asset"]["sha256"]
+            or receipt["zebrad_elf_sha256"] != zebra["zebrad_elf_sha256"]
+            or receipt["zebrad_elf_size"] != zebra["zebrad_elf_size"]
+            or receipt["gh_verifier_executable_sha256"] !=
+            zebra["gh_verifier_executable_sha256"]
+            or type(receipt["verified_attestation_count"]) is not int
+            or receipt["verified_attestation_count"] < 1
+            or receipt["archive_downloaded_by_tool"] is not False
+            or receipt["image_built"] is not False
+            or receipt["private_mode_approved"] is not False
+            or zebra["zebrad_elf_sha256"] is None
+            or zebra["zebrad_elf_size"] is None
+            or utc(receipt["eligible_at_utc"]) != eligible_at):
+        raise ValueError("Zebra staging receipt is missing or unreviewed")
+    exception = receipt["local_hold_exception"]
+    checked_at = utc(receipt["checked_at_utc"])
+    if exception is None:
+        if not eligible or checked_at < eligible_at:
+            raise ValueError("Zebra stage predates eligibility without reviewed exception")
+    elif (exception != LOCAL_HOLD_EXCEPTION
+          or zebra["release_id"] != LOCAL_HOLD_EXCEPTION["release_id"]
+          or zebra["tag"] != LOCAL_HOLD_EXCEPTION["tag"]
+          or zebra["asset"]["id"] != LOCAL_HOLD_EXCEPTION["asset_id"]
+          or zebra["asset"]["sha256"] != LOCAL_HOLD_EXCEPTION["asset_sha256"]
+          or zebra["minimum_age_days"] != 7
+          or receipt_sha256 != stock["reviewed_zebra_local_hold_receipt_sha256"]
+          or checked_at >= eligible_at):
+        raise ValueError("Zebra local hold exception differs from approved asset")
+    return exception
+
+
 def image_context(args):
     stock, zebra, lock_digest = locks()
     eligible, eligible_at = eligibility(zebra)
-    if not eligible:
+    if not eligible and not getattr(args, "allow_v642_local_hold_exception", False):
         raise ValueError(f"Zebra release hold ends {eligible_at.isoformat()}")
     if (args.base_image != BASE_IMAGE
             or args.base_image_created_at != BASE_IMAGE_CREATED_AT):
@@ -149,17 +209,10 @@ def image_context(args):
             or args.quote_proxy_sha256 != NATIVE_BINARIES_SHA256["zrpc-quote-proxy"]):
         raise ValueError("native binaries differ from reviewed reproducible build")
     stage = inside_workspace(args.zebra_stage)
-    receipt = read_json(stage / "receipt.json")
-    if (receipt.get("status") != "staged-diagnostic-unapproved"
-            or receipt.get("release_lock_sha256") != lock_digest
-            or receipt.get("asset_sha256") != zebra["asset"]["sha256"]
-            or receipt.get("zebrad_elf_sha256") != zebra["zebrad_elf_sha256"]
-            or receipt.get("zebrad_elf_size") != zebra["zebrad_elf_size"]
-            or type(receipt.get("verified_attestation_count")) is not int
-            or receipt["verified_attestation_count"] < 1
-            or zebra["zebrad_elf_sha256"] is None
-            or zebra["zebrad_elf_size"] is None):
-        raise ValueError("Zebra staging receipt is missing or unreviewed")
+    receipt_bytes = regular_bytes(stage / "receipt.json")
+    receipt = parse_json(receipt_bytes)
+    exception = checked_stage_receipt(stock, zebra, lock_digest, receipt,
+                                      digest(receipt_bytes), eligible, eligible_at)
     binaries = {
         "zebrad": checked_elf(stage / "zebrad", zebra["zebrad_elf_sha256"],
                               zebra["zebrad_elf_size"]),
@@ -179,6 +232,7 @@ def image_context(args):
         destination.chmod(0o555)
     for name in ("supervisor.py", "zebra.toml"):
         (output / name).write_bytes(regular_bytes(HERE / "image" / name))
+    (output / "zebra-stage-receipt.json").write_bytes(receipt_bytes)
     (output / "state/.keep").write_bytes(b"")
     (output / "Dockerfile").write_bytes(dockerfile)
     files_sha256 = context_files_sha256(output)
@@ -191,6 +245,8 @@ def image_context(args):
         "stock_candidate_lock_sha256": STOCK_LOCK_SHA256,
         "zebra_release_lock_sha256": lock_digest,
         "zebra_asset_sha256": zebra["asset"]["sha256"],
+        "zebra_local_hold_exception": exception,
+        "zebra_stage_receipt_sha256": digest(receipt_bytes),
         "binaries_sha256": {name: digest(data) for name, data in binaries.items()},
         "dockerfile_sha256": digest(dockerfile),
         "context_files_sha256": files_sha256,
@@ -205,8 +261,6 @@ def image_context(args):
 def check_image_context(args):
     stock, zebra, lock_digest = locks()
     eligible, eligible_at = eligibility(zebra)
-    if not eligible:
-        raise ValueError(f"Zebra release hold ends {eligible_at.isoformat()}")
     directory = inside_workspace(args.context)
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("regular image context directory required")
@@ -215,6 +269,10 @@ def check_image_context(args):
     if actual_paths != expected_paths or any(path.is_symlink() for path in directory.rglob("*")):
         raise ValueError("image context has missing, extra, or symlink paths")
     receipt = read_json(directory / "image-inputs.json")
+    stage_receipt_bytes = regular_bytes(directory / "zebra-stage-receipt.json")
+    stage_receipt = parse_json(stage_receipt_bytes)
+    exception = checked_stage_receipt(stock, zebra, lock_digest, stage_receipt,
+                                      digest(stage_receipt_bytes), eligible, eligible_at)
     files_sha256 = context_files_sha256(directory)
     if (zebra["zebrad_elf_sha256"] is None
             or zebra["zebrad_elf_size"] is None
@@ -225,7 +283,9 @@ def check_image_context(args):
             or set(receipt) != {"schema_version", "status", "base_image",
                          "base_image_created_at", "stock_os_image_sha256",
                          "stock_candidate_lock_sha256", "zebra_release_lock_sha256",
-                         "zebra_asset_sha256", "binaries_sha256",
+                         "zebra_asset_sha256", "zebra_local_hold_exception",
+                         "zebra_stage_receipt_sha256",
+                         "binaries_sha256",
                          "dockerfile_sha256", "context_files_sha256",
                          "context_sha256", "private_accepted", "deployment_enabled"}
             or receipt["schema_version"] != 1
@@ -236,6 +296,8 @@ def check_image_context(args):
             or receipt["stock_candidate_lock_sha256"] != STOCK_LOCK_SHA256
             or receipt["zebra_release_lock_sha256"] != lock_digest
             or receipt["zebra_asset_sha256"] != zebra["asset"]["sha256"]
+            or receipt["zebra_local_hold_exception"] != exception
+            or receipt["zebra_stage_receipt_sha256"] != digest(stage_receipt_bytes)
             or receipt["binaries_sha256"] != {
                 "zebrad": zebra["zebrad_elf_sha256"], **NATIVE_BINARIES_SHA256}
             or receipt["dockerfile_sha256"] != files_sha256["Dockerfile"]
@@ -275,13 +337,13 @@ def runtime_config(path):
 def launch_documents(args):
     stock, zebra, lock_digest = locks()
     eligible, eligible_at = eligibility(zebra)
-    if not eligible:
+    if not eligible and not getattr(args, "allow_v642_local_hold_exception", False):
         raise ValueError(f"Zebra release hold ends {eligible_at.isoformat()}")
     if not IMAGE_REF.fullmatch(args.image):
         raise ValueError("immutable application image reference required")
     inputs_path = inside_workspace(args.image_inputs)
     inputs_bytes = regular_bytes(inputs_path)
-    inputs = read_json(inputs_path)
+    inputs = parse_json(inputs_bytes)
     if (inputs.get("status") != "local-image-context-unapproved"
             or inputs.get("zebra_release_lock_sha256") != lock_digest
             or inputs.get("zebra_asset_sha256") != zebra["asset"]["sha256"]
@@ -290,6 +352,15 @@ def launch_documents(args):
             or inputs.get("private_accepted") is not False
             or inputs.get("deployment_enabled") is not False):
         raise ValueError("image context receipt differs from reviewed inputs")
+    if not eligible:
+        if (inputs_path.name != "image-inputs.json"
+                or inputs.get("zebra_local_hold_exception") != LOCAL_HOLD_EXCEPTION
+                or inputs.get("zebra_stage_receipt_sha256") !=
+                stock["reviewed_zebra_local_hold_receipt_sha256"]):
+            raise ValueError("Zebra local hold exception differs from reviewed receipt")
+        check_image_context(argparse.Namespace(context=inputs_path.parent))
+        if regular_bytes(inputs_path) != inputs_bytes:
+            raise ValueError("image context receipt changed during verification")
     limits = runtime_config(args.runtime)
     base = {
         "image": args.image, "platform": "linux/amd64", "read_only": True,
@@ -361,6 +432,8 @@ def launch_documents(args):
         "stock_candidate_lock_sha256": STOCK_LOCK_SHA256,
         "kms_catalog_id": stock["kms_catalog_id"],
         "zebra_release_lock_sha256": lock_digest,
+        "zebra_local_hold_exception": inputs.get("zebra_local_hold_exception"),
+        "zebra_stage_receipt_sha256": inputs.get("zebra_stage_receipt_sha256"),
         "image_ref": args.image,
         "image_inputs_sha256": digest(inputs_bytes),
         "docker_compose_file_sha256": digest(compose_bytes),
@@ -387,6 +460,7 @@ def main():
     image.add_argument("--base-image", required=True)
     image.add_argument("--base-image-created-at", required=True)
     image.add_argument("--output", required=True, type=Path)
+    image.add_argument("--allow-v642-local-hold-exception", action="store_true")
     check_image = commands.add_parser("check-image-context")
     check_image.add_argument("--context", required=True, type=Path)
     launch = commands.add_parser("launch-documents")
@@ -394,6 +468,7 @@ def main():
     launch.add_argument("--image-inputs", required=True, type=Path)
     launch.add_argument("--runtime", required=True, type=Path)
     launch.add_argument("--output", required=True, type=Path)
+    launch.add_argument("--allow-v642-local-hold-exception", action="store_true")
     args = parser.parse_args()
     try:
         stock, zebra, _ = locks()

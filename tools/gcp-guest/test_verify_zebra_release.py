@@ -124,6 +124,25 @@ class ZebraArtifactTests(unittest.TestCase):
                                 Path(root) / "missing-gh", output)
             self.assertFalse(output.exists())
 
+    def test_local_hold_exception_is_only_for_the_pinned_asset(self):
+        held = self.metadata(zebra.utc(self.lock["asset"]["created_at"])
+                    + timedelta(days=1))
+        self.assertEqual(zebra.selected_hold_exception(self.lock, held, True),
+                         zebra.LOCAL_HOLD_EXCEPTION)
+        with self.assertRaisesRegex(ValueError, "release hold"):
+            zebra.selected_hold_exception(self.lock, held, False)
+        for field, value in (("id", self.lock["asset"]["id"] + 1),
+                             ("sha256", "f" * 64)):
+            with self.subTest(field=field):
+                altered = copy.deepcopy(self.lock)
+                altered["asset"][field] = value
+                with self.assertRaisesRegex(ValueError, "release hold"):
+                    zebra.selected_hold_exception(altered, held, True)
+        eligible = self.metadata(zebra.utc(self.lock["asset"]["created_at"])
+                                 + timedelta(days=7))
+        with self.assertRaisesRegex(ValueError, "unnecessary"):
+            zebra.selected_hold_exception(self.lock, eligible, True)
+
     def test_metadata_redirect_does_not_fetch_asset_body(self):
         hits = {"metadata": 0, "asset": 0}
 
@@ -174,6 +193,7 @@ class ZebraArtifactTests(unittest.TestCase):
             self.assertTrue(args[0].startswith("/proc/self/fd/"))
             self.assertEqual(len(run.call_args.kwargs["pass_fds"]), 1)
             self.assertIn("--deny-self-hosted-runners", args)
+            self.assertEqual(args[args.index("--bundle") + 1], str(zebra.BUNDLE_PATH))
             self.assertEqual(args[args.index("--signer-workflow") + 1],
                              self.lock["signer_workflow"])
             self.assertEqual(args[args.index("--source-digest") + 1],
@@ -186,6 +206,17 @@ class ZebraArtifactTests(unittest.TestCase):
             with mock.patch.object(zebra.subprocess, "run", return_value=response):
                 with self.assertRaisesRegex(ValueError, "subject or predicate"):
                     zebra.verify_gh(self.lock, verifier, Path(root) / "archive")
+
+    def test_changed_attestation_bundle_blocks_before_verifier_execution(self):
+        with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:
+            changed = Path(root) / "bundle.json"
+            changed.write_text("{}")
+            with mock.patch.object(zebra, "BUNDLE_PATH", changed), \
+                    mock.patch.object(zebra, "sealed_verifier_fd") as sealed:
+                with self.assertRaisesRegex(ValueError, "attestation bundle differs"):
+                    zebra.verify_gh(self.lock, Path(root) / "unused-gh",
+                                    Path(root) / "unused-archive")
+                sealed.assert_not_called()
 
     def test_replaced_verifier_path_cannot_change_executed_bytes(self):
         with tempfile.TemporaryDirectory(dir=zebra.ROOT) as root:
@@ -227,6 +258,8 @@ class ZebraArtifactTests(unittest.TestCase):
                     package.addfile(member, io.BytesIO(content))
             self.lock["asset"]["size"] = archive.stat().st_size
             self.lock["asset"]["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+            self.lock["attestation_bundle"]["source_url"] = (
+                zebra.API + "/attestations/sha256:" + self.lock["asset"]["sha256"])
             self.lock["zebrad_elf_size"] = len(elf)
             self.lock["zebrad_elf_sha256"] = hashlib.sha256(elf).hexdigest()
             lock_path = root / "reviewed.lock.json"
