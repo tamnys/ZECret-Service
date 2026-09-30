@@ -24,11 +24,11 @@ button:disabled{cursor:wait;opacity:.65}
 .skip:focus{top:12px}
 .site-header{border-bottom:1px solid var(--line)}
 .header-inner{min-height:77px;display:flex;align-items:center;justify-content:space-between;gap:26px}
-.brand{display:inline-flex;align-items:center;gap:9px;text-decoration:none;font-size:20px;font-weight:650;line-height:1;letter-spacing:-.035em;white-space:nowrap}
+.brand{display:inline-flex;align-items:center;gap:9px;text-decoration:none;font-size:18px;font-weight:650;line-height:1;letter-spacing:-.035em;white-space:nowrap}
 .brand img{width:34px;height:56px;flex:none;transform:translateY(-4px)}
-.brand-wordmark{display:flex;flex-direction:column;gap:3px;transform:translateY(-2px)}
+.brand-wordmark{display:flex;flex-direction:column;gap:3px;transform:translateY(1px)}
 .brand-name{display:block}
-.brand small{display:block;color:var(--text);font-size:18px;font-weight:600;letter-spacing:normal;line-height:1}
+.brand small{display:block;color:var(--muted);font-size:16.2px;font-weight:600;letter-spacing:normal;line-height:1}
 nav{display:flex;align-items:center;gap:24px;font-size:13px}
 nav a{text-decoration:none;color:var(--muted)}
 nav a:hover,nav a[aria-current="page"]{color:var(--text)}
@@ -74,6 +74,7 @@ p{color:var(--muted)}
 .flow-diagram li:not(:last-child)::after{content:"→";position:absolute;top:23px;left:calc(100% + 6px);color:var(--muted);font-size:25px;line-height:1}
 .flow-icon{display:grid;place-items:center;width:64px;height:64px;flex:none;border:1px solid #696969;background:var(--base);color:#f4b63d}
 .flow-icon svg{width:40px;height:40px}
+.flow-icon .tor-logo{width:55px;height:32px;object-fit:contain}
 .flow-diagram strong{font-weight:600}
 .how-panel{margin-top:32px;padding:30px;border:1px solid var(--line);background:var(--base)}
 .how-panel h3{font-size:24px;margin:0 0 22px}
@@ -101,9 +102,6 @@ p{color:var(--muted)}
 .methods li{padding:6px 9px;border:1px solid var(--line);font-size:12px;color:var(--text)}
 .methods p{font-size:12px;line-height:1.7;margin:15px 0 0}
 code{font:inherit}
-.payment-section h2{max-width:750px;margin-bottom:22px}
-.payment-section .shell>p:not(.section-label){max-width:780px;font-size:14px;line-height:1.75}
-.payment-section .text-link{display:inline-block;margin-top:6px}
 .site-footer{border-top:1px solid var(--line)}
 .footer-inner{display:flex;align-items:start;justify-content:space-between;gap:28px;padding-block:36px;font-size:12px}
 .footer-inner strong{font-size:16px;font-weight:650}
@@ -145,6 +143,7 @@ code{font:inherit}
   .flow-diagram li:not(:last-child)::after{content:"↓";top:calc(100% + 7px);left:21px}
   .flow-icon{width:56px;height:56px}
   .flow-icon svg{width:36px;height:36px}
+  .flow-icon .tor-logo{width:46px;height:auto}
   .how-panel{padding:23px}
   .privacy-threat-grid{gap:25px}
   .quickstart-grid{gap:31px}
