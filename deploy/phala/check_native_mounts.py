@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the preview image's local mounts and cold Zebra RPC on native Linux.
+"""Exercise local quote, Zebra and wrapper runtime wiring on native Linux.
 
 This is not a snapshot import, dstack boot, TDX boot, or full-guest fit test.
 """
@@ -179,6 +179,43 @@ print('Packaged quote bridge ready; app cannot access backend or nonquote route'
 """
 
 
+WRAPPER_TLS_CHECK = r"""
+import socket
+import ssl
+import sys
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+# Synthetic transport probe only; client release/quote approval is never inferred.
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+context.minimum_version = ssl.TLSVersion.TLSv1_3
+context.maximum_version = ssl.TLSVersion.TLSv1_3
+context.set_alpn_protocols(['http/1.1'])
+try:
+    raw = socket.create_connection(('127.0.0.1', 8443), timeout=15)
+except ConnectionRefusedError:
+    sys.exit(75)
+with raw, context.wrap_socket(raw, server_hostname='localhost') as tls:
+    assert tls.version() == 'TLSv1.3'
+    assert tls.selected_alpn_protocol() == 'http/1.1'
+    tls.sendall(b'POST /rpc HTTP/1.1\r\nHost: localhost\r\n'
+                b'Content-Type: application/json\r\nContent-Length: 0\r\n\r\n')
+    assert tls.recv(128).startswith(b'HTTP/1.1 403 ')
+print('Synthetic TLS 1.3 wrapper refused RPC before attestation', flush=True)
+"""
+
+
+WRAPPER_DOWN_CHECK = r"""
+import socket
+
+try:
+    with socket.create_connection(('127.0.0.1', 8443), timeout=15):
+        raise AssertionError('wrapper listener survived quote bridge loss')
+except ConnectionRefusedError:
+    print('Wrapper listener closed after quote bridge loss', flush=True)
+"""
+
+
 def docker(*args):
     subprocess.run(["docker", *args], check=True)
 
@@ -209,11 +246,13 @@ def main():
     zebra_name = f"zrpc-mount-smoke-zebra-{suffix}"
     backend_name = f"zrpc-mount-smoke-backend-{suffix}"
     bridge_name = f"zrpc-mount-smoke-bridge-{suffix}"
+    wrapper_name = f"zrpc-mount-smoke-wrapper-{suffix}"
     created = []
     quote_started = False
     zebra_started = False
     backend_started = False
     bridge_started = False
+    wrapper_started = False
     try:
         docker("volume", "create", "--driver", "local", "--opt", "type=tmpfs",
                "--opt", "device=tmpfs", "--opt", "o=uid=0,gid=0,mode=1775",
@@ -311,8 +350,52 @@ def main():
                        "no-new-privileges:true", "--user", "10001:0",
                        "--entrypoint", "python3", args.image, "-I", "-c",
                        BRIDGE_RPC_CHECK, bridge_ip)
-        print("Native mounts, synthetic quote service, Zebra RPC and bridge isolation passed; no dstack guest was used.")
+                # Type/CLI minima are synthetic harness values, never selected
+                # production connection, quote or spacing limits.
+                docker(
+                    "run", "--detach", "--name", wrapper_name, "--pull=never",
+                    "--network", f"container:{zebra_name}", "--read-only",
+                    "--cap-drop=ALL", "--security-opt", "no-new-privileges:true",
+                    "--user", "10001:0",
+                    "--mount", f"type=volume,source={runtime},target=/run",
+                    "--entrypoint", "/opt/zrpc/bin/zrpc-node-wrapper", args.image,
+                    "--platform", "phala-dstack", "--listen", "0.0.0.0:8443",
+                    "--node", "127.0.0.1:18232", "--max-connections", "1",
+                    "--max-quotes", "1", "--quote-spacing-ms", "1",
+                )
+                wrapper_started = True
+                while True:
+                    probe = subprocess.run(
+                        ["docker", "exec", "--user", "10001:0", zebra_name,
+                         "python3", "-I", "-c", WRAPPER_TLS_CHECK],
+                        capture_output=True, text=True,
+                    )
+                    if probe.returncode == 0:
+                        print(probe.stdout.strip())
+                        break
+                    if probe.returncode != 75:
+                        raise RuntimeError(f"wrapper TLS probe failed: {probe.stderr}")
+                    running = subprocess.check_output(
+                        ["docker", "inspect", "--format", "{{.State.Running}}",
+                         wrapper_name], text=True).strip()
+                    if running != "true":
+                        docker("logs", wrapper_name)
+                        raise RuntimeError("wrapper stopped or missed TLS readiness")
+                    time.sleep(0.1)
+                docker("rm", "--force", bridge_name)
+                bridge_started = False
+                stopped = subprocess.run(
+                    ["docker", "wait", wrapper_name], capture_output=True,
+                    text=True, check=True,
+                )
+                if stopped.stdout.strip() != "1":
+                    raise AssertionError("wrapper did not fail closed on quote loss")
+                docker("exec", "--user", "10001:0", zebra_name,
+                       "python3", "-I", "-c", WRAPPER_DOWN_CHECK)
+        print("Native quote, Zebra and wrapper shutdown smoke passed; no dstack guest was used.")
     finally:
+        if wrapper_started:
+            docker("rm", "--force", wrapper_name)
         if zebra_started:
             docker("rm", "--force", zebra_name)
         if bridge_started:

@@ -202,11 +202,11 @@ jobs:
             echo 'No image was uploaded, pushed, or deployed; no private mode was approved.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Check native quote service and cold Zebra RPC without a guest
+      - name: Check native quote, Zebra, wrapper and shutdown without a guest
         shell: bash
         run: |
           set -euo pipefail
           python3 -I "$GITHUB_WORKSPACE/source/deploy/phala/check_native_mounts.py" \
             --image "zrpc-phala-native-smoke:$GITHUB_SHA"
-          echo 'Local tmpfs, synthetic root-owned quote backend, app socket isolation and cold Zebra Testnet RPC passed; no snapshot import, live dstack or TDX guest was used.' \
+          echo 'Local tmpfs, synthetic quote backend, Zebra Testnet RPC, wrapper TLS rejection before attestation and quote-loss shutdown passed; no snapshot import, live dstack or TDX guest was used.' \
             >> "$GITHUB_STEP_SUMMARY"
