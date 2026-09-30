@@ -583,6 +583,89 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn paid_query_does_not_transmit_if_managed_tor_dies_during_claim() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor.clone());
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + MAX_CONNECTION_LIFETIME,
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        let claimed = std::cell::Cell::new(false);
+        let error = session
+            .query_from_body_authorized(
+                || async {
+                    Ok(
+                        br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#
+                            .to_vec(),
+                    )
+                },
+                || {
+                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                        claimed.set(true);
+                        tor.terminate_synthetic_child();
+                        Ok(())
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::TorUnavailable);
+        assert!(claimed.get());
+        // The fixture peer fails if it sees any RPC byte on this TLS stream.
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn paid_query_does_not_transmit_if_verified_deadline_expires_during_claim() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor);
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + Duration::from_millis(200),
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        let claimed = std::cell::Cell::new(false);
+        let error = session
+            .query_from_body_authorized(
+                || async {
+                    Ok(
+                        br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#
+                            .to_vec(),
+                    )
+                },
+                || {
+                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                        claimed.set(true);
+                        std::thread::sleep(Duration::from_millis(250));
+                        Ok(())
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ExpiredCollateral);
+        assert!(claimed.get());
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn pending_private_body_stops_at_the_first_existing_deadline_without_rpc() {
         for session_expires_first in [true, false] {
             let (result, peer) = fixture(body).await;
