@@ -26,8 +26,8 @@ BASE_IMAGE = ("docker.io/library/python:3.13.15-slim-trixie@sha256:"
 # Created annotation in the pinned linux/amd64 OCI manifest.
 BASE_IMAGE_CREATED_AT = "2026-09-19T00:58:14Z"
 NATIVE_BINARIES_SHA256 = {
-    "zrpc-node-wrapper": "372771455c84710f82d5c404825e587440993e13a0a5b9aa16b5bdf7cfab3ed0",
-    "zrpc-quote-proxy": "b1d6f3ed2e6cf39d53f6f75e588f20ae046e8b28e7fa2eb9a54b676292f5304c",
+    "zrpc-node-wrapper": "ed5288654ba0cebb10e8c1f1e491270a57c09a697c4b1cfc63780ffe6fae02c4",
+    "zrpc-quote-proxy": "ec8445ac880976a1c5f811a46ceddad16e6b7d73cde2a7a5cd449f50c419c296",
 }
 CONTEXT_FILES = ("Dockerfile", "supervisor.py", "zebra.toml", "state/.keep",
                  "zebra-stage-receipt.json",
@@ -405,7 +405,7 @@ def launch_documents(args):
             "QUOTE_STARTUP_TIMEOUT_SECS": str(limits["quote_startup_timeout_secs"]),
         },
         "volumes": base["volumes"] + [{
-            "type": "bind", "source": "/run/dstack.sock", "target": "/run/dstack.sock",
+            "type": "bind", "source": "/run/dstack.sock", "target": "/dstack.sock",
             "read_only": True, "bind": {"create_host_path": False},
         }],
         "healthcheck": {

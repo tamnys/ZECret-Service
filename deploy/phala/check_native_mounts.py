@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import subprocess
 import tempfile
+import time
 import uuid
 
 
@@ -31,7 +32,7 @@ assert os.geteuid() == 10002
 assert os.statvfs('/').f_flag & os.ST_RDONLY
 assert mount_type('/run') == 'tmpfs'
 assert stat.S_IMODE(os.stat('/run').st_mode) == 0o1775
-assert stat.S_ISSOCK(os.stat('/run/dstack.sock').st_mode)
+assert stat.S_ISSOCK(os.stat('/dstack.sock').st_mode)
 marker = Path('/run/zrpc-mount-probe')
 with marker.open('xb') as output:
     output.write(b'quote')
@@ -57,8 +58,8 @@ assert os.geteuid() == 10001
 assert os.statvfs('/').f_flag & os.ST_RDONLY
 assert mount_type('/run') == 'tmpfs'
 assert mount_type('/var/lib/zebra') != 'tmpfs'
-backend = Path('/run/dstack.sock')
-assert not backend.exists() or not stat.S_ISSOCK(backend.stat().st_mode)
+assert not Path('/run/dstack.sock').exists()
+assert not Path('/dstack.sock').exists()
 marker = Path('/run/zrpc-mount-probe')
 assert marker.read_bytes() == b'quote'
 with os.fdopen(os.open(marker, os.O_WRONLY | os.O_APPEND), 'wb') as output:
@@ -135,6 +136,49 @@ except ConnectionRefusedError:
 """
 
 
+ROOT_BACKEND_CHECK = r"""
+import os
+from pathlib import Path
+import signal
+import socket
+import stat
+
+path = Path('/backend/stock-dstack.sock')
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+    listener.bind(str(path))
+    os.chmod(path, 0o777)
+    listener.listen(1)
+    assert path.stat().st_uid == 0
+    assert stat.S_ISSOCK(path.stat().st_mode)
+    print('READY', flush=True)
+    signal.pause()
+"""
+
+
+APP_BRIDGE_CHECK = r"""
+from pathlib import Path
+import socket
+import stat
+
+assert not Path('/run/dstack.sock').exists()
+assert not Path('/dstack.sock').exists()
+assert Path('/run/zrpc-quote-ready').stat().st_uid == 10002
+for name in ('quote.sock', 'watch.sock'):
+    item = Path('/run/zrpc-quote') / name
+    metadata = item.stat()
+    assert stat.S_ISSOCK(metadata.st_mode)
+    assert metadata.st_uid == 10002
+    assert stat.S_IMODE(metadata.st_mode) == 0o660
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.connect('/run/zrpc-quote/quote.sock')
+    client.sendall(b'POST /GetKey HTTP/1.1\r\nHost: dstack\r\n'
+                   b'Content-Type: application/json\r\nContent-Length: 0\r\n\r\n')
+    assert client.recv(128).startswith(b'HTTP/1.1 404 ')
+print('Packaged quote bridge ready; app cannot access backend or nonquote route',
+      flush=True)
+"""
+
+
 def docker(*args):
     subprocess.run(["docker", *args], check=True)
 
@@ -150,7 +194,7 @@ def container(image, user, runtime, state, backend, code, name=None):
         args += ["--mount", f"type=volume,source={state},target=/var/lib/zebra"]
     if backend is not None:
         args += ["--mount", (
-            f"type=bind,source={backend},target=/run/dstack.sock,readonly")]
+            f"type=bind,source={backend},target=/dstack.sock,readonly")]
     docker(*args, "--entrypoint", "python3", image, "-I", "-c", code)
 
 
@@ -163,9 +207,13 @@ def main():
     state = f"zrpc-mount-smoke-state-{suffix}"
     quote_name = f"zrpc-mount-smoke-quote-{suffix}"
     zebra_name = f"zrpc-mount-smoke-zebra-{suffix}"
+    backend_name = f"zrpc-mount-smoke-backend-{suffix}"
+    bridge_name = f"zrpc-mount-smoke-bridge-{suffix}"
     created = []
     quote_started = False
     zebra_started = False
+    backend_started = False
+    bridge_started = False
     try:
         docker("volume", "create", "--driver", "local", "--opt", "type=tmpfs",
                "--opt", "device=tmpfs", "--opt", "o=uid=0,gid=0,mode=1775",
@@ -190,6 +238,51 @@ def main():
                     logs.terminate()
                 container(args.image, "10001:0", runtime, state, None,
                           APP_CHECK)
+                stock_backend = Path(directory) / "stock-dstack.sock"
+                docker(
+                    "run", "--detach", "--name", backend_name, "--pull=never",
+                    "--network", "none", "--read-only", "--user", "0:0",
+                    "--mount", f"type=bind,source={directory},target=/backend",
+                    "--entrypoint", "python3", args.image, "-I", "-c",
+                    ROOT_BACKEND_CHECK,
+                )
+                backend_started = True
+                with subprocess.Popen(
+                    ["docker", "logs", "--follow", backend_name],
+                    stdout=subprocess.PIPE, text=True,
+                ) as logs:
+                    if logs.stdout.readline().strip() != "READY":
+                        raise RuntimeError("root-owned backend fixture stopped before readiness")
+                    logs.terminate()
+                if stock_backend.stat().st_uid != 0:
+                    raise AssertionError("synthetic stock backend is not root-owned")
+                # The package test's one-second synthetic fixture exercises
+                # readiness; it is not a selected deployment startup limit.
+                docker(
+                    "run", "--detach", "--name", bridge_name, "--pull=never",
+                    "--network", "none", "--read-only", "--cap-drop=ALL",
+                    "--security-opt", "no-new-privileges:true",
+                    "--user", "10002:0", "--env", "QUOTE_STARTUP_TIMEOUT_SECS=1",
+                    "--mount", f"type=volume,source={runtime},target=/run",
+                    "--mount", (f"type=bind,source={stock_backend},"
+                                "target=/dstack.sock,readonly"),
+                    args.image, "quote",
+                )
+                bridge_started = True
+                while subprocess.run(
+                    ["docker", "exec", "--user", "10002:0", bridge_name,
+                     "python3", "/opt/zrpc/supervisor.py", "quote-health"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                ).returncode != 0:
+                    running = subprocess.check_output(
+                        ["docker", "inspect", "--format", "{{.State.Running}}",
+                         bridge_name], text=True).strip()
+                    if running != "true":
+                        docker("logs", bridge_name)
+                        raise RuntimeError("packaged quote service stopped before readiness")
+                    time.sleep(0.1)
+                container(args.image, "10001:0", runtime, None, None,
+                          APP_BRIDGE_CHECK)
                 docker(
                     "run", "--detach", "--name", zebra_name, "--pull=never",
                     "--network", "bridge", "--read-only", "--memory", "8g",
@@ -218,10 +311,14 @@ def main():
                        "no-new-privileges:true", "--user", "10001:0",
                        "--entrypoint", "python3", args.image, "-I", "-c",
                        BRIDGE_RPC_CHECK, bridge_ip)
-        print("Native mount, cold Zebra RPC and bridge isolation smoke passed; no dstack guest was used.")
+        print("Native mounts, synthetic quote service, Zebra RPC and bridge isolation passed; no dstack guest was used.")
     finally:
         if zebra_started:
             docker("rm", "--force", zebra_name)
+        if bridge_started:
+            docker("rm", "--force", bridge_name)
+        if backend_started:
+            docker("rm", "--force", backend_name)
         if quote_started:
             docker("rm", "--force", quote_name)
         for volume in reversed(created):

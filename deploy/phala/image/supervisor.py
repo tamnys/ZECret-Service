@@ -19,7 +19,7 @@ QUOTE_READY = RUN / "zrpc-quote-ready"
 NOTIFY = RUN / "zrpc-notify.sock"
 COOKIE_DIR = RUN / "zrpc-node"
 COOKIE = COOKIE_DIR / ".cookie"
-BACKEND = RUN / "dstack.sock"
+BACKEND = Path("/dstack.sock")
 STATE = Path("/var/lib/zebra")
 BIN = Path("/opt/zrpc/bin")
 
@@ -148,8 +148,9 @@ def run_app():
     from snapshot_import import ensure_snapshot
 
     require_runtime_mount()
-    if BACKEND.exists() and stat.S_ISSOCK(BACKEND.stat().st_mode):
-        raise RuntimeError("app container exposes dstack socket")
+    for path in (BACKEND, RUN / "dstack.sock"):
+        if path.exists() and stat.S_ISSOCK(path.stat().st_mode):
+            raise RuntimeError("app container exposes dstack socket")
     if mount_type(STATE) == "tmpfs":
         raise RuntimeError("public Zebra state is not persistent")
     state = STATE.stat()

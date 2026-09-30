@@ -22,15 +22,16 @@ must preserve the reviewed bytes and staging receipt contract.
 The emitted `app-compose.json` is a local candidate. Its raw hash cannot be
 called an authenticated Phala measurement until the provider accepts those
 exact bytes and a post-deploy GET `/api/v1/cvms/{id}/compose_file` readback
-matches. The [native Docker mount smoke](../../records/phala-native-mount-smoke.md)
-confirmed the two nonroot identities can share the named tmpfs while both
-containers remain running, the app cannot see a usable nested backend socket,
-and its public-state volume has the expected ownership. It used a synthetic
-socket and did not run dstack or the actual quote bridge. The stock Phala
-runtime still needs a test of its effective named-volume mounts, root-owned
-backend socket, quote/watch socket access, startup ordering and failure
-handling. The shared volume uses mode 1775 and both services use GID 0;
-source-mode reasoning alone cannot establish those provider behaviors.
+matches. The initial [native Docker mount smoke](../../records/phala-native-mount-smoke.md)
+confirmed tmpfs lifetime and public-state ownership, but did not run the
+actual quote bridge. The later [actual-service probe](https://github.com/tamnys/ZECret-service/actions/runs/36701303221)
+found that binding the host socket at `/run/dstack.sock` inside the quote
+container made it visible through the shared `/run` volume in the app. The
+corrected candidate binds that source at `/dstack.sock`, outside the shared
+volume, and keeps app startup checks for both paths. The rebuilt image passed
+the [native service smoke](https://github.com/tamnys/ZECret-service/actions/runs/36705200448)
+with a synthetic root-owned backend. Phala's effective mount readback and
+failure tests remain open; a local Docker run does not establish provider behavior.
 
 The official Phala Cloud OpenAPI at commit
 `7b36622c6eb4ff691b5818546c04c61b26e08809`, `AppComposeV2`, declares

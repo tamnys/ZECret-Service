@@ -6,7 +6,9 @@ import importlib.util
 import json
 from pathlib import Path
 import socket
+import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -302,7 +304,10 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(compose["services"]["app"]["image"], image)
         self.assertEqual(compose["services"]["quote"]["image"], image)
         self.assertEqual(compose["volumes"]["runtime_tmpfs"]["driver_opts"]["type"], "tmpfs")
-        self.assertIn("/run/dstack.sock", json.dumps(compose["services"]["quote"]))
+        quote_bind = compose["services"]["quote"]["volumes"][1]
+        self.assertEqual(quote_bind["source"], "/run/dstack.sock")
+        self.assertEqual(quote_bind["target"], "/dstack.sock")
+        self.assertNotIn("/dstack.sock", json.dumps(compose["services"]["app"]))
         self.assertNotIn("/run/dstack.sock", json.dumps(compose["services"]["app"]))
         self.assertFalse(receipt["private_accepted"])
         self.assertFalse(receipt["deployment_enabled"])
@@ -339,6 +344,18 @@ class PackageTests(unittest.TestCase):
             finally:
                 for item in sockets:
                     item.close()
+
+    def test_app_startup_refuses_legacy_shared_backend_socket(self):
+        with socket.socket(socket.AF_UNIX) as backend:
+            backend.bind(str(self.root / "dstack.sock"))
+            snapshot = types.ModuleType("snapshot_import")
+            snapshot.ensure_snapshot = lambda: None
+            with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
+                  patch.object(supervisor, "RUN", self.root),
+                  patch.object(supervisor, "BACKEND", self.root / "quote-only.sock"),
+                  patch.object(supervisor, "mount_type", return_value="tmpfs")):
+                with self.assertRaisesRegex(RuntimeError, "app container exposes dstack socket"):
+                    supervisor.run_app()
 
 
 if __name__ == "__main__":
