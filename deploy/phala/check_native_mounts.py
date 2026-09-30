@@ -59,7 +59,7 @@ backend = Path('/run/dstack.sock')
 assert not backend.exists() or not stat.S_ISSOCK(backend.stat().st_mode)
 marker = Path('/run/zrpc-mount-probe')
 assert marker.read_bytes() == b'quote'
-with marker.open('ab') as output:
+with os.fdopen(os.open(marker, os.O_WRONLY | os.O_APPEND), 'wb') as output:
     output.write(b'/app')
 state = Path('/var/lib/zebra')
 assert state.stat().st_uid == 10001
