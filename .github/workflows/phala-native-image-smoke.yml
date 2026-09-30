@@ -1,0 +1,203 @@
+name: Phala native amd64 preview image smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  image-smoke:
+    name: Native x86_64 image build and fail-closed startup smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact project source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+
+      - name: Fetch the exact prior native Rust build artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-native-image-smoke"
+          mkdir -p "$scratch/native-artifact"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/11069525348" \
+            > "$scratch/native-artifact-metadata.json"
+          python3 -I - "$scratch/native-artifact-metadata.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          value = json.loads(Path(sys.argv[1]).read_bytes())
+          if (value.get("id") != 11069525348
+                  or value.get("name") !=
+                  "native-rust-36822a65c96ae97213c491f2e084a5b1518df7c3"
+                  or value.get("digest") !=
+                  "sha256:3e74b413829852d67222ca7f7bbe9f888b7add46b59ca7e59eea5c232d7148dc"
+                  or value.get("expired") is not False
+                  or value.get("workflow_run", {}).get("id") != 36645815672
+                  or value.get("workflow_run", {}).get("head_sha") !=
+                  "36822a65c96ae97213c491f2e084a5b1518df7c3"):
+              raise SystemExit("prior native Rust artifact identity differs")
+          PY
+          gh run download 36645815672 --repo "$GITHUB_REPOSITORY" \
+            --name native-rust-36822a65c96ae97213c491f2e084a5b1518df7c3 \
+            --dir "$scratch/native-artifact"
+          (cd "$scratch/native-artifact" && \
+            sha256sum -c native-rust-36822a65c96ae97213c491f2e084a5b1518df7c3.tar.sha256)
+
+      - name: Stage checked application image inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-native-image-smoke"
+          python3 -I - "$source" "$scratch" <<'PY'
+          import hashlib
+          import importlib.util
+          import json
+          from pathlib import Path
+          import shutil
+          import sys
+          import tarfile
+          import urllib.request
+
+          source, scratch = map(Path, sys.argv[1:])
+          archive = scratch / "native-artifact" / (
+              "native-rust-36822a65c96ae97213c491f2e084a5b1518df7c3.tar")
+          expected = {
+              "zrpc-node-wrapper":
+                  "372771455c84710f82d5c404825e587440993e13a0a5b9aa16b5bdf7cfab3ed0",
+              "zrpc-quote-proxy":
+                  "b1d6f3ed2e6cf39d53f6f75e588f20ae046e8b28e7fa2eb9a54b676292f5304c",
+          }
+          binaries = scratch / "native-binaries"
+          binaries.mkdir()
+          with tarfile.open(archive, "r:") as package:
+              manifest = json.load(package.extractfile("./manifest.json"))
+              if (manifest.get("source_commit") !=
+                      "36822a65c96ae97213c491f2e084a5b1518df7c3"
+                      or any(manifest.get("artifact_sha256", {}).get(name) != digest
+                             for name, digest in expected.items())):
+                  raise ValueError("native Rust build receipt differs")
+              for name, digest in expected.items():
+                  member = package.getmember("./artifacts/" + name)
+                  if not member.isfile():
+                      raise ValueError("native Rust artifact is not a regular file")
+                  data = package.extractfile(member).read()
+                  if hashlib.sha256(data).hexdigest() != digest:
+                      raise ValueError("native Rust binary differs from pinned hash")
+                  path = binaries / name
+                  path.write_bytes(data)
+                  path.chmod(0o555)
+
+          def fetch(url, destination, size, digest):
+              observed = hashlib.sha256()
+              count = 0
+              with urllib.request.urlopen(url) as response, destination.open("xb") as output:
+                  while chunk := response.read(1024 * 1024):
+                      observed.update(chunk)
+                      count += len(chunk)
+                      output.write(chunk)
+              if count != size or observed.hexdigest() != digest:
+                  raise ValueError("download differs from reviewed size or SHA-256")
+
+          zebra_lock = json.loads((source / "deploy/gcp/zebra-release.lock.json").read_bytes())
+          asset = zebra_lock["asset"]
+          zebra_archive = scratch / asset["name"]
+          fetch("https://github.com/ZcashFoundation/zebra/releases/download/"
+                + zebra_lock["tag"] + "/" + asset["name"], zebra_archive,
+                asset["size"], asset["sha256"])
+          spec = importlib.util.spec_from_file_location(
+              "verify_zebra_release", source / "tools/gcp-guest/verify_zebra_release.py")
+          verifier = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(verifier)
+          stage = scratch / "zebra-stage"
+          stage.mkdir()
+          size, digest = verifier.extract_zebrad(zebra_archive, stage / "zebrad")
+          if (size, digest) != (zebra_lock["zebrad_elf_size"],
+                                zebra_lock["zebrad_elf_sha256"]):
+              raise ValueError("Zebra ELF differs from reviewed identity")
+          shutil.copyfile(source / "records/zebra-v642-local-staging-receipt.json",
+                          stage / "receipt.json")
+
+          snapshot_lock = json.loads((source / "deploy/phala/snapshot.lock.json").read_bytes())
+          wheel = snapshot_lock["decompressor"]
+          fetch(wheel["wheel_url"], scratch / wheel["wheel_filename"],
+                wheel["wheel_size_bytes"], wheel["wheel_sha256"])
+          PY
+          python3 -I "$source/deploy/phala/prepare.py" image-context \
+            --zebra-stage "$scratch/zebra-stage" \
+            --snapshot-wheel "$scratch/zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" \
+            --node-wrapper "$scratch/native-binaries/zrpc-node-wrapper" \
+            --node-wrapper-sha256 372771455c84710f82d5c404825e587440993e13a0a5b9aa16b5bdf7cfab3ed0 \
+            --quote-proxy "$scratch/native-binaries/zrpc-quote-proxy" \
+            --quote-proxy-sha256 b1d6f3ed2e6cf39d53f6f75e588f20ae046e8b28e7fa2eb9a54b676292f5304c \
+            --base-image docker.io/library/python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332 \
+            --base-image-created-at 2026-09-19T00:58:14Z \
+            --output "$scratch/image-context" \
+            --allow-v642-local-hold-exception
+          python3 -I "$source/deploy/phala/prepare.py" check-image-context \
+            --context "$scratch/image-context"
+
+      - name: Build and smoke the image without publishing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          context="$source/.codex-tmp/phala-native-image-smoke/image-context"
+          base=docker.io/library/python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332
+          image="zrpc-phala-native-smoke:$GITHUB_SHA"
+          docker pull --platform linux/amd64 "$base"
+          docker build --platform linux/amd64 --network none --pull=false --no-cache \
+            --tag "$image" "$context"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
+          test "$(docker image inspect --format '{{.Config.User}}' "$image")" = 10001:0
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = \
+            '["python3","/opt/zrpc/supervisor.py"]'
+          test "$(docker run --rm --pull=never --network none --read-only \
+            --entrypoint /opt/zrpc/bin/zebrad "$image" --version)" = 'zebrad 6.4.2'
+          docker run --rm --pull=never --network none --read-only \
+            --entrypoint /opt/zrpc/bin/zrpc-node-wrapper "$image" --help \
+            | grep -F 'Measured guest only.'
+          set +e
+          proxy_error="$(docker run --rm --pull=never --network none --read-only \
+            --entrypoint /opt/zrpc/bin/zrpc-quote-proxy "$image" --help 2>&1)"
+          proxy_status=$?
+          app_error="$(docker run --rm --pull=never --network none --read-only "$image" app 2>&1)"
+          app_status=$?
+          quote_error="$(docker run --rm --pull=never --network none --read-only "$image" quote 2>&1)"
+          quote_status=$?
+          set -e
+          test "$proxy_status" -eq 1
+          test "$proxy_error" = 'quote bridge accepts only --stock-preview'
+          test "$app_status" -eq 1
+          test "$quote_status" -eq 1
+          case "$app_error" in
+            'Phala public preview stopped: required mount is missing'|\
+            'Phala public preview stopped: shared runtime is not tmpfs') ;;
+            *) exit 1 ;;
+          esac
+          case "$quote_error" in
+            'Phala public preview stopped: required mount is missing'|\
+            'Phala public preview stopped: shared runtime is not tmpfs') ;;
+            *) exit 1 ;;
+          esac
+          {
+            echo 'Native amd64 image build and fail-closed smoke passed.'
+            echo "Local image ID: $(docker image inspect --format '{{.Id}}' "$image")"
+            echo 'No image was uploaded, pushed, or deployed; no private mode was approved.'
+          } >> "$GITHUB_STEP_SUMMARY"
