@@ -121,12 +121,21 @@ def checked_inputs(lock_path, inputs, base_manifest_sha256, native_report):
     return lock_bytes, issuer_name, artifacts
 
 
-def render_paid_rootfs(base_rootfs, issuer_name):
+def render_paid_rootfs(base_rootfs, issuer_name, base_entries):
     """Return only changed or added rootfs files, relative to rootfs."""
     overlay = {}
-    fstab = regular_bytes(base_rootfs / "etc/fstab")
+    def pinned(relative):
+        path = base_rootfs / relative
+        data = regular_bytes(path)
+        entry = base_entries["rootfs/" + str(relative)]
+        if entry != {"type": "file", "sha256": sha256(data),
+                     "mode": stat.S_IMODE(path.stat().st_mode)}:
+            raise ValueError("free stage file changed after verification")
+        return data
+
+    fstab = pinned("etc/fstab")
     rule_path = "usr/lib/udev/rules.d/65-gce-disk-naming.rules"
-    rules = regular_bytes(base_rootfs / rule_path)
+    rules = pinned(rule_path)
     for relative, data in (("etc/fstab", fstab), (rule_path, rules)):
         if sha256(data) != prepare.PINNED_DISK_FILES[relative]:
             raise ValueError("free disk source differs from reviewed profile")
@@ -143,7 +152,7 @@ def render_paid_rootfs(base_rootfs, issuer_name):
                                b"zrpc-gcp-disk-id --spent $devnode")
     spent_rule = spent_rule.replace(b"zrpc-public-data", b"zrpc-spent-data")
     overlay[rule_path] = rules + spent_rule
-    tmpfiles = regular_bytes(base_rootfs / "usr/lib/tmpfiles.d/zrpc.conf")
+    tmpfiles = pinned("usr/lib/tmpfiles.d/zrpc.conf")
     if b"zrpc-spent" in tmpfiles:
         raise ValueError("free tmpfiles profile already contains spent state")
     overlay["usr/lib/tmpfiles.d/zrpc.conf"] = (
@@ -151,7 +160,7 @@ def render_paid_rootfs(base_rootfs, issuer_name):
     )
     for unit, service in GUARDED_UNITS.items():
         path = UNIT_DIR / unit
-        data = regular_bytes(base_rootfs / path)
+        data = pinned(path)
         if b"--paid-" in data or b"zrpc-spent" in data:
             raise ValueError("free service already contains paid access")
         data = exact_replace(data,
@@ -188,11 +197,18 @@ def write_overlay(output, files, lock_bytes, base_manifest_sha256):
         path.write_bytes(data)
         path.chmod(mode)
     (output / "paid-inputs.lock.json").write_bytes(lock_bytes)
+    (output / "paid-inputs.lock.json").chmod(0o644)
     root_fd = prepare.open_stage_directory(output)
     try:
         entries = prepare.staged_inventory(root_fd)
     finally:
         os.close(root_fd)
+    for relative, (data, mode) in files.items():
+        if entries[relative] != {"type": "file", "sha256": sha256(data), "mode": mode}:
+            raise ValueError("paid overlay output changed during staging")
+    if entries["paid-inputs.lock.json"] != {
+            "type": "file", "sha256": sha256(lock_bytes), "mode": 0o644}:
+        raise ValueError("paid input lock output changed during staging")
     manifest = {
         "schema_version": 1,
         "status": STATUS,
@@ -212,6 +228,13 @@ def write_overlay(output, files, lock_bytes, base_manifest_sha256):
 def stage(base_stage, base_sha256, base_bytes, lock_path, inputs,
           native_bundle, native_revision, output, *, selected_output=None):
     prepare.verify_stage(base_stage, base_sha256, base_bytes)
+    base_manifest_bytes = regular_bytes(base_stage / "candidate-manifest.json")
+    if (len(base_manifest_bytes) != base_bytes
+            or sha256(base_manifest_bytes) != base_sha256):
+        raise ValueError("free stage manifest changed after verification")
+    base_manifest = json.loads(base_manifest_bytes,
+                               object_pairs_hook=prepare.unique_object,
+                               parse_constant=prepare.reject_nonfinite_constant)
     destination = output.resolve()
     if (destination.is_relative_to(base_stage.resolve())
             or destination.is_relative_to(inputs.resolve())
@@ -226,7 +249,8 @@ def stage(base_stage, base_sha256, base_bytes, lock_path, inputs,
         lock_path, inputs, base_sha256, native_report)
     files = {
         "rootfs/" + relative: (data, 0o644)
-        for relative, data in render_paid_rootfs(base_stage / "rootfs", issuer_name).items()
+        for relative, data in render_paid_rootfs(
+            base_stage / "rootfs", issuer_name, base_manifest["entries"]).items()
     }
     files.update({
         "rootfs/etc/zrpc/issuer.der": (artifacts["issuer_public_der"], 0o444),
@@ -276,14 +300,13 @@ def verify(output, manifest_sha256, manifest_bytes):
             "private_mode_approved": False}
 
 
-def render_paid_auditor(base_auditor, overlay):
+def render_paid_auditor(base_auditor, copied):
     if b"__STAGED_MOUNT_SHA256__" in base_auditor:
         raise ValueError("free rootfs audit has not been staged")
     pins = {}
     for relative in sorted(PAID_ROOTFS_FILES):
-        path = overlay / "rootfs" / relative
-        data = regular_bytes(path, executable=relative.endswith("/zrpc-payment-crypto"))
-        pins[relative] = (len(data), sha256(data), stat.S_IMODE(path.stat().st_mode))
+        data, mode = copied[relative]
+        pins[relative] = (len(data), sha256(data), mode)
     result = base_auditor
     for relative in ("etc/fstab", "usr/lib/udev/rules.d/65-gce-disk-naming.rules"):
         result = exact_replace(result,
@@ -296,8 +319,18 @@ def render_paid_auditor(base_auditor, overlay):
 def apply(base_stage, base_sha256, base_bytes, overlay, overlay_sha256,
           overlay_bytes, output):
     prepare.verify_stage(base_stage, base_sha256, base_bytes)
+    base_manifest_bytes = regular_bytes(base_stage / "candidate-manifest.json")
+    if len(base_manifest_bytes) != base_bytes or sha256(base_manifest_bytes) != base_sha256:
+        raise ValueError("free stage manifest changed after verification")
+    base_manifest = json.loads(base_manifest_bytes,
+                               object_pairs_hook=prepare.unique_object,
+                               parse_constant=prepare.reject_nonfinite_constant)
     verify(overlay, overlay_sha256, overlay_bytes)
-    overlay_manifest = json.loads(regular_bytes(overlay / "candidate-manifest.json"),
+    overlay_manifest_bytes = regular_bytes(overlay / "candidate-manifest.json")
+    if (len(overlay_manifest_bytes) != overlay_bytes
+            or sha256(overlay_manifest_bytes) != overlay_sha256):
+        raise ValueError("paid overlay manifest changed after verification")
+    overlay_manifest = json.loads(overlay_manifest_bytes,
                                   object_pairs_hook=prepare.unique_object,
                                   parse_constant=prepare.reject_nonfinite_constant)
     if overlay_manifest["base_stage_manifest_sha256"] != base_sha256:
@@ -310,6 +343,7 @@ def apply(base_stage, base_sha256, base_bytes, overlay, overlay_sha256,
         raise ValueError("fresh disjoint paid stage on workspace volume required")
     shutil.copytree(base_stage, output, symlinks=True)
     prepare.verify_stage(output, base_sha256, base_bytes)
+    copied = {}
     for relative in sorted(PAID_ROOTFS_FILES):
         source = overlay / "rootfs" / relative
         target = output / "rootfs" / relative
@@ -320,26 +354,49 @@ def apply(base_stage, base_sha256, base_bytes, overlay, overlay_sha256,
                 raise ValueError("paid stage file parent redirected")
         if target.is_symlink() or (target.exists() and not target.is_file()):
             raise ValueError("paid stage file redirected")
-        data = regular_bytes(source)
+        entry = overlay_manifest["entries"]["rootfs/" + relative]
+        data = regular_bytes(source, executable=relative.endswith("/zrpc-payment-crypto"))
+        mode = stat.S_IMODE(source.stat().st_mode)
+        if (entry != {"type": "file", "sha256": sha256(data), "mode": mode}):
+            raise ValueError("paid overlay file changed after verification")
         target.write_bytes(data)
-        target.chmod(stat.S_IMODE(source.stat().st_mode))
+        target.chmod(mode)
+        copied[relative] = (data, mode)
     for name, source in (("paid-inputs.lock.json", overlay / "paid-inputs.lock.json"),
                          ("paid-overlay-manifest.json", overlay / "candidate-manifest.json")):
+        data = regular_bytes(source)
+        if name == "paid-inputs.lock.json":
+            entry = overlay_manifest["entries"][name]
+            if (entry != {"type": "file", "sha256": sha256(data),
+                          "mode": stat.S_IMODE(source.stat().st_mode)}
+                    or sha256(data) != overlay_manifest["paid_inputs_lock_sha256"]):
+                raise ValueError("paid input lock changed after verification")
+        elif data != overlay_manifest_bytes:
+            raise ValueError("paid overlay manifest changed after verification")
         with (output / name).open("xb") as stream:
-            stream.write(regular_bytes(source))
+            stream.write(data)
+        (output / name).chmod(0o644)
     auditor = output / "audit-rootfs.py"
-    rendered = render_paid_auditor(regular_bytes(auditor, executable=True), overlay)
+    rendered = render_paid_auditor(regular_bytes(auditor, executable=True), copied)
     temporary = output / "audit-rootfs.paid.tmp"
     with temporary.open("xb") as stream:
         stream.write(rendered)
     temporary.chmod(0o555)
     temporary.replace(auditor)
-    base_manifest = json.loads(regular_bytes(output / "candidate-manifest.json"),
-                               object_pairs_hook=prepare.unique_object,
-                               parse_constant=prepare.reject_nonfinite_constant)
+    expected_entries = dict(base_manifest["entries"])
+    for relative, (data, mode) in copied.items():
+        expected_entries["rootfs/" + relative] = {
+            "type": "file", "sha256": sha256(data), "mode": mode}
+    expected_entries["paid-inputs.lock.json"] = {
+        "type": "file", "sha256": overlay_manifest["paid_inputs_lock_sha256"],
+        "mode": 0o644}
+    expected_entries["paid-overlay-manifest.json"] = {
+        "type": "file", "sha256": overlay_sha256, "mode": 0o644}
+    expected_entries["audit-rootfs.py"] = {
+        "type": "file", "sha256": sha256(rendered), "mode": 0o555}
     root_fd = prepare.open_stage_directory(output)
     try:
-        base_manifest["entries"] = prepare.staged_inventory(root_fd)
+        base_manifest["entries"] = prepare.staged_inventory(root_fd, expected_entries)
     finally:
         os.close(root_fd)
     base_manifest["remaining_gates"].extend([

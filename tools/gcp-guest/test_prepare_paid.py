@@ -184,6 +184,20 @@ class PaidOverlayTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.stage()
 
+    def test_stage_rejects_free_unit_changed_after_verification(self):
+        original_verify = prepare.verify_stage
+        changed = self.base / "rootfs" / paid.UNIT_DIR / "zrpc-node.service"
+
+        def swap_after_verify(*args):
+            result = original_verify(*args)
+            with changed.open("ab") as stream:
+                stream.write(b"# changed after verification\n")
+            return result
+
+        with mock.patch.object(prepare, "verify_stage", side_effect=swap_after_verify):
+            with self.assertRaisesRegex(ValueError, "changed after verification"):
+                self.stage()
+
     def test_rejects_issuer_name_with_unit_argument_separator(self):
         locked = json.loads(self.lock.read_text())
         locked["issuer_name"] = "issuer.example --access free-demo"
@@ -228,6 +242,44 @@ class PaidOverlayTests(unittest.TestCase):
         key.chmod(0o444)
         with self.assertRaises(ValueError):
             prepare.verify_stage(applied, result["manifest_sha256"], result["manifest_bytes"])
+
+    def test_apply_rejects_overlay_changed_after_verification(self):
+        overlay = self.stage()
+        original_verify = paid.verify
+        changed = self.output / "rootfs/etc/zrpc/issuer.der"
+
+        def swap_after_verify(*args):
+            result = original_verify(*args)
+            changed.chmod(0o644)
+            changed.write_bytes(b"attacker key fixture")
+            changed.chmod(0o444)
+            return result
+
+        with mock.patch.object(paid, "verify", side_effect=swap_after_verify):
+            with self.assertRaisesRegex(ValueError, "changed after verification"):
+                paid.apply(self.base, self.base_sha256, self.base_bytes,
+                           self.output, overlay["manifest_sha256"],
+                           overlay["manifest_bytes"], self.root / "paid-stage")
+
+    def test_apply_rejects_paid_stage_mutation_before_final_inventory(self):
+        overlay = self.stage()
+        applied = self.root / "paid-stage"
+        original_inventory = prepare.staged_inventory
+
+        def mutate_before_inventory(root_fd, expected=None):
+            if expected is not None and "paid-overlay-manifest.json" in expected:
+                changed = applied / "rootfs/etc/zrpc/issuer.der"
+                changed.chmod(0o644)
+                changed.write_bytes(b"attacker key fixture")
+                changed.chmod(0o444)
+            return original_inventory(root_fd, expected)
+
+        with mock.patch.object(prepare, "staged_inventory",
+                               side_effect=mutate_before_inventory):
+            with self.assertRaisesRegex(ValueError, "pinned manifest"):
+                paid.apply(self.base, self.base_sha256, self.base_bytes,
+                           self.output, overlay["manifest_sha256"],
+                           overlay["manifest_bytes"], applied)
 
     def test_overlay_rejects_extra_file_even_when_manifest_is_rewritten(self):
         self.stage()

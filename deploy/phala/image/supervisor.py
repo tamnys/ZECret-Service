@@ -197,6 +197,7 @@ def run_app():
                 "--max-connections", str(limits[0]),
                 "--max-quotes", str(limits[1]),
                 "--quote-spacing-ms", str(limits[2]),
+                "--access", "free-demo",
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
