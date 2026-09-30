@@ -78,3 +78,21 @@ tip. The ARM64 node-only measurements do not establish the full x86_64 Phala
 guest's 8 GB memory fit, 80 GB storage fit, startup timing or private mode.
 The production `LocalNode` integration test above was not rerun: its code and
 the node configuration had not changed since its passing run.
+
+## Independent tip comparison — 2026-09-30 06:46 UTC
+
+A fresh authenticated loopback `getblockchaininfo` response from the same
+native ARM64 Zebra process reported `chain: "test"`, equal block and header
+height **4,419,945**, `verificationprogress: 1.0`, and best-block hash
+`00000731fb90927bc71b4e7a5f7fc82099fc03bbcbb29be1902950d85977e9a0`.
+Within the same observation window, the
+[CipherScan Testnet API](https://api.testnet.cipherscan.app/api/blockchain-info)
+reported the same chain, height, header height, progress, and hash. Its
+[API documentation](https://cipherscan.app/docs) describes this endpoint as
+reading `getblockchaininfo` from its Zebra node. The first external read was
+one block behind; a fresh external read matched the local response.
+
+This is a time-bound agreement between two node views, not proof of network
+wide consensus or finality. It does not establish a Phala boot, TEE evidence,
+private-query protection, or deployment readiness. No Phala resource or spend
+was involved.
