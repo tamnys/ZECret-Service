@@ -57,6 +57,7 @@ p{color:var(--muted)}
 .section-head h2{margin:0 0 14px}
 .section-head>p:last-child{max-width:700px;margin:0;font-size:15px;line-height:1.7}
 .demo-grid{display:grid;grid-template-columns:minmax(240px,.75fr) minmax(0,1.25fr);gap:20px}
+.demo-handoff{margin:22px 0 0;font-size:14px;line-height:1.7}
 .demo-grid>*,.quickstart-grid>*{min-width:0}
 .panel{padding:27px;border:1px solid var(--line);background:var(--surface)}
 .demo-controls label{display:block;margin-bottom:10px;font-size:13px;font-weight:650}
