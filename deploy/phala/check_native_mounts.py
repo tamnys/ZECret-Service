@@ -282,7 +282,10 @@ status, body = post('/rpc', {
 assert status == 200
 result = json.loads(body)
 assert result['result']['chain'] == 'test'
-assert result['result']['blocks'] == 0
+blocks = result['result']['blocks']
+headers = result['result']['headers']
+assert type(blocks) is int and blocks >= 0
+assert type(headers) is int and headers >= blocks
 
 status, _ = post('/rpc', {
     'jsonrpc': '2.0', 'id': 2, 'method': 'sendrawtransaction',

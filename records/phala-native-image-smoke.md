@@ -64,3 +64,43 @@ was uploaded or pushed, so no immutable registry identity or production guest
 measurement exists yet. Reproducibility is established for this local build
 recipe and exact inputs; a later packaging, registry, or deployment step needs
 its own identity readback.
+
+The merged [main run 36714132961](https://github.com/tamnys/ZECret-service/actions/runs/36714132961)
+passed the same smoke at commit `f5b7074e2c11f74a512fd9be618722c4ccf91144`.
+Its checked context remained `019600c63c557870223a4ee67bfd1acb4576c98af08672f8477247d5168857e8`,
+but its archive SHA-256 changed to
+`e18024cc0f8149b365323d7928f8b7a57e938ff065a903b5b1044e2048ed5042`
+because the workflow had used the Git commit time as `SOURCE_DATE_EPOCH`.
+This made an evidence-only commit alter the local image identity. The revised
+workflow derives that timestamp from the checked context's pinned base-image
+Created annotation (`2026-09-19T00:58:14Z`). Its first
+[run 36714625090](https://github.com/tamnys/ZECret-service/actions/runs/36714625090)
+at source `4ee0891c2ed13c43820869fce2a9d4c39bb8d7df` produced twice-matching
+archive SHA-256
+`7666369a61754e2d5f2fa338674e4696cfe107cda238d342fc5f0496e896c6cb`
+and local image config ID
+`sha256:e126a22b330b47da87299cadef6ead7ee6e53a8008d2588bf9e90fb5739b3df2`.
+The next records-only commit tested whether that identity survived a source
+commit change without changing the checked image context.
+
+That check exposed a second archive-only input. At records-only source commit
+`3949620041a2c7f86f910267bcefa74b20dc2ffc`,
+[run 36714945133](https://github.com/tamnys/ZECret-service/actions/runs/36714945133)
+kept the image config ID above but produced archive SHA-256
+`aac4bafbe540932e5c644ede686ee8614b762c6537b4e4ef0e458742fbf302bb`:
+the Docker archive's `manifest.json` contained the Git-SHA-derived local tag.
+Its build comparison passed, but the service smoke failed on an invalid
+`blocks == 0` assertion after the live Zebra testnet node had advanced. The
+smoke now accepts a nonnegative integer block height with headers at least as
+high. A later [run 36715240699](https://github.com/tamnys/ZECret-service/actions/runs/36715240699)
+passed the complete service smoke and retained the same image config ID; its
+archive still changed with the tag. The workflow now uses a fixed, local-only
+tag. Its first [run 36715501053](https://github.com/tamnys/ZECret-service/actions/runs/36715501053)
+passed with twice-matching archive SHA-256
+`2bafc4b766d7ff71b36a04bd4a0581b0ccd875a0cc099db5a77014666cca22c8`
+and the same image config ID. A fresh
+[run 36715811635](https://github.com/tamnys/ZECret-service/actions/runs/36715811635)
+after the records-only commit `7d0296f800f5fa9d4d11f8176ed349ac5d6a2690`
+passed the complete smoke and reproduced both identities. This proves local
+archive stability across these exact two commits and their unchanged checked
+context; it does not prove a registry or guest identity.
