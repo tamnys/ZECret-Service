@@ -175,12 +175,19 @@ jobs:
               > "$scratch/image-$pass.id"
             docker image inspect "$image" > "$scratch/image-$pass.inspect.json"
           done
+          if ! cmp -s "$scratch/image-first.id" "$scratch/image-second.id"; then
+            for pass in first second; do
+              docker save --output "$scratch/image-$pass.tar" \
+                "$(cat "$scratch/image-$pass.id")"
+            done
+          fi
           python3 -I - "$scratch/build-first.json" "$scratch/build-second.json" \
             "$scratch/image-first.inspect.json" "$scratch/image-second.inspect.json" \
-            "$scratch/image-manifest-digest" <<'PY'
+            "$scratch/image-manifest-digest" "$scratch" <<'PY'
           import json
           from pathlib import Path
           import sys
+          import tarfile
 
           first, second = [json.loads(Path(path).read_bytes()) for path in sys.argv[1:3]]
           first_image, second_image = [
@@ -194,6 +201,23 @@ jobs:
           for index, (left, right) in enumerate(zip(first_layers, second_layers)):
               if left != right:
                   print(f"Differing layer {index}: {left} {right}")
+          if first_image["Id"] != second_image["Id"]:
+              index = next(index for index, (left, right) in
+                           enumerate(zip(first_layers, second_layers)) if left != right)
+              def layer_entries(name):
+                  with tarfile.open(Path(sys.argv[6]) / f"image-{name}.tar") as image:
+                      manifest = json.load(image.extractfile("manifest.json"))[0]
+                      layer = image.extractfile(manifest["Layers"][index])
+                      with tarfile.open(fileobj=layer, mode="r|") as archive:
+                          return [(entry.name, entry.type, entry.mode, entry.uid,
+                                   entry.gid, entry.mtime, entry.size,
+                                   entry.linkname, entry.pax_headers)
+                                  for entry in archive]
+              left, right = layer_entries("first"), layer_entries("second")
+              print(f"First changed layer entry counts: {len(left)} {len(right)}")
+              for position, pair in enumerate(zip(left, right)):
+                  if pair[0] != pair[1]:
+                      print(f"First changed tar entry {position}: {pair}")
           digest = first.get("containerimage.digest")
           print(f"Manifest digests: {digest} {second.get('containerimage.digest')}")
           if not isinstance(digest, str) or not digest.startswith("sha256:"):
