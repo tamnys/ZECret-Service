@@ -450,7 +450,7 @@ async fn paid_rpc_admits_once_before_node_failure() {
         )
         .unwrap(),
     );
-    shared.payment = Some(Arc::new(Redeemer::new(issuer, helper, spent)));
+    shared.payment = Some(Arc::new(Redeemer::new(issuer, helper.clone(), spent)));
     let shared = Arc::new(shared);
     let nonce = [31; 32];
     let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
@@ -529,7 +529,28 @@ async fn paid_rpc_admits_once_before_node_failure() {
         StatusCode::SERVICE_UNAVAILABLE
     );
     drop((client, driver, server));
-    let (mut client, _driver, _server) = connect_attested(shared, nonce).await;
+    drop(shared);
+    let restarted_issuer = zrpc_payments::IssuerPublic::from_public_der(
+        &helper,
+        &std::fs::read(&public_key).unwrap(),
+        "issuer.example",
+    )
+    .unwrap();
+    let reopened_spent = zrpc_payments::RedeemerStore::open(&redeemer_dir).unwrap();
+    let mut restarted = Shared::new(FakeQuote::new(), limits(1, 1, Duration::from_nanos(1)));
+    restarted.node = Some(
+        LocalNode::new(
+            "127.0.0.1:1".parse().unwrap(),
+            CookieAuth::from_cookie(b"fixture:fixture").unwrap(),
+        )
+        .unwrap(),
+    );
+    restarted.payment = Some(Arc::new(Redeemer::new(
+        restarted_issuer,
+        helper,
+        reopened_spent,
+    )));
+    let (mut client, driver, server) = connect_attested(Arc::new(restarted), nonce).await;
     assert_eq!(
         read(
             client
@@ -542,7 +563,7 @@ async fn paid_rpc_admits_once_before_node_failure() {
         StatusCode::FORBIDDEN
     );
     assert_eq!(ticket_store.balance().unwrap().uncertain, 2);
-    drop(client);
+    drop((client, driver, server));
     drop(ticket_store);
     drop(operator);
     std::fs::remove_dir_all(&root).unwrap();
