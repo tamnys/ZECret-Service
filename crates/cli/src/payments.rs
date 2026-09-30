@@ -7,8 +7,8 @@ use std::{
 use serde_json::json;
 use zrpc_payments::{
     Balance, ClientStore, IssuerPublic, IssuerStore, PendingPurchase, PrivateDirectory, PurchaseId,
-    collect_purchase, export_pending_purchase, load_private_key_file, mock_settle_purchase,
-    prepare_purchase,
+    RedeemerStore, collect_purchase, export_pending_purchase, load_private_key_file,
+    mock_settle_purchase, prepare_purchase,
 };
 
 use super::{exhausted, print_json, required, take_value};
@@ -18,6 +18,7 @@ zrpc payments prepare --resume PURCHASE_ID --ticket-store PRIVATE_DIR --issuer-p
 zrpc payments pending --ticket-store PRIVATE_DIR
 zrpc payments mock-settle --issuer-store PRIVATE_DIR --issuer-public-der FILE --issuer-private-der PRIVATE_FILE --issuer-name NAME --crypto-helper FILE --credits N --request-file PRIVATE_FILE --response-file PRIVATE_FILE
 zrpc payments collect --ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE --purchase-id PURCHASE_ID --response-file PRIVATE_FILE
+zrpc payments init-redeemer --spent-store NEW_PRIVATE_DIR
 zrpc payments balance --ticket-store PRIVATE_DIR
 All exchange files and state directories must be owner-private and outside the checkout. Settlement is simulated; these commands do not transfer ZEC or enable paid RPC.";
 
@@ -31,6 +32,7 @@ pub(super) fn run(mut args: Vec<String>) -> Result<(), String> {
         "pending" => pending_command(args),
         "mock-settle" => mock_settle(args),
         "collect" => collect(args),
+        "init-redeemer" => init_redeemer(args),
         "balance" => {
             let counts = balance(args)?;
             print_json(json!({"available": counts.available, "uncertain": counts.uncertain}))
@@ -70,6 +72,15 @@ fn public_issuer(args: &mut Vec<String>) -> Result<(IssuerPublic, PathBuf), Stri
     let path = required(args, "--issuer-public-der")?;
     let issuer_name = required(args, "--issuer-name")?;
     let helper = PathBuf::from(required(args, "--crypto-helper")?);
+    let issuer = load_public_issuer(&path, &issuer_name, &helper)?;
+    Ok((issuer, helper))
+}
+
+fn load_public_issuer(
+    path: &str,
+    issuer_name: &str,
+    helper: &Path,
+) -> Result<IssuerPublic, String> {
     let mut public_der = Vec::new();
     File::open(path)
         .and_then(|file| file.take(u16::MAX as u64 + 1).read_to_end(&mut public_der))
@@ -77,9 +88,35 @@ fn public_issuer(args: &mut Vec<String>) -> Result<(IssuerPublic, PathBuf), Stri
     if public_der.is_empty() || public_der.len() > u16::MAX as usize {
         return Err("issuer public key unavailable".into());
     }
-    let issuer = IssuerPublic::from_public_der(&helper, &public_der, &issuer_name)
-        .map_err(|_| "issuer configuration unavailable")?;
-    Ok((issuer, helper))
+    IssuerPublic::from_public_der(helper, &public_der, issuer_name)
+        .map_err(|_| "issuer configuration unavailable".into())
+}
+
+pub(super) struct QueryTicketConfig {
+    store: String,
+    public_der: String,
+    issuer_name: String,
+    helper: PathBuf,
+}
+
+impl QueryTicketConfig {
+    pub(super) fn parse(args: &mut Vec<String>) -> Result<Option<Self>, String> {
+        let Some(store) = take_value(args, "--ticket-store")? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            store,
+            public_der: required(args, "--issuer-public-der")?,
+            issuer_name: required(args, "--issuer-name")?,
+            helper: PathBuf::from(required(args, "--crypto-helper")?),
+        }))
+    }
+
+    pub(super) fn open(&self) -> Result<(IssuerPublic, ClientStore), String> {
+        let issuer = load_public_issuer(&self.public_der, &self.issuer_name, &self.helper)?;
+        let client = open_client(&self.store)?;
+        Ok((issuer, client))
+    }
 }
 
 fn open_client(path: &str) -> Result<ClientStore, String> {
@@ -216,6 +253,17 @@ fn balance(mut args: Vec<String>) -> Result<Balance, String> {
         .map_err(|_| "ticket store unavailable".to_owned())
 }
 
+fn init_redeemer(mut args: Vec<String>) -> Result<(), String> {
+    let path = PathBuf::from(required(&mut args, "--spent-store")?);
+    exhausted(&args)?;
+    if path.exists() {
+        return Err("redeemer store already exists".into());
+    }
+    let directory = PrivateDirectory::create(&path).map_err(|_| "redeemer store unavailable")?;
+    RedeemerStore::create(&directory).map_err(|_| "redeemer store unavailable")?;
+    print_json(json!({"redeemer_store_initialized": true}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +298,35 @@ mod tests {
         assert_eq!(
             balance(vec!["--ticket-store".into(), "relative".into()]),
             Err("ticket store unavailable".to_owned())
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn redeemer_initialization_never_recreates_a_missing_existing_database() {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "zrpc-redeemer-cli-{}-{}",
+            std::process::id(),
+            u128::from_be_bytes(random)
+        ));
+        let args = vec!["--spent-store".into(), path.to_string_lossy().into_owned()];
+        init_redeemer(args.clone()).unwrap();
+        let directory = PrivateDirectory::open(&path).unwrap();
+        RedeemerStore::open(&directory).unwrap();
+        assert_eq!(
+            init_redeemer(args),
+            Err("redeemer store already exists".into())
+        );
+        fs::remove_file(path.join("redeemer.sqlite3")).unwrap();
+        assert!(RedeemerStore::open(&directory).is_err());
+        assert_eq!(
+            init_redeemer(vec![
+                "--spent-store".into(),
+                path.to_string_lossy().into_owned()
+            ]),
+            Err("redeemer store already exists".into())
         );
         fs::remove_dir_all(path).unwrap();
     }

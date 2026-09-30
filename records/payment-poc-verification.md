@@ -1,6 +1,8 @@
 # Payment POC verification — 2026-09-29
 
-Status: **local simulated settlement and durable ticket issuance work; private RPC integration remains incomplete**. The `zrpc-payments` crate uses separate SQLite stores, RFC 9578 type-2 wire values, private exchange files, and a separately locked local cryptography helper. Native `zrpc payments` commands prepare, recover, mock-settle, collect, inspect pending purchases, and report balance without printing tickets. No ticket-authorized RPC query, measured paid deployment, or live testnet redemption is enabled.
+Status: **local payment issuance and ticket-authorized RPC paths implemented and tested; measured paid deployment and live testnet acceptance remain incomplete**. The `zrpc-payments` crate uses separate SQLite stores, RFC 9578 type-2 wire values, private exchange files, and a separately locked local cryptography helper. Native `zrpc payments` commands prepare, recover, mock-settle, collect, initialize the spent store, inspect pending purchases, and report balance without printing tickets. The client and server can exchange and redeem a ticket through local attested TLS tests, but no ticket-required image has been approved or deployed.
+
+The detailed observations below record successive checkpoints. Later checkpoints supersede earlier statements about features not yet implemented.
 
 ## Requested outcome and acceptance
 
@@ -95,3 +97,13 @@ The node-backed attestation service now has an explicit ticket-required construc
 Next integration work must send a locally selected ticket only after the client's existing release, Tor, attestation, freshness, and TLS checks, then require local token verification and an atomic spent-marker commit before Zebra dispatch. The helper executable and configuration must enter reviewed measured-image inputs before a ticket-required deployment can be approved. A free demonstration must remain explicit; missing helper or payment state must fail closed in ticket-required mode.
 
 A website can proceed independently with public fixtures, native-client instructions, and honest unavailable/planned states. It must not advertise working paid RPC access based on this local simulated-settlement milestone.
+
+## Current local integration checkpoint — 2026-09-30
+
+The native `zrpc query` command now accepts a private ticket store and the common issuer public configuration. It opens the ticket store only after the existing verified Tor and attested TLS connection is established. The retained session validates the request body and connection before constructing the `Authorization: PrivateToken` header; immediately before transmission, the client atomically moves that exact ticket from available to uncertain. A successful response marks it spent locally. An ambiguous transport or node error leaves it uncertain, and no second ticket is selected automatically. A concurrent exact-ticket claim test admits only one claimant.
+
+The node wrapper now requires an explicit `--access free-demo|ticket-required` choice. Ticket-required startup requires the issuer public DER, issuer name, crypto helper, and existing spent store; missing or corrupt configuration does not fall back to free access. A new `zrpc payments init-redeemer` command creates the private spent store once, while ordinary server startup opens an existing store. The GCP guest's existing free demonstration unit now passes `--access free-demo` explicitly; its synthetic packaging suite passed 38 tests. This does not package or approve a paid guest image.
+
+Managed-container checks against the isolated source copy passed: 24 ordinary payment tests (four helper-backed tests ignored by default), full CLI suites (6 and 17 tests), full transport suites (46 library tests, two ignored, and 13 integration tests), and 57 server library tests plus binary tests. The helper-backed server TLS test issued a real blinded ticket, rejected missing and invalid headers, admitted the valid token before a deliberately unavailable node returned 503, and rejected its replay. Synthetic retained-connection tests confirm that malformed requests or a failed local ticket claim transmit no query or ticket and preserve the one-use connection behavior. `git diff --check` passed after the GCP unit change. No approved private release or live chain query was available, so end-to-end testnet data and restart acceptance through a deployed measured image remain unproven.
+
+The paid image still needs a reviewed helper artifact and issuer public configuration, an appropriately protected persistent spent store, measured image inputs, and real release approval. The isolated payment branch must not alter the main thread's in-progress GCP image preparation or insert synthetic approvals.

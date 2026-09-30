@@ -71,6 +71,16 @@ impl IssuerPublic {
     pub fn key_id(&self) -> [u8; 32] {
         self.key_id
     }
+
+    /// Build a redacted standard header only for a token bound to this shared
+    /// challenge and issuer. This validates local framing before the ticket is
+    /// claimed for a request.
+    pub fn authorization_for(&self, token: &[u8]) -> Result<SecretBytes, IssuanceError> {
+        let value =
+            crate::http::format_authorization(token, self.challenge.as_bytes(), self.key_id)
+                .map_err(|_| IssuanceError)?;
+        Ok(SecretBytes::new(value.as_bytes().to_vec()))
+    }
 }
 
 impl fmt::Debug for IssuerPublic {

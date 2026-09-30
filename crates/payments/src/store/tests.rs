@@ -254,6 +254,74 @@ fn concurrent_clients_can_take_one_ticket_only_once() {
 }
 
 #[test]
+fn previewed_ticket_is_claimed_once_without_switching_to_another() {
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    let id = [12; 32];
+    let mut client = ClientStore::create(&directory).unwrap();
+    client
+        .store_prepared(
+            id,
+            &[
+                pending(b"blind-a", b"state-a"),
+                pending(b"blind-b", b"state-b"),
+            ],
+        )
+        .unwrap();
+    client
+        .collect_verified(
+            id,
+            &[
+                SecretBytes::new(b"token-a".to_vec()),
+                SecretBytes::new(b"token-b".to_vec()),
+            ],
+        )
+        .unwrap();
+    drop(client);
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let path = fixture.path.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let directory = PrivateDirectory::open(&path).unwrap();
+            let mut client = ClientStore::open(&directory).unwrap();
+            let preview = client.preview_available().unwrap().unwrap();
+            assert_eq!(preview.token.expose(), b"token-a");
+            barrier.wait();
+            client.claim_available(&preview).is_ok()
+        }));
+    }
+    assert_eq!(
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .filter(|won| *won)
+            .count(),
+        1
+    );
+    let mut client = ClientStore::open(&directory).unwrap();
+    assert_eq!(
+        client.balance().unwrap(),
+        Balance {
+            available: 1,
+            uncertain: 1
+        }
+    );
+    let next = client.preview_available().unwrap().unwrap();
+    assert_eq!(next.token.expose(), b"token-b");
+    client.claim_available(&next).unwrap();
+    assert_eq!(
+        client.balance().unwrap(),
+        Balance {
+            available: 0,
+            uncertain: 2
+        }
+    );
+}
+
+#[test]
 fn issuer_authorization_is_exact_and_issuance_is_idempotent() {
     let fixture = Fixture::new();
     let directory = fixture.directory();

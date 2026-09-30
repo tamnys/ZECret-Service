@@ -120,6 +120,12 @@ impl SecretBytes {
     }
 }
 
+impl AsRef<[u8]> for SecretBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.expose()
+    }
+}
+
 impl fmt::Debug for SecretBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("SecretBytes([redacted])")
@@ -512,6 +518,59 @@ impl ClientStore {
         })
     }
 
+    /// Read one available ticket without changing its state. Call this only
+    /// after the private transport has passed its release and connection
+    /// checks. `claim_available` must succeed before any wire transmission.
+    pub fn preview_available(&self) -> Result<Option<SelectedTicket>, StoreError> {
+        let selected = self
+            .0
+            .query_row(
+                "SELECT marker, token FROM tickets WHERE state='available' ORDER BY rowid LIMIT 1",
+                [],
+                |row| {
+                    let marker: Vec<u8> = row.get(0)?;
+                    Ok(SelectedTicket {
+                        marker: marker
+                            .try_into()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        token: SecretBytes::new(row.get(1)?),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| StoreError::StorageUnavailable)?;
+        if let Some(ticket) = &selected {
+            if digest(ticket.token.expose()) != ticket.marker {
+                return Err(StoreError::MissingOrCorrupt);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Commit the uncertain state only for the exact ticket previewed above.
+    /// A competing client wins at most once; no alternate ticket is selected.
+    pub fn claim_available(&mut self, ticket: &SelectedTicket) -> Result<(), StoreError> {
+        if digest(ticket.token.expose()) != ticket.marker {
+            return Err(StoreError::MissingOrCorrupt);
+        }
+        let transaction = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| StoreError::StorageUnavailable)?;
+        let changed = transaction
+            .execute(
+                "UPDATE tickets SET state='uncertain' WHERE marker=?1 AND token=?2 AND state='available'",
+                params![ticket.marker.as_slice(), ticket.token.expose()],
+            )
+            .map_err(|_| StoreError::StorageUnavailable)?;
+        if changed != 1 {
+            return Err(StoreError::InvalidTransition);
+        }
+        transaction
+            .commit()
+            .map_err(|_| StoreError::StorageUnavailable)
+    }
+
     /// Call only after all local release, transport, attestation, and request
     /// checks pass. `validate` checks the selected ticket while the write
     /// transaction is open; failure leaves it available. A successful take
@@ -562,7 +621,7 @@ impl ClientStore {
         Ok(selected)
     }
 
-    pub(crate) fn mark_spent(&mut self, marker: Marker) -> Result<(), StoreError> {
+    pub fn mark_spent(&mut self, marker: Marker) -> Result<(), StoreError> {
         let changed = self
             .0
             .execute(

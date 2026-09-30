@@ -3,11 +3,16 @@
 //! quote-only bridge socket. This binary grants no client release approval.
 
 use std::{
+    fs::{self, File, OpenOptions},
+    io::Read,
     net::{SocketAddr, SocketAddrV4},
     num::NonZeroUsize,
-    path::Path,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    path::{Component, Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
+use zrpc_payments::{IssuerPublic, PrivateDirectory, Redeemer, RedeemerStore};
 use zrpc_server::{
     attestation::BootstrapLimits,
     bootstrap::BoundNodeListener,
@@ -15,13 +20,24 @@ use zrpc_server::{
 };
 
 const COOKIE_PATH: &str = "/run/zrpc-node/.cookie";
-const USAGE: &str = "zrpc-node-wrapper --listen NUMERIC_IP:PORT --node LOOPBACK_IPV4:PORT --max-connections COUNT --max-quotes COUNT --quote-spacing-ms INTEGER\nMeasured guest only. The Zebra cookie must be at /run/zrpc-node/.cookie on tmpfs; the quote-only socket path is compiled in. This launcher does not approve client private mode.";
+const USAGE: &str = "zrpc-node-wrapper --listen NUMERIC_IP:PORT --node LOOPBACK_IPV4:PORT --max-connections COUNT --max-quotes COUNT --quote-spacing-ms INTEGER --access free-demo|ticket-required\nTicket-required mode also needs --issuer-public-der ROOT_OWNED_FILE --issuer-name COMMON_NAME --crypto-helper ROOT_OWNED_EXECUTABLE --spent-store PRIVATE_DIR. Measured guest only; the Zebra cookie remains on tmpfs. This launcher does not approve client private mode.";
+
+enum PaymentAccess {
+    FreeDemo,
+    TicketRequired {
+        public_der: PathBuf,
+        issuer_name: String,
+        helper: PathBuf,
+        spent_store: PathBuf,
+    },
+}
 
 struct Config {
     gcp: bool,
     listen: SocketAddr,
     node: SocketAddrV4,
     limits: BootstrapLimits,
+    payment: PaymentAccess,
 }
 
 fn take(args: &mut Vec<String>, name: &str) -> Result<String, &'static str> {
@@ -37,6 +53,16 @@ fn take(args: &mut Vec<String>, name: &str) -> Result<String, &'static str> {
 }
 
 fn parse(mut args: Vec<String>) -> Result<Config, &'static str> {
+    let payment = match take(&mut args, "--access")?.as_str() {
+        "free-demo" => PaymentAccess::FreeDemo,
+        "ticket-required" => PaymentAccess::TicketRequired {
+            public_der: PathBuf::from(take(&mut args, "--issuer-public-der")?),
+            issuer_name: take(&mut args, "--issuer-name")?,
+            helper: PathBuf::from(take(&mut args, "--crypto-helper")?),
+            spent_store: PathBuf::from(take(&mut args, "--spent-store")?),
+        },
+        _ => return Err("invalid RPC access policy"),
+    };
     let gcp = if args.iter().any(|arg| arg == "--platform") {
         match take(&mut args, "--platform")?.as_str() {
             "gcp-tdx" => true,
@@ -77,7 +103,69 @@ fn parse(mut args: Vec<String>) -> Result<Config, &'static str> {
         listen,
         node,
         limits,
+        payment,
     })
+}
+
+fn reviewed_file(path: &Path, executable: bool) -> Result<File, &'static str> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("payment configuration unavailable");
+    }
+    for ancestor in path.ancestors().skip(1) {
+        let metadata =
+            fs::symlink_metadata(ancestor).map_err(|_| "payment configuration unavailable")?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            return Err("payment configuration unavailable");
+        }
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| "payment configuration unavailable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "payment configuration unavailable")?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || (executable && metadata.mode() & 0o111 == 0)
+    {
+        return Err("payment configuration unavailable");
+    }
+    Ok(file)
+}
+
+fn paid_redeemer(payment: PaymentAccess) -> Result<Option<Arc<Redeemer>>, &'static str> {
+    let PaymentAccess::TicketRequired {
+        public_der,
+        issuer_name,
+        helper,
+        spent_store,
+    } = payment
+    else {
+        return Ok(None);
+    };
+    let public_file = reviewed_file(&public_der, false)?;
+    reviewed_file(&helper, true)?;
+    let mut public_bytes = Vec::new();
+    public_file
+        .take(u16::MAX as u64 + 1)
+        .read_to_end(&mut public_bytes)
+        .map_err(|_| "payment configuration unavailable")?;
+    if public_bytes.is_empty() || public_bytes.len() > u16::MAX as usize {
+        return Err("payment configuration unavailable");
+    }
+    let issuer = IssuerPublic::from_public_der(&helper, &public_bytes, &issuer_name)
+        .map_err(|_| "payment configuration unavailable")?;
+    let directory =
+        PrivateDirectory::open(&spent_store).map_err(|_| "payment state unavailable")?;
+    let spent = RedeemerStore::open(&directory).map_err(|_| "payment state unavailable")?;
+    Ok(Some(Arc::new(Redeemer::new(issuer, helper, spent))))
 }
 
 async fn run() -> Result<(), &'static str> {
@@ -86,18 +174,25 @@ async fn run() -> Result<(), &'static str> {
         println!("{USAGE}");
         return Ok(());
     }
-    let config = parse(args)?;
+    let Config {
+        gcp,
+        listen,
+        node: node_address,
+        limits,
+        payment,
+    } = parse(args)?;
     if rustix::process::geteuid().as_raw() == 0 {
         return Err("node wrapper must run as a non-root user");
     }
-    let cookie_path = if config.gcp {
+    let payment = paid_redeemer(payment)?;
+    let cookie_path = if gcp {
         "/run/zrpc-wrapper/.cookie"
     } else {
         COOKIE_PATH
     };
     let cookie = CookieAuth::from_tmpfs_file(Path::new(cookie_path))
         .map_err(|_| "memory-backed Zebra cookie unavailable")?;
-    let node = LocalNode::new(config.node, cookie).map_err(|_| "invalid node configuration")?;
+    let node = LocalNode::new(node_address, cookie).map_err(|_| "invalid node configuration")?;
 
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         .map_err(|_| "shutdown signal unavailable")?;
@@ -105,10 +200,13 @@ async fn run() -> Result<(), &'static str> {
         .map_err(|_| "shutdown signal unavailable")?;
     // The production constructor has no caller-supplied quote socket: it
     // probes only the local quote-only bridge before binding TCP.
-    let listener = if config.gcp {
-        BoundNodeListener::bind_gcp(config.listen, config.limits, node).await
-    } else {
-        BoundNodeListener::bind(config.listen, config.limits, node).await
+    let listener = match (gcp, payment) {
+        (true, Some(payment)) => {
+            BoundNodeListener::bind_gcp_paid(listen, limits, node, payment).await
+        }
+        (false, Some(payment)) => BoundNodeListener::bind_paid(listen, limits, node, payment).await,
+        (true, None) => BoundNodeListener::bind_gcp(listen, limits, node).await,
+        (false, None) => BoundNodeListener::bind(listen, limits, node).await,
     }
     .map_err(|_| "node listener unavailable")?;
     listener
@@ -143,6 +241,8 @@ mod tests {
             "1",
             "--quote-spacing-ms",
             "1000",
+            "--access",
+            "free-demo",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -182,5 +282,51 @@ mod tests {
         let mut args = valid();
         args.extend(["--platform".into(), "unknown".into()]);
         assert!(parse(args).is_err());
+    }
+
+    #[test]
+    fn ticket_required_policy_needs_complete_explicit_configuration() {
+        let mut args = valid();
+        let access = args.iter().position(|arg| arg == "--access").unwrap();
+        args[access + 1] = "ticket-required".into();
+        args.extend([
+            "--issuer-public-der".into(),
+            "/etc/zrpc/issuer.der".into(),
+            "--issuer-name".into(),
+            "issuer.example".into(),
+            "--crypto-helper".into(),
+            "/usr/local/bin/zrpc-payment-crypto".into(),
+            "--spent-store".into(),
+            "/var/lib/zrpc-spent".into(),
+        ]);
+        assert!(matches!(
+            parse(args.clone()).unwrap().payment,
+            PaymentAccess::TicketRequired { .. }
+        ));
+        for option in [
+            "--issuer-public-der",
+            "--issuer-name",
+            "--crypto-helper",
+            "--spent-store",
+        ] {
+            let mut incomplete = args.clone();
+            let index = incomplete.iter().position(|arg| arg == option).unwrap();
+            incomplete.drain(index..index + 2);
+            assert!(parse(incomplete).is_err(), "{option}");
+        }
+        let mut invalid_free = valid();
+        invalid_free.extend(["--issuer-name".into(), "issuer.example".into()]);
+        assert!(parse(invalid_free).is_err());
+        assert!(matches!(
+            parse(valid()).unwrap().payment,
+            PaymentAccess::FreeDemo
+        ));
+        let mut missing = valid();
+        missing.truncate(missing.len() - 2);
+        assert!(parse(missing).is_err());
+        let mut invalid = valid();
+        let access = invalid.iter().position(|arg| arg == "--access").unwrap();
+        invalid[access + 1] = "unknown".into();
+        assert!(parse(invalid).is_err());
     }
 }

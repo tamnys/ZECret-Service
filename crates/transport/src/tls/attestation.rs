@@ -507,10 +507,56 @@ impl VerifiedRpcSession {
         self.query(&request).await
     }
 
-    pub async fn query(mut self, request: &RpcRequest) -> Result<Value, SafeError> {
+    /// Paid RPC path. `prepare` is not called until release approval, Tor,
+    /// attestation, TLS lifetime, and typed request validation have succeeded.
+    /// It returns a locally formatted header and a claim callback. The header
+    /// is checked and inserted before the claim is made; after a successful
+    /// claim, the next operation is the retained connection's wire send.
+    pub async fn query_from_body_authorized<F, Fut, P, C, H, R>(
+        self,
+        body: F,
+        prepare: P,
+    ) -> Result<(Value, R), SafeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, SafeError>>,
+        P: FnOnce() -> Result<(H, R, C), SafeError>,
+        H: AsRef<[u8]>,
+        C: FnOnce() -> Result<(), SafeError>,
+    {
+        self.ensure_private_ready()?;
+        let deadline = self.private_operation_deadline()?;
+        let bytes = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), body())
+            .await
+            .map_err(|_| self.ensure_lifetimes().err().unwrap_or_else(expired))??;
+        self.ensure_private_ready()?;
+        let request = parse_request(&bytes)?;
+        self.query_with_claim(&request, || {
+            let (header, receipt, claim) = prepare()?;
+            Ok((Some(header), receipt, claim))
+        })
+        .await
+    }
+
+    pub async fn query(self, request: &RpcRequest) -> Result<Value, SafeError> {
+        self.query_with_claim(request, || Ok((None::<&[u8]>, (), || Ok(()))))
+            .await
+            .map(|(value, ())| value)
+    }
+
+    async fn query_with_claim<P, C, H, R>(
+        mut self,
+        request: &RpcRequest,
+        prepare: P,
+    ) -> Result<(Value, R), SafeError>
+    where
+        P: FnOnce() -> Result<(Option<H>, R, C), SafeError>,
+        H: AsRef<[u8]>,
+        C: FnOnce() -> Result<(), SafeError>,
+    {
         self.ensure_private_ready()?;
         let body = encode_request(request)?;
-        let http = Request::post("/rpc")
+        let mut http = Request::post("/rpc")
             .header(header::HOST, self.authority.as_str())
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json")
@@ -518,6 +564,15 @@ impl VerifiedRpcSession {
             .body(Full::new(Bytes::from(body)))
             .map_err(|_| unavailable())?;
         let operation_deadline = self.private_operation_deadline()?;
+        self.ensure_private_ready()?;
+        let (authorization, receipt, claim) = prepare()?;
+        if let Some(authorization) = authorization {
+            let value = header::HeaderValue::from_bytes(authorization.as_ref())
+                .map_err(|_| unavailable())?;
+            http.headers_mut().insert(header::AUTHORIZATION, value);
+        }
+        self.ensure_private_ready()?;
+        claim()?;
         // The only sender here is the one retained from POST /attestation.
         let operation = async {
             let response = self
@@ -579,7 +634,7 @@ impl VerifiedRpcSession {
         let result = result.map_err(|_| expired())?;
         // Tokio cannot preempt synchronous JSON decoding inside the timeout.
         // Check again before a result escapes the original TLS session deadline.
-        finish_before_deadline(self.deadline, result)
+        Ok((finish_before_deadline(self.deadline, result)?, receipt))
     }
 }
 

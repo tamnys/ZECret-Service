@@ -332,18 +332,12 @@ async fn optional_rpc_route_requires_attestation_then_enforces_method_allowlist(
 }
 
 #[tokio::test]
-#[ignore = "requires the separately locked payment helper in the managed container"]
-async fn paid_rpc_fails_closed_without_a_valid_ticket() {
+#[ignore = "requires OpenSSL and the separately locked payment helper in the managed container"]
+async fn paid_rpc_admits_once_before_node_failure() {
     let helper = std::path::PathBuf::from(
         std::env::var_os("ZRPC_PAYMENT_CRYPTO_HELPER")
             .expect("set ZRPC_PAYMENT_CRYPTO_HELPER to the helper executable"),
     );
-    let fixture = include_str!("../../../../tools/payment-crypto/tests/rfc9578_public_vector.json");
-    let prefix = "\"pkI\": \"";
-    let start = fixture.find(prefix).unwrap() + prefix.len();
-    let spki = hex::decode(fixture[start..].split('"').next().unwrap()).unwrap();
-    let issuer =
-        zrpc_payments::IssuerPublic::from_public_der(&helper, &spki, "issuer.example").unwrap();
     let root = std::env::temp_dir().join(format!(
         "zrpc-paid-rpc-{}-{}",
         std::process::id(),
@@ -352,8 +346,79 @@ async fn paid_rpc_fails_closed_without_a_valid_ticket() {
             .unwrap()
             .as_nanos()
     ));
-    let directory = zrpc_payments::PrivateDirectory::create(&root).unwrap();
-    let spent = zrpc_payments::RedeemerStore::create(&directory).unwrap();
+    zrpc_payments::PrivateDirectory::create(&root).unwrap();
+    let private_key = root.join("private.der");
+    let public_key = root.join("public.der");
+    assert!(
+        std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-outform",
+                "DER",
+                "-out"
+            ])
+            .arg(&private_key)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("openssl")
+            .args(["pkey", "-inform", "DER", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-outform", "DER", "-out"])
+            .arg(&public_key)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let issuer = zrpc_payments::IssuerPublic::from_public_der(
+        &helper,
+        &std::fs::read(&public_key).unwrap(),
+        "issuer.example",
+    )
+    .unwrap();
+    let client_dir = zrpc_payments::PrivateDirectory::create(&root.join("client")).unwrap();
+    let issuer_dir = zrpc_payments::PrivateDirectory::create(&root.join("issuer")).unwrap();
+    let redeemer_dir = zrpc_payments::PrivateDirectory::create(&root.join("redeemer")).unwrap();
+    zrpc_payments::PrivateDirectory::create(&root.join("exchange")).unwrap();
+    let request_file = root.join("exchange/request.bin");
+    let response_file = root.join("exchange/response.bin");
+    let mut ticket_store = zrpc_payments::ClientStore::create(&client_dir).unwrap();
+    let purchase =
+        zrpc_payments::prepare_purchase(&mut ticket_store, &issuer, &helper, 1, &request_file)
+            .unwrap();
+    let mut operator = zrpc_payments::IssuerStore::create(&issuer_dir).unwrap();
+    zrpc_payments::mock_settle_purchase(
+        &mut operator,
+        &issuer,
+        &helper,
+        &zrpc_payments::load_private_key_file(&private_key).unwrap(),
+        1,
+        &request_file,
+        &response_file,
+    )
+    .unwrap();
+    zrpc_payments::collect_purchase(
+        &mut ticket_store,
+        &issuer,
+        &helper,
+        purchase,
+        &response_file,
+    )
+    .unwrap();
+    let ticket = ticket_store.preview_available().unwrap().unwrap();
+    let authorization = issuer.authorization_for(ticket.token.expose()).unwrap();
+    ticket_store.claim_available(&ticket).unwrap();
+    let spent = zrpc_payments::RedeemerStore::create(&redeemer_dir).unwrap();
     let mut shared = Shared::new(FakeQuote::new(), limits(1, 1, Duration::from_nanos(1)));
     shared.node = Some(
         LocalNode::new(
@@ -398,7 +463,33 @@ async fn paid_rpc_fails_closed_without_a_valid_ticket() {
         read(client.send_request(invalid).await.unwrap()).await.0,
         StatusCode::FORBIDDEN
     );
+    let paid_request = || {
+        Request::post("/rpc")
+            .header(header::HOST, "fixture.invalid")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::AUTHORIZATION,
+                header::HeaderValue::from_bytes(authorization.as_ref()).unwrap(),
+            )
+            .body(Full::new(Bytes::from_static(body)))
+            .unwrap()
+    };
+    assert_eq!(
+        read(client.send_request(paid_request()).await.unwrap())
+            .await
+            .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        read(client.send_request(paid_request()).await.unwrap())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(ticket_store.balance().unwrap().uncertain, 1);
     drop(client);
+    drop(ticket_store);
+    drop(operator);
     std::fs::remove_dir_all(&root).unwrap();
 }
 

@@ -22,7 +22,7 @@ zrpc inspect-quote --quote FILE --collateral FILE
 zrpc inspect-workload [--platform gcp-tdx|phala-dstack] --quote FILE --collateral FILE --event-log FILE --policy FILE
 zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --policy FILE
 zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
-zrpc query --stdin [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
+zrpc query [--stdin | --method METHOD] [--ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE] [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
 zrpc payments --help
 zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
@@ -73,6 +73,26 @@ fn exhausted(args: &[String]) -> Result<(), String> {
     } else {
         Err("unknown or repeated argument".into())
     }
+}
+
+fn private_query_body(stdin: bool, method: Option<String>) -> Result<Vec<u8>, SafeError> {
+    if stdin {
+        let mut bytes = Vec::new();
+        io::stdin()
+            .take((zrpc_protocol::MAX_REQUEST_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| SafeError::new(ErrorCode::InvalidRequest, "Private input unavailable."))?;
+        Ok(bytes)
+    } else {
+        let method = method
+            .ok_or_else(|| SafeError::new(ErrorCode::InvalidRequest, "Private request unavailable."))?;
+        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":[]}))
+            .map_err(|_| SafeError::new(ErrorCode::InvalidRequest, "Private request unavailable."))
+    }
+}
+
+fn ticket_query_error() -> SafeError {
+    SafeError::new(ErrorCode::InvalidRequest, "Ticket authorization unavailable.")
 }
 
 fn platform(args: &mut Vec<String>) -> Result<Backend, String> {
@@ -193,6 +213,7 @@ async fn run() -> Result<(), String> {
             if stdin && method.is_some(){return Err("choose stdin or method".into())}
             if !simulation {
                 if scenario.is_some(){return Err("scenario is simulation-only".into())}
+                let ticket_config=payments::QueryTicketConfig::parse(&mut args)?;
                 if args.is_empty() {
                     // Do not even read a customer body before authorization.
                     print_json(PrivateClient::new().verify())?;
@@ -205,19 +226,37 @@ async fn run() -> Result<(), String> {
                     .await.map_err(|error|error.to_string())?;
                 // The retained session checks the managed Tor lease before
                 // this closure reads or constructs any private body.
-                let result=session.query_from_body(move || {
-                    if stdin {
-                        let mut bytes=Vec::new();
-                        io::stdin().take((zrpc_protocol::MAX_REQUEST_BYTES+1) as u64).read_to_end(&mut bytes)
-                            .map_err(|_|SafeError::new(ErrorCode::InvalidRequest,"Private input unavailable."))?;
-                        Ok(bytes)
-                    } else {
-                        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":method.unwrap(),"params":[]}))
-                            .map_err(|_|SafeError::new(ErrorCode::InvalidRequest,"Private request unavailable."))
+                let (result,ticket_state)=if let Some(config)=ticket_config {
+                    let (issuer,mut store)=config.open()?;
+                    let result=session.query_from_body_authorized(
+                        || async move {private_query_body(stdin,method)},
+                        || {
+                            let ticket=store.preview_available().map_err(|_|ticket_query_error())?
+                                .ok_or_else(ticket_query_error)?;
+                            let authorization=issuer.authorization_for(ticket.token.expose())
+                                .map_err(|_|ticket_query_error())?;
+                            let marker=ticket.marker;
+                            let claim_store=&mut store;
+                            Ok((authorization,marker,move || claim_store.claim_available(&ticket)
+                                .map_err(|_|ticket_query_error())))
+                        }
+                    ).await;
+                    match result {
+                        Ok((value,marker))=>{
+                            let state=if store.mark_spent(marker).is_ok(){"spent"}else{"uncertain"};
+                            (Ok(value),Some(state))
+                        },
+                        Err(error)=>(Err(error),None)
                     }
-                }).await;
+                }else{
+                    (session.query_from_body(move || private_query_body(stdin,method)).await,None)
+                };
                 match result {
-                    Ok(result)=>print_json(json!({"mode":"private","simulation":false,"private_accepted":true,"query_sent":true,"result":result})),
+                    Ok(result)=>{
+                        let mut output=json!({"mode":"private","simulation":false,"private_accepted":true,"query_sent":true,"result":result});
+                        if let Some(state)=ticket_state {output["ticket_state"]=json!(state)}
+                        print_json(output)
+                    },
                     Err(error) if matches!(error.code,ErrorCode::InvalidRequest|ErrorCode::RequestTooLarge|ErrorCode::MethodNotAllowed|ErrorCode::InvalidParameters)=>Err(error.to_string()),
                     Err(error) if error.code == ErrorCode::TorUnavailable=>{
                         print_json(json!({"mode":"private_blocked","simulation":false,"private_accepted":false,"query_sent":false,"error":error}))?;
