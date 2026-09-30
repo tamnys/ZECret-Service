@@ -381,15 +381,16 @@ def launch_documents(args):
             or inputs.get("private_accepted") is not False
             or inputs.get("deployment_enabled") is not False):
         raise ValueError("image context receipt differs from reviewed inputs")
+    if inputs_path.name != "image-inputs.json":
+        raise ValueError("image context receipt path is not canonical")
     if not eligible:
-        if (inputs_path.name != "image-inputs.json"
-                or inputs.get("zebra_local_hold_exception") != LOCAL_HOLD_EXCEPTION
+        if (inputs.get("zebra_local_hold_exception") != LOCAL_HOLD_EXCEPTION
                 or inputs.get("zebra_stage_receipt_sha256") !=
                 stock["reviewed_zebra_local_hold_receipt_sha256"]):
             raise ValueError("Zebra local hold exception differs from reviewed receipt")
-        check_image_context(argparse.Namespace(context=inputs_path.parent))
-        if regular_bytes(inputs_path) != inputs_bytes:
-            raise ValueError("image context receipt changed during verification")
+    check_image_context(argparse.Namespace(context=inputs_path.parent))
+    if regular_bytes(inputs_path) != inputs_bytes:
+        raise ValueError("image context receipt changed during verification")
     limits = runtime_config(args.runtime)
     base = {
         "image": args.image, "platform": "linux/amd64", "read_only": True,
