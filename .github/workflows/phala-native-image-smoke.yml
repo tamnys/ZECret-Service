@@ -201,3 +201,12 @@ jobs:
             echo "Local image ID: $(docker image inspect --format '{{.Id}}' "$image")"
             echo 'No image was uploaded, pushed, or deployed; no private mode was approved.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check native Docker runtime mounts without a guest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I "$GITHUB_WORKSPACE/source/deploy/phala/check_native_mounts.py" \
+            --image "zrpc-phala-native-smoke:$GITHUB_SHA"
+          echo 'Local tmpfs sharing and public-state ownership passed; no dstack or TDX guest was used.' \
+            >> "$GITHUB_STEP_SUMMARY"
