@@ -68,6 +68,12 @@ be treated as an independent, always-running deletion control. Neither
 synthetic bundle was installed here; no watchdog unit, timer, provider call or
 cloud resource was activated in this preflight.
 
+At 05:29 UTC, `pmset -g custom` showed AC-power `sleep=0`, `standby=0` and
+`autorestart=0`; `pmset -g sched` showed no scheduled wake. The idle-sleep
+setting is favorable for an attended evaluation, but power-loss recovery and
+Colima startup after a Mac reboot remain unproven. No Mac power setting was
+changed.
+
 Before a billable Phala deployment, bind the original experiment ledger and
 selected native binary to a persistent mount accessible to the chosen nonroot
 UID, verify owner-private provider credentials and trust roots, derive timing
