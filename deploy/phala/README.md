@@ -54,6 +54,19 @@ database as public Testnet input; use
 [Zebra's snapshot guidance](https://zebra.zfnd.org/user/snapshots.html) when
 assessing its trust model.
 
+To rehearse the same public snapshot import on native ARM64 Linux without
+creating a CVM, run this from the repository root in the managed container:
+
+```sh
+mkdir -p /workspace/.codex-tmp
+python3 tools/phala-local/import_snapshot_arm64.py \
+  --work-dir /workspace/.codex-tmp/phala-local-sync
+```
+
+The work directory holds the downloaded archive during import and the
+resulting public Zebra state. This local state is separate from the Phala CVM
+volume and does not approve private mode.
+
 After an exact application image digest and reviewed runtime limits exist,
 `prepare.py launch-documents` writes `compose.json`, `app-compose.json`, and a
 receipt into a fresh local directory. During the hold, pass the
@@ -89,8 +102,10 @@ The wrapper serves public chain status and a user-supplied valid testnet
 transparent-address lookup only through the local preview path. The client
 must label the result as public and unverified for private use. No private
 release catalog entry exists. The local demo client requires a managed Tor
-SOCKS endpoint; no Tor executable is currently prepared for the chosen Mac
-mini/Colima client host. Direct network access is not a fallback.
+SOCKS endpoint. Stage the pinned Linux arm64 Tor binary as described in
+[`tools/tor/README.md`](../../tools/tor/README.md), then pass its absolute
+`/workspace/.codex-tmp/tor-package/bin/tor` path as `--tor-executable`.
+Direct network access is not a fallback.
 
 For a live quote diagnostic, obtain an exact quote from the same deployed CVM
 using the [Phala attestation command](https://github.com/Phala-Network/phala-cloud/blob/main/skills/usecase/verify-attestation.md),
