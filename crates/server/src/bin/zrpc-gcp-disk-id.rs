@@ -2,8 +2,9 @@
 //!
 //! Google guest-configs ba80fe774c17e41c15d92f5c0b1901dd14d35212 reads
 //! the NVMe Identify Namespace vendor extension at byte 384. This helper
-//! deliberately recognizes only the evaluation's public-data disk. It does
-//! not use metadata, a shell, a guest agent, or a network endpoint.
+//! recognizes the public-data disk by default. A separate, explicit paid
+//! invocation recognizes only the spent-state disk. It does not use metadata,
+//! a shell, a guest agent, or a network endpoint.
 
 use serde::Deserialize;
 use std::io::Read;
@@ -12,6 +13,7 @@ use std::process::{Command, Stdio};
 const NAMESPACE_BYTES: usize = 4096; // NVMe Identify Namespace data structure.
 const VENDOR_OFFSET: usize = 384; // Google guest-configs google_nvme_id.
 const PUBLIC_DISK: &str = "zrpc-public-data";
+const SPENT_DISK: &str = "zrpc-spent-data";
 
 #[derive(Deserialize)]
 struct VendorExtension {
@@ -31,7 +33,7 @@ fn namespace_path(path: &str) -> bool {
         && namespace.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn approved_name(namespace: &[u8]) -> Result<(), ()> {
+fn approved_name(namespace: &[u8], expected: &str) -> Result<(), ()> {
     if namespace.len() != NAMESPACE_BYTES {
         return Err(());
     }
@@ -41,10 +43,18 @@ fn approved_name(namespace: &[u8]) -> Result<(), ()> {
         .position(|byte| *byte == 0)
         .unwrap_or(vendor.len());
     let parsed: VendorExtension = serde_json::from_slice(&vendor[..end]).map_err(|_| ())?;
-    if parsed.device_name != PUBLIC_DISK {
+    if parsed.device_name != expected {
         return Err(());
     }
     Ok(())
+}
+
+fn requested_disk(arguments: &[String]) -> Option<(&str, &'static str)> {
+    match arguments {
+        [path] if !path.starts_with("--") => Some((path, PUBLIC_DISK)),
+        [flag, path] if flag == "--spent" => Some((path, SPENT_DISK)),
+        _ => None,
+    }
 }
 
 fn identify(path: &str) -> Result<Vec<u8>, ()> {
@@ -77,18 +87,14 @@ fn identify(path: &str) -> Result<Vec<u8>, ()> {
 }
 
 fn main() {
-    let mut arguments = std::env::args();
-    let program = arguments.next();
-    let path = arguments.next();
-    let valid = program.is_some()
-        && arguments.next().is_none()
-        && path
-            .and_then(|path| identify(&path).ok())
-            .is_some_and(|namespace| approved_name(&namespace).is_ok());
-    if !valid {
+    let arguments: Vec<_> = std::env::args().skip(1).collect();
+    let Some((path, expected)) = requested_disk(&arguments) else {
+        std::process::exit(1);
+    };
+    if !identify(path).is_ok_and(|namespace| approved_name(&namespace, expected).is_ok()) {
         std::process::exit(1);
     }
-    println!("{PUBLIC_DISK}");
+    println!("{expected}");
 }
 
 #[cfg(test)]
@@ -103,7 +109,34 @@ mod tests {
 
     #[test]
     fn exact_public_disk_is_accepted() {
-        assert!(approved_name(&namespace(br#"{"device_name":"zrpc-public-data"}"#)).is_ok());
+        assert!(
+            approved_name(
+                &namespace(br#"{"device_name":"zrpc-public-data"}"#),
+                PUBLIC_DISK
+            )
+            .is_ok()
+        );
+        assert!(
+            approved_name(
+                &namespace(br#"{"device_name":"zrpc-public-data"}"#),
+                SPENT_DISK
+            )
+            .is_err()
+        );
+        assert!(
+            approved_name(
+                &namespace(br#"{"device_name":"zrpc-spent-data"}"#),
+                SPENT_DISK
+            )
+            .is_ok()
+        );
+        assert!(
+            approved_name(
+                &namespace(br#"{"device_name":"zrpc-spent-data"}"#),
+                PUBLIC_DISK
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -114,24 +147,48 @@ mod tests {
             br#"{"device_name":"other"}"#,
             br#"{"device_name":"zrpc-public-data","device_name":"other"}"#,
         ] {
-            assert!(approved_name(&namespace(vendor)).is_err());
+            assert!(approved_name(&namespace(vendor), PUBLIC_DISK).is_err());
         }
         assert!(
-            approved_name(&namespace(br#"{"device_name":"zrpc-public-data"}"#)[..4095]).is_err()
+            approved_name(
+                &namespace(br#"{"device_name":"zrpc-public-data"}"#)[..4095],
+                PUBLIC_DISK
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn bytes_after_vendor_json_terminator_are_not_treated_as_a_disk_name() {
         assert!(
-            approved_name(&namespace(
-                b"{\"device_name\":\"zrpc-public-data\"}\0future-vendor-bytes"
-            ))
+            approved_name(
+                &namespace(b"{\"device_name\":\"zrpc-public-data\"}\0future-vendor-bytes"),
+                PUBLIC_DISK
+            )
             .is_ok()
         );
         assert!(
-            approved_name(&namespace(b"{\"device_name\":\"other\"}\0zrpc-public-data")).is_err()
+            approved_name(
+                &namespace(b"{\"device_name\":\"other\"}\0zrpc-public-data"),
+                PUBLIC_DISK
+            )
+            .is_err()
         );
+    }
+
+    #[test]
+    fn paid_disk_mode_is_explicit_and_cannot_select_an_arbitrary_device_name() {
+        let public = vec!["/dev/nvme0n2".to_owned()];
+        let paid = vec!["--spent".to_owned(), "/dev/nvme0n3".to_owned()];
+        assert_eq!(requested_disk(&public), Some(("/dev/nvme0n2", PUBLIC_DISK)));
+        assert_eq!(requested_disk(&paid), Some(("/dev/nvme0n3", SPENT_DISK)));
+        assert_eq!(requested_disk(&[]), None);
+        assert_eq!(requested_disk(&["--spent".to_owned()]), None);
+        assert_eq!(
+            requested_disk(&["--other".to_owned(), "/dev/nvme0n3".to_owned()]),
+            None
+        );
+        assert_eq!(requested_disk(&[paid, public].concat()), None);
     }
 
     #[test]
