@@ -28,21 +28,11 @@
     <section class="hero shell" aria-labelledby="hero-title">
       <div class="hero-copy">
         <h1 id="hero-title">End-to-end private ZCash queries</h1>
-        <p class="lede">Fully shielded Zcash transactions hide payment details on-chain. A direct RPC connection can still reveal your IP address and the blocks or transaction IDs you request. ZECret is designed to route queries through Tor and verify the service first.</p>
+        <p class="lede">ZCash keeps your on-chain activity private, but RPCs that bridge you to the chain can learn your sensitive information. ZECret Service is the only ZCash RPC that keeps your data verifiably private.</p>
         <div class="actions">
           <a class="button primary" href="#demo">Try the demo</a>
         </div>
-        <p class="availability"><strong>Available today:</strong> fixed demo examples. No private service is approved for use yet.</p>
       </div>
-      <aside class="path" aria-labelledby="path-title">
-        <h2 id="path-title">How ZECret is designed to work</h2>
-        <ol>
-          <li><strong>Connect through Tor</strong><span>The service does not see your direct IP address.</span></li>
-          <li><strong>Verify the service</strong><span>The client checks its release, attestation, and connection.</span></li>
-          <li><strong>Make a read-only query</strong><span>The verified service handles one request.</span></li>
-        </ol>
-        <p>The service still handles the query. This website only shows fixed examples.</p>
-      </aside>
     </section>
 
     <section class="section shell" id="demo" aria-labelledby="demo-title">
@@ -73,11 +63,13 @@
 
     <section class="section section-band" id="how-it-works" aria-labelledby="checks-title">
       <div class="shell">
-        <div class="section-head"><p class="section-label">Privacy model</p><h2 id="checks-title">Two different checks.</h2><p>The network route and the software answering the request need separate protection.</p></div>
-        <div class="checks-grid">
-          <div><h3>Tor hides the direct route.</h3><p>The native client uses Tor so the service does not see the client's direct network address. It does not anonymize this website visit or prevent every form of traffic analysis.</p></div>
-          <div><h3>Attestation checks the service.</h3><p>The native client checks evidence about the remote workload and binds that check to its live TLS connection before sending query parameters. A badge on this page cannot make that decision.</p></div>
+        <div class="section-head"><p class="section-label">How it works</p><h2 id="checks-title">From connection to query.</h2><p>The native client is designed to check the network route and the service before sending a read-only request.</p></div>
+        <div class="steps-grid">
+          <div><h3>Connect through Tor</h3><p>The service does not see the client's direct IP address.</p></div>
+          <div><h3>Verify the service</h3><p>The client checks the release, attestation evidence, and live TLS connection before sending query parameters.</p></div>
+          <div><h3>Make a read-only query</h3><p>The service handles one request using a Zebra node.</p></div>
         </div>
+        <p class="steps-note">The service still sees the query. Tor does not anonymize this website visit; the browser demo uses fixed examples.</p>
       </div>
     </section>
 
