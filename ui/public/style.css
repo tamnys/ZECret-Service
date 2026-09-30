@@ -74,7 +74,6 @@ p{color:var(--muted)}
 .flow-diagram li:not(:last-child)::after{content:"→";position:absolute;top:23px;left:calc(100% + 6px);color:var(--muted);font-size:25px;line-height:1}
 .flow-icon{display:grid;place-items:center;width:64px;height:64px;flex:none;border:1px solid #696969;background:var(--base);color:#f4b63d}
 .flow-icon svg{width:40px;height:40px}
-.flow-icon .tor-logo{width:55px;height:32px;object-fit:contain}
 .flow-diagram strong{font-weight:600}
 .how-panel{margin-top:32px;padding:30px;border:1px solid var(--line);background:var(--base)}
 .how-panel h3{font-size:24px;margin:0 0 22px}
@@ -143,7 +142,6 @@ code{font:inherit}
   .flow-diagram li:not(:last-child)::after{content:"↓";top:calc(100% + 7px);left:21px}
   .flow-icon{width:56px;height:56px}
   .flow-icon svg{width:36px;height:36px}
-  .flow-icon .tor-logo{width:46px;height:auto}
   .how-panel{padding:23px}
   .privacy-threat-grid{gap:25px}
   .quickstart-grid{gap:31px}
