@@ -477,6 +477,69 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn paid_query_rejects_dead_tor_or_expired_connection_before_ticket_selection() {
+        for tor_unavailable in [true, false] {
+            let (result, peer) = fixture(body).await;
+            let mut evidence = result.unwrap();
+            let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+            evidence.connection.session.origin = TransportOrigin::Managed(tor.clone());
+            let session = VerifiedRpcSession::from_authenticated_inspection(
+                evidence.connection.session,
+                evidence.connection.deadline,
+                evidence.connection.authority,
+                PrivateDeadline {
+                    monotonic: Instant::now()
+                        + if tor_unavailable {
+                            MAX_CONNECTION_LIFETIME
+                        } else {
+                            Duration::from_millis(200)
+                        },
+                    collateral_expiration_unix_seconds: u64::MAX,
+                },
+            )
+            .unwrap();
+            if tor_unavailable {
+                tor.terminate_synthetic_child();
+            } else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let body_read = std::cell::Cell::new(false);
+            let ticket_selected = std::cell::Cell::new(false);
+            let error = session
+                .query_from_body_authorized(
+                    || {
+                        body_read.set(true);
+                        async {
+                            Ok(
+                                br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#
+                                    .to_vec(),
+                            )
+                        }
+                    },
+                    || {
+                        ticket_selected.set(true);
+                        Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || Ok(())))
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                if tor_unavailable {
+                    ErrorCode::TorUnavailable
+                } else {
+                    ErrorCode::ExpiredCollateral
+                }
+            );
+            assert!(!body_read.get());
+            assert!(!ticket_selected.get());
+            // The fixture peer fails if it sees an RPC byte on this stream.
+            peer.await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn paid_query_claim_failure_prevents_ticket_and_body_transmission() {
         let (result, peer) = fixture(body).await;
         let mut evidence = result.unwrap();
