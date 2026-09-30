@@ -7,6 +7,9 @@ provenance, not a GCP deploy dependency. The explicit v6.4.2 exception permits
 only local staging, image-context preparation, and launch-document rendering
 while the seven-day hold is active. It is bound to the exact release asset ID
 and digest in the stage receipt and copied into the local image context. The
+separately authorized [native image smoke](../../records/phala-native-image-smoke.md)
+built and ran that exact candidate locally without publishing it; it did not
+broaden the stage receipt into a deployment or private-mode approval. The
 launch renderer rechecks that complete context and requires the pinned stage
 receipt digest and exception identity; the GCP image runner retains its age
 check. The verified stage receipt is
@@ -19,11 +22,15 @@ must preserve the reviewed bytes and staging receipt contract.
 The emitted `app-compose.json` is a local candidate. Its raw hash cannot be
 called an authenticated Phala measurement until the provider accepts those
 exact bytes and a post-deploy GET `/api/v1/cvms/{id}/compose_file` readback
-matches. The named tmpfs volume, nested `/run/dstack.sock` mount, and UID/GID
-access to quote/watch sockets also need a stock-runtime test. Source-mode
-analysis predicts access because both services use GID 0, the shared volume
-uses mode 1775, and the bridge sockets use mode 0660; it does not establish
-Docker/Phala behavior.
+matches. The [native Docker mount smoke](../../records/phala-native-mount-smoke.md)
+confirmed the two nonroot identities can share the named tmpfs while both
+containers remain running, the app cannot see a usable nested backend socket,
+and its public-state volume has the expected ownership. It used a synthetic
+socket and did not run dstack or the actual quote bridge. The stock Phala
+runtime still needs a test of its effective named-volume mounts, root-owned
+backend socket, quote/watch socket access, startup ordering and failure
+handling. The shared volume uses mode 1775 and both services use GID 0;
+source-mode reasoning alone cannot establish those provider behaviors.
 
 The official Phala Cloud OpenAPI at commit
 `7b36622c6eb4ff691b5818546c04c61b26e08809`, `AppComposeV2`, declares
