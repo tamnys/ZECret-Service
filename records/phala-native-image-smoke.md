@@ -80,8 +80,8 @@ archive SHA-256
 `7666369a61754e2d5f2fa338674e4696cfe107cda238d342fc5f0496e896c6cb`
 and local image config ID
 `sha256:e126a22b330b47da87299cadef6ead7ee6e53a8008d2588bf9e90fb5739b3df2`.
-The same-context, later-commit check is still needed before calling that
-identity stable across evidence-only changes.
+The next records-only commit tested whether that identity survived a source
+commit change without changing the checked image context.
 
 That check exposed a second archive-only input. At records-only source commit
 `3949620041a2c7f86f910267bcefa74b20dc2ffc`,
@@ -98,5 +98,9 @@ archive still changed with the tag. The workflow now uses a fixed, local-only
 tag. Its first [run 36715501053](https://github.com/tamnys/ZECret-service/actions/runs/36715501053)
 passed with twice-matching archive SHA-256
 `2bafc4b766d7ff71b36a04bd4a0581b0ccd875a0cc099db5a77014666cca22c8`
-and the same image config ID. A fresh run after this records-only commit will
-test complete-archive stability across commits.
+and the same image config ID. A fresh
+[run 36715811635](https://github.com/tamnys/ZECret-service/actions/runs/36715811635)
+after the records-only commit `7d0296f800f5fa9d4d11f8176ed349ac5d6a2690`
+passed the complete smoke and reproduced both identities. This proves local
+archive stability across these exact two commits and their unchanged checked
+context; it does not prove a registry or guest identity.
