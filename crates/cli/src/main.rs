@@ -89,15 +89,19 @@ fn private_query_body(stdin: bool, method: Option<String>) -> Result<Vec<u8>, Sa
             .map_err(|_| SafeError::new(ErrorCode::InvalidRequest, "Private input unavailable."))?;
         Ok(bytes)
     } else {
-        let method = method
-            .ok_or_else(|| SafeError::new(ErrorCode::InvalidRequest, "Private request unavailable."))?;
+        let method = method.ok_or_else(|| {
+            SafeError::new(ErrorCode::InvalidRequest, "Private request unavailable.")
+        })?;
         serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":[]}))
             .map_err(|_| SafeError::new(ErrorCode::InvalidRequest, "Private request unavailable."))
     }
 }
 
 fn ticket_query_error() -> SafeError {
-    SafeError::new(ErrorCode::InvalidRequest, "Ticket authorization unavailable.")
+    SafeError::new(
+        ErrorCode::InvalidRequest,
+        "Ticket authorization unavailable.",
+    )
 }
 
 fn platform(args: &mut Vec<String>) -> Result<Backend, String> {
