@@ -22,14 +22,37 @@ Linux x86_64 `zebrad` and the Zebra staging receipt from
 `tools/gcp-guest/verify_zebra_release.py stage`. During the Zebra hold, pass
 `--allow-v642-local-hold-exception` to `stage`, `prepare.py image-context`,
 and `prepare.py launch-documents`. The latter requires the checked image
-context and its exact staged receipt. Image-context preparation still refuses
-an unpinned ELF, different base manifest, or different native binaries. It
-copies checked bytes and the Zebra receipt into a fresh local build context
-and hashes every file in it. Before building, run
+context and its exact staged receipt. `image-context` also requires
+`--snapshot-wheel` pointing to the exact Linux x86_64 CPython 3.13 wheel
+`zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl`
+identified in `snapshot.lock.json`. Download that wheel through the managed
+container and pass its absolute workspace path; the preparation command checks
+its pinned size, SHA-256, and archive contents. Image-context preparation
+refuses an unpinned ELF, different base manifest, or different native binaries.
+It copies checked bytes, the snapshot importer and lock, the wheel, and the
+Zebra receipt into a fresh local build context and hashes every file in it.
+Before building, run
 `python3 deploy/phala/prepare.py check-image-context --context ABSOLUTE_CONTEXT_PATH`.
 The check detects changed or extra build inputs; it does not build, pull, or
 publish an image. Use `--help` for the full preparation arguments. Build and
 registry publication remain separate operator actions.
+
+This public preview uses the Zcash Foundation's September 23, 2026 Testnet
+snapshot pinned in `snapshot.lock.json`. On a fresh
+`zebra_public_testnet` volume, the app downloads the pinned 11,137,971,554-byte
+archive over HTTPS, checks its exact size and SHA-256, and imports its
+`state/v28/testnet` database before starting Zebra or the wrapper. Allow disk
+space for both the compressed download and extracted database during import.
+An interrupted download or import is retried at the next start; an existing
+state directory without the expected import marker blocks startup. Once
+imported, the marker permits reuse on later starts and Zebra synchronizes from
+the snapshot tip. The marker does not revalidate all existing database bytes.
+The snapshot and its manifest come from the same publisher, and the manifest
+is **unsigned**. Their checksums pin the selected bytes but are not an
+independent authenticity proof or a private-mode approval. Treat the imported
+database as public Testnet input; use
+[Zebra's snapshot guidance](https://zebra.zfnd.org/user/snapshots.html) when
+assessing its trust model.
 
 After an exact application image digest and reviewed runtime limits exist,
 `prepare.py launch-documents` writes `compose.json`, `app-compose.json`, and a
@@ -117,7 +140,7 @@ hardware quote and session binding, but does not establish the full workload
 identity required for private RPC.
 
 Before a billable public demo, the operator must
-also select an age-eligible Zebra artifact and exact app image, test the
+also select the exact staged Zebra artifact and app image, test the
 container mount/permission behavior and live quote/TLS route, measure node
 resource fit, obtain a current quote from the selected CVM, and arm the external deletion
 deadline on the chosen always-on host. A local render receipt is not a deploy
