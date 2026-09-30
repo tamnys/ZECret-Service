@@ -2,6 +2,11 @@
 
 This collects the presently reviewable inputs for a **public, unverified-for-private-use** TDX-hosted demo. It is not a deployment instruction or spending request. No registry image was published, Phala resource created, deletion scheduler activated, or credit used to make this packet. The distributed approved-release list remains empty; the stock Phala image does not meet the genuine private-mode disk and administration policy.
 
+The operator subsequently [authorized deployment within the existing budget
+and cleanup limits](phala-operator-authorization-2026-09-30.md). That
+authorization does not by itself close the readiness gaps below or establish
+that any billable action has occurred.
+
 ## Pinned local inputs
 
 | Input | Reviewed identity and evidence |
@@ -37,6 +42,23 @@ configuration Phala would actually launch. The September 25 lock remains a
 dated, unapproved observation; do not silently replace its values or treat this
 public recheck as the required signed-in quote.
 
+## Signed-in form recheck — 2026-09-30
+
+After the operator authorized deployment, a read-only signed-in Chrome check
+found an empty Compute inventory and no CVM usage this month. The account's
+credits are shared with other Phala services, including model usage, so the
+balance is not a budget-control substitute. Compute is prepaid with auto-topup
+off. The unsubmitted deployment form offered `prod9`, displayed
+`dstack-0.5.9` and Phala KMS, and reported eight available Large TDX instances
+(4 vCPU, 8 GB) at `$0.232/hour`. With 80 GB entered and ext4 selected, it
+displayed `$0.242959/hour` total and `$177.36` monthly, equivalent to
+`$40.817112` for 168 hours before any unshown fees or billing rounding. The
+form was not submitted; these are transient UI observations, not a price lock,
+image digest, capacity reservation or final cost ceiling. The form's default
+gateway says it terminates TLS; the exact production TLS-passthrough route
+still needs confirmation and a live test. The form exposed no explicit swap
+setting, and its short OS label did not establish the catalog digest.
+
 The newly listed upstream `dstack-0.6.0` source was also [reviewed for runtime
 persistence](phala-v060-runtime-source-review.md). Its early memory-backed
 `/var` is followed by persistent binds for five container-runtime roots, so
@@ -50,12 +72,12 @@ The provisional size is `tdx.large` (4 vCPU, 8 GB) with 80 GB storage. [Local AR
 
 The Mac mini's Colima VM is the selected candidate external Linux/systemd watchdog host. Its binary, clock, mount and uninstalled unit syntax passed the [host preflight](phala-watchdog-host-preflight.md). A later volatile rehearsal observed the synthetic mount gate start and one periodic timer firing on Colima's systemd 255; those units were removed afterward. Effective mount-loss and reboot recovery, provider credentials, timing allowances, and an independent deadline/manual backstop remain unproven. No deletion timer is armed. The lifecycle ledger must be initialized **once before any resource call**, preserving the original start and deadline; `zrpc lifecycle ledger record-attempt` commits intent before creation, and `record-cvm` stores each returned canonical CVM/app/instance identity and conservative rate immediately afterward. The [CLI usage in `ledger.rs`](../crates/cli/src/ledger.rs) is the command contract. On uncertain outcomes, inspect the retained ledger and authenticated inventory; never reinitialize it. `export-watchdog` only writes uninstalled units. Installing provider-capable units would enable real deletion and requires a separate operator action. A DELETE response or missing CVM cannot establish storage deletion or billing finality; inventory and later billing reconciliation are separate evidence.
 
-## Required completion before a spending request
+## Required completion before billable deployment
 
 1. Confirm the account's current node, production image, KMS, capacity, 80 GB allowance, credit balance and complete price for the selected duration. Resolve any mismatch with the September 25 observation.
 2. Select reviewed runtime limits from measured startup/load behavior; package the exact image, publish it only by a separately approved operator action, and read back its immutable registry digest. Run `prepare.py launch-documents` with that digest and the checked context; compare the emitted Compose bytes with Phala's post-creation readback before interpreting an attestation measurement.
 3. Prepare the original ledger, owner-private provider credential and trust-root files, effective watchdog units and restart test on the always-on host. Establish timing/fee allowances from the selected quote and measured deletion path. Arrange a deadline backstop independent of the Mac mini. Arm no scheduler until separately authorized.
-4. Present the resulting exact artifact digest, launch bytes, account quote, ledger registration path, cleanup controls and maximum evaluation duration for separate spending approval. No current packet value authorizes creation.
+4. Compare the resulting exact artifact digest, launch bytes, account quote, ledger registration path, cleanup controls and maximum evaluation duration with the [operator's authorization](phala-operator-authorization-2026-09-30.md). Do not create a resource if the configuration exceeds its scope.
 5. After an approved launch, begin with synthetic inputs. Check actual guest resource fit, quote/collateral, retained TLS key binding, Tor-only client route, typed RPC behavior and the provider's effective Compose/KMS readback. Keep private mode blocked. Delete all experiment-owned resources and reconcile storage and billing evidence before closing the ledger.
 
 The local, no-spend inspection command is `python3 -I deploy/phala/prepare.py status` **inside the managed container from the repository root**. It reports artifact eligibility only; it cannot create or approve a CVM. There is no ready deployment command in this packet.
