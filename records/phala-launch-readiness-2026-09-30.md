@@ -37,10 +37,13 @@ initialized, and no real deletion timer armed.
 - Signed-in billing showed **$51.74 shared workspace credit**, with $20 grant
   credit applied first, CVM usage $0 this month, prepaid compute and auto-topup
   off. Other workspace services share the balance, so it is not a dedicated
-  spending cap. At the quoted rate, a window ending at the close of Thursday
-  in New York (`2026-10-02T04:00:00Z`) would cost about $8.05 from the
-  September 30 readback time. That is a proposed earlier deadline within the
-  authorized 168-hour maximum, not an initialized ledger or billing promise.
+  spending cap. The operator selected a **168-hour experiment window** measured
+  from the original ledger start, including synchronization and cleanup. This
+  supersedes the previously proposed close-of-Thursday cutoff. At the
+  September 30 form quote, the full window projects **$40.817112** before
+  unshown fees or rounding; recheck the complete account quote before launch.
+  The start and absolute deadline are not set until the original ledger is
+  initialized immediately before the first billable call.
 - A fresh `HEAD` of the [pinned public Testnet archive](../deploy/phala/snapshot.lock.json)
   at 2026-09-30 19:07 UTC returned HTTP 200 at the locked URL with
   `Content-Length: 11137971554`, matching the lock's expected byte count, and
@@ -48,7 +51,7 @@ initialized, and no real deletion timer armed.
   completed full-download SHA-256 verification or a guarantee that the archive
   will remain available during the Phala boot.
 
-## External control status
+## Manual lifecycle status
 
 The operator authorized one non-expiring, workspace-scoped Phala API token
 for the Mac mini/Colima deletion watchdog and revocation after cleanup. Its
@@ -61,6 +64,9 @@ and a persistent `/Users/j` VirtioFS mount. Isolated mount-loss and
 synchronized Colima VM restart rehearsals passed, then all synthetic units
 were removed. An empty mode-0700 directory for the original ledger exists at
 `/Users/j/Code/phala-zcash-rpc/.codex-tmp/phala-live-20260930` on that mount.
+The operator has since chosen **manual deletion without activating this
+watchdog** for the public preview. The credential and tested binary do not
+create a scheduled cleanup job; revoke the unused token after the experiment.
 
 The [pinned provider OpenAPI](https://github.com/Phala-Network/phala-docs/blob/5176d4c53fcee5aec3a8ccbbb05840a0a678c553/openapi.json)
 lists `PATCH /api/v1/cvms/{cvm_id}/scheduled-delete`, while the ordinary create
@@ -70,19 +76,18 @@ creation. The documented PATCH 200 body is `VM`, which omits
 `CvmBasicInfo`, where that field is optional, or `CVMInfoDetail`, which omits
 it. Thus a 200 PATCH alone does not prove the provider retained the deadline,
 and the documented GET contract does not guarantee a readable confirmation.
-The schedule cannot count as the separate deadline backstop until a live
-readback actually exposes the exact time or Phala supplies another reliable
-confirmation path. It cannot substitute for the external watchdog or prove
-that attached storage and billing have ended. If setting or confirming it
-fails after creation, delete the new CVM promptly using its retained ledger
-identity.
+The schedule cannot be treated as confirmed unless a live readback actually
+exposes the exact time or Phala supplies another reliable confirmation path.
+No provider schedule has been set. Neither a schedule nor a DELETE response
+proves that attached storage and billing have ended.
 
-The remaining deployment input is an explicitly selected response-size and
-deletion-latency allowance: Phala's OpenAPI has no guaranteed maximum body
-size or deletion time. A question about using a 1 MiB body cap and one-hour
-deletion allowance for this public experiment is pending with the operator.
-Those would be assumptions subject to live verification, not provider
-guarantees. The exact production ledger, effective provider-capable units,
-deadline backstop, and post-deletion billing procedure are not yet activated.
-Do not submit the form until the original binding and external jobs are
-persisted, synchronized, and read back.
+The operator selected a **1 MiB (1,048,576-byte) per-response cap** for
+optional management-API diagnostics and a **one-hour deletion-latency
+allowance** inside the 168-hour window. With the automatic watchdog waived,
+the manual operator must request CVM **deletion** no later than 167 hours after
+the durable experiment start, and sooner if the demo is complete, projected
+experiment cost reaches $45, or the $50 ceiling is at risk. Stopping alone
+leaves storage billing active. The exact original ledger, manual teardown
+deadline, responsible operator, and post-deletion storage/billing procedure
+must be established before submitting the form. The one-hour allowance is not
+a provider guarantee; a DELETE response does not prove billing finality.
