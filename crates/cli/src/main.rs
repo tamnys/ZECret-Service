@@ -34,7 +34,7 @@ zrpc watchdog --manifest FILE --now UNIX_SECONDS --accrued-microusd INTEGER
 zrpc teardown --simulate --manifest FILE
 zrpc lifecycle --help
 GCP operator tooling: zrpc-gcp-lifecycle --help
-The default platform is gcp-tdx. Phala private and workload-inspection commands additionally require --app-compose FILE.
+The legacy default platform for inspect, verify, query, and dashboard is gcp-tdx. Phala public preview requires --platform phala-dstack; Phala private and workload-inspection commands additionally require --app-compose FILE.
 Public inspection uses the configured local SOCKS. Once an approved release exists, private commands start a local Tor child with a private Unix SOCKS socket; no direct mode exists.
 Live Phala testnet preview verifies a TDX quote, current collateral, fresh challenge, and retained managed-Tor TLS key, then reads public testnet status and one validated testnet transparent address balance. The public fixture address is the default. Workload identity is unverified and private mode remains unavailable.
 The compiled approved-release catalog is empty; private queries remain blocked.";
@@ -122,7 +122,7 @@ async fn run() -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str(){
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
-        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"tor":"not_checked; inspection uses explicit SOCKS, private sessions require a selected local Tor executable","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"phala-dstack","default_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"public_preview_available":true,"public_preview_platform":"phala-dstack","tor":"not_checked; public inspection uses explicit SOCKS, Phala preview starts a selected local Tor executable, private mode blocked","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_and_phala_public_preview_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-endpoint"=>inspect_endpoint_command(args).await,
         "lifecycle"=>provider_observation::run(args).await,
         "inspect-quote"=>{
