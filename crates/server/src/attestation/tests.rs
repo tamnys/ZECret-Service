@@ -113,6 +113,24 @@ async fn connect<Q: QuoteSource>(
     }));
     (sender, expected, driver, server)
 }
+async fn connect_attested<Q: QuoteSource>(
+    shared: Arc<Shared<Q>>,
+    nonce: [u8; 32],
+) -> (TestClient, AbortOnDrop, AbortOnDrop) {
+    let (mut client, _, driver, server) = connect(shared, &nonce).await;
+    assert_eq!(
+        read(
+            client
+                .send_request(request("/attestation", nonce_body(nonce)))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    (client, driver, server)
+}
 #[derive(Clone)]
 struct FakeQuote {
     calls: Arc<Mutex<Vec<[u8; 64]>>>,
@@ -394,7 +412,7 @@ async fn paid_rpc_admits_once_before_node_failure() {
     let response_file = root.join("exchange/response.bin");
     let mut ticket_store = zrpc_payments::ClientStore::create(&client_dir).unwrap();
     let purchase =
-        zrpc_payments::prepare_purchase(&mut ticket_store, &issuer, &helper, 1, &request_file)
+        zrpc_payments::prepare_purchase(&mut ticket_store, &issuer, &helper, 2, &request_file)
             .unwrap();
     let mut operator = zrpc_payments::IssuerStore::create(&issuer_dir).unwrap();
     zrpc_payments::mock_settle_purchase(
@@ -402,7 +420,7 @@ async fn paid_rpc_admits_once_before_node_failure() {
         &issuer,
         &helper,
         &zrpc_payments::load_private_key_file(&private_key).unwrap(),
-        1,
+        2,
         &request_file,
         &response_file,
     )
@@ -418,6 +436,11 @@ async fn paid_rpc_admits_once_before_node_failure() {
     let ticket = ticket_store.preview_available().unwrap().unwrap();
     let authorization = issuer.authorization_for(ticket.token.expose()).unwrap();
     ticket_store.claim_available(&ticket).unwrap();
+    let other_ticket = ticket_store.preview_available().unwrap().unwrap();
+    let other_authorization = issuer
+        .authorization_for(other_ticket.token.expose())
+        .unwrap();
+    ticket_store.claim_available(&other_ticket).unwrap();
     let spent = zrpc_payments::RedeemerStore::create(&redeemer_dir).unwrap();
     let mut shared = Shared::new(FakeQuote::new(), limits(1, 1, Duration::from_nanos(1)));
     shared.node = Some(
@@ -428,19 +451,9 @@ async fn paid_rpc_admits_once_before_node_failure() {
         .unwrap(),
     );
     shared.payment = Some(Arc::new(Redeemer::new(issuer, helper, spent)));
-    let (mut client, _, _driver, _server) = connect(Arc::new(shared), &[31; 32]).await;
+    let shared = Arc::new(shared);
     let nonce = [31; 32];
-    assert_eq!(
-        read(
-            client
-                .send_request(request("/attestation", nonce_body(nonce)))
-                .await
-                .unwrap()
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
     let body = br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#;
     assert_eq!(
         read(
@@ -453,6 +466,8 @@ async fn paid_rpc_admits_once_before_node_failure() {
         .0,
         StatusCode::FORBIDDEN
     );
+    drop((client, driver, server));
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
     let invalid = Request::post("/rpc")
         .header(header::HOST, "fixture.invalid")
         .header(header::CONTENT_TYPE, "application/json")
@@ -463,30 +478,70 @@ async fn paid_rpc_admits_once_before_node_failure() {
         read(client.send_request(invalid).await.unwrap()).await.0,
         StatusCode::FORBIDDEN
     );
-    let paid_request = || {
+    drop((client, driver, server));
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
+    let paid_request = |authorization: &[u8]| {
         Request::post("/rpc")
             .header(header::HOST, "fixture.invalid")
             .header(header::CONTENT_TYPE, "application/json")
             .header(
                 header::AUTHORIZATION,
-                header::HeaderValue::from_bytes(authorization.as_ref()).unwrap(),
+                header::HeaderValue::from_bytes(authorization).unwrap(),
             )
             .body(Full::new(Bytes::from_static(body)))
             .unwrap()
     };
     assert_eq!(
-        read(client.send_request(paid_request()).await.unwrap())
-            .await
-            .0,
+        read(
+            client
+                .send_request(paid_request(authorization.as_ref()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
         StatusCode::SERVICE_UNAVAILABLE
     );
+    // A second, independently valid ticket cannot be linked to the first on
+    // this attested connection. It remains redeemable on a fresh connection.
     assert_eq!(
-        read(client.send_request(paid_request()).await.unwrap())
-            .await
-            .0,
+        read(
+            client
+                .send_request(paid_request(other_authorization.as_ref()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
         StatusCode::FORBIDDEN
     );
-    assert_eq!(ticket_store.balance().unwrap().uncertain, 1);
+    drop((client, driver, server));
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
+    assert_eq!(
+        read(
+            client
+                .send_request(paid_request(other_authorization.as_ref()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop((client, driver, server));
+    let (mut client, _driver, _server) = connect_attested(shared, nonce).await;
+    assert_eq!(
+        read(
+            client
+                .send_request(paid_request(authorization.as_ref()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(ticket_store.balance().unwrap().uncertain, 2);
     drop(client);
     drop(ticket_store);
     drop(operator);

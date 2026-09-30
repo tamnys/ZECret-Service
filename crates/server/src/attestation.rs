@@ -353,6 +353,7 @@ struct Session {
     io: SessionIo,
     challenged: AtomicBool,
     attestation_issued: AtomicBool,
+    paid_rpc_attempted: AtomicBool,
 }
 
 #[cfg(test)]
@@ -394,6 +395,7 @@ async fn serve_until<Q: QuoteSource>(
         io: io.clone(),
         challenged: AtomicBool::new(false),
         attestation_issued: AtomicBool::new(false),
+        paid_rpc_attempted: AtomicBool::new(false),
     });
     let service = hyper::service::service_fn(|request| {
         let shared = shared.clone();
@@ -562,6 +564,13 @@ async fn handle_rpc<Q: QuoteSource>(
     // its one nonce/exporter quote exchange. The native client independently
     // withholds the body until it authenticates and approves that quote.
     if !session.attestation_issued.load(Ordering::SeqCst) || session.io.check_deadline().is_err() {
+        return failure(StatusCode::FORBIDDEN);
+    }
+    // A paid ticket must never share a verified TLS session with another RPC
+    // attempt. Otherwise the service could link independently issued tickets
+    // simply because the caller presented them over one connection. Claim the
+    // attempt before parsing credentials or reading a private request body.
+    if shared.payment.is_some() && session.paid_rpc_attempted.swap(true, Ordering::SeqCst) {
         return failure(StatusCode::FORBIDDEN);
     }
     let authorization = if shared.payment.is_some() {
