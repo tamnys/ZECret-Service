@@ -2,10 +2,17 @@ name: Phala native amd64 preview image smoke
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_to_ghcr:
+        description: Publish the exact checked public-preview image to GHCR after smoke tests; does not create a Phala resource
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   actions: read
   contents: read
+  packages: write
 
 jobs:
   image-smoke:
@@ -308,3 +315,48 @@ jobs:
             --image "zrpc-phala-native-smoke:checked-local"
           echo 'Local tmpfs, synthetic quote exchange, cold Zebra public RPC on retained TLS, write-method rejection, and existing-session closure on quote loss passed; no snapshot import, live dstack or TDX guest was used.' \
             >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish only the reviewed public-preview image
+        if: ${{ inputs.publish_to_ghcr }}
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "${GITHUB_REPOSITORY,,}" = tamnys/zecret-service
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-native-image-smoke"
+          image=zrpc-phala-native-smoke:checked-local
+          expected_archive=026c4dc1d3756079a7ebeaff4e4cb28ac5cdb25d59f10fe3cc064e85370909de
+          expected_config=sha256:db5640e760fc8c69acf2fe1637f71b56100469fc58e437fc68646f2679dfaed2
+          test "$(cat "$scratch/image-archive-sha256")" = "$expected_archive"
+          test "$(docker image inspect --format '{{.Id}}' "$image")" = "$expected_config"
+          repository=ghcr.io/tamnys/zecret-service-preview
+          ref="$repository:preview-${expected_config#sha256:}"
+          docker tag "$image" "$ref"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+          push_output="$(docker push "$ref")"
+          digest="$(printf '%s\n' "$push_output" | \
+            sed -nE 's/.*digest: (sha256:[a-f0-9]{64}).*/\1/p' | tail -1)"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          docker logout ghcr.io >/dev/null
+          docker manifest inspect "$repository@$digest" \
+            > "$scratch/published-manifest.json"
+          python3 -I - "$scratch/published-manifest.json" "$expected_config" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          manifest = json.loads(Path(sys.argv[1]).read_bytes())
+          if (manifest.get("schemaVersion") != 2
+                  or manifest.get("config", {}).get("digest") != sys.argv[2]
+                  or not manifest.get("layers")):
+              raise SystemExit("anonymous GHCR readback differs from checked image")
+          PY
+          {
+            echo "Published public-preview image: $repository@$digest"
+            echo "Image config: $expected_config"
+            echo "Docker archive SHA-256: $expected_archive"
+            echo 'Anonymous manifest readback passed. No Phala resource was created and private mode remains blocked.'
+          } >> "$GITHUB_STEP_SUMMARY"
