@@ -15,6 +15,16 @@ HERE = Path(__file__).resolve().parent
 STOCK_LOCK = HERE / "stock-candidate.lock.json"
 ZEBRA_LOCK = ROOT / "deploy/gcp/zebra-release.lock.json"
 STOCK_LOCK_SHA256 = "76361686948794ad56b571c7ef640110d47c79d68618c960148c414286d01510"
+BASE_IMAGE = ("docker.io/library/python:3.13.15-slim-trixie@sha256:"
+              "37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332")
+# Created annotation in the pinned linux/amd64 OCI manifest.
+BASE_IMAGE_CREATED_AT = "2026-09-19T00:58:14Z"
+NATIVE_BINARIES_SHA256 = {
+    "zrpc-node-wrapper": "372771455c84710f82d5c404825e587440993e13a0a5b9aa16b5bdf7cfab3ed0",
+    "zrpc-quote-proxy": "b1d6f3ed2e6cf39d53f6f75e588f20ae046e8b28e7fa2eb9a54b676292f5304c",
+}
+CONTEXT_FILES = ("Dockerfile", "supervisor.py", "zebra.toml", "state/.keep",
+                 "bin/zebrad", "bin/zrpc-node-wrapper", "bin/zrpc-quote-proxy")
 IMAGE_REF = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -113,15 +123,31 @@ def checked_elf(path, expected_sha256, expected_size=None):
     return data
 
 
+def dockerfile_bytes(base_image):
+    template = regular_bytes(HERE / "image/Dockerfile.in").decode("ascii")
+    prefix = "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n"
+    if not template.startswith(prefix):
+        raise ValueError("image recipe changed")
+    return ("FROM " + base_image + "\n" + template[len(prefix):]).encode()
+
+
+def context_files_sha256(directory):
+    return {name: digest(regular_bytes(directory / name)) for name in CONTEXT_FILES}
+
+
 def image_context(args):
     stock, zebra, lock_digest = locks()
     eligible, eligible_at = eligibility(zebra)
     if not eligible:
         raise ValueError(f"Zebra release hold ends {eligible_at.isoformat()}")
-    if not IMAGE_REF.fullmatch(args.base_image):
-        raise ValueError("immutable base image reference required")
-    if datetime.now(timezone.utc) < utc(args.base_image_created_at) + timedelta(days=7):
+    if (args.base_image != BASE_IMAGE
+            or args.base_image_created_at != BASE_IMAGE_CREATED_AT):
+        raise ValueError("base image differs from reviewed linux/amd64 manifest")
+    if datetime.now(timezone.utc) < utc(BASE_IMAGE_CREATED_AT) + timedelta(days=7):
         raise ValueError("base image is inside the seven-day hold")
+    if (args.node_wrapper_sha256 != NATIVE_BINARIES_SHA256["zrpc-node-wrapper"]
+            or args.quote_proxy_sha256 != NATIVE_BINARIES_SHA256["zrpc-quote-proxy"]):
+        raise ValueError("native binaries differ from reviewed reproducible build")
     stage = inside_workspace(args.zebra_stage)
     receipt = read_json(stage / "receipt.json")
     if (receipt.get("status") != "staged-diagnostic-unapproved"
@@ -142,11 +168,7 @@ def image_context(args):
         "zrpc-quote-proxy": checked_elf(args.quote_proxy,
                                         args.quote_proxy_sha256),
     }
-    template = regular_bytes(HERE / "image/Dockerfile.in").decode("ascii")
-    prefix = "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n"
-    if not template.startswith(prefix):
-        raise ValueError("image recipe changed")
-    dockerfile = ("FROM " + args.base_image + "\n" + template[len(prefix):]).encode()
+    dockerfile = dockerfile_bytes(BASE_IMAGE)
     output = fresh_output(args.output)
     output.mkdir()
     (output / "bin").mkdir()
@@ -159,22 +181,84 @@ def image_context(args):
         (output / name).write_bytes(regular_bytes(HERE / "image" / name))
     (output / "state/.keep").write_bytes(b"")
     (output / "Dockerfile").write_bytes(dockerfile)
+    files_sha256 = context_files_sha256(output)
     result = {
         "schema_version": 1,
         "status": "local-image-context-unapproved",
-        "base_image": args.base_image,
-        "base_image_created_at": args.base_image_created_at,
+        "base_image": BASE_IMAGE,
+        "base_image_created_at": BASE_IMAGE_CREATED_AT,
         "stock_os_image_sha256": stock["os_image_sha256"],
         "stock_candidate_lock_sha256": STOCK_LOCK_SHA256,
         "zebra_release_lock_sha256": lock_digest,
         "zebra_asset_sha256": zebra["asset"]["sha256"],
         "binaries_sha256": {name: digest(data) for name, data in binaries.items()},
         "dockerfile_sha256": digest(dockerfile),
+        "context_files_sha256": files_sha256,
+        "context_sha256": digest(canonical(files_sha256)),
         "private_accepted": False,
         "deployment_enabled": False,
     }
     (output / "image-inputs.json").write_bytes(canonical(result))
     return result
+
+
+def check_image_context(args):
+    stock, zebra, lock_digest = locks()
+    eligible, eligible_at = eligibility(zebra)
+    if not eligible:
+        raise ValueError(f"Zebra release hold ends {eligible_at.isoformat()}")
+    directory = inside_workspace(args.context)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("regular image context directory required")
+    expected_paths = set(CONTEXT_FILES) | {"image-inputs.json", "bin", "state"}
+    actual_paths = {str(path.relative_to(directory)) for path in directory.rglob("*")}
+    if actual_paths != expected_paths or any(path.is_symlink() for path in directory.rglob("*")):
+        raise ValueError("image context has missing, extra, or symlink paths")
+    receipt = read_json(directory / "image-inputs.json")
+    files_sha256 = context_files_sha256(directory)
+    if (zebra["zebrad_elf_sha256"] is None
+            or zebra["zebrad_elf_size"] is None
+            or files_sha256["bin/zebrad"] != zebra["zebrad_elf_sha256"]
+            or (directory / "bin/zebrad").stat().st_size != zebra["zebrad_elf_size"]
+            or any(files_sha256["bin/" + name] != expected
+                   for name, expected in NATIVE_BINARIES_SHA256.items())
+            or set(receipt) != {"schema_version", "status", "base_image",
+                         "base_image_created_at", "stock_os_image_sha256",
+                         "stock_candidate_lock_sha256", "zebra_release_lock_sha256",
+                         "zebra_asset_sha256", "binaries_sha256",
+                         "dockerfile_sha256", "context_files_sha256",
+                         "context_sha256", "private_accepted", "deployment_enabled"}
+            or receipt["schema_version"] != 1
+            or receipt["status"] != "local-image-context-unapproved"
+            or receipt["base_image"] != BASE_IMAGE
+            or receipt["base_image_created_at"] != BASE_IMAGE_CREATED_AT
+            or receipt["stock_os_image_sha256"] != stock["os_image_sha256"]
+            or receipt["stock_candidate_lock_sha256"] != STOCK_LOCK_SHA256
+            or receipt["zebra_release_lock_sha256"] != lock_digest
+            or receipt["zebra_asset_sha256"] != zebra["asset"]["sha256"]
+            or receipt["binaries_sha256"] != {
+                "zebrad": zebra["zebrad_elf_sha256"], **NATIVE_BINARIES_SHA256}
+            or receipt["dockerfile_sha256"] != files_sha256["Dockerfile"]
+            or receipt["context_files_sha256"] != files_sha256
+            or receipt["context_sha256"] != digest(canonical(files_sha256))
+            or receipt["private_accepted"] is not False
+            or receipt["deployment_enabled"] is not False
+            or regular_bytes(directory / "Dockerfile") != dockerfile_bytes(BASE_IMAGE)
+            or regular_bytes(directory / "supervisor.py") !=
+            regular_bytes(HERE / "image/supervisor.py")
+            or regular_bytes(directory / "zebra.toml") !=
+            regular_bytes(HERE / "image/zebra.toml")
+            or regular_bytes(directory / "state/.keep") != b""):
+        raise ValueError("image context differs from reviewed inputs")
+    return {
+        "status": "local-image-context-checked-unapproved",
+        "context_sha256": receipt["context_sha256"],
+        "context_files_sha256": files_sha256,
+        "base_image": BASE_IMAGE,
+        "private_accepted": False,
+        "deployment_enabled": False,
+        "cloud_calls": False,
+    }
 
 
 def runtime_config(path):
@@ -259,8 +343,6 @@ def launch_documents(args):
         "runner": "docker-compose",
         "docker_compose_file": compose_bytes.decode("ascii"),
         "storage_fs": "ext4",
-        "swap_size": 0,
-        "key_provider": "kms",
         "kms_enabled": True,
         "tproxy_enabled": True,
         "public_logs": False,
@@ -305,6 +387,8 @@ def main():
     image.add_argument("--base-image", required=True)
     image.add_argument("--base-image-created-at", required=True)
     image.add_argument("--output", required=True, type=Path)
+    check_image = commands.add_parser("check-image-context")
+    check_image.add_argument("--context", required=True, type=Path)
     launch = commands.add_parser("launch-documents")
     launch.add_argument("--image", required=True)
     launch.add_argument("--image-inputs", required=True, type=Path)
@@ -330,6 +414,8 @@ def main():
             }
         elif args.command == "image-context":
             result = image_context(args)
+        elif args.command == "check-image-context":
+            result = check_image_context(args)
         else:
             result = launch_documents(args)
         print(json.dumps(result, indent=2, sort_keys=True))

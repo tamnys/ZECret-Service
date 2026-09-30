@@ -15,15 +15,18 @@ digest, KMS catalog identity, and source commits are in
 identity, and pricing before any deployment decision. A passing local package
 check cannot establish those live facts.
 
-The image recipe takes a reviewed, immutable Linux amd64 Python runtime base
-and checked Linux x86_64 binaries for `zebrad`, `zrpc-node-wrapper`, and
-`zrpc-quote-proxy`. `prepare.py image-context` accepts a Zebra staging receipt
-from `tools/gcp-guest/verify_zebra_release.py stage`, explicit hashes for the
-two Rust binaries, and an exact base image digest. It refuses the current Zebra
-hold or an unpinned ELF. It only copies checked local bytes into a fresh build
-context; it does not build, pull, or publish an image. Use `--help` for the
-required file paths and values. Build and registry publication need their own
-reviewed workflow.
+The image recipe pins the Linux amd64
+`python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332`
+manifest and the two native Rust binary hashes. It also requires a checked
+Linux x86_64 `zebrad` and the Zebra staging receipt from
+`tools/gcp-guest/verify_zebra_release.py stage`. `prepare.py image-context`
+refuses the current Zebra hold, unpinned ELF, different base manifest, or
+different native binaries. It copies checked bytes into a fresh local build
+context and hashes every file consumed by the Dockerfile. Before building, run
+`python3 deploy/phala/prepare.py check-image-context --context ABSOLUTE_CONTEXT_PATH`.
+The check detects changed or extra build inputs; it does not build, pull, or
+publish an image. Use `--help` for the full preparation arguments. Build and
+registry publication remain separate operator actions.
 
 After an exact application image digest and reviewed runtime limits exist,
 `prepare.py launch-documents` writes `compose.json`, `app-compose.json`, and a
@@ -39,9 +42,15 @@ Zebra's loopback RPC or P2P listener. See the
 [pinned dstack v0.5.9 usage guide](https://raw.githubusercontent.com/Dstack-TEE/dstack/v0.5.9/docs/usage.md)
 for the `s` route syntax.
 
+The current Phala Cloud `AppComposeV2` schema declares `storage_fs` and
+`kms_enabled`, but does not declare `swap_size` or `key_provider`. This public
+preview does not assert a no-swap policy or disk-key authorization policy.
+Verify the effective configuration through provider readback and live tests;
+private-mode approval remains blocked.
+
 The Compose design runs a quote bridge with the stock dstack socket mounted
 only in its container, and a separate application container with Zebra and the
-node wrapper. Both use the same checked image digest. A shared tmpfs volume
+node wrapper. Both use the same supplied immutable image digest. A shared tmpfs volume
 carries quote sockets and Zebra's cookie; `zebra_public_testnet` is the only
 application data volume and holds public chain state. Docker, containerd, and
 Sysbox still use the stock image's persistent data disk, so this configuration

@@ -50,6 +50,56 @@ class PackageTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stock or Zebra identity"):
                 prepare.locks()
 
+    def test_image_context_check_rejects_changed_build_inputs(self):
+        stock, zebra, lock_digest = prepare.locks()
+        elf = b"\x7fELF\x02\x01" + b"\x00" * 10 + b"\x03\x00\x3e\x00" + b"\x00" * 44
+        elf_hash = prepare.digest(elf)
+        zebra = {**zebra, "zebrad_elf_sha256": elf_hash, "zebrad_elf_size": len(elf)}
+        native = {name: elf_hash for name in prepare.NATIVE_BINARIES_SHA256}
+        stage = self.root / "stage"
+        stage.mkdir()
+        (stage / "zebrad").write_bytes(elf)
+        (stage / "receipt.json").write_bytes(prepare.canonical({
+            "status": "staged-diagnostic-unapproved",
+            "release_lock_sha256": lock_digest,
+            "asset_sha256": zebra["asset"]["sha256"],
+            "zebrad_elf_sha256": elf_hash,
+            "zebrad_elf_size": len(elf),
+            "verified_attestation_count": 1,
+        }))
+        for name in native:
+            (self.root / name).write_bytes(elf)
+        args = argparse.Namespace(
+            zebra_stage=stage,
+            node_wrapper=self.root / "zrpc-node-wrapper",
+            node_wrapper_sha256=elf_hash,
+            quote_proxy=self.root / "zrpc-quote-proxy",
+            quote_proxy_sha256=elf_hash,
+            base_image=prepare.BASE_IMAGE,
+            base_image_created_at=prepare.BASE_IMAGE_CREATED_AT,
+            output=self.root / "context",
+        )
+        with (patch.object(prepare, "locks", return_value=(stock, zebra, lock_digest)),
+              patch.object(prepare, "NATIVE_BINARIES_SHA256", native),
+              patch.object(prepare, "eligibility", return_value=(True, datetime.now(timezone.utc)))):
+            prepare.image_context(args)
+            checked = prepare.check_image_context(argparse.Namespace(context=args.output))
+            self.assertEqual(checked["status"], "local-image-context-checked-unapproved")
+            (args.output / "supervisor.py").write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "reviewed inputs"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+            (args.output / "supervisor.py").write_bytes(
+                (prepare.HERE / "image/supervisor.py").read_bytes())
+            native_file = args.output / "bin/zrpc-node-wrapper"
+            native_file.chmod(0o755)
+            native_file.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "reviewed inputs"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+            native_file.write_bytes(elf)
+            (args.output / ".dockerignore").write_text("bin/\n")
+            with self.assertRaisesRegex(ValueError, "missing, extra"):
+                prepare.check_image_context(argparse.Namespace(context=args.output))
+
     def test_render_binds_exact_bytes_and_isolates_backend_socket(self):
         stock, zebra, lock_digest = prepare.locks()
         inputs = self.root / "image-inputs.json"
@@ -81,6 +131,8 @@ class PackageTests(unittest.TestCase):
         compose = json.loads(compose_bytes)
         app = json.loads(app_bytes)
         self.assertEqual(app["docker_compose_file"].encode(), compose_bytes)
+        self.assertNotIn("swap_size", app)
+        self.assertNotIn("key_provider", app)
         self.assertEqual(receipt["docker_compose_file_sha256"], prepare.digest(compose_bytes))
         self.assertEqual(receipt["app_compose_file_sha256"], prepare.digest(app_bytes))
         self.assertEqual(compose["services"]["app"]["ports"], ["8443:8443"])
