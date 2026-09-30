@@ -31,15 +31,17 @@ EXPECTED_ALL_BINARIES = {
     "zrpc", "zrpc-wrapper", "zrpc-node-wrapper", "zrpc-quote-proxy",
     "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-disk-id", "zrpc-gcp-cookie",
     "zrpc-gcp-early-init", "zrpc-gcp-lifecycle", "zrpc-gcp-import-producer",
-    "zrpc-uki-digest",
+    "zrpc-uki-digest", "zrpc-payment-crypto",
 }
 EXPECTED_SELECTED = ({("zrpc-cli", "zrpc"),
                       ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),
                       ("zrpc-lifecycle", "zrpc-gcp-import-producer"),
-                      ("zrpc-uki-digest", "zrpc-uki-digest")}
+                      ("zrpc-uki-digest", "zrpc-uki-digest"),
+                      ("zrpc-payment-crypto", "zrpc-payment-crypto")}
                      | {("zrpc-server", name) for name in EXPECTED_ALL_BINARIES
                         if name not in {"zrpc", "zrpc-gcp-lifecycle",
-                                        "zrpc-gcp-import-producer", "zrpc-uki-digest"}})
+                                        "zrpc-gcp-import-producer", "zrpc-uki-digest",
+                                        "zrpc-payment-crypto"}})
 
 
 def unique_object(pairs):
@@ -162,6 +164,7 @@ def inspect(bundle, revision, *, selected_output=None):
         raise ValueError("reproduction input identities are missing")
     for path, field in (
         ("Cargo.lock", "Cargo.lock"),
+        ("tools/payment-crypto/Cargo.lock", "tools/payment-crypto/Cargo.lock"),
         ("rust-toolchain.toml", "rust-toolchain.toml"),
         ("scripts/reproduce-release.py", "script_in_source_sha256"),
     ):
@@ -193,6 +196,7 @@ def inspect(bundle, revision, *, selected_output=None):
             or any(not isinstance(build, dict) for build in builds)
             or {build.get("directory") for build in builds} != {"build-a", "build-b"}
             or any(build.get("exit_code") != 0
+                   or build.get("payment_helper_exit_code") != 0
                    or build.get("static_import_producer_exit_code") != 0
                    or build.get("static_import_producer_no_dynamic_loader") is not True
                    or build.get("artifact_sha256") != digests
@@ -220,6 +224,8 @@ def inspect(bundle, revision, *, selected_output=None):
         "exporter_script_sha256": sha256(regular_bytes(Path(__file__).resolve())),
         "reproduction_manifest_sha256": sha256(manifest_bytes),
         "cargo_lock_sha256": input_hashes["Cargo.lock"],
+        "payment_crypto_lock_sha256": input_hashes["tools/payment-crypto/Cargo.lock"],
+        "payment_crypto_sha256": digests["zrpc-payment-crypto"],
         "rust_toolchain_sha256": input_hashes["rust-toolchain.toml"],
         "rustc_host": "x86_64-unknown-linux-gnu",
         "artifacts": {role: {"path": role, "sha256": digests[name]}

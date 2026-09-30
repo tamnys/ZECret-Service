@@ -113,6 +113,24 @@ async fn connect<Q: QuoteSource>(
     }));
     (sender, expected, driver, server)
 }
+async fn connect_attested<Q: QuoteSource>(
+    shared: Arc<Shared<Q>>,
+    nonce: [u8; 32],
+) -> (TestClient, AbortOnDrop, AbortOnDrop) {
+    let (mut client, _, driver, server) = connect(shared, &nonce).await;
+    assert_eq!(
+        read(
+            client
+                .send_request(request("/attestation", nonce_body(nonce)))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    (client, driver, server)
+}
 #[derive(Clone)]
 struct FakeQuote {
     calls: Arc<Mutex<Vec<[u8; 64]>>>,
@@ -173,6 +191,16 @@ async fn read(response: Response<Incoming>) -> (StatusCode, Bytes) {
         status,
         response.into_body().collect().await.unwrap().to_bytes(),
     )
+}
+
+fn assert_private_store_excludes(directory: &std::path::Path, forbidden: &[&[u8]]) {
+    for entry in std::fs::read_dir(directory).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        for value in forbidden {
+            assert!(!value.is_empty());
+            assert!(!bytes.windows(value.len()).any(|window| window == *value));
+        }
+    }
 }
 
 #[tokio::test]
@@ -294,6 +322,18 @@ async fn optional_rpc_route_requires_attestation_then_enforces_method_allowlist(
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    let unexpected_ticket = Request::post("/rpc")
+        .header(header::HOST, "fixture.invalid")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "PrivateToken token=\"unexpected\"")
+        .body(Full::new(Bytes::from_static(body)))
+        .unwrap();
+    assert_eq!(
+        read(client.send_request(unexpected_ticket).await.unwrap())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
     let forbidden =
         br#"{"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":["PRIVATE_MARKER"]}"#;
     let (status, reply) = read(
@@ -317,6 +357,328 @@ async fn optional_rpc_route_requires_attestation_then_enforces_method_allowlist(
     )
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+#[ignore = "requires OpenSSL and the separately locked payment helper in the managed container"]
+async fn paid_rpc_admits_once_and_preserves_replay_after_node_outcomes() {
+    const PRIVATE_QUERY_MARKER: &[u8] = b"SYNTHETIC_PRIVATE_REQUEST_MARKER";
+    let helper = std::path::PathBuf::from(
+        std::env::var_os("ZRPC_PAYMENT_CRYPTO_HELPER")
+            .expect("set ZRPC_PAYMENT_CRYPTO_HELPER to the helper executable"),
+    );
+    let root = std::env::temp_dir().join(format!(
+        "zrpc-paid-rpc-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    zrpc_payments::PrivateDirectory::create(&root).unwrap();
+    let private_key = root.join("private.der");
+    let public_key = root.join("public.der");
+    assert!(
+        std::process::Command::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-outform",
+                "DER",
+                "-out"
+            ])
+            .arg(&private_key)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        std::process::Command::new("openssl")
+            .args(["pkey", "-inform", "DER", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-outform", "DER", "-out"])
+            .arg(&public_key)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let issuer = zrpc_payments::IssuerPublic::from_public_der(
+        &helper,
+        &std::fs::read(&public_key).unwrap(),
+        "issuer.example",
+    )
+    .unwrap();
+    let client_dir = zrpc_payments::PrivateDirectory::create(&root.join("client")).unwrap();
+    let issuer_dir = zrpc_payments::PrivateDirectory::create(&root.join("issuer")).unwrap();
+    let redeemer_dir = zrpc_payments::PrivateDirectory::create(&root.join("redeemer")).unwrap();
+    zrpc_payments::PrivateDirectory::create(&root.join("exchange")).unwrap();
+    let request_file = root.join("exchange/request.bin");
+    let response_file = root.join("exchange/response.bin");
+    let mut ticket_store = zrpc_payments::ClientStore::create(&client_dir).unwrap();
+    let purchase =
+        zrpc_payments::prepare_purchase(&mut ticket_store, &issuer, &helper, 3, &request_file)
+            .unwrap();
+    let mut operator = zrpc_payments::IssuerStore::create(&issuer_dir).unwrap();
+    zrpc_payments::mock_settle_purchase(
+        &mut operator,
+        &issuer,
+        &helper,
+        &zrpc_payments::load_private_key_file(&private_key).unwrap(),
+        3,
+        &request_file,
+        &response_file,
+    )
+    .unwrap();
+    zrpc_payments::collect_purchase(
+        &mut ticket_store,
+        &issuer,
+        &helper,
+        purchase,
+        &response_file,
+    )
+    .unwrap();
+    let ticket = ticket_store.preview_available().unwrap().unwrap();
+    let authorization = issuer.authorization_for(ticket.token.expose()).unwrap();
+    ticket_store.claim_available(&ticket).unwrap();
+    let other_ticket = ticket_store.preview_available().unwrap().unwrap();
+    let other_authorization = issuer
+        .authorization_for(other_ticket.token.expose())
+        .unwrap();
+    ticket_store.claim_available(&other_ticket).unwrap();
+    let success_ticket = ticket_store.preview_available().unwrap().unwrap();
+    let success_authorization = issuer
+        .authorization_for(success_ticket.token.expose())
+        .unwrap();
+    ticket_store.claim_available(&success_ticket).unwrap();
+    let spent = zrpc_payments::RedeemerStore::create(&redeemer_dir).unwrap();
+    let mut shared = Shared::new(FakeQuote::new(), limits(1, 1, Duration::from_nanos(1)));
+    shared.node = Some(
+        LocalNode::new(
+            "127.0.0.1:1".parse().unwrap(),
+            CookieAuth::from_cookie(b"fixture:fixture").unwrap(),
+        )
+        .unwrap(),
+    );
+    shared.payment = Some(Arc::new(Redeemer::new(issuer, helper.clone(), spent)));
+    let shared = Arc::new(shared);
+    let nonce = [31; 32];
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
+    let body = br#"{"jsonrpc":"2.0","id":"SYNTHETIC_PRIVATE_REQUEST_MARKER","method":"getblockcount","params":[]}"#;
+    assert_eq!(
+        read(
+            client
+                .send_request(request("/rpc", body.to_vec()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    drop((client, driver, server));
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
+    let invalid = Request::post("/rpc")
+        .header(header::HOST, "fixture.invalid")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "PrivateToken token=\"invalid\"")
+        .body(Full::new(Bytes::from_static(body)))
+        .unwrap();
+    assert_eq!(
+        read(client.send_request(invalid).await.unwrap()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    drop((client, driver, server));
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
+    let paid_request = |authorization: &[u8]| {
+        Request::post("/rpc")
+            .header(header::HOST, "fixture.invalid")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::AUTHORIZATION,
+                header::HeaderValue::from_bytes(authorization).unwrap(),
+            )
+            .body(Full::new(Bytes::from_static(body)))
+            .unwrap()
+    };
+    let (status, node_failure) = read(
+        client
+            .send_request(paid_request(authorization.as_ref()))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        !node_failure
+            .windows(PRIVATE_QUERY_MARKER.len())
+            .any(|window| window == PRIVATE_QUERY_MARKER)
+    );
+    // A second, independently valid ticket cannot be linked to the first on
+    // this attested connection. It remains redeemable on a fresh connection.
+    assert_eq!(
+        read(
+            client
+                .send_request(paid_request(other_authorization.as_ref()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    drop((client, driver, server));
+    let (mut client, driver, server) = connect_attested(shared.clone(), nonce).await;
+    assert_eq!(
+        read(
+            client
+                .send_request(paid_request(other_authorization.as_ref()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop((client, driver, server));
+    drop(shared);
+    let node_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let node_address = match node_listener.local_addr().unwrap() {
+        std::net::SocketAddr::V4(address) => address,
+        _ => unreachable!(),
+    };
+    let node_methods = Arc::new(Mutex::new(Vec::new()));
+    let observed_methods = node_methods.clone();
+    let node_task = tokio::spawn(async move {
+        let (socket, _) = node_listener.accept().await.unwrap();
+        let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+            let observed_methods = observed_methods.clone();
+            async move {
+                assert_eq!(request.method(), hyper::Method::POST);
+                assert_eq!(request.uri(), "/");
+                assert_eq!(
+                    request
+                        .headers()
+                        .get(header::AUTHORIZATION)
+                        .unwrap()
+                        .as_bytes(),
+                    b"Basic Zml4dHVyZTpmaXh0dXJl"
+                );
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                assert!(
+                    !body
+                        .windows(PRIVATE_QUERY_MARKER.len())
+                        .any(|window| window == PRIVATE_QUERY_MARKER)
+                );
+                let call: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let method = call["method"].as_str().unwrap();
+                observed_methods.lock().unwrap().push(method.to_owned());
+                let result = match method {
+                    "getblockchaininfo" => serde_json::json!({"chain":"test"}),
+                    "getblockcount" => serde_json::json!(42),
+                    _ => panic!("unexpected forwarded method"),
+                };
+                let response = serde_json::json!({
+                    "jsonrpc":"2.0", "id":call["id"], "result":result
+                });
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Full::new(Bytes::from(
+                            serde_json::to_vec(&response).unwrap(),
+                        )))
+                        .unwrap(),
+                )
+            }
+        });
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(TokioIo::new(socket), service)
+            .await
+            .unwrap();
+    });
+    let restarted_issuer = zrpc_payments::IssuerPublic::from_public_der(
+        &helper,
+        &std::fs::read(&public_key).unwrap(),
+        "issuer.example",
+    )
+    .unwrap();
+    let reopened_spent = zrpc_payments::RedeemerStore::open(&redeemer_dir).unwrap();
+    let mut restarted = Shared::new(FakeQuote::new(), limits(1, 1, Duration::from_nanos(1)));
+    restarted.node = Some(
+        LocalNode::new(
+            node_address,
+            CookieAuth::from_cookie(b"fixture:fixture").unwrap(),
+        )
+        .unwrap(),
+    );
+    restarted.payment = Some(Arc::new(Redeemer::new(
+        restarted_issuer,
+        helper,
+        reopened_spent,
+    )));
+    let restarted = Arc::new(restarted);
+    let (mut client, driver, server) = connect_attested(restarted.clone(), nonce).await;
+    assert_eq!(
+        read(
+            client
+                .send_request(paid_request(authorization.as_ref()))
+                .await
+                .unwrap()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    drop((client, driver, server));
+    let (mut client, driver, server) = connect_attested(restarted, nonce).await;
+    let (status, body) = read(
+        client
+            .send_request(paid_request(success_authorization.as_ref()))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["id"], "SYNTHETIC_PRIVATE_REQUEST_MARKER");
+    assert_eq!(response["result"], 42);
+    assert_eq!(ticket_store.balance().unwrap().uncertain, 3);
+    drop((client, driver, server));
+    node_task.await.unwrap();
+    assert_eq!(
+        node_methods.lock().unwrap().as_slice(),
+        ["getblockchaininfo", "getblockcount"]
+    );
+    drop(ticket_store);
+    drop(operator);
+    assert_private_store_excludes(
+        &root.join("issuer"),
+        &[
+            ticket.token.expose(),
+            other_ticket.token.expose(),
+            success_ticket.token.expose(),
+        ],
+    );
+    assert_private_store_excludes(
+        &root.join("redeemer"),
+        &[
+            PRIVATE_QUERY_MARKER,
+            &purchase,
+            ticket.token.expose(),
+            other_ticket.token.expose(),
+            success_ticket.token.expose(),
+            authorization.as_ref(),
+            other_authorization.as_ref(),
+            success_authorization.as_ref(),
+        ],
+    );
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[tokio::test]

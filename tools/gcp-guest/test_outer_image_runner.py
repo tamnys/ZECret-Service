@@ -604,6 +604,59 @@ class OuterImageRunnerTest(unittest.TestCase):
                                  inputs / "stage", inputs, inputs, root,
                                  "net:[1]", "mnt:[2]")
 
+    def test_paid_selection_requires_both_inputs_before_source_load(self):
+        path = Path("/unused")
+        with mock.patch.object(runner, "source_context") as source:
+            with self.assertRaisesRegex(ValueError, "both paid input paths"):
+                runner.build(path, path, path, path, "a" * 40, path,
+                             path, path, path, "net:[1]", "mnt:[2]",
+                             access="ticket-required")
+            with self.assertRaisesRegex(ValueError, "both paid input paths"):
+                runner.build(path, path, path, path, "a" * 40, path,
+                             path, path, path, "net:[1]", "mnt:[2]",
+                             access="free-demo", paid_lock=path,
+                             paid_inputs=path)
+        source.assert_not_called()
+
+    def test_paid_stage_applies_verified_overlay_and_never_falls_back(self):
+        free_stage = Path("/unused/candidate-free-source")
+        overlay = Path("/unused/candidate-paid-overlay")
+        stage = Path("/unused/candidate")
+        prepare = types.SimpleNamespace(
+            stage=mock.Mock(return_value={"manifest_sha256": "a" * 64,
+                                          "manifest_bytes": 100}),
+            verify_stage=mock.Mock())
+        paid = types.SimpleNamespace(
+            stage=mock.Mock(return_value={"manifest_sha256": "b" * 64,
+                                          "manifest_bytes": 200}),
+            apply=mock.Mock(return_value={"manifest_sha256": "c" * 64,
+                                          "manifest_bytes": 300}))
+        selected = types.SimpleNamespace(output=mock.Mock())
+        context = types.SimpleNamespace(source=types.SimpleNamespace(
+            guest=types.SimpleNamespace(prepare=prepare)), paid=paid,
+            selected=selected)
+        result = runner.stage_guest_candidate(context, Path("/lock"), Path("/inputs"),
+                                              Path("/bundle"), "d" * 40, stage,
+                                              "ticket-required", Path("/paid-lock"),
+                                              Path("/paid-inputs"))
+        self.assertEqual(result["manifest_sha256"], "c" * 64)
+        prepare.stage.assert_called_once_with(Path("/lock"), Path("/inputs"), free_stage)
+        prepare.verify_stage.assert_called_once_with(free_stage, "a" * 64, 100)
+        paid.stage.assert_called_once_with(
+            free_stage, "a" * 64, 100, Path("/paid-lock"), Path("/paid-inputs"),
+            Path("/bundle"), "d" * 40, overlay,
+            selected_output=selected.output)
+        paid.apply.assert_called_once_with(
+            free_stage, "a" * 64, 100, overlay, "b" * 64, 200, stage)
+        paid.stage.side_effect = ValueError("invalid paid lock")
+        with self.assertRaisesRegex(ValueError, "invalid paid lock"):
+            runner.stage_guest_candidate(context, Path("/lock"), Path("/inputs"),
+                                         Path("/bundle"), "d" * 40, stage,
+                                         "ticket-required", Path("/paid-lock"),
+                                         Path("/paid-inputs"))
+        self.assertEqual(prepare.stage.call_count, 2)
+        self.assertEqual(paid.apply.call_count, 1)
+
     def test_main_fail_closed_without_isolated_python(self):
         with mock.patch.object(runner, "sys", types.SimpleNamespace(
                 flags=types.SimpleNamespace(isolated=0))):

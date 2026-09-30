@@ -19,6 +19,20 @@ spec.loader.exec_module(reproduce_release)
 class GuestArtifactTests(unittest.TestCase):
     def test_current_workspace_binaries_are_covered(self):
         reproduce_release.check_project_artifacts(ROOT)
+        reproduce_release.check_payment_helper(ROOT)
+
+    def test_payment_helper_must_keep_its_separate_pinned_graph(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("CODEX_TMP_DIR")) as temporary:
+            helper = Path(temporary) / "tools/payment-crypto"
+            (helper / "src").mkdir(parents=True)
+            for relative in ("Cargo.toml", "Cargo.lock", "src/main.rs"):
+                (helper / relative).write_bytes((ROOT / "tools/payment-crypto" / relative).read_bytes())
+            manifest = helper / "Cargo.toml"
+            manifest.write_text(manifest.read_text().replace(
+                'blind-rsa-signatures = "=0.17.2"',
+                'blind-rsa-signatures = "*"'))
+            with self.assertRaisesRegex(reproduce_release.Refusal, "payment helper differs"):
+                reproduce_release.check_payment_helper(Path(temporary))
 
     def test_omitting_a_non_guest_binary_fails(self):
         artifacts = tuple(artifact for artifact in reproduce_release.ARTIFACTS

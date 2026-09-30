@@ -272,7 +272,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn synthetic_gcp_retained_sender_uses_one_tls_stream_for_typed_rpc() {
-        for oversized_result in [false, true] {
+        for (oversized_result, paid) in [(false, false), (true, false), (false, true), (true, true)]
+        {
             let (client, server) = connect_pair(server_config(false, Some(ALPN))).await;
             let pending = client.unwrap().prepare_challenge().unwrap();
             let mut server = server.unwrap();
@@ -302,6 +303,18 @@ mod tests {
                 }
                 let headers = std::str::from_utf8(&headers).unwrap();
                 assert!(headers.starts_with("POST /rpc HTTP/1.1\r\n"));
+                let authorization: Vec<_> = headers
+                    .split("\r\n")
+                    .filter(|line| line.to_ascii_lowercase().starts_with("authorization: "))
+                    .collect();
+                if paid {
+                    assert_eq!(
+                        authorization,
+                        ["authorization: PrivateToken token=\"synthetic\""]
+                    );
+                } else {
+                    assert!(authorization.is_empty());
+                }
                 let lengths: Vec<usize> = headers
                     .split("\r\n")
                     .filter_map(|line| {
@@ -358,11 +371,35 @@ mod tests {
             .unwrap();
             test_promotion.send(()).unwrap();
             server_ready.await.unwrap();
-            let result = session
-                .query_from_body(|| {
-                    Ok(br#"{"jsonrpc":"2.0","id":"synthetic-id","method":"getblockcount","params":[]}"#.to_vec())
-                })
-                .await;
+            let claimed = std::cell::Cell::new(false);
+            let released = std::cell::Cell::new(false);
+            let result = if paid {
+                session
+                    .query_from_body_authorized(
+                        || async {
+                            Ok(br#"{"jsonrpc":"2.0","id":"synthetic-id","method":"getblockcount","params":[]}"#.to_vec())
+                        },
+                        || {
+                            Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                                claimed.set(true);
+                                Ok(|| {
+                                    released.set(true);
+                                    Ok(())
+                                })
+                            }))
+                        },
+                    )
+                    .await
+                    .map(|(value, ())| value)
+            } else {
+                session
+                    .query_from_body(|| {
+                        Ok(br#"{"jsonrpc":"2.0","id":"synthetic-id","method":"getblockcount","params":[]}"#.to_vec())
+                    })
+                    .await
+            };
+            assert_eq!(claimed.get(), paid);
+            assert!(!released.get());
             if oversized_result {
                 assert_eq!(result.unwrap_err().code, ErrorCode::InvalidBackendResponse);
             } else {
@@ -402,6 +439,247 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::ExpiredCollateral);
         assert!(!body_read);
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn paid_query_rejects_invalid_body_before_ticket_selection() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor);
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + MAX_CONNECTION_LIFETIME,
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        let selected = std::cell::Cell::new(false);
+        let error = session
+            .query_from_body_authorized(
+                || async {
+                    Ok(
+                        br#"{"jsonrpc":"2.0","id":1,"method":"sendrawtransaction","params":[]}"#
+                            .to_vec(),
+                    )
+                },
+                || {
+                    selected.set(true);
+                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                        Ok(|| Ok(()))
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::MethodNotAllowed);
+        assert!(!selected.get());
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn paid_query_rejects_dead_tor_or_expired_connection_before_ticket_selection() {
+        for tor_unavailable in [true, false] {
+            let (result, peer) = fixture(body).await;
+            let mut evidence = result.unwrap();
+            let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+            evidence.connection.session.origin = TransportOrigin::Managed(tor.clone());
+            let session = VerifiedRpcSession::from_authenticated_inspection(
+                evidence.connection.session,
+                evidence.connection.deadline,
+                evidence.connection.authority,
+                PrivateDeadline {
+                    monotonic: Instant::now()
+                        + if tor_unavailable {
+                            MAX_CONNECTION_LIFETIME
+                        } else {
+                            Duration::from_millis(200)
+                        },
+                    collateral_expiration_unix_seconds: u64::MAX,
+                },
+            )
+            .unwrap();
+            if tor_unavailable {
+                tor.terminate_synthetic_child();
+            } else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            let body_read = std::cell::Cell::new(false);
+            let ticket_selected = std::cell::Cell::new(false);
+            let error = session
+                .query_from_body_authorized(
+                    || {
+                        body_read.set(true);
+                        async {
+                            Ok(
+                                br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#
+                                    .to_vec(),
+                            )
+                        }
+                    },
+                    || {
+                        ticket_selected.set(true);
+                        Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                            Ok(|| Ok(()))
+                        }))
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                if tor_unavailable {
+                    ErrorCode::TorUnavailable
+                } else {
+                    ErrorCode::ExpiredCollateral
+                }
+            );
+            assert!(!body_read.get());
+            assert!(!ticket_selected.get());
+            // The fixture peer fails if it sees an RPC byte on this stream.
+            peer.await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn paid_query_claim_failure_prevents_ticket_and_body_transmission() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor);
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + MAX_CONNECTION_LIFETIME,
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        let claimed = std::cell::Cell::new(false);
+        let error = session
+            .query_from_body_authorized(
+                || async {
+                    Ok(
+                        br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#
+                            .to_vec(),
+                    )
+                },
+                || {
+                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                        claimed.set(true);
+                        Err::<fn() -> Result<(), SafeError>, _>(SafeError::new(
+                            ErrorCode::InvalidRequest,
+                            "Ticket authorization unavailable.",
+                        ))
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidRequest);
+        assert!(claimed.get());
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn paid_query_does_not_transmit_if_managed_tor_dies_during_claim() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor.clone());
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + MAX_CONNECTION_LIFETIME,
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        let claimed = std::cell::Cell::new(false);
+        let released = std::cell::Cell::new(false);
+        let error = session
+            .query_from_body_authorized(
+                || async {
+                    Ok(
+                        br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#
+                            .to_vec(),
+                    )
+                },
+                || {
+                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                        claimed.set(true);
+                        tor.terminate_synthetic_child();
+                        Ok(|| {
+                            released.set(true);
+                            Ok(())
+                        })
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::TorUnavailable);
+        assert!(claimed.get());
+        assert!(released.get());
+        // The fixture peer fails if it sees any RPC byte on this TLS stream.
+        peer.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn paid_query_does_not_transmit_if_verified_deadline_expires_during_claim() {
+        let (result, peer) = fixture(body).await;
+        let mut evidence = result.unwrap();
+        let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+        evidence.connection.session.origin = TransportOrigin::Managed(tor);
+        let session = VerifiedRpcSession::from_authenticated_inspection(
+            evidence.connection.session,
+            evidence.connection.deadline,
+            evidence.connection.authority,
+            PrivateDeadline {
+                monotonic: Instant::now() + Duration::from_millis(200),
+                collateral_expiration_unix_seconds: u64::MAX,
+            },
+        )
+        .unwrap();
+        let claimed = std::cell::Cell::new(false);
+        let released = std::cell::Cell::new(false);
+        let error = session
+            .query_from_body_authorized(
+                || async {
+                    Ok(
+                        br#"{"jsonrpc":"2.0","id":1,"method":"getblockcount","params":[]}"#
+                            .to_vec(),
+                    )
+                },
+                || {
+                    Ok((b"PrivateToken token=\"synthetic\"".to_vec(), (), || {
+                        claimed.set(true);
+                        std::thread::sleep(Duration::from_millis(250));
+                        Ok(|| {
+                            released.set(true);
+                            Ok(())
+                        })
+                    }))
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ExpiredCollateral);
+        assert!(claimed.get());
+        assert!(released.get());
         peer.await.unwrap();
     }
 

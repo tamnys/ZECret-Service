@@ -26,8 +26,8 @@ BASE_IMAGE = ("docker.io/library/python:3.13.15-slim-trixie@sha256:"
 # Created annotation in the pinned linux/amd64 OCI manifest.
 BASE_IMAGE_CREATED_AT = "2026-09-19T00:58:14Z"
 NATIVE_BINARIES_SHA256 = {
-    "zrpc-node-wrapper": "ed5288654ba0cebb10e8c1f1e491270a57c09a697c4b1cfc63780ffe6fae02c4",
-    "zrpc-quote-proxy": "ec8445ac880976a1c5f811a46ceddad16e6b7d73cde2a7a5cd449f50c419c296",
+    "zrpc-node-wrapper": "65dfeb3c43c403e71e4c4e635ee78decf73661bdf4fb020fa417905145fe4762",
+    "zrpc-quote-proxy": "6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186",
 }
 CONTEXT_FILES = ("Dockerfile", "supervisor.py", "zebra.toml", "state/.keep",
                  "zebra-stage-receipt.json",

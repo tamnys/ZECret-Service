@@ -469,6 +469,7 @@ def main():
                     "--platform", "phala-dstack", "--listen", "0.0.0.0:8443",
                     "--node", "127.0.0.1:18232", "--max-connections", "1",
                     "--max-quotes", "1", "--quote-spacing-ms", "1",
+                    "--access", "free-demo",
                 )
                 wrapper_started = True
                 while True:

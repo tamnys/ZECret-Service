@@ -473,10 +473,12 @@ def postbuild_import(staged, args):
     """Keep import conversion inside the same checked no-route builder."""
     report_host = args.scratch / "outer-image-report.json"
     report, _ = handoff_json(report_host)
+    access = "ticket-required" if getattr(args, "paid", False) else "free-demo"
     source_sha256 = report.get("raw_disk_sha256")
     source_bytes = report.get("raw_disk_bytes")
     if (report.get("status") != "candidate-outer-image-built-unapproved"
             or report.get("source_commit") != args.revision
+            or report.get("access_policy") != access
             or report.get("image_built") is not True
             or report.get("signed_uki_checked") is not True
             or report.get("verity_userspace_verified") is not True
@@ -588,6 +590,7 @@ def postbuild_import(staged, args):
     handoff = {
         "schema_version": 1,
         "status": "diagnostic-operator-import-handoff-unapproved",
+        "access_policy": access,
         "source_commit": args.revision,
         "stage_manifest_sha256": finished["stage_manifest_sha256"],
         "input_lock_sha256": finished["input_lock_sha256"],
@@ -630,14 +633,20 @@ def postbuild_import(staged, args):
 
 
 def build(args, *, preflight_only=False):
+    paid = bool(getattr(args, "paid", False))
+    if preflight_only and paid:
+        raise ValueError("paid image inputs require the full build path")
     if preflight_only:
         input_files, input_dirs = (), PREFLIGHT_INPUT_DIRS
         overlay, apt = checked_layout(args.workspace, args.source, args.scratch,
                                       args.staged, input_files=input_files,
                                       input_dirs=input_dirs)
     else:
-        input_files, input_dirs = INPUT_FILES, INPUT_DIRS
-        overlay, apt = checked_layout(args.workspace, args.source, args.scratch, args.staged)
+        input_files = INPUT_FILES + (("paid-inputs.lock.json",) if paid else ())
+        input_dirs = INPUT_DIRS + (("paid-inputs",) if paid else ())
+        overlay, apt = checked_layout(args.workspace, args.source, args.scratch,
+                                      args.staged, input_files=input_files,
+                                      input_dirs=input_dirs)
     checked_bound_mounts(args.source, args.scratch, args.staged)
     checked_bound_sockets(args.source, args.scratch, args.staged)
     checked_source(args.source, args.revision)
@@ -701,21 +710,30 @@ print(json.dumps(result,sort_keys=True))'''
                            (signing_target, True)):
         if bool(os.statvfs(path).f_flag & os.ST_RDONLY) != readonly:
             raise ValueError("final builder mount write policy differs")
-    run_in_builder(staged, ["/usr/bin/python3", "-I", "-B",
-                            "/workspace/tools/gcp-guest/outer_image_runner.py", "build",
-                            "--lock", str(SCRATCH_IN_GUEST / "inputs.lock.json"),
-                            "--inputs", str(SCRATCH_IN_GUEST / "inputs"),
-                            "--zebra-receipt", str(SCRATCH_IN_GUEST / "zebra-provenance.json"),
-                            "--rust-bundle", str(SCRATCH_IN_GUEST / "rust-bundle"),
-                            "--stage", str(SCRATCH_IN_GUEST / "candidate-stage"),
-                            "--metadata", str(SCRATCH_IN_GUEST / "metadata"),
-                            "--builder-archives", str(SCRATCH_IN_GUEST / "builder-archives"),
-                            "--workspace", str(SCRATCH_IN_GUEST),
-                            "--report-path", str(SCRATCH_IN_GUEST / "outer-image-report.json"),
-                            "--revision", args.revision,
-                            "--parent-network-namespace", args.net,
-                            "--parent-mount-namespace", args.mnt])
+    run_in_builder(staged, outer_build_command(args, paid))
     return postbuild_import(staged, args)
+
+
+def outer_build_command(args, paid):
+    command = ["/usr/bin/python3", "-I", "-B",
+               "/workspace/tools/gcp-guest/outer_image_runner.py", "build",
+               "--lock", str(SCRATCH_IN_GUEST / "inputs.lock.json"),
+               "--inputs", str(SCRATCH_IN_GUEST / "inputs"),
+               "--zebra-receipt", str(SCRATCH_IN_GUEST / "zebra-provenance.json"),
+               "--rust-bundle", str(SCRATCH_IN_GUEST / "rust-bundle"),
+               "--stage", str(SCRATCH_IN_GUEST / "candidate-stage"),
+               "--metadata", str(SCRATCH_IN_GUEST / "metadata"),
+               "--builder-archives", str(SCRATCH_IN_GUEST / "builder-archives"),
+               "--workspace", str(SCRATCH_IN_GUEST),
+               "--report-path", str(SCRATCH_IN_GUEST / "outer-image-report.json"),
+               "--revision", args.revision,
+               "--parent-network-namespace", args.net,
+               "--parent-mount-namespace", args.mnt,
+               "--access", "ticket-required" if paid else "free-demo"]
+    if paid:
+        command.extend(("--paid-lock", str(SCRATCH_IN_GUEST / "paid-inputs.lock.json"),
+                        "--paid-inputs", str(SCRATCH_IN_GUEST / "paid-inputs")))
+    return command
 
 
 def main(argv=None):
@@ -731,6 +749,8 @@ def main(argv=None):
         parser.add_argument("--parent-" + name + "-namespace", dest=name, required=True)
     parser.add_argument("--preflight-only", action="store_true",
                         help="diagnostic signed-builder handoff; no signing key or image build")
+    parser.add_argument("--paid", action="store_true",
+                        help="require separate paid input lock and ticket-required guest stage")
     args = parser.parse_args(argv)
     try:
         if args.preflight_only:

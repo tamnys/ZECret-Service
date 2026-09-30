@@ -362,6 +362,7 @@ class CandidateTests(unittest.TestCase):
         units = output / "rootfs/usr/lib/systemd/system"
         wrapper = (units / "zrpc-wrapper.service").read_text()
         self.assertIn("--platform gcp-tdx", wrapper)
+        self.assertIn("--access free-demo", wrapper)
         self.assertIn("ExecStart=/usr/lib/zrpc/zrpc-gcp-guard --exec wrapper", wrapper)
         for name in ("zrpc-wrapper", "zrpc-node", "zrpc-cookie", "zrpc-gcp-quote"):
             unit = (units / f"{name}.service").read_text()

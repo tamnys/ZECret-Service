@@ -21,6 +21,38 @@ def mount_record(target, options="rw"):
 
 
 class LayoutTests(unittest.TestCase):
+    def test_paid_build_requires_paid_inputs_before_any_mount(self):
+        root = Path("/unused")
+        args = types.SimpleNamespace(workspace=root, source=root / "source",
+                                     scratch=root / "scratch", staged=root / "staged",
+                                     revision="a" * 40, paid=True)
+        with (mock.patch.object(harness, "checked_layout", return_value=(root, root)) as layout,
+              mock.patch.object(harness, "checked_bound_mounts",
+                                side_effect=ValueError("stop before mount")),
+              mock.patch.object(harness, "mount") as mounted):
+            with self.assertRaisesRegex(ValueError, "stop before mount"):
+                harness.build(args)
+        layout.assert_called_once_with(
+            args.workspace, args.source, args.scratch, args.staged,
+            input_files=harness.INPUT_FILES + ("paid-inputs.lock.json",),
+            input_dirs=harness.INPUT_DIRS + ("paid-inputs",))
+        mounted.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "full build path"):
+            harness.build(args, preflight_only=True)
+
+    def test_build_command_selects_one_access_policy(self):
+        args = types.SimpleNamespace(revision="a" * 40, net="net:[1]", mnt="mnt:[2]")
+        free = harness.outer_build_command(args, False)
+        paid = harness.outer_build_command(args, True)
+        self.assertEqual(free[free.index("--access") + 1], "free-demo")
+        self.assertEqual(paid[paid.index("--access") + 1], "ticket-required")
+        self.assertNotIn("--paid-lock", free)
+        self.assertNotIn("--paid-inputs", free)
+        self.assertEqual(paid[paid.index("--paid-lock") + 1],
+                         str(harness.SCRATCH_IN_GUEST / "paid-inputs.lock.json"))
+        self.assertEqual(paid[paid.index("--paid-inputs") + 1],
+                         str(harness.SCRATCH_IN_GUEST / "paid-inputs"))
+
     def test_rejects_source_outside_workspace_before_mount(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -530,6 +562,7 @@ class ImportHandoffTests(unittest.TestCase):
         self.stage_manifest_sha = "c" * 64
         self.build_report = {
             "status": "candidate-outer-image-built-unapproved",
+            "access_policy": "free-demo",
             "source_commit": self.args.revision,
             "candidate_manifest_sha256": self.stage_manifest_sha,
             "input_lock_sha256": "1" * 64,
@@ -619,6 +652,7 @@ class ImportHandoffTests(unittest.TestCase):
         self.assertEqual(report["mkosi_disk_sha256"], self.source_sha)
         self.assertFalse(report["import_package_ready"])
         self.assertFalse(report["private_mode_approved"])
+        self.assertEqual(report["access_policy"], "free-demo")
         self.assertEqual(report["package_diagnostics"]["esp_diagnostic"]["path"],
                          str(self.args.scratch / "import-disk/esp.json"))
         self.assertEqual(report["handoff_artifact"]["sha256"],
@@ -641,6 +675,13 @@ class ImportHandoffTests(unittest.TestCase):
         self.build_report["signed_uki_checked"] = False
         self.write_private(self.args.scratch / "outer-image-report.json",
                            self.build_report)
+        with mock.patch.object(harness, "run_in_builder") as executed:
+            with self.assertRaisesRegex(ValueError, "verified mkosi report"):
+                harness.postbuild_import(self.args.staged, self.args)
+            executed.assert_not_called()
+
+    def test_paid_handoff_rejects_free_image_report(self):
+        self.args.paid = True
         with mock.patch.object(harness, "run_in_builder") as executed:
             with self.assertRaisesRegex(ValueError, "verified mkosi report"):
                 harness.postbuild_import(self.args.staged, self.args)

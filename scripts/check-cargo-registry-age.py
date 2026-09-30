@@ -186,8 +186,13 @@ def preflight(lock_path, fetch=fetch_index, now=None):
 
 
 def main():
-    lock = Path(__file__).resolve().parents[1] / "Cargo.lock"
     try:
+        arguments = sys.argv[1:]
+        if arguments not in ([], ["--payment-helper"]):
+            raise Refusal("only the workspace or separate payment helper lock may be checked")
+        relative = ("tools/payment-crypto/Cargo.lock" if arguments
+                    else "Cargo.lock")
+        lock = Path(__file__).resolve().parents[1] / relative
         result = preflight(lock)
     except (Refusal, OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError) as error:
         print(json.dumps({"registry_preflight_passed": False, "reason": str(error),

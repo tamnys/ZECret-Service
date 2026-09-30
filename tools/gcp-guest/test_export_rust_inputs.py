@@ -63,16 +63,19 @@ class GuestRustInputTests(unittest.TestCase):
             "script_matches_source": True,
             "input_sha256": {path: hashlib.sha256(exporter.git_bytes(
                 self.revision, path)).hexdigest() for path in (
-                    "Cargo.lock", "rust-toolchain.toml")},
+                    "Cargo.lock", "tools/payment-crypto/Cargo.lock",
+                    "rust-toolchain.toml")},
             "selected_binaries": [
                 {"package": {"zrpc": "zrpc-cli",
                              "zrpc-gcp-lifecycle": "zrpc-lifecycle",
                              "zrpc-gcp-import-producer": "zrpc-lifecycle",
-                             "zrpc-uki-digest": "zrpc-uki-digest"}.get(name, "zrpc-server"),
+                             "zrpc-uki-digest": "zrpc-uki-digest",
+                             "zrpc-payment-crypto": "zrpc-payment-crypto"}.get(name, "zrpc-server"),
                  "name": name} for name in sorted(digests)
             ],
             "artifact_sha256": digests,
             "builds": [{"directory": label, "exit_code": 0,
+                        "payment_helper_exit_code": 0,
                         "static_import_producer_exit_code": 0,
                         "static_import_producer_no_dynamic_loader": True,
                         "artifact_sha256": digests} for label in ("build-a", "build-b")],
@@ -93,11 +96,14 @@ class GuestRustInputTests(unittest.TestCase):
         result = exporter.inspect(self.bundle, self.revision)
         self.assertEqual(set(result["artifacts"]), set(exporter.EXPECTED_GUEST_BINARIES))
         self.assertEqual(result["artifacts"]["early_init"]["path"], "early_init")
+        self.assertEqual(result["payment_crypto_sha256"],
+                         self.manifest["artifact_sha256"]["zrpc-payment-crypto"])
         self.assertFalse(result["image_built"])
         self.assertFalse(result["private_mode_approved"])
 
     def test_receipt_archive_reader_preserves_checks_without_git_binary(self):
         required = ("tools/gcp-guest/prepare.py", "Cargo.lock",
+                    "tools/payment-crypto/Cargo.lock",
                     "rust-toolchain.toml", "scripts/reproduce-release.py")
         selected = {path: exporter.git_bytes(self.revision, path) for path in required}
 
@@ -121,8 +127,19 @@ class GuestRustInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "binary differs"):
             exporter.inspect(self.bundle, self.revision)
 
+    def test_payment_helper_artifact_tamper_is_rejected(self):
+        (self.bundle / "artifacts/zrpc-payment-crypto").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "binary differs"):
+            exporter.inspect(self.bundle, self.revision)
+
     def test_dynamic_import_producer_build_record_is_rejected(self):
         self.manifest["builds"][1]["static_import_producer_no_dynamic_loader"] = False
+        (self.bundle / "manifest.json").write_text(json.dumps(self.manifest))
+        with self.assertRaisesRegex(ValueError, "independent binary receipts"):
+            exporter.inspect(self.bundle, self.revision)
+
+    def test_missing_payment_helper_build_record_is_rejected(self):
+        del self.manifest["builds"][1]["payment_helper_exit_code"]
         (self.bundle / "manifest.json").write_text(json.dumps(self.manifest))
         with self.assertRaisesRegex(ValueError, "independent binary receipts"):
             exporter.inspect(self.bundle, self.revision)

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 zrpc-client = { path = "../client" }
+zrpc-payments = { path = "../payments" }
 zrpc-protocol = { path = "../protocol" }
 zrpc-verifier = { path = "../verifier" }
 

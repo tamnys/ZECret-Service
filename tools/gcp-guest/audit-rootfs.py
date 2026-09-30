@@ -30,6 +30,9 @@ PINNED_DISK_FILES = {
     "usr/lib/udev/rules.d/65-gce-disk-naming.rules": "b06b83104359437859d4f497973eede0da1d8b3958afc4aab073d9f94e9d7b19",
     "usr/lib/systemd/system/zrpc-gcp-disk-trigger.service": "60da51b2fb02e6591a42bdce024594c3f891a314d5622ab88237049ae3ac9737",
 }
+# The paid stage generator substitutes an exact hash/size/mode map here. The
+# source free profile has no paid files and retains its original disk pins.
+PAID_PINNED_FILES = {}
 SIGNED_DISK_ELFS = {
     "usr/sbin/nvme": (1477760, "2ecb01494cd51dc4793f14ce30bdd18133f0caad48316e7d7c8093c687957140", 0o555),
     "usr/lib/x86_64-linux-gnu/libnvme.so.1": (209096, "49eb38e4e8952b4f38946562d35419354209116082bce9172bd969faa3293c85", 0o444),
@@ -363,6 +366,31 @@ def audit_accounts(root):
             if gid in protected_gids:
                 raise ValueError("guest service GID has an alias")
 
+def audit_paid_files(root):
+    for relative, (size, expected_sha256, mode) in PAID_PINNED_FILES.items():
+        parent = root
+        for component in Path(relative).parts[:-1]:
+            parent = parent / component
+            if parent.is_symlink() or not parent.is_dir():
+                raise ValueError("paid guest file parent redirected: " + relative)
+        path = root / relative
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or (before.st_uid, before.st_gid) != (0, 0)
+                    or before.st_size != size
+                    or stat.S_IMODE(before.st_mode) != mode):
+                raise ValueError("paid guest file missing or has unsafe identity: " + relative)
+            if hashlib.file_digest(stream, "sha256").hexdigest() != expected_sha256:
+                raise ValueError("paid guest file bytes differ: " + relative)
+            after = os.fstat(stream.fileno())
+            if (before.st_dev, before.st_ino, before.st_mode, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_mode, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns):
+                raise ValueError("paid guest file changed during audit: " + relative)
+
 def audit(root):
     if root.is_symlink() or not root.is_dir() or root.resolve() == Path("/"):
         raise ValueError("explicit build root required")
@@ -463,6 +491,7 @@ def audit(root):
         path = root / "usr/lib/zrpc" / name
         if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o022:
             raise ValueError("guest executable missing or mutable")
+    audit_paid_files(root)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)

@@ -64,6 +64,7 @@ ADDITIONAL_SCRIPTS = (
 )
 STATIC_SOURCE_FILES = (
     "tools/gcp-guest/audit-rootfs.py",
+    "tools/gcp-guest/prepare_paid.py",
     "tools/gcp-guest/audit-initrd.py",
     "tools/gcp-guest/seal-shadow.py",
     "tools/gcp-guest/sanitize-mount.py",
@@ -274,6 +275,8 @@ def source_context(revision, rust_bundle):
                                 selected, revision),
         import_disk=bind_file_module("outer_prepare_import_disk", ADDITIONAL_SCRIPTS[10],
                                      selected, revision),
+        paid=bind_file_module("outer_prepare_paid", "tools/gcp-guest/prepare_paid.py",
+                              selected, revision),
     )
 
 
@@ -1061,9 +1064,40 @@ def reinspect_import(stage, inputs, rust_bundle, revision, metadata, builder_arc
     return {**receipt, "receipt_artifact": receipt_artifact}
 
 
+def stage_guest_candidate(context, lock_path, inputs, rust_bundle, revision,
+                          stage, access, paid_lock, paid_inputs):
+    prepare = context.source.guest.prepare
+    if access == "free-demo":
+        return prepare.stage(lock_path, inputs, stage)
+    if access != "ticket-required" or paid_lock is None or paid_inputs is None:
+        raise ValueError("paid guest stage requires locked inputs")
+    free_stage = stage.with_name(stage.name + "-free-source")
+    overlay = stage.with_name(stage.name + "-paid-overlay")
+    for sibling in (free_stage, overlay):
+        if sibling.exists() or sibling.is_symlink():
+            raise ValueError("paid staging siblings must be fresh")
+    free = prepare.stage(lock_path, inputs, free_stage)
+    prepare.verify_stage(free_stage, free["manifest_sha256"], free["manifest_bytes"])
+    paid_overlay = context.paid.stage(
+        free_stage, free["manifest_sha256"], free["manifest_bytes"],
+        paid_lock, paid_inputs, rust_bundle, revision, overlay,
+        selected_output=context.selected.output)
+    return context.paid.apply(
+        free_stage, free["manifest_sha256"], free["manifest_bytes"],
+        overlay, paid_overlay["manifest_sha256"], paid_overlay["manifest_bytes"],
+        stage)
+
+
 def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
           metadata, builder_archives, workspace,
-          parent_network_namespace, parent_mount_namespace):
+          parent_network_namespace, parent_mount_namespace, *,
+          access="free-demo", paid_lock=None, paid_inputs=None):
+    if access not in {"free-demo", "ticket-required"}:
+        raise ValueError("explicit guest access policy required")
+    paid = access == "ticket-required"
+    if paid != (paid_lock is not None and paid_inputs is not None) or \
+            ((paid_lock is None) != (paid_inputs is None)):
+        raise ValueError("paid access requires both paid input paths")
     if sys.platform != "linux" or os.uname().machine != "x86_64":
         raise ValueError("native x86_64 Linux builder required")
     workspace = Path(workspace).resolve(strict=True)
@@ -1076,7 +1110,7 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
             or not stage.parent.is_relative_to(workspace)):
         raise ValueError("fresh stage in the real workspace build root required")
     for path in (lock_path, inputs, zebra_receipt, rust_bundle, metadata,
-                 builder_archives):
+                 builder_archives, *((paid_lock, paid_inputs) if paid else ())):
         if (not path.is_absolute() or path.resolve(strict=True) != path
                 or not path.is_relative_to(workspace)):
             raise ValueError("outer build inputs must be real workspace paths")
@@ -1100,7 +1134,8 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
         parent_network_namespace, parent_mount_namespace)
     builder = context.package.verified_mkosi(context.source, metadata, builder_archives)
     temporary_directory = context.package.checked_mkosi_tmpdir()
-    staged = prepare.stage(lock_path, inputs, stage)
+    staged = stage_guest_candidate(context, lock_path, inputs, rust_bundle,
+                                   revision, stage, access, paid_lock, paid_inputs)
     checked_source_tree(context.selected, revision, context.source)
     verified = prepare.verify_stage(stage, staged["manifest_sha256"],
                                     staged["manifest_bytes"])
@@ -1142,6 +1177,7 @@ def build(lock_path, inputs, zebra_receipt, rust_bundle, revision, stage,
     if sha256(regular_bytes(rust_bundle / "manifest.json")) != rust_manifest_sha256:
         raise ValueError("Rust bundle changed during mkosi build or inspection")
     return {"schema_version": 1, "status": "candidate-outer-image-built-unapproved",
+            "access_policy": access,
             "source_commit": revision,
             "native_rust_manifest_sha256": rust_manifest_sha256,
             "input_lock_sha256": staged["input_lock_sha256"],
@@ -1166,6 +1202,9 @@ def main(argv=None):
                  "metadata", "builder-archives", "workspace"):
         builder.add_argument("--" + name, type=Path, required=True)
     builder.add_argument("--report-path", type=Path)
+    builder.add_argument("--access", choices=("free-demo", "ticket-required"), required=True)
+    builder.add_argument("--paid-lock", type=Path)
+    builder.add_argument("--paid-inputs", type=Path)
     importer = commands.add_parser("reinspect-import")
     for name in ("inputs", "zebra-receipt", "rust-bundle", "stage", "metadata",
                  "builder-archives", "workspace", "import-directory", "sfdisk"):
@@ -1188,7 +1227,9 @@ def main(argv=None):
             report = build(args.lock, args.inputs, args.zebra_receipt, args.rust_bundle,
                            args.revision, args.stage, args.metadata, args.builder_archives,
                            args.workspace,
-                           args.parent_network_namespace, args.parent_mount_namespace)
+                           args.parent_network_namespace, args.parent_mount_namespace,
+                           access=args.access, paid_lock=args.paid_lock,
+                           paid_inputs=args.paid_inputs)
             if args.report_path is not None:
                 write_diagnostic(args.report_path, report)
         elif args.command == "diagnostic-verify-uki":

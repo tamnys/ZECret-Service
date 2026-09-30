@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -99,6 +100,24 @@ class NativeRustReceiptTest(unittest.TestCase):
             verifier.symlink_to(bundle / "elsewhere")
             with self.assertRaises(OSError):
                 receipt.enable_verified_host_verifier(bundle)
+
+    def test_payment_registry_gate_matches_separate_lock(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            bundle = Path(scratch)
+            gates = bundle / "dependency-gates"
+            gates.mkdir()
+            record = {"cargo_lock_sha256": DIGEST, "registry_preflight_passed": True,
+                      "younger_than_hold": [], "cargo_fetch_executed": False,
+                      "cargo_build_executed": False, "private_mode_approved": False}
+            target = gates / "payment-registry-age.json"
+            target.write_text(json.dumps(record))
+            receipt.check_payment_gate(bundle, DIGEST)
+            with self.assertRaisesRegex(ValueError, "payment helper dependency gate"):
+                receipt.check_payment_gate(bundle, "c" * 64)
+            record["registry_preflight_passed"] = False
+            target.write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "payment helper dependency gate"):
+                receipt.check_payment_gate(bundle, DIGEST)
 
     def test_reject_digest_change_and_tar_escape_before_exporter(self):
         with tempfile.TemporaryDirectory() as scratch:

@@ -27,6 +27,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
+use zrpc_payments::Redeemer;
 use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
 
 fn unavailable() -> SafeError {
@@ -208,10 +209,32 @@ impl BoundNodeListener {
         limits: BootstrapLimits,
         node: LocalNode,
     ) -> Result<Self, SafeError> {
+        Self::bind_gcp_with_payment(address, limits, node, None).await
+    }
+
+    pub async fn bind_gcp_paid(
+        address: SocketAddr,
+        limits: BootstrapLimits,
+        node: LocalNode,
+        payment: Arc<Redeemer>,
+    ) -> Result<Self, SafeError> {
+        Self::bind_gcp_with_payment(address, limits, node, Some(payment)).await
+    }
+
+    async fn bind_gcp_with_payment(
+        address: SocketAddr,
+        limits: BootstrapLimits,
+        node: LocalNode,
+        payment: Option<Arc<Redeemer>>,
+    ) -> Result<Self, SafeError> {
         let path = Path::new(crate::gcp_quote::GCP_QUOTE_SOCKET);
         probe_private_quote_socket(path).await?;
         let watch = connect_quote_watch(Path::new(crate::gcp_quote::GCP_WATCH_SOCKET)).await?;
-        let service = AttestationService::new_gcp(path, limits)?.with_node(node)?;
+        let service = AttestationService::new_gcp(path, limits)?;
+        let service = match payment {
+            Some(payment) => service.with_paid_node(node, payment)?,
+            None => service.with_node(node)?,
+        };
         Ok(Self {
             listener: BoundPublicListener::bind_service(address, service).await?,
             bridge_watch: Some(watch),
@@ -226,7 +249,35 @@ impl BoundNodeListener {
         let quote_socket = Path::new(QUOTE_SOCKET_PATH);
         probe_private_quote_socket(quote_socket).await?;
         let bridge_watch = connect_quote_watch(Path::new(QUOTE_WATCH_SOCKET_PATH)).await?;
-        Self::bind_with_socket(address, quote_socket, limits, node, Some(bridge_watch)).await
+        Self::bind_with_socket(
+            address,
+            quote_socket,
+            limits,
+            node,
+            Some(bridge_watch),
+            None,
+        )
+        .await
+    }
+
+    pub async fn bind_paid(
+        address: SocketAddr,
+        limits: BootstrapLimits,
+        node: LocalNode,
+        payment: Arc<Redeemer>,
+    ) -> Result<Self, SafeError> {
+        let quote_socket = Path::new(QUOTE_SOCKET_PATH);
+        probe_private_quote_socket(quote_socket).await?;
+        let bridge_watch = connect_quote_watch(Path::new(QUOTE_WATCH_SOCKET_PATH)).await?;
+        Self::bind_with_socket(
+            address,
+            quote_socket,
+            limits,
+            node,
+            Some(bridge_watch),
+            Some(payment),
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -237,7 +288,7 @@ impl BoundNodeListener {
         node: LocalNode,
         bridge_watch: Option<UnixStream>,
     ) -> Result<Self, SafeError> {
-        Self::bind_with_socket(address, quote_socket, limits, node, bridge_watch).await
+        Self::bind_with_socket(address, quote_socket, limits, node, bridge_watch, None).await
     }
 
     async fn bind_with_socket(
@@ -246,8 +297,13 @@ impl BoundNodeListener {
         limits: BootstrapLimits,
         node: LocalNode,
         bridge_watch: Option<UnixStream>,
+        payment: Option<Arc<Redeemer>>,
     ) -> Result<Self, SafeError> {
-        let service = AttestationService::new(quote_socket, limits)?.with_node(node)?;
+        let service = AttestationService::new(quote_socket, limits)?;
+        let service = match payment {
+            Some(payment) => service.with_paid_node(node, payment)?,
+            None => service.with_node(node)?,
+        };
         Ok(Self {
             listener: BoundPublicListener::bind_service(address, service).await?,
             bridge_watch,
