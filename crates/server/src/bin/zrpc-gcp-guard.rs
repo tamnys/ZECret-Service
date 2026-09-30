@@ -8,6 +8,8 @@ use std::{
     process::Command,
 };
 
+const SPENT_PATH: &str = "/var/lib/zrpc-spent";
+
 #[derive(Debug)]
 struct Mount<'a> {
     path: &'a str,
@@ -61,6 +63,27 @@ fn validate_namespace(
     suid_dump: &str,
     service: Option<&str>,
 ) -> Result<String, ()> {
+    validate_profile_namespace(mountinfo, swaps, core, suid_dump, service, false)
+}
+
+fn validate_paid_namespace(
+    mountinfo: &str,
+    swaps: &str,
+    core: &str,
+    suid_dump: &str,
+    service: Option<&str>,
+) -> Result<String, ()> {
+    validate_profile_namespace(mountinfo, swaps, core, suid_dump, service, true)
+}
+
+fn validate_profile_namespace(
+    mountinfo: &str,
+    swaps: &str,
+    core: &str,
+    suid_dump: &str,
+    service: Option<&str>,
+    paid: bool,
+) -> Result<String, ()> {
     if swaps.lines().collect::<Vec<_>>() != ["Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority"]
         || core.trim() != "/dev/null"
         || suid_dump.trim() != "0"
@@ -72,14 +95,24 @@ fn validate_namespace(
     if root.kind != "ext4" || !root.options.contains("ro") {
         return Err(());
     }
-    for required in ["/run", "/tmp", "/var", "/var/lib/zebra"] {
+    let required_mounts: &[&str] = if paid {
+        &["/run", "/tmp", "/var", "/var/lib/zebra", SPENT_PATH]
+    } else {
+        &["/run", "/tmp", "/var", "/var/lib/zebra"]
+    };
+    for &required in required_mounts {
         let m = mounts.iter().find(|m| m.path == required).ok_or(())?;
-        if required == "/var/lib/zebra" {
-            if matches!(service, Some("wrapper" | "broker" | "cookie"))
-                && m.kind == "tmpfs"
-                && m.options.contains("ro")
-            {
+        if required == "/var/lib/zebra" || required == SPENT_PATH {
+            let hidden = if required == "/var/lib/zebra" {
+                matches!(service, Some("wrapper" | "broker" | "cookie"))
+            } else {
+                matches!(service, Some("zebra" | "broker" | "cookie"))
+            };
+            if hidden && m.kind == "tmpfs" && m.options.contains("ro") {
                 continue;
+            }
+            if required == SPENT_PATH && service.is_some() && service != Some("wrapper") {
+                return Err(());
             }
             if m.kind != "ext4"
                 || !["noexec", "nodev", "nosuid"]
@@ -88,7 +121,7 @@ fn validate_namespace(
             {
                 return Err(());
             }
-            if service != Some("broker") && !m.options.contains("rw") {
+            if (required == SPENT_PATH || service != Some("broker")) && !m.options.contains("rw") {
                 return Err(());
             }
         } else if m.kind != "tmpfs" || !["nodev", "nosuid"].iter().all(|o| m.options.contains(o)) {
@@ -97,8 +130,27 @@ fn validate_namespace(
         if service.is_none() && !m.options.contains("rw") {
             return Err(());
         }
-        if service.is_some() && required != "/var/lib/zebra" && !m.options.contains("ro") {
+        if service.is_some()
+            && required != "/var/lib/zebra"
+            && required != SPENT_PATH
+            && !m.options.contains("ro")
+        {
             return Err(());
+        }
+    }
+    if paid {
+        let spent = mounts.iter().find(|m| m.path == SPENT_PATH).ok_or(())?;
+        if spent.kind == "ext4" && spent.device == root.device {
+            return Err(());
+        }
+        if service.is_none() {
+            let zebra = mounts
+                .iter()
+                .find(|m| m.path == "/var/lib/zebra")
+                .ok_or(())?;
+            if spent.device == zebra.device {
+                return Err(());
+            }
         }
     }
     for m in &mounts {
@@ -116,7 +168,8 @@ fn validate_namespace(
         {
             return Err(());
         }
-        if m.options.contains("rw") && m.path != "/var/lib/zebra" {
+        if m.options.contains("rw") && m.path != "/var/lib/zebra" && !(paid && m.path == SPENT_PATH)
+        {
             let memory = m.kind == "tmpfs"
                 && (m.path == "/run"
                     || m.path.starts_with("/run/")
@@ -152,6 +205,7 @@ fn validate_namespace(
         // configuration inputs. Approve only root, expected memory and kernel.
         if m.path != "/"
             && m.path != "/var/lib/zebra"
+            && !(paid && m.path == SPENT_PATH)
             && !(m.kind == "ext4"
                 && m.device == root.device
                 && m.options.contains("ro")
@@ -181,19 +235,23 @@ fn validate_namespace(
         {
             return Err(());
         }
-        if m.path.starts_with("/var/lib/zebra/") {
+        if m.path.starts_with("/var/lib/zebra/")
+            || (paid && m.path.starts_with("/var/lib/zrpc-spent/"))
+        {
             return Err(());
         }
     }
-    let required_write: &[&str] = match service {
-        Some("broker") => &["/run/zrpc-gcp-quote"],
-        Some("zebra") => &["/run/zrpc-node", "/var/lib/zebra"],
-        Some("cookie") => &["/run/zrpc-wrapper"],
-        Some("wrapper") | None => &[],
+    let required_write: &[&str] = match (service, paid) {
+        (Some("broker"), _) => &["/run/zrpc-gcp-quote"],
+        (Some("zebra"), _) => &["/run/zrpc-node", "/var/lib/zebra"],
+        (Some("cookie"), _) => &["/run/zrpc-wrapper"],
+        (Some("wrapper"), true) => &[SPENT_PATH],
+        (Some("wrapper") | None, false) | (None, true) => &[],
         _ => return Err(()),
     };
     for path in required_write {
         if *path != "/var/lib/zebra"
+            && *path != SPENT_PATH
             && service.is_some()
             && !mounts
                 .iter()
@@ -207,7 +265,7 @@ fn validate_namespace(
             .max_by_key(|m| m.path.len())
             .ok_or(())?;
         if !covering.options.contains("rw")
-            || (covering.kind != "tmpfs" && *path != "/var/lib/zebra")
+            || (covering.kind != "tmpfs" && *path != "/var/lib/zebra" && *path != SPENT_PATH)
         {
             return Err(());
         }
@@ -301,36 +359,53 @@ fn service_command(service: &str, arguments: &[String]) -> Result<Command, ()> {
     Ok(command)
 }
 
+fn wrapper_access_matches(arguments: &[String], paid: bool) -> bool {
+    let access: Vec<_> = arguments
+        .windows(2)
+        .filter(|pair| pair[0] == "--access")
+        .collect();
+    matches!(access.as_slice(), [pair] if pair[1] == if paid { "ticket-required" } else { "free-demo" })
+}
+
 fn run() -> Result<(), ()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let [flag, service, arguments @ ..] = args.as_slice() else {
         return Err(());
     };
-    if !["--mark-start", "--exec"].contains(&flag.as_str())
-        || !["broker", "cookie", "zebra", "wrapper"].contains(&service.as_str())
-        || (flag != "--exec" && !arguments.is_empty())
+    let (paid, mark_start) = match flag.as_str() {
+        "--mark-start" => (false, true),
+        "--exec" => (false, false),
+        "--paid-mark-start" => (true, true),
+        "--paid-exec" => (true, false),
+        _ => return Err(()),
+    };
+    if !["broker", "cookie", "zebra", "wrapper"].contains(&service.as_str())
+        || (mark_start && !arguments.is_empty())
+        || (!mark_start && service == "wrapper" && !wrapper_access_matches(arguments, paid))
     {
         return Err(());
     }
-    if flag == "--mark-start" && rustix::process::geteuid().as_raw() != 0 {
+    if mark_start && rustix::process::geteuid().as_raw() != 0 {
         return Err(());
     }
     let read = |path: &str| fs::read_to_string(path).map_err(|_| ());
-    if flag != "--mark-start" {
+    if !mark_start {
         validate_privileges(&read("/proc/self/status")?, &read("/etc/passwd")?, service)?;
     }
     let mountinfo = read("/proc/self/mountinfo")?;
-    let device = validate_namespace(
-        &mountinfo,
-        &read("/proc/swaps")?,
-        &read("/proc/sys/kernel/core_pattern")?,
-        &read("/proc/sys/fs/suid_dumpable")?,
-        if flag == "--mark-start" {
-            None
-        } else {
-            Some(service)
-        },
-    )?;
+    let swaps = read("/proc/swaps")?;
+    let core = read("/proc/sys/kernel/core_pattern")?;
+    let suid_dump = read("/proc/sys/fs/suid_dumpable")?;
+    let service_view = if mark_start {
+        None
+    } else {
+        Some(service.as_str())
+    };
+    let device = if paid {
+        validate_paid_namespace(&mountinfo, &swaps, &core, &suid_dump, service_view)
+    } else {
+        validate_namespace(&mountinfo, &swaps, &core, &suid_dump, service_view)
+    }?;
     let uuid = read(&format!("/sys/dev/block/{device}/dm/uuid"))?;
     if !uuid.trim_end().starts_with("CRYPT-VERITY-") {
         return Err(());
@@ -347,8 +422,11 @@ fn run() -> Result<(), ()> {
             return Err(());
         }
     }
+    if paid && fs::canonicalize(SPENT_PATH).map_err(|_| ())? != Path::new(SPENT_PATH) {
+        return Err(());
+    }
     // Markers prohibit a same-boot retry, but never replace the live checks.
-    if flag == "--mark-start" {
+    if mark_start {
         let parent = Path::new("/run/zrpc-starts");
         let metadata = fs::symlink_metadata(parent).map_err(|_| ())?;
         if !metadata.is_dir() || metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
@@ -368,7 +446,7 @@ fn run() -> Result<(), ()> {
     // systemd creates a separate mount namespace for each ExecStartPre and
     // ExecStart command. Check and exec the workload in the *same* process;
     // a pre-start check alone cannot authorize the workload's namespace.
-    if flag == "--exec" {
+    if !mark_start {
         let _ = service_command(service, arguments)?.exec();
         return Err(());
     }
@@ -476,6 +554,87 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn paid_profile_requires_a_separate_spent_mount_with_wrapper_only_access() {
+        let paid = format!(
+            "{MOUNTS}6 4 259:2 / {SPENT_PATH} rw,nosuid,nodev,noexec - ext4 /dev/nvme0n3 rw\n"
+        );
+        assert!(validate_paid_namespace(&paid, SWAPS, "/dev/null", "0", None).is_ok());
+        assert!(validate_namespace(&paid, SWAPS, "/dev/null", "0", None).is_err());
+        assert!(validate_paid_namespace(MOUNTS, SWAPS, "/dev/null", "0", None).is_err());
+        for invalid in [
+            paid.replace("6 4 259:2", "6 4 259:1"),
+            paid.replace("6 4 259:2", "6 4 253:0"),
+            paid.replace(
+                "rw,nosuid,nodev,noexec - ext4 /dev/nvme0n3",
+                "rw,nosuid,nodev - ext4 /dev/nvme0n3",
+            ),
+            format!("{paid}7 6 259:3 / /var/lib/zrpc-spent/config ro - ext4 disk ro\n"),
+        ] {
+            assert!(validate_paid_namespace(&invalid, SWAPS, "/dev/null", "0", None).is_err());
+        }
+
+        let narrowed = paid
+            .replace("/ /run rw,nosuid,nodev", "/ /run ro,nosuid,nodev,noexec")
+            .replace("/ /tmp rw,nosuid,nodev", "/ /tmp ro,nosuid,nodev,noexec")
+            .replace("/ /var rw,nosuid,nodev", "/ /var ro,nosuid,nodev,noexec");
+        let wrapper = narrowed.replace(
+            "5 4 259:1 / /var/lib/zebra rw,nosuid,nodev,noexec - ext4 /dev/nvme0n2 rw",
+            "5 4 0:5 / /var/lib/zebra ro,nosuid,nodev,noexec - tmpfs inaccessible ro",
+        );
+        assert!(
+            validate_paid_namespace(&wrapper, SWAPS, "/dev/null", "0", Some("wrapper")).is_ok()
+        );
+        assert!(validate_namespace(&wrapper, SWAPS, "/dev/null", "0", Some("wrapper")).is_err());
+        let hidden_spent = narrowed.replace(
+            "6 4 259:2 / /var/lib/zrpc-spent rw,nosuid,nodev,noexec - ext4 /dev/nvme0n3 rw",
+            "6 4 0:6 / /var/lib/zrpc-spent ro,nosuid,nodev,noexec - tmpfs inaccessible ro",
+        );
+        let zebra = format!(
+            "{hidden_spent}7 2 0:2 /zrpc-node /run/zrpc-node rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n"
+        );
+        assert!(validate_paid_namespace(&zebra, SWAPS, "/dev/null", "0", Some("zebra")).is_ok());
+        assert!(
+            validate_paid_namespace(&narrowed, SWAPS, "/dev/null", "0", Some("zebra")).is_err()
+        );
+        let hidden_both = wrapper.replace(
+            "6 4 259:2 / /var/lib/zrpc-spent rw,nosuid,nodev,noexec - ext4 /dev/nvme0n3 rw",
+            "6 4 0:6 / /var/lib/zrpc-spent ro,nosuid,nodev,noexec - tmpfs inaccessible ro",
+        );
+        assert!(
+            validate_paid_namespace(&hidden_both, SWAPS, "/dev/null", "0", Some("wrapper"))
+                .is_err()
+        );
+        for (service, directory) in [
+            ("broker", "/run/zrpc-gcp-quote"),
+            ("cookie", "/run/zrpc-wrapper"),
+        ] {
+            let scoped = format!(
+                "{hidden_both}7 2 0:2 /{} {directory} rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n",
+                directory.trim_start_matches("/run/")
+            );
+            assert!(
+                validate_paid_namespace(&scoped, SWAPS, "/dev/null", "0", Some(service)).is_ok()
+            );
+            assert!(
+                validate_paid_namespace(&wrapper, SWAPS, "/dev/null", "0", Some(service)).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn free_and_paid_guard_invocations_require_their_exact_access_policy() {
+        let free = vec!["--access".to_owned(), "free-demo".to_owned()];
+        let paid = vec!["--access".to_owned(), "ticket-required".to_owned()];
+        assert!(wrapper_access_matches(&free, false));
+        assert!(!wrapper_access_matches(&free, true));
+        assert!(wrapper_access_matches(&paid, true));
+        assert!(!wrapper_access_matches(&paid, false));
+        assert!(!wrapper_access_matches(&[], true));
+        let repeated = [paid, free].concat();
+        assert!(!wrapper_access_matches(&repeated, true));
     }
 
     fn status(uid: u32, gid: u32, caps: u64, no_new_privs: u8) -> String {
