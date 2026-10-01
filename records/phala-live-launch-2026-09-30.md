@@ -93,9 +93,42 @@ release-approval test. The same pinned Tor executable also ran a successful
 native public preview in the Colima VM using a local loader wrapper and the
 Ubuntu `libevent-2.1-7t64` package whose SHA-256 matched that VM's APT
 index. This wrapper and extracted library live only in ignored local work
-state; they do not change the guest or client trust policy. A separate
-loopback-only SSH tunnel test reached a Colima listener from the Mac, but the
-dashboard itself has not yet been exercised over that tunnel.
+state; they do not change the guest or client trust policy.
+
+At 2026-10-01 00:05 UTC, a local probe started the dashboard inside Colima,
+forwarded its assigned loopback port through SSH to the Mac, and retained its
+one-time bootstrap token and local capability only in process memory. From
+the Mac side, the page, bootstrap, status and preview routes each returned
+HTTP 200. The preview reported `public_preview_passed: true`, Testnet height
+4,424,577, `workload_identity_verified: false` and `private_accepted: false`.
+The resulting local UI path is Mac loopback → SSH → Colima Rust client → local
+Tor → Phala. The probe did not open a graphical Mac browser or send a private
+request. It then closed the tunnel and dashboard. Its abrupt SSH teardown left
+one Tor child, which was explicitly terminated with its exact temporary directory
+removed. [PR #276](https://github.com/tamnys/ZECret-Service/pull/276)
+subsequently added a Linux parent-death guard; an abrupt client exit can still
+leave its temporary Tor directory, so it is not crash-time storage cleanup.
+
+For the operator's manual Mac dashboard, start this command in one terminal.
+It prints a one-time local URL to that terminal; keep the link out of logs and
+public reports.
+
+```sh
+ssh -F /Users/j/.colima/ssh_config -tt colima /Users/j/Code/phala-zcash-rpc/.worktrees/phala-snapshot-preview/target/debug/zrpc dashboard --preview --platform phala-dstack --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network --endpoint-port 443 --tor-executable /Users/j/Code/phala-zcash-rpc/.codex-tmp/phala-live-20260930/tor-project-0.4.9.13/launch-colima.sh --collateral /Users/j/Code/phala-zcash-rpc/.codex-tmp/phala-live-20260930/collateral.json --no-open
+```
+
+In a second terminal, substitute the port printed in that URL for `PORT`:
+
+```sh
+ssh -F /Users/j/.colima/ssh_config -N -L 127.0.0.1:PORT:127.0.0.1:PORT colima
+```
+
+Open the one-time URL in the Mac browser. The local and remote ports must match
+because the dashboard validates Host and Origin. If that port is already occupied on the Mac, stop the
+dashboard and start it again for a new assigned port. Stop the dashboard with
+Ctrl-C, then stop the tunnel. This local wrapper depends on the ignored staged
+Tor and `libevent` artifacts on this Mac; the managed-container preview command
+above is the verified container test path.
 
 Phala's live stats reported zero swap and a running DStack 0.5.9 guest. The
 stock dashboard's container-log view returned `configured logging driver does
