@@ -17,15 +17,26 @@ struct EmbeddedRelease {
     manifest_json: &'static [u8],
 }
 
-const EMBEDDED_RELEASES: &[EmbeddedRelease] = &[EmbeddedRelease {
-    id: "phala-prod9-testnet-20261001-1",
-    manifest_sha256: [
-        0x80, 0x73, 0xad, 0xda, 0x03, 0x3f, 0xf8, 0xb9, 0x64, 0xc4, 0x6d, 0x88, 0xe6, 0x72, 0x04,
-        0x9c, 0x0f, 0x5b, 0x43, 0xd9, 0x46, 0xdc, 0x79, 0x8c, 0x46, 0x82, 0x1f, 0xe1, 0x35, 0x23,
-        0x86, 0x69,
-    ],
-    manifest_json: include_bytes!("releases/phala-prod9-20261001.json"),
-}];
+const EMBEDDED_RELEASES: &[EmbeddedRelease] = &[
+    EmbeddedRelease {
+        id: "phala-prod9-testnet-20261001-1",
+        manifest_sha256: [
+            0x80, 0x73, 0xad, 0xda, 0x03, 0x3f, 0xf8, 0xb9, 0x64, 0xc4, 0x6d, 0x88, 0xe6, 0x72,
+            0x04, 0x9c, 0x0f, 0x5b, 0x43, 0xd9, 0x46, 0xdc, 0x79, 0x8c, 0x46, 0x82, 0x1f, 0xe1,
+            0x35, 0x23, 0x86, 0x69,
+        ],
+        manifest_json: include_bytes!("releases/phala-prod9-20261001.json"),
+    },
+    EmbeddedRelease {
+        id: "phala-prod9-testnet-block-context-20261001-2",
+        manifest_sha256: [
+            0xd3, 0xc4, 0x65, 0x55, 0x8e, 0x62, 0x49, 0xf2, 0xdc, 0xb9, 0x1d, 0xa7, 0x42, 0x9e,
+            0x81, 0xce, 0x89, 0x5d, 0x69, 0x48, 0xdb, 0xc1, 0x96, 0x20, 0xd2, 0x1f, 0xf3, 0xfd,
+            0xa9, 0xd1, 0x06, 0xa1,
+        ],
+        manifest_json: include_bytes!("releases/phala-prod9-block-context-20261001.json"),
+    },
+];
 
 pub(crate) fn is_embedded(id: &str) -> bool {
     EMBEDDED_RELEASES.iter().any(|release| release.id == id)
@@ -256,6 +267,24 @@ mod tests {
         changed[0] ^= 1;
         assert!(!release.matches_launch_config(&changed));
         assert!(!release.matches_launch_config(b"{}"));
+    }
+
+    #[test]
+    fn block_context_release_rejects_previous_launch() {
+        let mut policy = PhalaTrustedPolicy::default();
+        policy.phala_trusted_enabled = true;
+        policy
+            .reviewed_release_ids
+            .push("phala-prod9-testnet-block-context-20261001-2".into());
+        let selected = PhalaTrustedRelease::selected(&policy).unwrap();
+        assert_eq!(selected.len(), 1);
+        let release = &selected[0];
+        let current = include_bytes!(
+            "../../../deploy/phala/releases/2026-10-01/block-context-app-compose.json"
+        );
+        let previous = include_bytes!("../../../deploy/phala/releases/2026-10-01/app-compose.json");
+        assert!(release.matches_launch_config(current));
+        assert!(!release.matches_launch_config(previous));
     }
 
     #[test]
