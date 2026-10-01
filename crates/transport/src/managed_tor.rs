@@ -107,7 +107,21 @@ impl ManagedTor {
             .and_then(|file| file.sync_all())
             .map_err(|_| unavailable())?;
 
-        let child = Command::new(executable)
+        // On Linux, let the kernel end Tor if the client is killed before
+        // ManagedTorState::drop can run. setpriv execs the selected binary in
+        // the same child PID; without it, an abrupt exit leaves the private
+        // SOCKS socket and Tor data directory alive. No missing-tool fallback:
+        // a Linux client without this maintained OS utility fails closed.
+        #[cfg(target_os = "linux")]
+        let mut command = {
+            let mut command = Command::new("/usr/bin/setpriv");
+            command.args(["--nnp", "--pdeathsig", "SIGKILL", "--"]);
+            command.arg(&executable);
+            command
+        };
+        #[cfg(not(target_os = "linux"))]
+        let mut command = Command::new(&executable);
+        let child = command
             .arg("--defaults-torrc")
             .arg(&defaults)
             .arg("-f")
