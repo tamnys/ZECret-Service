@@ -259,6 +259,22 @@ def reject_interpolation(value: object) -> None:
             reject_interpolation(item)
 
 
+def same_json_shape(value: object, expected: object) -> bool:
+    # Python considers 0 == False and 1 == True; Compose does not promise
+    # identical interpretation for those JSON types.
+    if type(value) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return (set(value) == set(expected)
+                and all(same_json_shape(value[key], item)
+                        for key, item in expected.items()))
+    if isinstance(expected, list):
+        return (len(value) == len(expected)
+                and all(same_json_shape(actual, item)
+                        for actual, item in zip(value, expected)))
+    return value == expected
+
+
 def validate_compose_file(content: str) -> None:
     # Docker Compose accepts JSON as YAML. Requiring JSON excludes aliases,
     # merge keys and tag processing, while unique_object rejects shadowed keys.
@@ -281,7 +297,8 @@ def validate_compose_file(content: str) -> None:
         if (not isinstance(image, str)
                 or not re.fullmatch(r"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", image)):
             raise ValueError("Compose images require an exact SHA-256 digest")
-        if any(service.get(key) != value for key, value in SPLIT_COMMON.items()):
+        if any(not same_json_shape(service.get(key), value)
+               for key, value in SPLIT_COMMON.items()):
             raise ValueError("Compose service violates common isolation policy")
     node, wrapper = services["node"], services["wrapper"]
     if node["image"] != wrapper["image"]:
@@ -289,21 +306,22 @@ def validate_compose_file(content: str) -> None:
     common_keys = set(SPLIT_COMMON) | {"image"}
     if (set(node) != common_keys | {"command", "environment", "healthcheck",
                                    "ports", "volumes"}
-            or node["command"] != ["node"]
-            or node["ports"] != ["8443:8443"]
-            or node["volumes"] != SPLIT_NODE_VOLUMES
-            or node["healthcheck"] != {
+            or not same_json_shape(node["command"], ["node"])
+            or not same_json_shape(node["ports"], ["8443:8443"])
+            or not same_json_shape(node["volumes"], SPLIT_NODE_VOLUMES)
+            or not same_json_shape(node["healthcheck"], {
                 "test": ["CMD", "python3", "/opt/zrpc/supervisor.py", "node-health"]
-            }
+            })
             or not isinstance(node["environment"], dict)
             or set(node["environment"]) != {"NODE_POLL_INTERVAL_MS"}):
         raise ValueError("node service differs from reviewed split topology")
     if (set(wrapper) != common_keys | {"command", "depends_on", "environment",
                                       "network_mode", "volumes"}
-            or wrapper["command"] != ["wrapper"]
+            or not same_json_shape(wrapper["command"], ["wrapper"])
             or wrapper["network_mode"] != "service:node"
-            or wrapper["depends_on"] != {"node": {"condition": "service_healthy"}}
-            or wrapper["volumes"] != SPLIT_WRAPPER_VOLUMES
+            or not same_json_shape(wrapper["depends_on"],
+                                   {"node": {"condition": "service_healthy"}})
+            or not same_json_shape(wrapper["volumes"], SPLIT_WRAPPER_VOLUMES)
             or not isinstance(wrapper["environment"], dict)
             or set(wrapper["environment"]) != SPLIT_WRAPPER_LIMITS
             or node["environment"]["NODE_POLL_INTERVAL_MS"] !=
@@ -337,7 +355,7 @@ def launch_config_digest(path: Path | None) -> bytes | None:
         isinstance(port_policy, dict)
         and set(port_policy) == {"restrict_mode", "ports"}
         and port_policy["restrict_mode"] is True
-        and only_port == {"port": 8443, "pp": False}
+        and same_json_shape(only_port, {"port": 8443, "pp": False})
     )
     profile_keys = {
         "manifest_version", "name", "runner", "docker_compose_file",

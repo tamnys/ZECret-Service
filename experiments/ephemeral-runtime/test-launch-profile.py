@@ -98,6 +98,8 @@ class LaunchProfileInputTests(unittest.TestCase):
             ("port_policy", {"restrict_mode": True, "ports": [{"port": 0}]}),
             ("port_policy", {"restrict_mode": True,
                              "ports": [{"port": 18232, "pp": False}]}),
+            ("port_policy", {"restrict_mode": True,
+                             "ports": [{"port": 8443, "pp": 0}]}),
             ("extra_runtime_control", True),
             ("init_script", "echo bad"),
             ("pre_launch_script", "echo bad"),
@@ -132,6 +134,7 @@ class LaunchProfileInputTests(unittest.TestCase):
             ("image", "example.invalid/synthetic@sha256:${DIGEST}"),
             ("user", "0:0"),
             ("read_only", False),
+            ("read_only", 1),
             ("cap_drop", []),
             ("security_opt", []),
             ("logging", {"driver": "json-file"}),
@@ -179,8 +182,11 @@ class LaunchProfileInputTests(unittest.TestCase):
             ("node", 1, "source", "/var/lib/docker"),
             ("node", 1, "target", "/run/docker.sock"),
             ("node", 1, "read_only", True),
+            ("node", 1, "read_only", 0),
             ("wrapper", 1, "read_only", False),
             ("wrapper", 1, "bind", {"create_host_path": True}),
+            ("wrapper", 1, "bind", {"create_host_path": 0,
+                                     "propagation": "rprivate"}),
         ):
             with self.subTest(service=service, key=key):
                 compose = copy.deepcopy(self.compose)
