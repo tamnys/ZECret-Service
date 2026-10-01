@@ -11,7 +11,7 @@ test('static pages keep the public browser boundary', async () => {
   for (const path of ['/', '/privacy']) {
     const response = await request(path);
     assert.equal(response.status, 200);
-    assert.match(response.headers.get('content-security-policy') ?? '', /connect-src 'self'/);
+    assert.match(response.headers.get('content-security-policy') ?? '', /connect-src 'none'/);
     assert.match(response.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
     assert.equal(response.headers.get('set-cookie'), null);
     const html = await response.text();
@@ -19,7 +19,7 @@ test('static pages keep the public browser boundary', async () => {
   }
 });
 
-test('status separates approved native profile from browser fixtures', async () => {
+test('status reports the approved native profile without browser RPC access', async () => {
   const response = await request('/api/status');
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
@@ -39,27 +39,13 @@ test('status separates approved native profile from browser fixtures', async () 
   ]);
 });
 
-test('every scenario is explicitly synthetic and sends no real query', async () => {
-  for (const name of ['success', 'release-rejected', 'ticket-replay']) {
-    const response = await request(`/api/scenarios/${name}`);
-    assert.equal(response.status, 200);
-    const fixture = await response.json();
-    assert.equal(fixture.real_private_query_sent, false);
-    assert.ok(['synthetic_fixture', 'payment_simulation'].includes(fixture.kind));
-    assert.equal(response.headers.get('set-cookie'), null);
-  }
-  const replay = await (await request('/api/scenarios/ticket-replay')).json();
-  assert.equal(replay.payment, 'simulated_only');
-  assert.equal(replay.chain_data, null);
-});
-
 test('API rejects input, cross-origin access, and unknown routes', async () => {
   const cases = [
-    ['/api/scenarios/success?txid=abc', undefined, 400],
-    ['/api/scenarios/success', { method: 'POST', body: 'secret' }, 405],
-    ['/api/scenarios/success', { headers: { Origin: 'https://other.example' } }, 403],
-    ['/api/scenarios/success', { headers: { 'Sec-Fetch-Site': 'cross-site' } }, 403],
-    ['/api/scenarios/unknown', undefined, 404],
+    ['/api/status?txid=abc', undefined, 400],
+    ['/api/status', { method: 'POST', body: 'secret' }, 405],
+    ['/api/status', { headers: { Origin: 'https://other.example' } }, 403],
+    ['/api/status', { headers: { 'Sec-Fetch-Site': 'cross-site' } }, 403],
+    ['/api/scenarios/success', undefined, 404],
     ['/api/proxy', undefined, 404]
   ];
   for (const [path, options, status] of cases) {

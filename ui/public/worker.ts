@@ -35,37 +35,6 @@ const capabilities = {
   source: `${SOURCE}/blob/main/crates/protocol/src/lib.rs`
 } as const;
 
-const scenarios = {
-  success: {
-    kind: 'synthetic_fixture',
-    title: 'Example response',
-    explanation: 'A canned block-height response illustrates the shape of a successful native query. No connection or attestation occurred.',
-    simulated_decision: 'accepted_in_fixture',
-    real_private_query_sent: false,
-    payment: 'not_used',
-    chain_data: { kind: 'synthetic_fixture', method: 'getblockcount', block_height: 42 }
-  },
-  'release-rejected': {
-    kind: 'synthetic_fixture',
-    title: 'Release rejected',
-    explanation: 'The example client refuses before a query when the workload does not match its independently trusted release policy.',
-    simulated_decision: 'rejected_in_fixture',
-    reason: 'unknown_release',
-    real_private_query_sent: false,
-    chain_data: null
-  },
-  'ticket-replay': {
-    kind: 'payment_simulation',
-    title: 'Ticket replay rejected',
-    explanation: 'This synthetic ticket was already spent, so the illustrated service rejects its replay. Native ticket issuance and redemption have been tested locally; paid access is not live.',
-    simulated_decision: 'rejected_in_fixture',
-    reason: 'ticket_already_spent',
-    real_private_query_sent: false,
-    payment: 'simulated_only',
-    chain_data: null
-  }
-} as const;
-
 const HEADERS = {
   'Content-Type': 'application/json; charset=utf-8',
   'Cache-Control': 'no-store',
@@ -102,13 +71,6 @@ export default {
     }
     if (url.pathname === '/api/status') return json(status);
     if (url.pathname === '/api/capabilities') return json(capabilities);
-    if (url.pathname === '/api/scenarios') {
-      return json({ kind: 'synthetic_fixture_index', scenarios: Object.keys(scenarios) });
-    }
-    const match = /^\/api\/scenarios\/([a-z-]+)$/.exec(url.pathname);
-    if (match && Object.prototype.hasOwnProperty.call(scenarios, match[1])) {
-      return json(scenarios[match[1] as keyof typeof scenarios]);
-    }
     return json({ error: 'Public endpoint not found.' }, 404);
   }
 };
