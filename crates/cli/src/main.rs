@@ -167,7 +167,7 @@ async fn run() -> Result<(), String> {
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
         "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"phala-dstack","default_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","phala_trusted_profile":"blocked_no_packaged_release","simulation_available":true,"public_endpoint_inspection_available":true,"public_preview_available":true,"public_preview_platform":"phala-dstack","tor":"not_checked; public inspection uses explicit SOCKS, Phala preview starts a selected local Tor executable, private mode blocked","hardware_verifier":"offline_dcap_qvl_0.6.3_diagnostic_and_phala_trusted_policy","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-endpoint"=>inspect_endpoint_command(args).await,
-        "payments"=>payments::run(args),
+        "payments"=>payments::run(args).await,
         "lifecycle"=>provider_observation::run(args).await,
         "inspect-quote"=>{
             let quote_path=required(&mut args,"--quote")?;

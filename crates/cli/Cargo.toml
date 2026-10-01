@@ -12,6 +12,7 @@ path = "src/main.rs"
 zrpc-client = { path = "../client" }
 zrpc-payments = { path = "../payments" }
 zrpc-protocol = { path = "../protocol" }
+zrpc-transport = { path = "../transport" }
 zrpc-verifier = { path = "../verifier" }
 
 zrpc-lifecycle = { path = "../lifecycle" }

@@ -26,7 +26,7 @@ use zrpc_verifier::VerifiedChannel;
 mod managed_tor;
 mod tls;
 #[cfg(unix)]
-pub use managed_tor::ManagedTor;
+pub use managed_tor::{ManagedTor, valid_v3_onion_host};
 pub use tls::{
     EndpointInspection, EndpointInspectionIssue, PendingChallenge, PhalaTrustedRpcSession,
     PreviewRpcSession, PublicBootstrapTls, PublicTestnetPreview, UnverifiedGcpEvidence,
@@ -389,6 +389,50 @@ pub struct UnverifiedChannel {
     origin: TransportOrigin,
     server_name: Option<String>,
     authority: Option<String>,
+}
+
+/// A Tor v3 onion connection for blinded issuance only. It does not carry a
+/// verified RPC session or grant private-query authority. The pinned onion
+/// address authenticates the issuer endpoint through Tor; the caller must
+/// independently pin the ticket issuer public key.
+#[cfg(unix)]
+pub struct IssuerOnionChannel {
+    pub(crate) socket: Socks5Stream<RequirePassword<ProxySocket>>,
+    pub(crate) tor: ManagedTor,
+}
+
+#[cfg(unix)]
+impl AsyncRead for IssuerOnionChannel {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.tor.ensure_live().map_err(io::Error::other)?;
+        Pin::new(&mut self.socket).poll_read(cx, buf)
+    }
+}
+
+#[cfg(unix)]
+impl AsyncWrite for IssuerOnionChannel {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.tor.ensure_live().map_err(io::Error::other)?;
+        Pin::new(&mut self.socket).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.tor.ensure_live().map_err(io::Error::other)?;
+        Pin::new(&mut self.socket).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.tor.ensure_live().map_err(io::Error::other)?;
+        Pin::new(&mut self.socket).poll_shutdown(cx)
+    }
 }
 
 impl UnverifiedChannel {
