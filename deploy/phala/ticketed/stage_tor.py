@@ -40,7 +40,7 @@ def require_hash(path, expected):
         raise ValueError(f"pinned input unavailable: {path.name}")
 
 
-def verify_signature(archive, signature, key, scratch):
+def verify_signature(archive, signature, key):
     inspect = subprocess.run(
         ["gpg", "--batch", "--no-default-keyring", "--show-keys", "--with-colons", str(key)],
         capture_output=True, text=True, check=False,
@@ -56,19 +56,21 @@ def verify_signature(archive, signature, key, scratch):
             expecting = False
     if inspect.returncode or primary != [LOCK["signing_key_primary_fingerprint"]]:
         raise ValueError("Tor signing key fingerprint differs from the pin")
-    home = scratch / "gnupg"
-    home.mkdir(mode=0o700)
-    imported = subprocess.run(
-        ["gpg", "--homedir", str(home), "--batch", "--import", str(key)],
-        capture_output=True, check=False,
-    )
-    if imported.returncode:
-        raise ValueError("Tor signing key import failed")
-    verified = subprocess.run(
-        ["gpg", "--homedir", str(home), "--batch", "--no-auto-key-retrieve",
-         "--status-fd", "1", "--verify", str(signature), str(archive)],
-        capture_output=True, text=True, check=False,
-    )
+    # GnuPG's agent socket has a short Unix path limit. This contains only a
+    # public signing key and stays separate from the large staged bundle.
+    with tempfile.TemporaryDirectory(prefix="zrpc-gpg-") as temporary:
+        home = Path(temporary)
+        imported = subprocess.run(
+            ["gpg", "--homedir", str(home), "--batch", "--no-autostart", "--import", str(key)],
+            capture_output=True, check=False,
+        )
+        if imported.returncode:
+            raise ValueError("Tor signing key import failed")
+        verified = subprocess.run(
+            ["gpg", "--homedir", str(home), "--batch", "--no-autostart", "--no-auto-key-retrieve",
+             "--status-fd", "1", "--verify", str(signature), str(archive)],
+            capture_output=True, text=True, check=False,
+        )
     signatures = [line.split() for line in verified.stdout.splitlines()
                   if line.startswith("[GNUPG:] VALIDSIG ")]
     if (verified.returncode or len(signatures) != 1
@@ -94,7 +96,7 @@ def stage(archive, signature, key, output, now=None):
         raise ValueError("fresh absolute Tor staging directory required")
     with tempfile.TemporaryDirectory(prefix=".tor-expert-", dir=output.parent) as temporary:
         scratch = Path(temporary)
-        verify_signature(archive, signature, key, scratch)
+        verify_signature(archive, signature, key)
         staged = scratch / "stage"
         staged.mkdir()
         found = set()

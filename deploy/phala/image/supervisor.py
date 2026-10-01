@@ -27,7 +27,7 @@ BIN = Path("/opt/zrpc/bin")
 NODE_RPC = ("127.0.0.1", 18232)
 SPENT = Path("/var/lib/zrpc-spent")
 ISSUER = Path("/var/lib/zrpc-issuer")
-ISSUER_RUN = RUN / "zrpc-issuer"
+ISSUER_RUN = Path("/tmp/zrpc-issuer")
 ISSUER_BIND = ("127.0.0.1", 18555)
 TICKET = Path("/opt/zrpc/ticket")
 
