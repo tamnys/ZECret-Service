@@ -162,6 +162,11 @@ jobs:
           BB_NO_NETWORK = "1"
           BB_FETCH_PREMIRRORONLY = "1"
           CONNECTIVITY_CHECK_URIS = ""
+          # The pinned dstack distro prefers linux-yocto-dev, whose AUTOREV
+          # requires network during parsing. These are the recipe's own static
+          # parse fallback revisions, not reviewed kernel build inputs.
+          SRCREV_machine:pn-linux-yocto-dev = "29594404d7fe73cd80eaa4ee8c43dcc53970c60e"
+          SRCREV_meta:pn-linux-yocto-dev = "29594404d7fe73cd80eaa4ee8c43dcc53970c60e"
           EOF
           cat > "$build/conf/bblayers.conf" <<EOF
           POKY_BBLAYERS_CONF_VERSION = "2"
@@ -184,5 +189,5 @@ jobs:
             "
           EOF
           bitbake -p
-          echo 'Pinned corrected-guest source parsed on native x86_64 Linux. No recipe task, image build, image publication, Phala resource, hardware boot or private approval occurred.' \
+          echo 'Pinned corrected-guest source parsed on native x86_64 Linux with parse-only kernel revisions. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
             >> "$GITHUB_STEP_SUMMARY"
