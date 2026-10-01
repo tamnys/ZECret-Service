@@ -60,6 +60,49 @@ ledger readback found two retained observations and the same one tracked CVM.
 No Phala mutation occurred, no usage row was accepted as a charge, and billing
 finality remains unverified.
 
+On 2026-10-01, authenticated API version `2026-06-23` reads of this
+CVM's detail and `compose_file` used the existing workspace key, an
+independently selected TLS trust root, and the operator-approved 1 MiB response
+cap. Both responses reported `public_logs: true`, `public_sysinfo: true` and
+`public_tcbinfo: true`; the prepared local launch document had explicitly set
+the first two fields false. The returned 1,498-byte `docker_compose_file`
+matched the prepared SHA-256
+`1e8f93e57803ea348cdf9fbbf9843d2851049ef9cec98d5c1237f71a4857058c`.
+The full 20,442-byte provider compose response had SHA-256
+`8a4ff7d6c6df51d76497b4bdc4fc63d692725c5a158eb66553b3313aa06d9912`,
+different from the prepared app-compose digest. It also reported
+`no_instance_id: false` despite the detail's `instance_id: null`, and a
+nonempty 17,569-byte `pre_launch_script` with SHA-256
+`982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8`.
+The prepared document did not supply that script. A limited static pattern
+scan found root-password, SSH-key, SSH-server and remote-fetch terms in its
+text. This does not prove what executed or establish the script's origin; the
+raw response and script were not saved or printed. These readback mismatches
+preclude using the prepared app-compose hash as the live workload identity and
+reinforce the existing block on private mode. No resource update had been
+attempted at that read.
+
+After retaining a private, fsynced intent bound to the original CVM and ledger
+generation 5, a field-only `PATCH /api/v1/cvms/cvm_MeD4o0eQ` requested
+`public_logs: false` and `public_sysinfo: false`. Phala returned 202 with a
+correlation ID; the exact outcome was durably recorded beside the intent under
+the ignored original experiment directory. An authenticated operation readback
+found that correlation in `completed` status, and `operation-status` later
+reported `idle`. Detail and compose readbacks both reported the two visibility
+fields false. The post-update compose response SHA-256 is
+`5a13c76a80bfe1cc40ea4d3a181512dc1f74d1ab8520fe754e95f7819ceaa3f5`;
+its inner Docker Compose and pre-launch script hashes remained unchanged. The
+detail still reported `instance_id: null` and briefly reported CVM status
+`updating`. Completion of the management operation and matching readback do
+not alone prove that the application has resumed serving or that prior public
+logs were withdrawn. The update created no new CVM or private-mode approval.
+Subsequent authenticated detail returned to `running`, and a fresh public
+preview through the pinned Tor executable passed live quote, freshness and
+TLS-key checks before reading Testnet height **4,425,002** and the zero-balance
+fixture address. `private_accepted` remained false. This confirms the demo
+path resumed after the visibility update, not that historical public logs were
+removed or that stock-image privacy gates passed.
+
 The stock HTTPS gateway URL terminated TLS outside the guest and could not
 carry the wrapper's retained TLS session. The documented `-8443s` gateway
 hostname passed TLS through to the guest: a separate diagnostic reached its
