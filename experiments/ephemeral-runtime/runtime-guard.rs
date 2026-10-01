@@ -21,6 +21,9 @@ const RUNTIME_ROOTS: [&str; 4] = [
     "/var/lib/sysbox",
     "/dstack",
 ];
+const PUBLIC_DATA_MOUNT: &str = "/var/volatile/dstack/persistent";
+const PUBLIC_STATE_SOURCE: &str = "/var/volatile/dstack/persistent/zebra-public-testnet";
+const PUBLIC_STATE_MOUNT: &str = "/var/lib/zebra-public";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Denial {
@@ -36,6 +39,7 @@ enum Denial {
     MissingCoveringMount,
     NonMemoryRuntimeMount,
     NonMemoryDescendantMount,
+    PublicStateMountUnsafe,
     MalformedSwaps,
     SwapPresent,
     CrashDumpPolicyUnsafe,
@@ -74,7 +78,10 @@ fn mode() -> Result<Mode, Denial> {
 struct Mount {
     id: u64,
     parent: u64,
+    device: Vec<u8>,
+    root: PathBuf,
     point: PathBuf,
+    options: Vec<u8>,
     filesystem: Vec<u8>,
 }
 
@@ -162,14 +169,17 @@ fn parse_mountinfo(input: &[u8]) -> Result<Vec<Mount>, Denial> {
         }
         decimal(device[0])?;
         decimal(device[1])?;
-        proc_path(fields[3])?; // Validate the filesystem-relative mount root too.
+        let root = proc_path(fields[3])?;
         let point = proc_path(fields[4])?;
         // Unknown optional fields before '-' are deliberately ignored, as Linux
         // documents. Filesystem identity comes after '-', never from the source.
         mounts.push(Mount {
             id,
             parent,
+            device: fields[2].to_vec(),
+            root,
             point,
+            options: fields[5].to_vec(),
             filesystem: fields[separator + 1].to_vec(),
         });
     }
@@ -220,6 +230,86 @@ fn live_core_policy() -> Result<[Vec<u8>; 3], Denial> {
 
 fn memory_filesystem(mount: &Mount) -> bool {
     matches!(mount.filesystem.as_slice(), b"tmpfs" | b"ramfs")
+}
+
+fn has_option(mount: &Mount, option: &[u8]) -> bool {
+    mount.options.split(|byte| *byte == b',').any(|part| part == option)
+}
+
+fn check_public_data_mount(mountinfo: &[u8]) -> Result<(), Denial> {
+    let mounts = parse_mountinfo(mountinfo)?;
+    let unique_at = |point: &str| -> Result<&Mount, Denial> {
+        let mut found = mounts.iter().filter(|mount| mount.point == Path::new(point));
+        let mount = found.next().ok_or(Denial::PublicStateMountUnsafe)?;
+        if found.next().is_some() {
+            return Err(Denial::AmbiguousMountPoint);
+        }
+        Ok(mount)
+    };
+    let data = unique_at(PUBLIC_DATA_MOUNT)?;
+    let state = unique_at(PUBLIC_STATE_MOUNT)?;
+    if data.filesystem != b"ext4"
+        || data.root != Path::new("/")
+        || state.filesystem != b"ext4"
+        || state.root != Path::new("/zebra-public-testnet")
+        || state.device != data.device
+        || ![data, state].iter().all(|mount| {
+            [b"rw".as_slice(), b"noexec", b"nodev", b"nosuid", b"nosymfollow"]
+                .iter()
+                .all(|option| has_option(mount, option))
+        })
+    {
+        return Err(Denial::PublicStateMountUnsafe);
+    }
+    for endpoint in [data, state] {
+        let chain: Vec<&Mount> = mounts.iter()
+            .filter(|mount| endpoint.point.starts_with(&mount.point))
+            .collect();
+        let mut seen = HashSet::new();
+        for mount in &chain {
+            if !seen.insert(&mount.point) {
+                return Err(Denial::AmbiguousMountPoint);
+            }
+            if mount.point != Path::new("/") {
+                let parent = chain.iter()
+                    .filter(|candidate| candidate.point != mount.point
+                        && mount.point.starts_with(&candidate.point))
+                    .max_by_key(|candidate| candidate.point.as_os_str().as_bytes().len())
+                    .ok_or(Denial::MountTopologyMismatch)?;
+                if mount.parent != parent.id {
+                    return Err(Denial::MountTopologyMismatch);
+                }
+            }
+        }
+        if mounts.iter().any(|mount| mount.point != endpoint.point
+            && mount.point.starts_with(&endpoint.point)) {
+            return Err(Denial::MountTopologyMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn live_public_state() -> Result<(), Denial> {
+    let mut identity = None;
+    for path in [PUBLIC_STATE_SOURCE, PUBLIC_STATE_MOUNT] {
+        let target = Path::new(path);
+        let entry = fs::symlink_metadata(target).map_err(|_| Denial::PublicStateMountUnsafe)?;
+        if !entry.is_dir() || entry.file_type().is_symlink()
+            || fs::canonicalize(target).map_err(|_| Denial::PublicStateMountUnsafe)? != target
+            || entry.uid() != 10001 || entry.gid() != 10001
+            || entry.permissions().mode() & 0o7777 != 0o700
+        {
+            return Err(Denial::PublicStateMountUnsafe);
+        }
+        let current = (entry.dev(), entry.ino());
+        if let Some(previous) = identity {
+            if current != previous {
+                return Err(Denial::PublicStateMountUnsafe);
+            }
+        }
+        identity = Some(current);
+    }
+    Ok(())
 }
 
 fn check(mountinfo: &[u8], swaps: &[u8], roots: &[PathBuf]) -> Result<(), Denial> {
@@ -335,6 +425,8 @@ fn live_check() -> Result<(), Denial> {
     check(&mounts, &swaps, &scratch)?;
     let roots = live_roots()?;
     check(&mounts, &swaps, &roots)?;
+    check_public_data_mount(&mounts)?;
+    live_public_state()?;
     if matches!(mode, Mode::MarkStart(_)) {
         // The denial marker is never a readiness proof. It may only live on
         // memory-backed /run, so same-boot retries cannot use persistent state.
@@ -351,6 +443,7 @@ fn live_check() -> Result<(), Denial> {
     {
         return Err(Denial::ObservedStateChanged);
     }
+    live_public_state()?;
     if let Mode::MarkStart(service) = mode {
         mark_start(Path::new("/run/zrpc-starts"), service, 0)?;
     }
@@ -412,6 +505,35 @@ mod tests {
 
     fn check_text(text: &str) -> Result<(), Denial> {
         check(text.as_bytes(), NO_SWAP, &roots())
+    }
+
+    fn public_mounts() -> String {
+        format!(
+            "{MEMORY}\
+40 10 253:0 / /var/volatile/dstack/persistent rw,nosuid,nodev,noexec,nosymfollow - ext4 /dev/dm-0 rw\n\
+41 1 253:0 /zebra-public-testnet /var/lib/zebra-public rw,nosuid,nodev,noexec,nosymfollow - ext4 /dev/dm-0 rw\n"
+        )
+    }
+
+    #[test]
+    fn only_reviewed_public_directory_may_bind_persistent_data() {
+        let mounted = public_mounts();
+        assert_eq!(check_public_data_mount(mounted.as_bytes()), Ok(()));
+        assert_eq!(check_public_data_mount(MEMORY.as_bytes()), Err(Denial::PublicStateMountUnsafe));
+        for changed in [
+            mounted.replace("/zebra-public-testnet /var/lib/zebra-public", "/ /var/lib/zebra-public"),
+            mounted.replace("41 1 253:0", "41 1 253:1"),
+            mounted.replace("41 1 253:0", "41 10 253:0"),
+            mounted.replace("- ext4 /dev/dm-0", "- overlay overlay"),
+            mounted.replace("rw,nosuid,nodev,noexec,nosymfollow", "rw,nosuid,nodev,noexec"),
+            mounted.replace("rw,nosuid,nodev,noexec,nosymfollow", "ro,nosuid,nodev,noexec,nosymfollow"),
+            format!("{mounted}42 41 0:42 / /var/lib/zebra-public/hidden rw - tmpfs tmpfs rw\n"),
+            format!("{mounted}42 40 0:42 / /var/volatile/dstack/persistent/hidden rw - tmpfs tmpfs rw\n"),
+            format!("{mounted}42 1 0:42 / /var/lib rw - tmpfs tmpfs rw\n"),
+            format!("{mounted}42 10 0:42 / /var/volatile/dstack rw - tmpfs tmpfs rw\n"),
+        ] {
+            assert!(check_public_data_mount(changed.as_bytes()).is_err(), "{changed}");
+        }
     }
 
     #[test]
