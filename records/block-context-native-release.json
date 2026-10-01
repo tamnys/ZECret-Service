@@ -8,6 +8,16 @@
   "bundle_sha256": "bd005975e1afa477ae57ae0b40fe692eab6a7ca247b2c479e1111f51081adbfa",
   "architecture": "x86_64-unknown-linux-gnu",
   "reproducible": true,
+  "image_smoke": {
+    "workflow_run": "https://github.com/tamnys/ZECret-service/actions/runs/36886542775",
+    "source_commit": "2692c14af01818192858befd4e7649e9728643de",
+    "image_exporter_digest": "sha256:29d1c2ff9dd6f86421c6e33297d829c5a3654680bdec7d4b3e95c1d0bd28c701",
+    "two_matching_builds": true,
+    "startup_and_shutdown_checks_passed": true,
+    "quote_evidence": "synthetic",
+    "published": false,
+    "deployed": false
+  },
   "artifact_sha256": {
     "zrpc-node-wrapper": "85dfd9ea8baa45467e4f29c0173cd22b6a4090cad97c2244714c905e5e188317",
     "zrpc-quote-proxy": "7c4e84de4d3278fbdd47ee81427c642a9bf01d3993b90796dab63f544edc023f",
