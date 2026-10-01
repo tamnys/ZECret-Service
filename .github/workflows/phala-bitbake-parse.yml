@@ -1,0 +1,142 @@
+name: Phala pinned BitBake parse preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    name: Native x86_64 source-only candidate parse
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact project and meta-dstack source objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          export GIT_LFS_SKIP_SMUDGE=1
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-bitbake-parse"
+          mkdir -p "$source"
+          git -C "$source" init -q
+          git -c core.hooksPath=/dev/null -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -c core.hooksPath=/dev/null -C "$source" checkout -q --detach FETCH_HEAD
+
+          fetch_pinned() {
+            local name="$1" url="$2" commit="$3" directory="$scratch/sources/$name"
+            mkdir -p "$directory"
+            git -C "$directory" init -q
+            git -c core.hooksPath=/dev/null -C "$directory" fetch -q \
+              --no-tags --depth=1 "$url" "$commit"
+            test "$(git -C "$directory" rev-parse FETCH_HEAD)" = "$commit"
+            git -c core.hooksPath=/dev/null -C "$directory" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$directory" rev-parse HEAD)" = "$commit"
+          }
+
+          fetch_pinned meta-dstack https://github.com/Dstack-TEE/meta-dstack.git e3655d1390feee3736476f4bda35c4354b4a12fc
+          fetch_pinned dstack https://github.com/Dstack-TEE/dstack 282eeb27d22d8f091ad0fa5a90e638f85cf68751
+          fetch_pinned poky https://github.com/yoctoproject/poky.git cd44e6bd40b0c1f498b3feaeb5e9b72f8bf32d41
+          fetch_pinned meta-confidential-compute https://github.com/Dstack-TEE/meta-confidential-compute.git 6d1355e0c684f7fdfb688ecfef0ed63feb2aac4c
+          fetch_pinned meta-openembedded https://github.com/openembedded/meta-openembedded 72018ca1b1a471226917e8246e8bbf9a374ccf97
+          fetch_pinned meta-rust-bin https://github.com/rust-embedded/meta-rust-bin 79c077fac9694eb5fbcee7b15e800c21e887bb5d
+          fetch_pinned meta-security https://github.com/Dstack-TEE/meta-security.git bc63d95746ef4f0ac6820165e5041d83647e8c9c
+          fetch_pinned meta-virtualization https://github.com/Dstack-TEE/meta-virtualization.git 52cd8a290cf3989bc99bd9eb475b5db88000245a
+
+      - name: Reconstruct the checked candidate with synthetic binary placeholders
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-bitbake-parse"
+          python3 -I - "$scratch" <<'PY'
+          from pathlib import Path
+          import struct
+          import sys
+
+          scratch = Path(sys.argv[1])
+          for name in ("synthetic-guard", "synthetic-quote-proxy"):
+              data = bytearray(64)
+              data[:7] = b"\x7fELF\x02\x01\x01"
+              struct.pack_into("<H", data, 16, 3)
+              struct.pack_into("<H", data, 18, 62)
+              struct.pack_into("<I", data, 20, 1)
+              (scratch / name).write_bytes(data)
+          PY
+          guard_hash="$(sha256sum "$scratch/synthetic-guard" | cut -d ' ' -f 1)"
+          proxy_hash="$(sha256sum "$scratch/synthetic-quote-proxy" | cut -d ' ' -f 1)"
+          python3 -I "$source/experiments/ephemeral-runtime/prepare-packaging-source.py" \
+            "$scratch/sources/dstack" \
+            "$scratch/sources/meta-dstack" \
+            "$scratch/candidate" \
+            --runtime-guard "$scratch/synthetic-guard" \
+            --runtime-guard-sha256 "$guard_hash" \
+            --quote-proxy "$scratch/synthetic-quote-proxy" \
+            --quote-proxy-sha256 "$proxy_hash" \
+            --poky-source "$scratch/sources/poky" \
+            --meta-confidential-compute-source "$scratch/sources/meta-confidential-compute" \
+            --meta-openembedded-source "$scratch/sources/meta-openembedded" \
+            --meta-rust-bin-source "$scratch/sources/meta-rust-bin" \
+            --meta-security-source "$scratch/sources/meta-security" \
+            --meta-virtualization-source "$scratch/sources/meta-virtualization"
+          python3 -I - "$scratch/candidate/packaging-manifest.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          manifest = json.loads(Path(sys.argv[1]).read_bytes())
+          if (manifest["guest_launch_profile_bound"]
+                  or manifest["binary_provenance_verified"]
+                  or manifest["bitbake_executed"]
+                  or manifest["private_accepted"]
+                  or manifest["unresolved_meta_gitlinks"]):
+              raise SystemExit("source-only candidate unexpectedly claims release evidence")
+          print("Checked source-only candidate reconstructed; binaries are synthetic placeholders.")
+          PY
+
+      - name: Parse all pinned layers without fetching or building
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-bitbake-parse"
+          staged="$scratch/candidate/staged-source"
+          build="$scratch/build"
+          python3 -I - <<'PY'
+          import os
+          if os.statvfs("/tmp").f_flag & os.ST_NOEXEC:
+              raise SystemExit("native runner /tmp is noexec; pinned BitBake refuses to parse")
+          PY
+          . "$staged/poky/oe-init-build-env" "$build" >/dev/null
+          cp "$staged/bb-build/conf/local.conf" "$build/conf/local.conf"
+          cat >> "$build/conf/local.conf" <<'EOF'
+          BB_NO_NETWORK = "1"
+          BB_FETCH_PREMIRRORONLY = "1"
+          CONNECTIVITY_CHECK_URIS = ""
+          EOF
+          cat > "$build/conf/bblayers.conf" <<EOF
+          POKY_BBLAYERS_CONF_VERSION = "2"
+          BBPATH = "\${TOPDIR}"
+          BBFILES ?= ""
+          BBLAYERS ?= " \\
+            $staged/poky/meta \\
+            $staged/poky/meta-poky \\
+            $staged/poky/meta-yocto-bsp \\
+            $staged/meta-confidential-compute \\
+            $staged/meta-openembedded/meta-oe \\
+            $staged/meta-openembedded/meta-python \\
+            $staged/meta-openembedded/meta-networking \\
+            $staged/meta-openembedded/meta-filesystems \\
+            $staged/meta-virtualization \\
+            $staged/meta-rust-bin \\
+            $staged/meta-security \\
+            $staged/meta-dstack \\
+            $staged/meta-nvidia \\
+            "
+          EOF
+          bitbake -p
+          echo 'Pinned corrected-guest source parsed on native x86_64 Linux. No recipe task, image build, image publication, Phala resource, hardware boot or private approval occurred.' \
+            >> "$GITHUB_STEP_SUMMARY"
