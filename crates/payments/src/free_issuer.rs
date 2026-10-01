@@ -28,7 +28,7 @@ pub struct FreeIssuer {
     private_key: SecretBytes,
     store: IssuerStore,
     max_batch: usize,
-    max_total: usize,
+    max_total: Option<usize>,
 }
 
 impl FreeIssuer {
@@ -40,12 +40,14 @@ impl FreeIssuer {
         private_key: SecretBytes,
         store: IssuerStore,
         max_batch: usize,
-        max_total: usize,
+        max_total: Option<usize>,
     ) -> Result<Self, FreeIssuerError> {
         RequestBatch::encoded_len_for(max_batch).map_err(|_| FreeIssuerError)?;
         ResponseBatch::encoded_len_for(max_batch).map_err(|_| FreeIssuerError)?;
-        if max_total == 0 || i64::try_from(max_total).is_err() {
-            return Err(FreeIssuerError);
+        if let Some(limit) = max_total {
+            if limit == 0 || i64::try_from(limit).is_err() {
+                return Err(FreeIssuerError);
+            }
         }
         Ok(Self {
             issuer,
@@ -234,7 +236,7 @@ mod tests {
         let store = IssuerStore::create(&issuer_dir).unwrap();
         let private_key = load_private_key_file(&private_path).unwrap();
         let mut issuer =
-            FreeIssuer::new(server_issuer, helper.clone(), private_key, store, 100, 100).unwrap();
+            FreeIssuer::new(server_issuer, helper.clone(), private_key, store, 100, None).unwrap();
         let (client_socket, server_socket) = tokio::io::duplex(65_536);
         let (served, response) = tokio::join!(
             issuer.serve_connection(server_socket),
@@ -305,8 +307,8 @@ mod tests {
             issuer.serve_connection(server_socket),
             exchange_free_batch(client_socket, &fresh_request, 1)
         );
-        assert!(served.is_err());
-        assert!(fresh_response.is_err());
+        served.unwrap();
+        assert!(fresh_response.is_ok());
         drop(client);
         drop(issuer);
         fs::remove_dir_all(root).unwrap();

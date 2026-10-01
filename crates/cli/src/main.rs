@@ -26,10 +26,10 @@ zrpc inspect-preview-workload --quote FILE --collateral FILE --event-log FILE --
 zrpc inspect-preview-endpoint --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --policy FILE
 zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --policy FILE
 zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
-zrpc query [--stdin | --method METHOD] [--ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE] [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
+zrpc query [--stdin | --method METHOD] --ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
 zrpc verify --privacy-profile phala-trusted --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
-zrpc query --privacy-profile phala-trusted [--stdin | --method METHOD] --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
+zrpc query --privacy-profile phala-trusted [--stdin | --method METHOD] --ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
 zrpc payments --help
 zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
 zrpc dashboard --privacy-profile phala-trusted --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE [--no-open]
@@ -310,43 +310,14 @@ async fn run() -> Result<(), String> {
                 if scenario.is_some(){return Err("scenario is simulation-only".into())}
                 let profile=take_value(&mut args,"--privacy-profile")?;
                 if profile.as_deref()==Some("phala-trusted") {
-                    if args.iter().any(|arg|arg.starts_with("--ticket-")) {
-                        return Err("payments are unavailable for phala-trusted queries".into());
-                    }
+                    let ticket_config=payments::QueryTicketConfig::parse(&mut args)?
+                        .ok_or("a ticket store and issuer settings are required for live queries")?;
                     let live=phala_trusted_inputs(&mut args)?;
                     exhausted(&args)?;
                     if !stdin && method.is_none(){return Err("query requires --stdin or --method".into())}
                     let session=zrpc_client::inspection::connect_phala_trusted(&live.config,&live.collateral,&live.compose,&live.policy)
                         .await.map_err(|error|error.to_string())?;
-                    let result=session.query_from_body(move || private_query_body(stdin,method)).await;
-                    return match result {
-                        Ok(result)=>print_json(json!({"mode":"phala_trusted","simulation":false,
-                            "private_accepted":false,"phala_trusted_authorized":true,"query_sent":true,
-                            "trust_model":"phala_managed_guest_kms_runtime","result":result.result,"chain_context":result.chain_context})),
-                        Err(error)=>{
-                            print_json(json!({"mode":"phala_trusted_error","simulation":false,
-                                "private_accepted":false,"phala_trusted_authorized":false,
-                                "query_sent":"unknown","error":error}))?;
-                            std::process::exit(1)
-                        }
-                    };
-                }
-                if profile.is_some(){return Err("unsupported privacy profile".into())}
-                let ticket_config=payments::QueryTicketConfig::parse(&mut args)?;
-                if args.is_empty() {
-                    // Do not even read a customer body before authorization.
-                    print_json(PrivateClient::new().verify())?;
-                    std::process::exit(1);
-                }
-                let live=live_inputs(&mut args)?;
-                exhausted(&args)?;
-                if !stdin && method.is_none(){return Err("private query requires --stdin or --method".into())}
-                let session=zrpc_client::inspection::connect_verified(&live.config,&live.collateral,&live.compose,&live.policy)
-                    .await.map_err(|error|error.to_string())?;
-                // The retained session checks the managed Tor lease before
-                // this closure reads or constructs any private body.
-                let (result,ticket_state)=if let Some(config)=ticket_config {
-                    let (issuer,mut store)=config.open()?;
+                    let (issuer,mut store)=ticket_config.open()?;
                     let result=session.query_from_body_authorized(
                         || async move {private_query_body(stdin,method)},
                         || {
@@ -363,21 +334,60 @@ async fn run() -> Result<(), String> {
                             }))
                         }
                     ).await;
-                    match result {
-                        Ok((value,marker))=>{
-                            let state=if store.mark_spent(marker).is_ok(){"spent"}else{"uncertain"};
-                            (Ok(value),Some(state))
+                    return match result {
+                        Ok((result,marker))=>{
+                            let ticket_state=if store.mark_spent(marker).is_ok(){"spent"}else{"uncertain"};
+                            print_json(json!({"mode":"phala_trusted","simulation":false,
+                            "private_accepted":false,"phala_trusted_authorized":true,"query_sent":true,
+                            "trust_model":"phala_managed_guest_kms_runtime","ticket_state":ticket_state,
+                            "result":result.result,"chain_context":result.chain_context}))
                         },
-                        Err(error)=>(Err(error),None)
+                        Err(error)=>{
+                            print_json(json!({"mode":"phala_trusted_error","simulation":false,
+                                "private_accepted":false,"phala_trusted_authorized":false,
+                                "query_sent":"unknown","error":error}))?;
+                            std::process::exit(1)
+                        }
+                    };
+                }
+                if profile.is_some(){return Err("unsupported privacy profile".into())}
+                let ticket_config=payments::QueryTicketConfig::parse(&mut args)?
+                    .ok_or("a ticket store and issuer settings are required for live queries")?;
+                if args.is_empty() {
+                    // Do not even read a customer body before authorization.
+                    print_json(PrivateClient::new().verify())?;
+                    std::process::exit(1);
+                }
+                let live=live_inputs(&mut args)?;
+                exhausted(&args)?;
+                if !stdin && method.is_none(){return Err("private query requires --stdin or --method".into())}
+                let session=zrpc_client::inspection::connect_verified(&live.config,&live.collateral,&live.compose,&live.policy)
+                    .await.map_err(|error|error.to_string())?;
+                // The retained session checks the managed Tor lease before
+                // this closure reads or constructs any private body.
+                let (issuer,mut store)=ticket_config.open()?;
+                let result=session.query_from_body_authorized(
+                    || async move {private_query_body(stdin,method)},
+                    || {
+                        let ticket=store.preview_available().map_err(|_|ticket_query_error())?
+                            .ok_or_else(ticket_query_error)?;
+                        let authorization=issuer.authorization_for(ticket.token.expose())
+                            .map_err(|_|ticket_query_error())?;
+                        let marker=ticket.marker;
+                        let claim_store=&mut store;
+                        Ok((authorization,marker,move || {
+                            claim_store.claim_available(&ticket).map_err(|_|ticket_query_error())?;
+                            Ok(move || claim_store.release_untransmitted(&ticket)
+                                .map_err(|_|ticket_query_error()))
+                        }))
                     }
-                }else{
-                    (session.query_from_body(move || private_query_body(stdin,method)).await,None)
-                };
+                ).await;
                 match result {
-                    Ok(result)=>{
-                        let mut output=json!({"mode":"private","simulation":false,"private_accepted":true,"query_sent":true,"result":result.result,"chain_context":result.chain_context});
-                        if let Some(state)=ticket_state {output["ticket_state"]=json!(state)}
-                        print_json(output)
+                    Ok((result,marker))=>{
+                        let ticket_state=if store.mark_spent(marker).is_ok(){"spent"}else{"uncertain"};
+                        print_json(json!({"mode":"private","simulation":false,"private_accepted":true,
+                            "query_sent":true,"ticket_state":ticket_state,
+                            "result":result.result,"chain_context":result.chain_context}))
                     },
                     Err(error) if matches!(error.code,ErrorCode::InvalidRequest|ErrorCode::RequestTooLarge|ErrorCode::MethodNotAllowed|ErrorCode::InvalidParameters)=>Err(error.to_string()),
                     Err(error) if error.code == ErrorCode::TorUnavailable=>{

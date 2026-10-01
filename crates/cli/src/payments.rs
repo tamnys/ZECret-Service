@@ -26,10 +26,10 @@ zrpc payments pending --ticket-store PRIVATE_DIR
 zrpc payments mock-settle --issuer-store PRIVATE_DIR --issuer-public-der FILE --issuer-private-der PRIVATE_FILE --issuer-name NAME --crypto-helper FILE --credits N --request-file PRIVATE_FILE --response-file PRIVATE_FILE
 zrpc payments collect --ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE --purchase-id PURCHASE_ID --response-file PRIVATE_FILE
 zrpc payments init-issuer --issuer-store NEW_PRIVATE_DIR
-zrpc payments serve-free --bind 127.0.0.1:PORT --issuer-store PRIVATE_DIR --issuer-public-der FILE --issuer-private-der PRIVATE_FILE --issuer-name NAME --crypto-helper FILE --max-batch N --max-total N --io-timeout-seconds N
+zrpc payments serve-free --bind 127.0.0.1:PORT --issuer-store PRIVATE_DIR --issuer-public-der FILE --issuer-private-der PRIVATE_FILE --issuer-name NAME --crypto-helper FILE --max-batch N [--max-total N] --io-timeout-seconds N
 zrpc payments init-redeemer --spent-store NEW_PRIVATE_DIR
 zrpc payments balance --ticket-store PRIVATE_DIR
-All exchange files and state directories must be owner-private and outside the checkout. Free issuance transfers no ZEC. The free issuer listens only on loopback; an operator must publish a pinned v3 onion service separately. Redeeming tickets with zrpc query requires an approved private deployment.";
+All exchange files and state directories must be owner-private and outside the checkout. Free issuance transfers no ZEC. The free issuer listens only on loopback; an operator must publish a pinned v3 onion service separately. Redeeming tickets with zrpc query requires an approved ticket-required deployment.";
 
 pub(super) async fn run(mut args: Vec<String>) -> Result<(), String> {
     if args.is_empty() || (args.len() == 1 && args[0] == "--help") {
@@ -257,9 +257,13 @@ async fn serve_free(mut args: Vec<String>) -> Result<(), String> {
     let max_batch = required(&mut args, "--max-batch")?
         .parse::<usize>()
         .map_err(|_| "invalid maximum batch")?;
-    let max_total = required(&mut args, "--max-total")?
-        .parse::<usize>()
-        .map_err(|_| "invalid total ticket budget")?;
+    let max_total = take_value(&mut args, "--max-total")?
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| "invalid total ticket budget")
+        })
+        .transpose()?;
     let io_timeout = required(&mut args, "--io-timeout-seconds")?
         .parse::<u64>()
         .map_err(|_| "invalid issuer timeout")?;

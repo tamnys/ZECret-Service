@@ -277,7 +277,7 @@ pub fn issue_batch_bytes(
     helper: &Path,
     issuer_private_der: &SecretBytes,
     authorized_quantity: usize,
-    max_total: usize,
+    max_total: Option<usize>,
     request_bytes: &[u8],
 ) -> Result<SecretBytes, IssuanceError> {
     let request = RequestBatch::decode(request_bytes, issuer.key_id).map_err(|_| IssuanceError)?;
@@ -288,7 +288,7 @@ pub fn issue_batch_bytes(
         issuer_private_der,
         authorized_quantity,
         request,
-        Some(max_total),
+        max_total,
     )?;
     Ok(SecretBytes::new(
         response.encode().map_err(|_| IssuanceError)?,
