@@ -128,6 +128,21 @@ container run with the default fixture address also succeeded at height
 establish that every fresh Tor circuit will connect. The second address is
 public testnet input, not customer wallet material or private-mode evidence.
 
+At 2026-10-01 01:02 UTC, a fresh managed-container public preview through the
+pinned Tor executable reported Testnet height **4,424,966** and best-block hash
+`00001435ab2ea3da7a3f235e3d2471de13e14fcd629d7f059c0685c70f0cf897`.
+The client again verified the live quote, freshness and TLS-key binding under
+the public-preview policy; `private_accepted` remained false. The independent
+[CipherScan Testnet API](https://api.testnet.cipherscan.app/api/block/4424966)
+returned the **same hash at height 4,424,966**. Its separate
+[`getblockchaininfo` view](https://api.testnet.cipherscan.app/api/blockchain-info)
+reported height 4,424,965 just before the Phala request and 4,424,968 just
+after it, with equal blocks and headers and `verificationprogress: 1` at those
+two reads. This is point-in-time agreement with another Zebra node and evidence
+that the Phala node was near its observed tip. It is not network-wide consensus,
+proof of the Phala node's own verification progress at that instant, or
+private-mode acceptance. No new Phala resource or management mutation occurred.
+
 At 2026-10-01 00:05 UTC, a local probe started the dashboard inside Colima,
 forwarded its assigned loopback port through SSH to the Mac, and retained its
 one-time bootstrap token and local capability only in process memory. From
