@@ -36,8 +36,8 @@ enabled and a nonempty pre-launch script, while the prepared document set the
 first two flags false and supplied no script. The inner Docker Compose bytes
 matched. We subsequently changed the two visibility flags to false through a
 field-only update and confirmed that readback. Please explain which layer
-initially added or changed these fields and how to
-make the reviewed launch document effective without an unreviewed script.
+initially added or changed these fields, and how to make the reviewed launch
+document effective without an unreviewed script.
 
 Is there a currently supported image or supported custom-image route that puts
 these runtime roots in memory and prevents every runtime startup/restart path
