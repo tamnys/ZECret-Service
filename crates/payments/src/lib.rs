@@ -7,15 +7,18 @@
 mod challenge;
 mod crypto;
 mod exchange;
+mod free_issuer;
 mod http;
 mod issuance;
 mod redemption;
 mod store;
 mod wire;
 
+pub use free_issuer::{FreeIssuer, FreeIssuerError, exchange_free_batch};
 pub use issuance::{
-    IssuanceError, IssuerPublic, collect_purchase, export_pending_purchase, load_private_key_file,
-    mock_settle_purchase, prepare_purchase,
+    IssuanceError, IssuerPublic, collect_purchase, collect_purchase_bytes, export_pending_purchase,
+    export_pending_purchase_bytes, issue_batch_bytes, load_private_key_file, mock_settle_purchase,
+    prepare_purchase, prepare_purchase_bytes,
 };
 pub use redemption::{Redeemer, RedemptionError};
 pub use store::RedeemerStore;

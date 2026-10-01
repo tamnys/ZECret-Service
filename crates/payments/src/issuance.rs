@@ -130,6 +130,20 @@ pub fn prepare_purchase(
     quantity: usize,
     request_file: &Path,
 ) -> Result<PurchaseId, IssuanceError> {
+    let (purchase_id, _) = prepare_purchase_bytes(client, issuer, helper, quantity)?;
+    export_pending_purchase(client, issuer, purchase_id, request_file)?;
+    Ok(purchase_id)
+}
+
+/// Prepare an issuance batch in the private client store and return only its
+/// blinded wire requests. A failed exchange can resume with the same purchase
+/// identifier; it never needs to generate replacement blinding state.
+pub fn prepare_purchase_bytes(
+    client: &mut ClientStore,
+    issuer: &IssuerPublic,
+    helper: &Path,
+    quantity: usize,
+) -> Result<(PurchaseId, SecretBytes), IssuanceError> {
     if quantity == 0 {
         return Err(IssuanceError);
     }
@@ -161,8 +175,8 @@ pub fn prepare_purchase(
     client
         .store_prepared(purchase_id, &pending)
         .map_err(|_| IssuanceError)?;
-    export_pending_purchase(client, issuer, purchase_id, request_file)?;
-    Ok(purchase_id)
+    let bytes = export_pending_purchase_bytes(client, issuer, purchase_id)?;
+    Ok((purchase_id, bytes))
 }
 
 /// Recreate the exact blinded request batch from a durable pending purchase.
@@ -175,6 +189,15 @@ pub fn export_pending_purchase(
 ) -> Result<(), IssuanceError> {
     let (batch, _) = pending_batch(client, issuer, purchase_id)?;
     batch.write_new(request_file).map_err(|_| IssuanceError)
+}
+
+pub fn export_pending_purchase_bytes(
+    client: &ClientStore,
+    issuer: &IssuerPublic,
+    purchase_id: PurchaseId,
+) -> Result<SecretBytes, IssuanceError> {
+    let (batch, _) = pending_batch(client, issuer, purchase_id)?;
+    Ok(SecretBytes::new(batch.encode().map_err(|_| IssuanceError)?))
 }
 
 fn pending_batch(
@@ -231,9 +254,74 @@ pub fn mock_settle_purchase(
     let request = RequestBatch::read_private(request_file, issuer.key_id, authorized_quantity)
         .map_err(|_| IssuanceError)?;
     let purchase_id = request.purchase_id();
-    store
-        .authorize(purchase_id, authorized_quantity, request.commitment())
-        .map_err(|_| IssuanceError)?;
+    issue_batch(
+        store,
+        issuer,
+        helper,
+        issuer_private_der,
+        authorized_quantity,
+        request,
+        None,
+    )?
+    .write_new(response_file)
+    .map_err(|_| IssuanceError)?;
+    Ok(purchase_id)
+}
+
+/// Sign an operator-authorized free batch. The caller must enforce its own
+/// issuance policy before calling this function; possession of a blinded
+/// request does not itself authorize any credits.
+pub fn issue_batch_bytes(
+    store: &mut IssuerStore,
+    issuer: &IssuerPublic,
+    helper: &Path,
+    issuer_private_der: &SecretBytes,
+    authorized_quantity: usize,
+    max_total: Option<usize>,
+    request_bytes: &[u8],
+) -> Result<SecretBytes, IssuanceError> {
+    let request = RequestBatch::decode(request_bytes, issuer.key_id).map_err(|_| IssuanceError)?;
+    let response = issue_batch(
+        store,
+        issuer,
+        helper,
+        issuer_private_der,
+        authorized_quantity,
+        request,
+        max_total,
+    )?;
+    Ok(SecretBytes::new(
+        response.encode().map_err(|_| IssuanceError)?,
+    ))
+}
+
+fn issue_batch(
+    store: &mut IssuerStore,
+    issuer: &IssuerPublic,
+    helper: &Path,
+    issuer_private_der: &SecretBytes,
+    authorized_quantity: usize,
+    request: RequestBatch,
+    max_total: Option<usize>,
+) -> Result<ResponseBatch, IssuanceError> {
+    if request.requests().len() != authorized_quantity {
+        return Err(IssuanceError);
+    }
+    let purchase_id = request.purchase_id();
+    if let Some(limit) = max_total {
+        store
+            .authorize_free(
+                purchase_id,
+                authorized_quantity,
+                request.commitment(),
+                limit,
+            )
+            .map_err(|_| IssuanceError)?;
+    } else {
+        store
+            .authorize(purchase_id, authorized_quantity, request.commitment())
+            .map_err(|_| IssuanceError)?;
+    }
     let signatures = store
         .issue_once(purchase_id, request.commitment(), || {
             request
@@ -258,9 +346,7 @@ pub fn mock_settle_purchase(
         .map(|signature| TokenResponse::parse(signature).map_err(|_| IssuanceError))
         .collect::<Result<Vec<_>, _>>()?;
     ResponseBatch::new(purchase_id, issuer.key_id, request.commitment(), responses)
-        .and_then(|batch| batch.write_new(response_file))
-        .map_err(|_| IssuanceError)?;
-    Ok(purchase_id)
+        .map_err(|_| IssuanceError)
 }
 
 /// Finalize every authorized blind signature and verify the resulting tokens
@@ -281,6 +367,55 @@ pub fn collect_purchase(
         pending.len(),
     )
     .map_err(|_| IssuanceError)?;
+    collect_batch(
+        client,
+        issuer,
+        helper,
+        purchase_id,
+        request,
+        pending,
+        response,
+    )
+}
+
+pub fn collect_purchase_bytes(
+    client: &mut ClientStore,
+    issuer: &IssuerPublic,
+    helper: &Path,
+    purchase_id: PurchaseId,
+    response_bytes: &[u8],
+) -> Result<(), IssuanceError> {
+    let (request, pending) = pending_batch(client, issuer, purchase_id)?;
+    let response = ResponseBatch::decode(
+        response_bytes,
+        purchase_id,
+        issuer.key_id,
+        request.commitment(),
+    )
+    .map_err(|_| IssuanceError)?;
+    if response.responses().len() != pending.len() {
+        return Err(IssuanceError);
+    }
+    collect_batch(
+        client,
+        issuer,
+        helper,
+        purchase_id,
+        request,
+        pending,
+        response,
+    )
+}
+
+fn collect_batch(
+    client: &mut ClientStore,
+    issuer: &IssuerPublic,
+    helper: &Path,
+    purchase_id: PurchaseId,
+    request: RequestBatch,
+    pending: Vec<PendingTicket>,
+    response: ResponseBatch,
+) -> Result<(), IssuanceError> {
     let mut tokens = Vec::new();
     tokens
         .try_reserve_exact(pending.len())

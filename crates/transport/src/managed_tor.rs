@@ -226,6 +226,53 @@ impl ManagedTor {
         )
         .await
     }
+
+    /// Open a Tor-authenticated v3 onion stream for blinded ticket issuance.
+    /// This is separate from the attested private RPC channel and must never
+    /// be used to transmit query parameters or bearer tickets.
+    pub async fn connect_issuer_onion(
+        &self,
+        onion_host: &str,
+        port: u16,
+        isolation: IsolationLabel,
+    ) -> Result<super::IssuerOnionChannel, SafeError> {
+        if !valid_v3_onion_host(onion_host) {
+            return Err(unavailable());
+        }
+        let endpoint = RemoteEndpoint::new(onion_host, port)?;
+        let bootstrap = self.connect_bootstrap(&endpoint, isolation).await?;
+        let socket = bootstrap.socket.ok_or_else(unavailable)?;
+        Ok(super::IssuerOnionChannel {
+            socket,
+            tor: self.clone(),
+        })
+    }
+}
+
+pub fn valid_v3_onion_host(host: &str) -> bool {
+    let Some(name) = host.strip_suffix(".onion") else {
+        return false;
+    };
+    name.len() == 56
+        && name
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'2'..=b'7'))
+}
+
+#[cfg(test)]
+mod onion_host_tests {
+    use super::valid_v3_onion_host;
+
+    #[test]
+    fn accepts_only_canonical_v3_onion_names() {
+        let valid = "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion";
+        assert!(valid_v3_onion_host(valid));
+        assert!(!valid_v3_onion_host("127.0.0.1"));
+        assert!(!valid_v3_onion_host("abcdefghijklmnop.onion"));
+        assert!(!valid_v3_onion_host(&valid.to_uppercase()));
+        assert!(!valid_v3_onion_host(&format!("{valid}.")));
+        assert!(!valid_v3_onion_host(&valid.replace('p', "0")));
+    }
 }
 
 impl ManagedTorState {

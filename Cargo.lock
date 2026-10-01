@@ -3017,6 +3017,7 @@ dependencies = [
  "zrpc-lifecycle",
  "zrpc-payments",
  "zrpc-protocol",
+ "zrpc-transport",
  "zrpc-verifier",
 ]
 

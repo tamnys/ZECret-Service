@@ -684,6 +684,22 @@ impl PhalaTrustedRpcSession {
         self.0.query_from_body_async(body).await
     }
 
+    pub async fn query_from_body_authorized<F, Fut, P, C, A, H, R>(
+        self,
+        body: F,
+        prepare: P,
+    ) -> Result<(RpcResult, R), SafeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, SafeError>>,
+        P: FnOnce() -> Result<(H, R, C), SafeError>,
+        H: AsRef<[u8]>,
+        C: FnOnce() -> Result<A, SafeError>,
+        A: FnOnce() -> Result<(), SafeError>,
+    {
+        self.0.query_from_body_authorized(body, prepare).await
+    }
+
     pub async fn query(self, request: &RpcRequest) -> Result<RpcResult, SafeError> {
         self.0.query(request).await
     }

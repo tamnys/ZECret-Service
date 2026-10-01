@@ -36,6 +36,15 @@ const EMBEDDED_RELEASES: &[EmbeddedRelease] = &[
         ],
         manifest_json: include_bytes!("releases/phala-prod9-block-context-20261001.json"),
     },
+    EmbeddedRelease {
+        id: "phala-prod9-testnet-ticketed-20261001-3",
+        manifest_sha256: [
+            0x2c, 0xd7, 0x05, 0xcb, 0xa8, 0xae, 0xf0, 0xc5, 0x6f, 0x86, 0xda, 0x64, 0x97, 0xbb,
+            0x08, 0xb1, 0x50, 0xa3, 0xf6, 0xda, 0xb1, 0xcc, 0xb4, 0x42, 0x56, 0x8b, 0x2f, 0xcc,
+            0x8f, 0xd9, 0xd4, 0x39,
+        ],
+        manifest_json: include_bytes!("releases/phala-prod9-ticketed-20261001.json"),
+    },
 ];
 
 pub(crate) fn is_embedded(id: &str) -> bool {

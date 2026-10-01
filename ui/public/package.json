@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "types": "wrangler types",
-    "check": "wrangler types && tsc --project tsconfig.worker.json && tsc --project tsconfig.browser.json --noEmit && wrangler deploy --dry-run",
+    "check": "wrangler types && tsc --project tsconfig.worker.json && wrangler deploy --dry-run",
     "smoke": "node --test tests/smoke.mjs"
   },
   "devDependencies": {

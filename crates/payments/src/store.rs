@@ -28,6 +28,7 @@ pub enum StoreError {
     AlreadyExists,
     MissingOrCorrupt,
     InvalidQuantity,
+    BudgetExhausted,
     AlteredPurchase,
     UnknownPurchase,
     AlreadyCollected,
@@ -42,6 +43,7 @@ impl fmt::Display for StoreError {
             Self::AlreadyExists => "payment store already exists",
             Self::MissingOrCorrupt => "payment store missing or corrupt",
             Self::InvalidQuantity => "invalid purchase quantity",
+            Self::BudgetExhausted => "free ticket budget exhausted",
             Self::AlteredPurchase => "purchase inputs changed",
             Self::UnknownPurchase => "purchase is not authorized or pending",
             Self::AlreadyCollected => "purchase already collected",
@@ -703,7 +705,30 @@ impl IssuerStore {
         requested_quantity: usize,
         request_commitment: Marker,
     ) -> Result<(), StoreError> {
+        self.authorize_with_budget(id, requested_quantity, request_commitment, None)
+    }
+
+    /// Reserve free credits atomically with the authorization. An exact
+    /// retry remains valid after the budget is exhausted; a new batch does not.
+    pub fn authorize_free(
+        &mut self,
+        id: PurchaseId,
+        requested_quantity: usize,
+        request_commitment: Marker,
+        max_total: usize,
+    ) -> Result<(), StoreError> {
+        self.authorize_with_budget(id, requested_quantity, request_commitment, Some(max_total))
+    }
+
+    fn authorize_with_budget(
+        &mut self,
+        id: PurchaseId,
+        requested_quantity: usize,
+        request_commitment: Marker,
+        max_total: Option<usize>,
+    ) -> Result<(), StoreError> {
         let count = quantity(requested_quantity)?;
+        let limit = max_total.map(quantity).transpose()?;
         let transaction = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -721,6 +746,22 @@ impl IssuerStore {
                 return Ok(());
             }
             return Err(StoreError::AlteredPurchase);
+        }
+        if let Some(limit) = limit {
+            let total: i64 = transaction
+                .query_row(
+                    "SELECT COALESCE(SUM(quantity), 0) FROM authorizations",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|_| StoreError::StorageUnavailable)?;
+            if count
+                > limit
+                    .checked_sub(total)
+                    .ok_or(StoreError::StorageUnavailable)?
+            {
+                return Err(StoreError::BudgetExhausted);
+            }
         }
         transaction
             .execute(

@@ -144,6 +144,10 @@ impl RequestBatch {
     pub(crate) fn requests(&self) -> &[TokenRequest] {
         &self.requests
     }
+
+    pub(crate) fn encoded_len_for(count: usize) -> Result<usize, ExchangeError> {
+        encoded_len(REQUEST_HEADER_LEN, count, TOKEN_REQUEST_LEN)
+    }
 }
 
 impl fmt::Debug for RequestBatch {
@@ -232,6 +236,10 @@ impl ResponseBatch {
 
     pub(crate) fn responses(&self) -> &[TokenResponse] {
         &self.responses
+    }
+
+    pub(crate) fn encoded_len_for(count: usize) -> Result<usize, ExchangeError> {
+        encoded_len(RESPONSE_HEADER_LEN, count, RSA_SIGNATURE_LEN)
     }
 
     pub(crate) fn write_new(&self, path: &Path) -> Result<(), ExchangeError> {

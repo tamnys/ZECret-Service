@@ -1,0 +1,28 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+USER 0:0
+COPY --chmod=0555 supervisor.py /opt/zrpc/supervisor.py
+COPY --chmod=0555 bin/zrpc /opt/zrpc/bin/zrpc
+COPY --chmod=0555 bin/zrpc-node-wrapper /opt/zrpc/bin/zrpc-node-wrapper
+COPY --chmod=0555 bin/zrpc-payment-crypto /opt/zrpc/bin/zrpc-payment-crypto
+RUN mkdir -p /opt/zrpc/ticket /var/lib/zrpc-spent /var/lib/zrpc-issuer \
+    && chown 10001:0 /var/lib/zrpc-spent \
+    && chown 10003:0 /var/lib/zrpc-issuer \
+    && chmod 0700 /var/lib/zrpc-spent /var/lib/zrpc-issuer
+COPY --chmod=0444 ticket/issuer-public.der /opt/zrpc/ticket/issuer-public.der
+COPY --chmod=0444 ticket/issuer-hostname /opt/zrpc/ticket/issuer-hostname
+COPY --chmod=0444 ticket/hs_ed25519_public_key /opt/zrpc/ticket/hs_ed25519_public_key
+COPY --chmod=0555 ticket/tor/tor /opt/zrpc/ticket/tor/tor
+COPY --chmod=0444 ticket/tor/libcrypto.so.3 /opt/zrpc/ticket/tor/libcrypto.so.3
+COPY --chmod=0444 ticket/tor/libevent-2.1.so.7 /opt/zrpc/ticket/tor/libevent-2.1.so.7
+COPY --chmod=0444 ticket/tor/libssl.so.3 /opt/zrpc/ticket/tor/libssl.so.3
+COPY --chmod=0444 ticket/data/geoip /opt/zrpc/ticket/data/geoip
+COPY --chmod=0444 ticket/data/geoip6 /opt/zrpc/ticket/data/geoip6
+COPY --chmod=0444 ticket/data/torrc-defaults /opt/zrpc/ticket/data/torrc-defaults
+COPY --chmod=0444 ticket/docs/libevent.txt /opt/zrpc/ticket/docs/libevent.txt
+COPY --chmod=0444 ticket/docs/openssl.txt /opt/zrpc/ticket/docs/openssl.txt
+COPY --chmod=0444 ticket/docs/tor.txt /opt/zrpc/ticket/docs/tor.txt
+COPY --chown=10001:0 --chmod=0600 state/spent.keep /var/lib/zrpc-spent/.keep
+COPY --chown=10003:0 --chmod=0600 state/issuer.keep /var/lib/zrpc-issuer/.keep
+USER 10001:0
+ENTRYPOINT ["python3", "/opt/zrpc/supervisor.py"]

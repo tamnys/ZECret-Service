@@ -1,0 +1,8 @@
+{
+  "network": "testnet",
+  "phala_trusted_enabled": true,
+  "reviewed_release_ids": [
+    "phala-prod9-testnet-ticketed-20261001-3"
+  ],
+  "schema_version": 1
+}
