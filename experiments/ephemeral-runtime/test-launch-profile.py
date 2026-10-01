@@ -218,6 +218,8 @@ class LaunchProfileInputTests(unittest.TestCase):
             '{"vm_config":"{\\"image\\":1,\\"image\\":2}"}',
             '{"vm_config":"not JSON"}',
             '{"vm_config":"[]"}',
+            '{"vm_config":"{}","unexpected":NaN}',
+            '{"vm_config":"{\\"unexpected\\":NaN}"}',
             '{"vm_config":"{}","docker_registry":"https://registry.example"}',
         ):
             with self.subTest(payload=payload):

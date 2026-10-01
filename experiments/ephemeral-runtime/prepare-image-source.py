@@ -271,7 +271,7 @@ SPLIT_WRAPPER_LIMITS = frozenset({
 
 
 def reject_non_json_constant(value: str) -> None:
-    raise ValueError(f"non-JSON Compose constant: {value}")
+    raise ValueError(f"non-JSON constant: {value}")
 
 
 def reject_interpolation(value: object) -> None:
@@ -373,7 +373,8 @@ def launch_config_digest(path: Path | None) -> bytes | None:
         raise ValueError("launch configuration exceeds pinned dstack copy bound")
 
     try:
-        profile = json.loads(payload, object_pairs_hook=unique_object)
+        profile = json.loads(payload, object_pairs_hook=unique_object,
+                             parse_constant=reject_non_json_constant)
     except (ValueError, UnicodeDecodeError) as error:
         raise ValueError("invalid launch configuration JSON") from error
     port_policy = profile.get("port_policy") if isinstance(profile, dict) else None
@@ -426,7 +427,8 @@ def sys_config_digest(path: Path | None) -> bytes | None:
     if len(payload) > 32 * 1024:
         raise ValueError("system configuration exceeds pinned dstack copy bound")
     try:
-        config = json.loads(payload, object_pairs_hook=unique_object)
+        config = json.loads(payload, object_pairs_hook=unique_object,
+                            parse_constant=reject_non_json_constant)
     except (ValueError, UnicodeDecodeError) as error:
         raise ValueError("invalid system configuration JSON") from error
     if (not isinstance(config, dict)
@@ -435,7 +437,8 @@ def sys_config_digest(path: Path | None) -> bytes | None:
             or config.get("docker_registry") not in (None, "")):
         raise ValueError("system configuration violates private RPC profile")
     try:
-        vm_config = json.loads(config["vm_config"], object_pairs_hook=unique_object)
+        vm_config = json.loads(config["vm_config"], object_pairs_hook=unique_object,
+                               parse_constant=reject_non_json_constant)
     except (ValueError, UnicodeDecodeError) as error:
         raise ValueError("invalid embedded VM configuration JSON") from error
     if not isinstance(vm_config, dict):
