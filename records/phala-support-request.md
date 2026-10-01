@@ -30,6 +30,15 @@ public chain data through Tor. We have sent no private query and have not
 approved this workload for private mode. This live test does not resolve the
 runtime-disk, KMS or administrative questions below.
 
+The October 1 authenticated compose readback also differed from the prepared
+launch document: the provider reports public logs and system information
+enabled and a nonempty pre-launch script, while the prepared document set the
+first two flags false and supplied no script. The inner Docker Compose bytes
+matched. We subsequently changed the two visibility flags to false through a
+field-only update and confirmed that readback. Please explain which layer
+initially added or changed these fields, and how to make the reviewed launch
+document effective without an unreviewed script.
+
 Is there a currently supported image or supported custom-image route that puts
 these runtime roots in memory and prevents every runtime startup/restart path
 from proceeding if preparation fails? Please share the immutable image/source
@@ -74,9 +83,17 @@ billable resources in response.
    disabled or fixed for this deployment so
    that only the attested TLS wrapper port is reachable? We need to rule out an
    override that could expose Zebra's loopback RPC directly.
+   The live `compose_file` response includes a 17,569-byte pre-launch script
+   (SHA-256 `982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8`)
+   that our launch document did not supply. A static scan found root-password,
+   SSH-key, SSH-server and remote-fetch terms. Is this script supplied by Phala,
+   when is it run, and what supported configuration disables its administrative
+   paths? We have not executed or published its contents.
 
 3. **Deletion and accounting contract.** For API version `2026-06-23`, the live
    CVM inventory and detail return `instance_id: null` but a nonempty `vm_uuid`.
+   The authenticated `compose_file` readback reports `no_instance_id: false`.
+   Why is the CVM instance ID still null, and does that state change on reboot?
    Eight usage rows returned `instance_id` equal to that `vm_uuid`. Is that the
    supported, stable mapping for billing, including replicas, restarts and
    deletion? The same response returned `project_id` and `team_id` as JSON
