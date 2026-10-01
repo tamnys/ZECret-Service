@@ -166,10 +166,7 @@ impl LocalNode {
                 (info, Some(context))
             }
             Method::GetBlockCount => {
-                let tip = self
-                    .call(&mut sender, "getbestblockheightandhash", json!([]))
-                    .await?;
-                let context = BlockRef::from_parts(&tip["height"], &tip["hash"])?;
+                let context = BlockRef::from_parts(&info["blocks"], &info["bestblockhash"])?;
                 (json!(context.height), Some(context))
             }
             Method::GetPreviewAddressBalance { address } => {
@@ -538,7 +535,6 @@ mod tests {
                                         "getblockchaininfo" => if matches!(mode, Mode::Mainnet) {
                                             json!({"chain":"main"})
                                         } else { chain() },
-                                        "getbestblockheightandhash" => json!({"height":42,"hash":"ab".repeat(32)}),
                                         "getblockhash" => json!("ab".repeat(32)),
                                         "getaddressutxos" => json!({"height":43,"hash":"cd".repeat(32),"utxos":[{
                                             "address":params[0]["addresses"][0],"txid":"ab".repeat(32),"outputIndex":0,"satoshis":7,"height":40
@@ -647,16 +643,20 @@ mod tests {
                 .unwrap();
                 let result = backend.node.handle(&request).await;
                 if matched {
+                    let response = result.unwrap();
                     assert_eq!(
-                        result.unwrap()["chain_context"],
+                        response["chain_context"],
                         json!({"height":height,"hash":hash.repeat(32)})
                     );
+                    if method == "getblockcount" {
+                        assert_eq!(response["result"], json!(height));
+                    }
                 } else {
                     assert_eq!(result.unwrap_err().code, ErrorCode::BlockMismatch);
                 }
                 assert_eq!(
                     backend.seen.lock().unwrap().len() - before,
-                    if method == "getblockchaininfo" { 1 } else { 2 }
+                    if method == "getaddressbalance" { 2 } else { 1 }
                 );
             }
         }
@@ -915,7 +915,7 @@ mod tests {
             let fake = fake(mode).await;
             let error = fake
                 .node
-                .handle(&request("getblockcount", json!([])))
+                .handle(&request("getblockhash", json!([42])))
                 .await
                 .unwrap_err();
             assert_eq!(error.code, expected);
