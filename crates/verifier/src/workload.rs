@@ -185,6 +185,28 @@ pub fn inspect_phala_public_preview_workload(
     report
 }
 
+/// Evaluate a client-packaged Phala-managed release's exact workload and the
+/// original TLS exporter's signed REPORTDATA under its explicit TDX appraisal.
+/// Only the transport can turn a successful result into a retained session.
+pub fn inspect_phala_trusted_workload_and_report_data(
+    quote: &[u8],
+    collateral_json: &[u8],
+    event_log_json: &[u8],
+    raw_app_compose: &[u8],
+    policy: &WorkloadPolicy,
+    expected_report_data: &[u8; 64],
+) -> BoundWorkloadInspection {
+    let mut result = inspect_workload_using(
+        event_log_json,
+        raw_app_compose,
+        policy,
+        Some(expected_report_data),
+        |inspect| offline::inspect_phala_trusted_quote_with_claims(quote, collateral_json, inspect),
+    );
+    result.workload.policy_source = "client_packaged_phala_trusted_release";
+    result
+}
+
 /// Authenticate supplied evidence at the current system clock before comparing
 /// signed REPORTDATA. Echoed report_data strings or provider assertions are not
 /// inputs. A match never approves the policy or constructs a verified channel.

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use zrpc_client::inspection::{PreviewEndpointConfig, PrivateEndpointConfig};
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_protocol::TestnetTransparentAddress;
-use zrpc_verifier::ReleasePolicy;
+use zrpc_verifier::{PhalaTrustedPolicy, ReleasePolicy};
 
 const MAX_BODY: usize = 16 * 1024; // Design §9 request bound.
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; worker-src 'none'";
@@ -32,6 +32,11 @@ enum DashboardMode {
     Simulation,
     Live(LiveConfiguration),
     Preview(PreviewConfiguration),
+}
+
+enum LivePolicy {
+    Strict(ReleasePolicy),
+    PhalaTrusted(PhalaTrustedPolicy),
 }
 
 /// These are observations of the current local session, not a cached claim
@@ -85,7 +90,7 @@ pub struct LiveConfiguration {
     config: PrivateEndpointConfig,
     collateral: Vec<u8>,
     compose: Vec<u8>,
-    policy: ReleasePolicy,
+    policy: LivePolicy,
 }
 
 pub struct PreviewConfiguration {
@@ -119,7 +124,21 @@ impl LiveConfiguration {
             config,
             collateral,
             compose,
-            policy,
+            policy: LivePolicy::Strict(policy),
+        }
+    }
+
+    pub fn new_phala_trusted(
+        config: PrivateEndpointConfig,
+        collateral: Vec<u8>,
+        compose: Vec<u8>,
+        policy: PhalaTrustedPolicy,
+    ) -> Self {
+        Self {
+            config,
+            collateral,
+            compose,
+            policy: LivePolicy::PhalaTrusted(policy),
         }
     }
 }
@@ -242,7 +261,10 @@ async fn bootstrap(State(session): State<LocalSession>, headers: HeaderMap) -> R
     *token = None;
     let mode = match session.mode.as_ref() {
         DashboardMode::Simulation => "simulation",
-        DashboardMode::Live(_) => "live_unverified",
+        DashboardMode::Live(live) => match live.policy {
+            LivePolicy::Strict(_) => "live_unverified",
+            LivePolicy::PhalaTrusted(_) => "phala_trusted_unverified",
+        },
         DashboardMode::Preview(_) => "live_testnet_preview",
     };
     let platform = match session.mode.as_ref() {
@@ -275,13 +297,28 @@ async fn query(State(session): State<LocalSession>, request: Request) -> Respons
         if headers.contains_key("x-zrpc-scenario") {
             return (StatusCode::BAD_REQUEST, "scenario is simulation-only").into_response();
         }
-        let verified = zrpc_client::inspection::connect_verified(
-            &live.config,
-            &live.collateral,
-            &live.compose,
-            &live.policy,
-        )
-        .await;
+        enum Session {
+            Strict(zrpc_client::inspection::VerifiedRpcSession),
+            PhalaTrusted(zrpc_client::inspection::PhalaTrustedRpcSession),
+        }
+        let verified = match &live.policy {
+            LivePolicy::Strict(policy) => zrpc_client::inspection::connect_verified(
+                &live.config,
+                &live.collateral,
+                &live.compose,
+                policy,
+            )
+            .await
+            .map(Session::Strict),
+            LivePolicy::PhalaTrusted(policy) => zrpc_client::inspection::connect_phala_trusted(
+                &live.config,
+                &live.collateral,
+                &live.compose,
+                policy,
+            )
+            .await
+            .map(Session::PhalaTrusted),
+        };
         let session = match verified {
             Ok(session) => session,
             Err(error) => return Json(json!({"mode":"private_blocked","simulation":false,
@@ -289,22 +326,27 @@ async fn query(State(session): State<LocalSession>, request: Request) -> Respons
                 "platform":live.config.platform(),
                 "verification":LiveVerification::rejected(),"chain_readiness":"not_checked","result":null})).into_response(),
         };
-        let result = session
-            .query_from_body_async(move || async move {
-                to_bytes(body, MAX_BODY)
-                    .await
-                    .map(|bytes| bytes.to_vec())
-                    .map_err(|_| {
-                        zrpc_protocol::SafeError::new(
-                            zrpc_protocol::ErrorCode::RequestTooLarge,
-                            "Private request body unavailable or too large.",
-                        )
-                    })
-            })
-            .await;
+        let read_body = move || async move {
+            to_bytes(body, MAX_BODY)
+                .await
+                .map(|bytes| bytes.to_vec())
+                .map_err(|_| {
+                    zrpc_protocol::SafeError::new(
+                        zrpc_protocol::ErrorCode::RequestTooLarge,
+                        "Private request body unavailable or too large.",
+                    )
+                })
+        };
+        let result = match session {
+            Session::Strict(session) => session.query_from_body_async(read_body).await,
+            Session::PhalaTrusted(session) => session.query_from_body_async(read_body).await,
+        };
         return match result {
             Ok(result) => Json(
-                json!({"mode":"private","simulation":false,"private_accepted":true,
+                json!({"mode":match live.policy { LivePolicy::Strict(_) => "private", LivePolicy::PhalaTrusted(_) => "phala_trusted" },"simulation":false,
+                "private_accepted":matches!(live.policy,LivePolicy::Strict(_)),
+                "phala_trusted_authorized":matches!(live.policy,LivePolicy::PhalaTrusted(_)),
+                "trust_model":match live.policy { LivePolicy::Strict(_) => "independent_guest", LivePolicy::PhalaTrusted(_) => "phala_managed_guest_kms_runtime" },
                 "platform":live.config.platform(),
                 "verification":{"transport":"verified","hardware":"verified","application":"verified","key_binding":"verified","freshness":"verified","release":"approved"},
                 "query_sent":true,"error":null,"result":result}),
@@ -397,7 +439,8 @@ async fn status(State(session): State<LocalSession>) -> Response {
     match session.mode.as_ref() {
         DashboardMode::Simulation => Json(json!(PrivateClient::new().verify())).into_response(),
         DashboardMode::Live(live) => Json(
-            json!({"mode":"live_unverified","simulation":false,"platform":live.config.platform(),
+            json!({"mode":match live.policy {LivePolicy::Strict(_)=>"live_unverified",LivePolicy::PhalaTrusted(_)=>"phala_trusted_unverified"},"simulation":false,"platform":live.config.platform(),
+            "phala_trusted_authorized":false,
             "private_accepted":false,"query_sent":false,"verification":LiveVerification::initial(),
             "chain_readiness":"not_checked","result":null}),
         )
@@ -616,6 +659,45 @@ mod tests {
             assert_eq!(report["verification"]["channel_binding"], "not_verified");
             assert_eq!(report["verification"]["release_approval"], "not_approved");
         }
+    }
+    #[tokio::test]
+    async fn phala_trusting_dashboard_rejects_before_reading_private_body() {
+        let live = LiveConfiguration::new_phala_trusted(
+            PrivateEndpointConfig::for_platform(
+                zrpc_protocol::Backend::PhalaDstack,
+                "192.0.2.1",
+                443,
+                "/missing/local/tor",
+            )
+            .unwrap(),
+            b"{}".to_vec(),
+            b"{}".to_vec(),
+            PhalaTrustedPolicy::default(),
+        );
+        let state = LocalSession::new_live("127.0.0.1:32123".parse().unwrap(), live).unwrap();
+        let app = dashboard(state.clone());
+        let mut request = call("/api/query", &state.host, &state.origin, &state.capability);
+        *request.body_mut() = Body::from(vec![b'X'; MAX_BODY + 1]);
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), MAX_BODY).await.unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report["error"]["code"], "unknown_release");
+        assert_eq!(report["query_sent"], false);
+        assert_eq!(report["private_accepted"], false);
+        let status = app
+            .oneshot(call(
+                "/api/status",
+                &state.host,
+                &state.origin,
+                &state.capability,
+            ))
+            .await
+            .unwrap();
+        let status = to_bytes(status.into_body(), MAX_BODY).await.unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&status).unwrap();
+        assert_eq!(status["mode"], "phala_trusted_unverified");
+        assert_eq!(status["phala_trusted_authorized"], false);
     }
     #[tokio::test]
     async fn preview_dashboard_rejects_request_bodies_and_private_query_route() {

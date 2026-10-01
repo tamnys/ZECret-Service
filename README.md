@@ -4,7 +4,7 @@ ZECret service is an experimental privacy-focused way to read Zcash blockchain d
 
 The goal is simple: look up a block or transaction without giving a remote server an easy way to connect that lookup to you.
 
-**Current status:** this repository provides a local demo, attestation tools, and the foundations of a Zcash testnet service. Private queries are disabled because the client does not yet include an approved server release. Endpoint inspection accepts a configured local SOCKS proxy; private commands are designed to start a selected local Tor executable. Nym is an intended alternative, not an available client option in this version. No hosted endpoint or live Zcash node is included.
+**Current status:** this repository provides a local demo, attestation tools, a public testnet preview, and a separate Phala-trusting client profile. Neither the strict private profile nor the Phala-trusting profile includes an approved server release in this build, so both reject queries before reading a private request body. Endpoint inspection accepts a configured local SOCKS proxy; query commands start a selected local Tor executable after release selection. Nym is an intended alternative, not an available client option in this version. No hosted endpoint or live Zcash node is included in the repository.
 
 ## How it works
 
@@ -24,11 +24,13 @@ If a check fails, the client stops. It does not silently switch to a direct conn
 
 ## Privacy at the server: TEEs
 
-A TEE isolates a workload from the machine hosting it. ZECret service targets Google Cloud C3 Intel TDX with a custom measured guest, and retains a separate Phala dstack backend. TDX protects the virtual machine's private memory from access by the host operating system and hypervisor. See [Intel's TDX overview](https://www.intel.com/content/www/us/en/support/articles/000097227/processors/intel-xeon-processors.html).
+A TEE isolates a workload from the machine hosting it. ZECret service currently targets Phala dstack Intel TDX, with Google Cloud C3 TDX retained as a separate backend. TDX protects the virtual machine's private memory from access by the host operating system and hypervisor. See [Intel's TDX overview](https://www.intel.com/content/www/us/en/support/articles/000097227/processors/intel-xeon-processors.html).
 
 Attestation lets the client check what it is connecting to before trusting it with a query. The client makes that decision locally; a provider's claim that a server is “verified” is not enough.
 
 This protection still depends on the hardware, the approved software, and your device. Attestation does not prove that software has no bugs, that it never retains data, or that a blockchain response is correct.
+
+The explicit `phala-trusted` profile also trusts Phala's guest administration, KMS, and persistent runtime controls. It can protect a query from ordinary network observers while requiring a reviewed workload, live TDX quote, fresh TLS-key binding, and Tor. It does **not** claim confidentiality from Phala administrators or prove that persistent state was erased. The client packages approved releases; a local policy file or a provider response cannot add one.
 
 ## Privacy on the network: Nym or Tor
 
@@ -36,7 +38,7 @@ Network privacy complements the TEE by making it harder to link a request to the
 
 | Option | What it provides | Availability here |
 | --- | --- | --- |
-| **Tor** | Routes connections through relays to hide the client's IP address from the destination. | Endpoint inspection uses an explicitly configured local SOCKS proxy. Private commands are designed to start a local Tor child with a private Unix socket once an approved release exists; private queries remain disabled. |
+| **Tor** | Routes connections through relays to hide the client's IP address from the destination. | Endpoint inspection uses an explicitly configured local SOCKS proxy. Query profiles start a local Tor child with a private Unix socket after selecting a packaged release; both catalogs are empty in this build. |
 | **Nym mixnet** | Mixes traffic with other users' traffic and adds cover traffic and timing delays to make connections harder to correlate. This adds latency. | Intended alternative; not yet selectable in this version. |
 
 Learn more about [Tor's protections](https://support.torproject.org/about-tor/introduction/protections/) and [how Nym's mixnet works](https://nym.com/nym_litepaper.pdf).
@@ -63,6 +65,8 @@ The dashboard listens only on `127.0.0.1` and loads no remote assets. If a brows
 
 Private mode is the default when `--simulate` is omitted. In this build it refuses before reading a query from standard input. Use synthetic data for demonstrations.
 
+The qualified Phala profile must be selected with `--privacy-profile phala-trusted --platform phala-dstack` on `verify`, `query`, or `dashboard`. It requires the endpoint host and port, an absolute local Tor executable path, offline collateral, the exact Phala app-compose bytes, and a release-policy file selecting a client-packaged release. This build has no such release, so selection fails closed. The profile supports a validated Zcash testnet transparent address with `query --stdin` and typed `getaddressbalance` parameters; it does not accept payment options.
+
 ## What you can query
 
 The protocol accepts these read-only methods:
@@ -74,6 +78,7 @@ The protocol accepts these read-only methods:
 | `getblockhash` | Find a block's hash by height. |
 | `getblockheader` | Read a block header. |
 | `getrawtransaction` | Read a transaction by its ID. |
+| `getaddressbalance` | Read one validated testnet transparent address balance in the Phala-trusting profile. |
 
 Wallet operations, transaction submission, batch requests, and arbitrary upstream URLs are rejected. The local demo returns fixtures; compatibility with a live Zebra release must be established before running a service.
 

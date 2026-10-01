@@ -396,6 +396,8 @@ def launch_documents(args):
         "image": args.image, "platform": "linux/amd64", "read_only": True,
         "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
         "logging": {"driver": "none"}, "restart": "no",
+        "ulimits": {"core": 0},
+        "tmpfs": ["/tmp:rw,nosuid,nodev,noexec,mode=1777"],
         "volumes": [{"type": "volume", "source": "runtime_tmpfs", "target": "/run"}],
     }
     quote = {
@@ -444,6 +446,7 @@ def launch_documents(args):
         "runner": "docker-compose",
         "docker_compose_file": compose_bytes.decode("ascii"),
         "storage_fs": "ext4",
+        "swap_size": 0,
         "kms_enabled": True,
         "tproxy_enabled": True,
         "public_logs": False,

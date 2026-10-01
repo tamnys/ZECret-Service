@@ -13,10 +13,11 @@ use zrpc_protocol::{
 use zrpc_transport::ManagedTor;
 use zrpc_transport::{
     EndpointInspection, IsolationLabel, PublicTestnetPreview, RemoteEndpoint, TorConfig,
-    UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
+    UnverifiedGcpEvidence, UnverifiedPublicEvidence,
 };
+pub use zrpc_transport::{PhalaTrustedRpcSession, VerifiedRpcSession};
 use zrpc_verifier::{
-    ReleasePolicy,
+    PhalaTrustedPolicy, PhalaTrustedRelease, ReleasePolicy,
     gcp::GcpWorkloadPolicy,
     workload::{WorkloadInspection, WorkloadPolicy},
 };
@@ -342,6 +343,61 @@ pub async fn connect_verified(
     }
 }
 
+/// Establish a retained, Tor-routed session under a reviewed Phala-trusting
+/// release. The profile is explicit and never falls back to public preview.
+pub async fn connect_phala_trusted(
+    config: &PrivateEndpointConfig,
+    collateral_json: &[u8],
+    raw_app_compose: &[u8],
+    selection: &PhalaTrustedPolicy,
+) -> Result<PhalaTrustedRpcSession, SafeError> {
+    if config.platform != Backend::PhalaDstack {
+        return Err(wrong_platform());
+    }
+    if PhalaTrustedRelease::selected(selection)?.is_empty() {
+        return Err(SafeError::new(
+            ErrorCode::UnknownRelease,
+            "This client has no selected reviewed Phala-trusting release.",
+        ));
+    }
+    #[cfg(not(unix))]
+    return Err(SafeError::new(
+        ErrorCode::TorUnavailable,
+        "Managed local Tor requires a Unix-domain socket on this client platform.",
+    ));
+    #[cfg(unix)]
+    {
+        let tor = config
+            .tor
+            .get_or_try_init(|| async { ManagedTor::launch(&config.tor_executable) })
+            .await?;
+        match request_evidence_with(
+            Backend::PhalaDstack,
+            &config.endpoint,
+            EvidenceTransport::Managed(tor),
+        )
+        .await?
+        {
+            NativeEvidence::Phala(evidence) => {
+                evidence.authorize_phala_trusted(collateral_json, raw_app_compose, selection)
+            }
+            NativeEvidence::Gcp(_) => Err(wrong_platform()),
+        }
+    }
+}
+
+pub async fn query_phala_trusted(
+    config: &PrivateEndpointConfig,
+    collateral_json: &[u8],
+    raw_app_compose: &[u8],
+    selection: &PhalaTrustedPolicy,
+    body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
+) -> Result<Value, SafeError> {
+    let session =
+        connect_phala_trusted(config, collateral_json, raw_app_compose, selection).await?;
+    session.query_from_body(body).await
+}
+
 /// Build/read query bytes only after approval, then parse the typed allowlist
 /// and transmit through the retained original TLS sender.
 pub async fn query_endpoint(
@@ -458,6 +514,15 @@ mod tests {
         let result = query_endpoint(&config, b"{}", b"{}", &ReleasePolicy::default(), || {
             panic!("private body read before approval")
         })
+        .await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::UnknownRelease);
+        let result = query_phala_trusted(
+            &config,
+            b"{}",
+            b"{}",
+            &PhalaTrustedPolicy::default(),
+            || panic!("Phala-trusted body read before approval"),
+        )
         .await;
         assert_eq!(result.unwrap_err().code, ErrorCode::UnknownRelease);
         let config = PrivateEndpointConfig::for_platform(

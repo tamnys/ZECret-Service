@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 import queue
+import resource
 import select
 import signal
 import socket
@@ -45,6 +46,13 @@ def mount_type(path):
 def require_runtime_mount():
     if mount_type(RUN) != "tmpfs":
         raise RuntimeError("shared runtime is not tmpfs")
+    if mount_type(Path("/tmp")) != "tmpfs":
+        raise RuntimeError("temporary files are not memory-backed")
+    with open("/proc/swaps", encoding="ascii") as stream:
+        if len(stream.readlines()) != 1:
+            raise RuntimeError("guest swap is enabled")
+    if resource.getrlimit(resource.RLIMIT_CORE)[0] != 0:
+        raise RuntimeError("core dumps are enabled")
 
 
 def terminate_children(children):
@@ -359,6 +367,7 @@ def run_wrapper():
 
 
 def main():
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     if len(sys.argv) != 2:
         raise RuntimeError("exactly one service mode is required")
     mode = sys.argv[1]

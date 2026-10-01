@@ -71,16 +71,22 @@ function show(report, elapsed) {
         byId('chain').textContent = String(report.chain_readiness ?? 'not_checked').replaceAll('_', ' ');
         byId('result-label').textContent = mode === 'simulation'
             ? (report.error ? 'SIMULATED REJECTION' : 'SYNTHETIC RESULT')
-            : (report.private_accepted === true && report.query_sent === true && !report.error
-                ? 'VERIFIED RESPONSE' : report.private_accepted === true ? 'QUERY FAILED' : 'PRIVATE MODE BLOCKED');
+            : mode === 'phala_trusted_unverified'
+                ? (report.phala_trusted_authorized === true && report.query_sent === true && !report.error
+                    ? 'PHALA-TRUSTING RESPONSE' : report.phala_trusted_authorized === true ? 'QUERY FAILED' : 'RELEASE NOT APPROVED')
+                : (report.private_accepted === true && report.query_sent === true && !report.error
+                    ? 'VERIFIED RESPONSE' : report.private_accepted === true ? 'QUERY FAILED' : 'PRIVATE MODE BLOCKED');
         renderEvidence(report.verification);
     }
     byId('latency').textContent = `${elapsed.toFixed(1)} ms`;
 }
 function updateMethodFields() {
     const method = methodSelect.value;
-    const live = mode === 'live_unverified';
+    const live = mode === 'live_unverified' || mode === 'phala_trusted_unverified';
     byId('live-params').hidden = !live;
+    if (mode === 'phala_trusted_unverified') {
+        byId('preview-fixture').hidden = method !== 'getaddressbalance';
+    }
     byId('height-param').hidden = !live || method !== 'getblockhash';
     byId('hash-param').hidden = !live || !['getblockheader', 'getrawtransaction'].includes(method);
     byId('verbosity-param').hidden = !live || !['getblockheader', 'getrawtransaction'].includes(method);
@@ -103,6 +109,12 @@ function requestForMethod() {
         }
         params = [height];
     }
+    else if (method === 'getaddressbalance' && mode === 'phala_trusted_unverified') {
+        const address = byId('preview-address').value.trim();
+        if (!address)
+            throw new Error('Enter a Zcash testnet transparent address.');
+        params = [{ addresses: [address] }];
+    }
     else if (method === 'getblockheader' || method === 'getrawtransaction') {
         const hash = byId('hash').value.trim();
         if (!/^[a-fA-F0-9]{64}$/.test(hash)) {
@@ -117,7 +129,7 @@ function requestForMethod() {
     return JSON.stringify({ jsonrpc: '2.0', id: 1, method, params });
 }
 methodSelect.addEventListener('change', () => {
-    if (mode === 'live_unverified') {
+    if (mode === 'live_unverified' || mode === 'phala_trusted_unverified') {
         byId('height').value = '';
         byId('hash').value = '';
     }
@@ -135,7 +147,9 @@ run.addEventListener('click', async () => {
             : mode === 'live_testnet_preview' ? report.report?.preview
                 ? 'Public testnet reads completed. Workload identity and private approval remain unverified.'
                 : 'Preview stopped before public testnet results were available.'
-                : 'Local session ready. Private mode requires independent verification.';
+                : mode === 'phala_trusted_unverified'
+                    ? 'Phala-trusting release approval is required before a request is sent.'
+                    : 'Local session ready. Private mode requires independent verification.';
     }
     catch (error) {
         session.textContent = error instanceof Error ? error.message : 'Local request failed';
@@ -178,9 +192,12 @@ async function start() {
             show(status, performance.now() - started);
             session.textContent = 'Ready. Check the live TDX quote and read public testnet data.';
         }
-        else if (mode === 'live_unverified') {
-            byId('mode-label').textContent = 'LIVE CLIENT · UNVERIFIED';
-            byId('mode-description').textContent = 'This dashboard can ask the native client to verify a remote endpoint. No private query is sent unless the independently reviewed release and live connection pass every check.';
+        else if (mode === 'live_unverified' || mode === 'phala_trusted_unverified') {
+            const trusted = mode === 'phala_trusted_unverified';
+            byId('mode-label').textContent = trusted ? 'PHALA-TRUSTING · UNVERIFIED' : 'LIVE CLIENT · UNVERIFIED';
+            byId('mode-description').textContent = trusted
+                ? 'This profile trusts Phala with guest administration, KMS and persistent runtime state. The native client still requires a reviewed workload, live TDX quote, fresh TLS key binding and Tor before sending a query. It does not protect against Phala administrators.'
+                : 'This dashboard can ask the native client to verify a remote endpoint. No private query is sent unless the independently reviewed release and live connection pass every check.';
             byId('method-label').textContent = 'Typed testnet request';
             byId('scenario-label').style.display = 'none';
             byId('scenario').style.display = 'none';
@@ -192,20 +209,38 @@ async function start() {
                 if (option.value === 'getrawtransaction')
                     option.textContent = 'Transaction by ID';
             }
+            if (trusted) {
+                const addressOption = document.createElement('option');
+                addressOption.value = 'getaddressbalance';
+                addressOption.textContent = 'Testnet transparent address balance';
+                methodSelect.append(addressOption);
+                byId('preview-note').textContent = 'Only a valid testnet transparent P2PKH or P2SH address is accepted by the native client. Phala is trusted under this profile.';
+            }
             updateMethodFields();
             run.firstChild.textContent = 'Try verified query ';
-            byId('release-note').textContent = `${result.platform === 'gcp-tdx' ? 'Google Cloud TDX' : 'Phala dstack'}: no approved production release is packaged yet. Private mode stays blocked.`;
-            byId('gate-note').textContent = result.platform === 'gcp-tdx'
-                ? 'Google Cloud TDX boot integrity, administrative isolation, durable storage isolation, channel binding, and external cleanup still need independent validation.'
-                : 'Phala Gates A–E still need genuine evidence.';
+            byId('release-note').textContent = trusted
+                ? 'Phala-trusting profile: no reviewed live release is packaged yet. Queries remain blocked.'
+                : `${result.platform === 'gcp-tdx' ? 'Google Cloud TDX' : 'Phala dstack'}: no approved production release is packaged yet. Private mode stays blocked.`;
+            byId('gate-note').textContent = trusted
+                ? 'This qualified claim depends on Phala-operated guest, KMS and runtime controls. The local Rust client must approve the exact release and connection before reading your query.'
+                : result.platform === 'gcp-tdx'
+                    ? 'Google Cloud TDX boot integrity, administrative isolation, durable storage isolation, channel binding, and external cleanup still need independent validation.'
+                    : 'Phala Gates A–E still need genuine evidence.';
             const started = performance.now();
             const status = await api('/api/status');
-            if (status.mode !== 'live_unverified' || status.platform !== result.platform ||
+            if (status.mode !== mode || status.platform !== result.platform ||
                 status.private_accepted !== false || status.query_sent !== false) {
                 throw new Error('Local client status is inconsistent. Restart the dashboard from the CLI.');
             }
             show(status, performance.now() - started);
-            session.textContent = 'Local session ready. Private mode requires independent verification.';
+            session.textContent = trusted
+                ? 'Local session ready. A reviewed Phala-trusting release is required.'
+                : 'Local session ready. Private mode requires independent verification.';
+            if (trusted) {
+                const asideTitle = document.querySelector('.aside strong');
+                if (asideTitle)
+                    asideTitle.textContent = 'Phala-trusting mode is closed.';
+            }
         }
         else if (mode === 'simulation') {
             updateMethodFields();

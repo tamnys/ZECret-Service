@@ -4,8 +4,10 @@
 mod approved;
 pub mod gcp;
 pub mod offline;
+mod phala_trusted;
 pub mod workload;
 pub use approved::ApprovedRelease;
+pub use phala_trusted::PhalaTrustedRelease;
 
 use serde::{Deserialize, Serialize};
 use zrpc_protocol::{ErrorCode, Network, SafeError};
@@ -58,6 +60,63 @@ impl ReleasePolicy {
             if id.is_empty()
                 || self.approved_release_ids[..index].contains(id)
                 || !approved::is_embedded(id)
+            {
+                return Err(invalid_policy());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A deliberate selection of client-packaged Phala releases whose trust model
+/// includes Phala guest administration, KMS, and writable runtime storage.
+/// This policy cannot select a strict release or create a new trusted release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhalaTrustedPolicy {
+    pub schema_version: u32,
+    pub network: Network,
+    pub phala_trusted_enabled: bool,
+    pub reviewed_release_ids: Vec<String>,
+}
+
+impl Default for PhalaTrustedPolicy {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            network: Network::Testnet,
+            phala_trusted_enabled: false,
+            reviewed_release_ids: Vec::new(),
+        }
+    }
+}
+
+impl PhalaTrustedPolicy {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, SafeError> {
+        if bytes
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            != Some(b'{')
+        {
+            return Err(invalid_policy());
+        }
+        let policy: Self = serde_json::from_slice(bytes).map_err(|_| invalid_policy())?;
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    pub fn validate(&self) -> Result<(), SafeError> {
+        if self.schema_version != 1
+            || self.network != Network::Testnet
+            || self.phala_trusted_enabled != !self.reviewed_release_ids.is_empty()
+        {
+            return Err(invalid_policy());
+        }
+        for (index, id) in self.reviewed_release_ids.iter().enumerate() {
+            if id.is_empty()
+                || self.reviewed_release_ids[..index].contains(id)
+                || !phala_trusted::is_embedded(id)
             {
                 return Err(invalid_policy());
             }

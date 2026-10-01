@@ -12,7 +12,7 @@ use crate::{ManagedTor, TransportOrigin};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use zrpc_verifier::{
-    ReleasePolicy,
+    PhalaTrustedPolicy, ReleasePolicy,
     offline::InspectionStatus,
     workload::{KeyProviderPolicy, StorageFs},
 };
@@ -33,6 +33,21 @@ async fn synthetic_evidence_and_local_policy_cannot_send_a_private_body() {
     policy.private_mode_enabled = true;
     policy.approved_release_ids.push("SYNTHETIC".into());
     assert!(evidence.authorize(b"{}", b"{}", &policy).is_err());
+    drop(close);
+    peer.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn phala_trusting_catalog_rejects_synthetic_evidence_without_rpc() {
+    let (mut evidence, close, peer) = received_fixture().await;
+    let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+    evidence._session.origin = TransportOrigin::Managed(tor);
+    let error = evidence
+        .authorize_phala_trusted(b"{}", b"{}", &PhalaTrustedPolicy::default())
+        .err()
+        .expect("empty packaged catalog must reject");
+    assert_eq!(error.code, zrpc_protocol::ErrorCode::UnknownRelease);
     drop(close);
     peer.await.unwrap();
 }
