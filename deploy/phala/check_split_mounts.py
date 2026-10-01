@@ -40,8 +40,8 @@ print('Synthetic snapshot marker installed for cold Zebra smoke', flush=True)
 
 NODE_ISOLATION = r"""
 from pathlib import Path
-assert not (Path('/run/zrpc-quote') / 'quote.sock').exists()
-assert not (Path('/run/zrpc-quote') / 'watch.sock').exists()
+quote_dir = Path('/run/zrpc-quote')
+assert quote_dir.is_dir() and not any(quote_dir.iterdir())
 assert not Path('/dstack.sock').exists()
 assert not Path('/run/dstack.sock').exists()
 print('Zebra container has no guest quote or control socket', flush=True)
@@ -80,29 +80,27 @@ def main():
     quote_name = f"zrpc-split-bridge-{suffix}"
     node_name = f"zrpc-split-node-{suffix}"
     wrapper_name = f"zrpc-split-wrapper-{suffix}"
-    containers = []
-    volumes = []
+    label = f"zrpc.split-smoke={suffix}"
     try:
-        stock.docker("volume", "create", "--driver", "local", "--opt", "type=tmpfs",
+        stock.docker("volume", "create", "--label", label,
+                     "--driver", "local", "--opt", "type=tmpfs",
                      "--opt", "device=tmpfs",
                      "--opt", "o=uid=10001,gid=10001,mode=0700", runtime)
-        volumes.append(runtime)
-        stock.docker("volume", "create", "--driver", "local", "--opt", "type=tmpfs",
+        stock.docker("volume", "create", "--label", label,
+                     "--driver", "local", "--opt", "type=tmpfs",
                      "--opt", "device=tmpfs",
                      "--opt", "o=uid=0,gid=10001,mode=0750", quote_runtime)
-        volumes.append(quote_runtime)
-        stock.docker("volume", "create", state)
-        volumes.append(state)
+        stock.docker("volume", "create", "--label", label, state)
         with tempfile.TemporaryDirectory(prefix="zrpc-split-smoke-") as directory:
             backend = Path(directory) / "stock-dstack.sock"
             stock.docker(
-                "run", "--detach", "--name", backend_name, "--pull=never",
+                "run", "--detach", "--name", backend_name, "--label", label,
+                "--pull=never",
                 "--network", "none", "--read-only", "--user", "0:0",
                 "--mount", f"type=bind,source={directory},target=/backend",
                 "--entrypoint", "python3", args.image, "-I", "-c",
                 stock.ROOT_BACKEND_CHECK,
             )
-            containers.append(backend_name)
             with subprocess.Popen(["docker", "logs", "--follow", backend_name],
                                   stdout=subprocess.PIPE, text=True) as logs:
                 if logs.stdout.readline().strip() != "READY":
@@ -113,7 +111,8 @@ def main():
 
             # The fixture value exercises startup, not a deployment timeout.
             stock.docker(
-                "run", "--detach", "--name", quote_name, "--pull=never",
+                "run", "--detach", "--name", quote_name, "--label", label,
+                "--pull=never",
                 "--network", "none", "--read-only", "--cap-drop=ALL",
                 "--security-opt", "no-new-privileges:true", "--user", "0:10001",
                 "--env", "QUOTE_STARTUP_TIMEOUT_SECS=1",
@@ -121,7 +120,6 @@ def main():
                 "--mount", f"type=bind,source={backend},target=/dstack.sock,readonly",
                 args.image, "quote",
             )
-            containers.append(quote_name)
             ready(quote_name, "0:10001", "quote-health")
 
             stock.docker(
@@ -132,14 +130,14 @@ def main():
                 SYNTHETIC_MARKER,
             )
             stock.docker(
-                "run", "--detach", "--name", node_name, "--pull=never",
+                "run", "--detach", "--name", node_name, "--label", label,
+                "--pull=never",
                 "--network", "bridge", "--read-only", "--cap-drop=ALL",
                 "--security-opt", "no-new-privileges:true", "--user", "10001:10001",
                 "--mount", f"type=volume,source={runtime},target=/run",
                 "--mount", f"type=volume,source={state},target=/var/lib/zebra",
                 args.image, "node",
             )
-            containers.append(node_name)
             ready(node_name, "10001:10001", "node-health",
                   "NODE_POLL_INTERVAL_MS=1")
             stock.docker("exec", "--user", "10001:10001", node_name,
@@ -152,7 +150,8 @@ def main():
             quote_dir = str(Path(quote_mount) / "zrpc-quote")
             # These are synthetic CLI minima, not selected runtime limits.
             stock.docker(
-                "run", "--detach", "--name", wrapper_name, "--pull=never",
+                "run", "--detach", "--name", wrapper_name, "--label", label,
+                "--pull=never",
                 "--network", f"container:{node_name}", "--read-only",
                 "--cap-drop=ALL", "--security-opt", "no-new-privileges:true",
                 "--user", "10001:10001",
@@ -165,7 +164,6 @@ def main():
                             "target=/run/zrpc-quote,readonly"),
                 args.image, "wrapper",
             )
-            containers.append(wrapper_name)
             stock.docker("exec", "--user", "10001:10001", node_name,
                          "python3", "-I", "-c", NODE_ISOLATION)
             while True:
@@ -196,7 +194,6 @@ def main():
                     _, error = held.communicate()
                     raise RuntimeError(f"split held session did not start: {error}")
                 stock.docker("rm", "--force", quote_name)
-                containers.remove(quote_name)
                 stopped = subprocess.run(["docker", "wait", wrapper_name],
                                          capture_output=True, text=True, check=True)
                 if stopped.stdout.strip() != "1":
@@ -213,10 +210,16 @@ def main():
         print("Split node/wrapper native smoke passed with synthetic quote and marker; "
               "private_accepted=false")
     finally:
-        for name in reversed(containers):
+        for name in output("ps", "--all", "--quiet", "--filter",
+                           f"label={label}").splitlines():
             stock.docker("rm", "--force", name)
-        for name in reversed(volumes):
+        for name in output("volume", "ls", "--quiet", "--filter",
+                           f"label={label}").splitlines():
             stock.docker("volume", "rm", name)
+        if (output("ps", "--all", "--quiet", "--filter", f"label={label}")
+                or output("volume", "ls", "--quiet", "--filter",
+                          f"label={label}")):
+            raise RuntimeError("synthetic split-smoke resources remain after cleanup")
 
 
 if __name__ == "__main__":

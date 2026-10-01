@@ -2,7 +2,7 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/opt/zrpc/vendor
-RUN mkdir -p /opt/zrpc/bin /opt/zrpc/vendor && chmod 0755 /opt/zrpc /opt/zrpc/bin /opt/zrpc/vendor
+RUN mkdir -p /opt/zrpc/bin /opt/zrpc/vendor /run/zrpc-quote && chmod 0755 /opt/zrpc /opt/zrpc/bin /opt/zrpc/vendor /run/zrpc-quote
 COPY --chmod=0444 vendor/zstandard.whl /opt/zrpc/zstandard.whl
 RUN python3 -m zipfile -e /opt/zrpc/zstandard.whl /opt/zrpc/vendor
 RUN python3 -c "import zstandard; assert zstandard.__version__ == '0.25.0'"
