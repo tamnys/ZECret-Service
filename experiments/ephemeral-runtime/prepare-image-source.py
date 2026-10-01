@@ -155,6 +155,14 @@ fi
 mkdir -p /var/lib/zebra-public
 mount --bind "$public_state" /var/lib/zebra-public
 mount -o remount,bind,rw,noexec,nodev,nosuid,nosymfollow /var/lib/zebra-public
+# Both containers share this fresh memory-backed directory for the RPC cookie.
+# The wrapper receives it read-only; the quote socket is a separate bind.
+if [ -e /run/zrpc-shared ] || [ -L /run/zrpc-shared ]; then
+    log "Refusing preexisting shared runtime directory"
+    exit 1
+fi
+mkdir -m 0700 /run/zrpc-shared
+chown 10001:10001 /run/zrpc-shared
 /usr/bin/phala-runtime-guard
 """,
     )
@@ -210,9 +218,27 @@ def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-COMPOSE_SERVICE_FIELDS = frozenset({
-    "image", "user", "read_only", "cap_drop", "security_opt", "logging",
-    "restart", "environment", "network_mode",
+SPLIT_BIND = {"create_host_path": False, "propagation": "rprivate"}
+SPLIT_NODE_VOLUMES = [
+    {"type": "bind", "source": "/run/zrpc-shared", "target": "/run",
+     "read_only": False, "bind": SPLIT_BIND},
+    {"type": "bind", "source": "/var/lib/zebra-public",
+     "target": "/var/lib/zebra", "read_only": False, "bind": SPLIT_BIND},
+]
+SPLIT_WRAPPER_VOLUMES = [
+    {"type": "bind", "source": "/run/zrpc-shared", "target": "/run",
+     "read_only": True, "bind": SPLIT_BIND},
+    {"type": "bind", "source": "/run/zrpc-quote",
+     "target": "/run/zrpc-quote", "read_only": True, "bind": SPLIT_BIND},
+]
+SPLIT_COMMON = {
+    "platform": "linux/amd64", "user": "10001:10001", "read_only": True,
+    "cap_drop": ["ALL"], "security_opt": ["no-new-privileges:true"],
+    "logging": {"driver": "none"}, "restart": "no",
+}
+SPLIT_WRAPPER_LIMITS = frozenset({
+    "NODE_STARTUP_TIMEOUT_SECS", "NODE_POLL_INTERVAL_MS", "MAX_CONNECTIONS",
+    "MAX_QUOTES", "QUOTE_SPACING_MS",
 })
 
 
@@ -236,50 +262,57 @@ def reject_interpolation(value: object) -> None:
 def validate_compose_file(content: str) -> None:
     # Docker Compose accepts JSON as YAML. Requiring JSON excludes aliases,
     # merge keys and tag processing, while unique_object rejects shadowed keys.
-    # Mounts, ports and process overrides need a separately reviewed, exact
-    # profile. This source candidate cannot yet represent them.
+    # Only the split node/wrapper topology is representable by this candidate.
     try:
         compose = json.loads(content, object_pairs_hook=unique_object,
                              parse_constant=reject_non_json_constant)
     except (ValueError, UnicodeDecodeError) as error:
         raise ValueError("Compose content must be unambiguous JSON") from error
-    if (not isinstance(compose, dict)
-            or set(compose) - {"name", "services"}
-            or ("name" in compose and
-                (not isinstance(compose["name"], str) or not compose["name"]))):
+    if not isinstance(compose, dict) or set(compose) != {"services"}:
         raise ValueError("unsupported Compose top-level fields")
     services = compose.get("services")
-    if not isinstance(services, dict) or not services:
-        raise ValueError("Compose services are required")
+    if not isinstance(services, dict) or set(services) != {"node", "wrapper"}:
+        raise ValueError("split node and wrapper services are required")
     reject_interpolation(compose)
-    for name, service in services.items():
-        if (not name or not isinstance(service, dict)
-                or set(service) - COMPOSE_SERVICE_FIELDS):
-            raise ValueError("unsupported Compose service fields")
+    for service in services.values():
+        if not isinstance(service, dict):
+            raise ValueError("invalid Compose service")
         image = service.get("image")
         if (not isinstance(image, str)
                 or not re.fullmatch(r"[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}", image)):
             raise ValueError("Compose images require an exact SHA-256 digest")
-        user = service.get("user")
-        if (not isinstance(user, str)
-                or not re.fullmatch(r"[1-9][0-9]*(?::[1-9][0-9]*)?", user)):
-            raise ValueError("Compose services require a numeric non-root user")
-        if (service.get("read_only") is not True
-                or service.get("cap_drop") != ["ALL"]
-                or service.get("security_opt") != ["no-new-privileges:true"]
-                or service.get("logging") != {"driver": "none"}
-                or service.get("restart", "no") != "no"):
-            raise ValueError("Compose service violates private runtime policy")
-        mode = service.get("network_mode")
-        if mode is not None and (not isinstance(mode, str)
-                                 or not mode.startswith("service:")
-                                 or mode[8:] not in services
-                                 or mode[8:] == name):
-            raise ValueError("Compose network mode must name another service")
-        environment = service.get("environment", {})
-        if (not isinstance(environment, dict)
-                or any(not isinstance(value, str) for value in environment.values())):
-            raise ValueError("Compose environment must be explicit strings")
+        if any(service.get(key) != value for key, value in SPLIT_COMMON.items()):
+            raise ValueError("Compose service violates common isolation policy")
+    node, wrapper = services["node"], services["wrapper"]
+    if node["image"] != wrapper["image"]:
+        raise ValueError("split services must use one reviewed image")
+    common_keys = set(SPLIT_COMMON) | {"image"}
+    if (set(node) != common_keys | {"command", "environment", "healthcheck",
+                                   "ports", "volumes"}
+            or node["command"] != ["node"]
+            or node["ports"] != ["8443:8443"]
+            or node["volumes"] != SPLIT_NODE_VOLUMES
+            or node["healthcheck"] != {
+                "test": ["CMD", "python3", "/opt/zrpc/supervisor.py", "node-health"]
+            }
+            or not isinstance(node["environment"], dict)
+            or set(node["environment"]) != {"NODE_POLL_INTERVAL_MS"}):
+        raise ValueError("node service differs from reviewed split topology")
+    if (set(wrapper) != common_keys | {"command", "depends_on", "environment",
+                                      "network_mode", "volumes"}
+            or wrapper["command"] != ["wrapper"]
+            or wrapper["network_mode"] != "service:node"
+            or wrapper["depends_on"] != {"node": {"condition": "service_healthy"}}
+            or wrapper["volumes"] != SPLIT_WRAPPER_VOLUMES
+            or not isinstance(wrapper["environment"], dict)
+            or set(wrapper["environment"]) != SPLIT_WRAPPER_LIMITS
+            or node["environment"]["NODE_POLL_INTERVAL_MS"] !=
+                wrapper["environment"]["NODE_POLL_INTERVAL_MS"]):
+        raise ValueError("wrapper service differs from reviewed split topology")
+    for value in wrapper["environment"].values():
+        if (not isinstance(value, str) or not value.isascii()
+                or not value.isdecimal() or int(value) <= 0):
+            raise ValueError("split runtime values must be positive integers")
 
 
 def launch_config_digest(path: Path | None) -> bytes | None:
@@ -302,28 +335,35 @@ def launch_config_digest(path: Path | None) -> bytes | None:
     only_port = ports[0] if isinstance(ports, list) and len(ports) == 1 else None
     safe_port_policy = (
         isinstance(port_policy, dict)
-        and port_policy.get("restrict_mode") is True
-        and isinstance(only_port, dict)
-        and type(only_port.get("port")) is int
-        and 1 <= only_port["port"] <= 65535
-        and only_port.get("pp", False) is False
+        and set(port_policy) == {"restrict_mode", "ports"}
+        and port_policy["restrict_mode"] is True
+        and only_port == {"port": 8443, "pp": False}
     )
-    if not isinstance(profile, dict) or any((
+    profile_keys = {
+        "manifest_version", "name", "runner", "docker_compose_file",
+        "storage_fs", "storage_encrypted", "swap_size", "key_provider",
+        "key_provider_id", "kms_enabled", "tproxy_enabled", "public_logs",
+        "public_sysinfo", "public_tcbinfo", "allowed_envs", "port_policy",
+    }
+    if not isinstance(profile, dict) or set(profile) != profile_keys or any((
+        type(profile.get("manifest_version")) is not int or profile["manifest_version"] != 2,
+        not isinstance(profile.get("name"), str) or not profile["name"],
         profile.get("runner") != "docker-compose",
         profile.get("storage_fs") != "ext4",
+        profile.get("storage_encrypted") is not True,
         type(profile.get("swap_size")) is not int or profile.get("swap_size") != 0,
         profile.get("key_provider") != "kms",
         not isinstance(profile.get("key_provider_id"), str),
         not profile.get("key_provider_id"),
+        profile.get("kms_enabled") is not True,
+        profile.get("tproxy_enabled") is not True,
         not isinstance(profile.get("docker_compose_file"), str),
         not profile.get("docker_compose_file"),
-        profile.get("public_logs", False) is not False,
-        profile.get("public_sysinfo", False) is not False,
-        profile.get("allowed_envs", []) != [],
+        profile.get("public_logs") is not False,
+        profile.get("public_sysinfo") is not False,
+        profile.get("public_tcbinfo") is not False,
+        profile.get("allowed_envs") != [],
         not safe_port_policy,
-        any(profile.get(key) not in (None, "") for key in (
-            "init_script", "pre_launch_script", "bash_script"
-        )),
     )):
         raise ValueError("launch configuration violates private RPC profile")
     validate_compose_file(profile["docker_compose_file"])

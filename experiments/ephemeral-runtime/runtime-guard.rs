@@ -24,6 +24,7 @@ const RUNTIME_ROOTS: [&str; 4] = [
 const PUBLIC_DATA_MOUNT: &str = "/var/volatile/dstack/persistent";
 const PUBLIC_STATE_SOURCE: &str = "/var/volatile/dstack/persistent/zebra-public-testnet";
 const PUBLIC_STATE_MOUNT: &str = "/var/lib/zebra-public";
+const SHARED_RUNTIME: &str = "/run/zrpc-shared";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Denial {
@@ -40,6 +41,7 @@ enum Denial {
     NonMemoryRuntimeMount,
     NonMemoryDescendantMount,
     PublicStateMountUnsafe,
+    SharedRuntimeUnsafe,
     MalformedSwaps,
     SwapPresent,
     CrashDumpPolicyUnsafe,
@@ -312,6 +314,29 @@ fn live_public_state() -> Result<(), Denial> {
     Ok(())
 }
 
+fn check_shared_runtime(mountinfo: &[u8]) -> Result<(), Denial> {
+    if parse_mountinfo(mountinfo)?.iter().any(|mount| {
+        mount.point == Path::new(SHARED_RUNTIME)
+            || mount.point.starts_with(Path::new(SHARED_RUNTIME))
+    }) {
+        return Err(Denial::SharedRuntimeUnsafe);
+    }
+    Ok(())
+}
+
+fn live_shared_runtime() -> Result<(), Denial> {
+    let path = Path::new(SHARED_RUNTIME);
+    let entry = fs::symlink_metadata(path).map_err(|_| Denial::SharedRuntimeUnsafe)?;
+    if !entry.is_dir() || entry.file_type().is_symlink()
+        || fs::canonicalize(path).map_err(|_| Denial::SharedRuntimeUnsafe)? != path
+        || entry.uid() != 10001 || entry.gid() != 10001
+        || entry.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(Denial::SharedRuntimeUnsafe);
+    }
+    Ok(())
+}
+
 fn check(mountinfo: &[u8], swaps: &[u8], roots: &[PathBuf]) -> Result<(), Denial> {
     no_swap(swaps)?;
     for (index, root) in roots.iter().enumerate() {
@@ -427,6 +452,8 @@ fn live_check() -> Result<(), Denial> {
     check(&mounts, &swaps, &roots)?;
     check_public_data_mount(&mounts)?;
     live_public_state()?;
+    check_shared_runtime(&mounts)?;
+    live_shared_runtime()?;
     if matches!(mode, Mode::MarkStart(_)) {
         // The denial marker is never a readiness proof. It may only live on
         // memory-backed /run, so same-boot retries cannot use persistent state.
@@ -444,6 +471,7 @@ fn live_check() -> Result<(), Denial> {
         return Err(Denial::ObservedStateChanged);
     }
     live_public_state()?;
+    live_shared_runtime()?;
     if let Mode::MarkStart(service) = mode {
         mark_start(Path::new("/run/zrpc-starts"), service, 0)?;
     }
@@ -533,6 +561,15 @@ mod tests {
             format!("{mounted}42 10 0:42 / /var/volatile/dstack rw - tmpfs tmpfs rw\n"),
         ] {
             assert!(check_public_data_mount(changed.as_bytes()).is_err(), "{changed}");
+        }
+    }
+
+    #[test]
+    fn shared_runtime_is_an_unmounted_directory_beneath_run() {
+        assert_eq!(check_shared_runtime(MEMORY.as_bytes()), Ok(()));
+        for point in ["/run/zrpc-shared", "/run/zrpc-shared/cookie"] {
+            let changed = format!("{MEMORY}42 1 0:42 / {point} rw - tmpfs tmpfs rw\n");
+            assert_eq!(check_shared_runtime(changed.as_bytes()), Err(Denial::SharedRuntimeUnsafe));
         }
     }
 

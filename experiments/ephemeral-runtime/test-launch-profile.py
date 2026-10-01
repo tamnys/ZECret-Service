@@ -26,29 +26,22 @@ class LaunchProfileInputTests(unittest.TestCase):
         self.addCleanup(self.scratch.cleanup)
         self.path = Path(self.scratch.name) / "synthetic-app-compose.json"
         self.sys_path = Path(self.scratch.name) / "synthetic-sys-config.json"
-        self.compose = {
-            "services": {
-                "synthetic": {
-                    "image": "example.invalid/synthetic@sha256:" + "0" * 64,
-                    "user": "10001:10001",
-                    "read_only": True,
-                    "cap_drop": ["ALL"],
-                    "security_opt": ["no-new-privileges:true"],
-                    "logging": {"driver": "none"},
-                }
-            }
-        }
+        self.compose = json.loads((GENERATOR.parent / "fixtures" /
+                                   "split-compose-synthetic.json").read_text())
         self.profile = {
             "manifest_version": 2,
             "name": "SYNTHETIC_ONLY",
             "runner": "docker-compose",
             "storage_fs": "ext4",
+            "storage_encrypted": True,
             "swap_size": 0,
             "key_provider": "kms",
             "key_provider_id": "01",
             "kms_enabled": True,
+            "tproxy_enabled": True,
             "public_logs": False,
             "public_sysinfo": False,
+            "public_tcbinfo": False,
             "allowed_envs": [],
             "port_policy": {
                 "restrict_mode": True,
@@ -85,12 +78,16 @@ class LaunchProfileInputTests(unittest.TestCase):
         for key, value in (
             ("runner", "bash"),
             ("storage_fs", "zfs"),
+            ("storage_encrypted", False),
             ("swap_size", True),
             ("key_provider", "local"),
             ("key_provider_id", ""),
+            ("kms_enabled", False),
+            ("tproxy_enabled", False),
             ("docker_compose_file", ""),
             ("public_logs", True),
             ("public_sysinfo", True),
+            ("public_tcbinfo", True),
             ("allowed_envs", ["SECRET"]),
             ("port_policy", {"restrict_mode": False, "ports": [{"port": 8443}]}),
             (
@@ -99,6 +96,9 @@ class LaunchProfileInputTests(unittest.TestCase):
             ),
             ("port_policy", {"restrict_mode": True, "ports": [{"port": 8443, "pp": True}]}),
             ("port_policy", {"restrict_mode": True, "ports": [{"port": 0}]}),
+            ("port_policy", {"restrict_mode": True,
+                             "ports": [{"port": 18232, "pp": False}]}),
+            ("extra_runtime_control", True),
             ("init_script", "echo bad"),
             ("pre_launch_script", "echo bad"),
             ("bash_script", "echo bad"),
@@ -117,7 +117,7 @@ class LaunchProfileInputTests(unittest.TestCase):
             ("label_file", "labels.txt"),
             ("privileged", True),
             ("volumes", ["/run/docker.sock:/run/docker.sock"]),
-            ("ports", ["8443:8443"]),
+            ("ports", ["18232:18232"]),
             ("tmpfs", ["/run/secrets"]),
             ("command", ["sh", "-c", "run.sh"]),
             ("entrypoint", ["/bin/sh"]),
@@ -141,12 +141,12 @@ class LaunchProfileInputTests(unittest.TestCase):
         ):
             with self.subTest(field=field, value=value):
                 compose = copy.deepcopy(self.compose)
-                compose["services"]["synthetic"][field] = value
+                compose["services"]["node"][field] = value
                 self.write({**self.profile, "docker_compose_file": json.dumps(compose)})
                 with self.assertRaises(ValueError):
                     guest_source.launch_config_digest(self.path)
         for content in (
-            "services:\n  synthetic:\n    image: example.invalid/synthetic:latest\n",
+            "services:\n  node:\n    image: example.invalid/synthetic:latest\n",
             '{"services":{},"services":{}}',
             json.dumps({**self.compose, "include": ["other.yaml"]}),
             json.dumps({**self.compose, "networks": {"outside": {"external": True}}}),
@@ -156,14 +156,38 @@ class LaunchProfileInputTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     guest_source.launch_config_digest(self.path)
 
-    def test_compose_service_network_sharing_is_explicit(self) -> None:
-        compose = copy.deepcopy(self.compose)
-        compose["services"]["wrapper"] = {
-            **copy.deepcopy(compose["services"]["synthetic"]),
-            "network_mode": "service:synthetic",
-        }
-        self.write({**self.profile, "docker_compose_file": json.dumps(compose)})
-        self.assertIsNotNone(guest_source.launch_config_digest(self.path))
+    def test_split_roles_and_mounts_are_exact(self) -> None:
+        changes = (
+            ("wrapper", "network_mode", "bridge"),
+            ("wrapper", "network_mode", "service:wrapper"),
+            ("wrapper", "ports", ["8443:8443"]),
+            ("wrapper", "environment", {"MAX_QUOTES": "1"}),
+            ("wrapper", "depends_on", {"node": {"condition": "service_started"}}),
+            ("node", "ports", ["18232:18232"]),
+            ("node", "environment", {"NODE_POLL_INTERVAL_MS": "2"}),
+            ("node", "healthcheck", {"test": ["CMD-SHELL", "true"]}),
+            ("node", "platform", "linux/arm64"),
+        )
+        for service, field, value in changes:
+            with self.subTest(service=service, field=field):
+                compose = copy.deepcopy(self.compose)
+                compose["services"][service][field] = value
+                self.write({**self.profile, "docker_compose_file": json.dumps(compose)})
+                with self.assertRaises(ValueError):
+                    guest_source.launch_config_digest(self.path)
+        for service, index, key, value in (
+            ("node", 1, "source", "/var/lib/docker"),
+            ("node", 1, "target", "/run/docker.sock"),
+            ("node", 1, "read_only", True),
+            ("wrapper", 1, "read_only", False),
+            ("wrapper", 1, "bind", {"create_host_path": True}),
+        ):
+            with self.subTest(service=service, key=key):
+                compose = copy.deepcopy(self.compose)
+                compose["services"][service]["volumes"][index][key] = value
+                self.write({**self.profile, "docker_compose_file": json.dumps(compose)})
+                with self.assertRaises(ValueError):
+                    guest_source.launch_config_digest(self.path)
 
     def test_ambiguous_or_missing_input_is_rejected(self) -> None:
         self.path.write_text('{"runner":"docker-compose","runner":"bash"}')

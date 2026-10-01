@@ -1,0 +1,113 @@
+{
+  "services": {
+    "node": {
+      "image": "example.invalid/synthetic@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "read_only": true,
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "logging": {
+        "driver": "none"
+      },
+      "restart": "no",
+      "command": [
+        "node"
+      ],
+      "environment": {
+        "NODE_POLL_INTERVAL_MS": "1"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "python3",
+          "/opt/zrpc/supervisor.py",
+          "node-health"
+        ]
+      },
+      "ports": [
+        "8443:8443"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/run/zrpc-shared",
+          "target": "/run",
+          "read_only": false,
+          "bind": {
+            "create_host_path": false,
+            "propagation": "rprivate"
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/var/lib/zebra-public",
+          "target": "/var/lib/zebra",
+          "read_only": false,
+          "bind": {
+            "create_host_path": false,
+            "propagation": "rprivate"
+          }
+        }
+      ]
+    },
+    "wrapper": {
+      "image": "example.invalid/synthetic@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "platform": "linux/amd64",
+      "user": "10001:10001",
+      "read_only": true,
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "logging": {
+        "driver": "none"
+      },
+      "restart": "no",
+      "command": [
+        "wrapper"
+      ],
+      "depends_on": {
+        "node": {
+          "condition": "service_healthy"
+        }
+      },
+      "environment": {
+        "NODE_STARTUP_TIMEOUT_SECS": "1",
+        "NODE_POLL_INTERVAL_MS": "1",
+        "MAX_CONNECTIONS": "1",
+        "MAX_QUOTES": "1",
+        "QUOTE_SPACING_MS": "1"
+      },
+      "network_mode": "service:node",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "/run/zrpc-shared",
+          "target": "/run",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false,
+            "propagation": "rprivate"
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/run/zrpc-quote",
+          "target": "/run/zrpc-quote",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false,
+            "propagation": "rprivate"
+          }
+        }
+      ]
+    }
+  }
+}
