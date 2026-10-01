@@ -344,7 +344,7 @@ mod tests {
                     response(
                         "200 OK",
                         "",
-                        br#"{"jsonrpc":"2.0","id":"synthetic-id","result":42}"#,
+                        br#"{"jsonrpc":"2.0","id":"synthetic-id","result":42,"chain_context":{"height":42,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
                     )
                 };
                 server.write_all(&response).await.unwrap();
@@ -403,7 +403,9 @@ mod tests {
             if oversized_result {
                 assert_eq!(result.unwrap_err().code, ErrorCode::InvalidBackendResponse);
             } else {
-                assert_eq!(result.unwrap(), serde_json::json!(42));
+                let result = result.unwrap();
+                assert_eq!(result.result, serde_json::json!(42));
+                assert_eq!(result.chain_context.unwrap().height, 42);
             }
             peer.await.unwrap();
         }

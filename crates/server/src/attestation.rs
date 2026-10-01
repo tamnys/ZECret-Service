@@ -631,6 +631,22 @@ async fn handle_rpc<Q: QuoteSource>(
     let result = match node.query(&parsed).await {
         Ok(value) => value,
         Err(error) => {
+            // A block mismatch is a typed RPC failure on the retained session.
+            // Never include the requested block, address or backend diagnostics.
+            if error.code == zrpc_protocol::ErrorCode::BlockMismatch {
+                let mut output = BoundedOutput(Vec::new());
+                if serde_json::to_writer(
+                    &mut output,
+                    &serde_json::json!({
+                        "jsonrpc":"2.0", "id":parsed.id(), "error":error
+                    }),
+                )
+                .is_err()
+                {
+                    return failure(StatusCode::SERVICE_UNAVAILABLE);
+                }
+                return reply(StatusCode::OK, Bytes::from(output.0));
+            }
             // SafeError messages are fixed, query-independent literals.
             let mut output = BoundedOutput(Vec::new());
             if serde_json::to_writer(&mut output, &serde_json::json!({"error":error})).is_err() {

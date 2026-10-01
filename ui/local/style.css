@@ -2,3 +2,6 @@
 
 [hidden]{display:none!important}
 #preview-fixture{margin-top:25px;padding:16px;background:#101917;border:1px solid var(--line);border-radius:3px}.fixture-label{font-size:11px;color:var(--muted);margin:0 0 10px}#preview-address{font-family:ui-monospace,monospace;font-size:12px}.fixture-note{font-size:11px;color:var(--muted);line-height:1.6;margin:11px 0 0}.notice.preview{border-color:var(--line);background:#182321;color:#d6e4db}
+
+#block-context { margin-bottom: 1rem; }
+#block-hash { display: block; overflow-wrap: anywhere; margin-top: .5rem; }

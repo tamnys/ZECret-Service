@@ -41,7 +41,7 @@ jobs:
           source="$GITHUB_WORKSPACE/source"
           scratch="$source/.codex-tmp/phala-native-image-smoke"
           mkdir -p "$scratch/native-artifact"
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/11101841679" \
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/11174816988" \
             > "$scratch/native-artifact-metadata.json"
           python3 -I - "$scratch/native-artifact-metadata.json" <<'PY'
           import json
@@ -49,22 +49,22 @@ jobs:
           import sys
 
           value = json.loads(Path(sys.argv[1]).read_bytes())
-          if (value.get("id") != 11101841679
+          if (value.get("id") != 11174816988
                   or value.get("name") !=
-                  "native-rust-f0c8709e073575296a17925851589f7c3a81337b"
+                  "native-rust-7c4a43d703c993276081ce3292e84cb24234bf5b"
                   or value.get("digest") !=
-                  "sha256:650af5e939480aa8b997561e453368fd8f7301c45c3e9b094b3b3dcbb8f55cbd"
+                  "sha256:90c86975912c754109b2c1c4b9a88e21d3c83db7672d76f7d7fba99045d273e2"
                   or value.get("expired") is not False
-                  or value.get("workflow_run", {}).get("id") != 36721090690
+                  or value.get("workflow_run", {}).get("id") != 36884252774
                   or value.get("workflow_run", {}).get("head_sha") !=
-                  "f0c8709e073575296a17925851589f7c3a81337b"):
+                  "7c4a43d703c993276081ce3292e84cb24234bf5b"):
               raise SystemExit("prior native Rust artifact identity differs")
           PY
-          gh run download 36721090690 --repo "$GITHUB_REPOSITORY" \
-            --name native-rust-f0c8709e073575296a17925851589f7c3a81337b \
+          gh run download 36884252774 --repo "$GITHUB_REPOSITORY" \
+            --name native-rust-7c4a43d703c993276081ce3292e84cb24234bf5b \
             --dir "$scratch/native-artifact"
           (cd "$scratch/native-artifact" && \
-            sha256sum -c native-rust-f0c8709e073575296a17925851589f7c3a81337b.tar.sha256)
+            sha256sum -c native-rust-7c4a43d703c993276081ce3292e84cb24234bf5b.tar.sha256)
 
       - name: Stage checked application image inputs
         shell: bash
@@ -84,19 +84,19 @@ jobs:
 
           source, scratch = map(Path, sys.argv[1:])
           archive = scratch / "native-artifact" / (
-              "native-rust-f0c8709e073575296a17925851589f7c3a81337b.tar")
+              "native-rust-7c4a43d703c993276081ce3292e84cb24234bf5b.tar")
           expected = {
               "zrpc-node-wrapper":
-                  "65dfeb3c43c403e71e4c4e635ee78decf73661bdf4fb020fa417905145fe4762",
+                  "85dfd9ea8baa45467e4f29c0173cd22b6a4090cad97c2244714c905e5e188317",
               "zrpc-quote-proxy":
-                  "6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186",
+                  "7c4e84de4d3278fbdd47ee81427c642a9bf01d3993b90796dab63f544edc023f",
           }
           binaries = scratch / "native-binaries"
           binaries.mkdir()
           with tarfile.open(archive, "r:") as package:
               manifest = json.load(package.extractfile("./manifest.json"))
               if (manifest.get("source_commit") !=
-                      "f0c8709e073575296a17925851589f7c3a81337b"
+                      "7c4a43d703c993276081ce3292e84cb24234bf5b"
                       or any(manifest.get("artifact_sha256", {}).get(name) != digest
                              for name, digest in expected.items())):
                   raise ValueError("native Rust build receipt differs")
@@ -150,9 +150,9 @@ jobs:
             --zebra-stage "$scratch/zebra-stage" \
             --snapshot-wheel "$scratch/zstandard-0.25.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" \
             --node-wrapper "$scratch/native-binaries/zrpc-node-wrapper" \
-            --node-wrapper-sha256 65dfeb3c43c403e71e4c4e635ee78decf73661bdf4fb020fa417905145fe4762 \
+            --node-wrapper-sha256 85dfd9ea8baa45467e4f29c0173cd22b6a4090cad97c2244714c905e5e188317 \
             --quote-proxy "$scratch/native-binaries/zrpc-quote-proxy" \
-            --quote-proxy-sha256 6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186 \
+            --quote-proxy-sha256 7c4e84de4d3278fbdd47ee81427c642a9bf01d3993b90796dab63f544edc023f \
             --base-image docker.io/library/python:3.13.15-slim-trixie@sha256:37134a49d21d2120e4c4d73bb76f8a4ab9aef31f096f7ec2ead48c2feead4332 \
             --base-image-created-at 2026-09-19T00:58:14Z \
             --output "$scratch/image-context" \

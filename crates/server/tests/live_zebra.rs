@@ -26,6 +26,14 @@ async fn adapter_reads_live_testnet_status_and_transparent_balance() {
         .expect("live Testnet status through the production adapter");
     assert_eq!(status["result"]["chain"], "test");
     assert!(status["result"]["blocks"].as_u64().is_some());
+    assert_eq!(
+        status["chain_context"]["height"],
+        status["result"]["blocks"]
+    );
+    assert_eq!(
+        status["chain_context"]["hash"],
+        status["result"]["bestblockhash"]
+    );
 
     let request = serde_json::json!({
         "jsonrpc": "2.0", "id": 2, "method": "getaddressbalance",
@@ -37,5 +45,9 @@ async fn adapter_reads_live_testnet_status_and_transparent_balance() {
         .expect("live transparent balance through the production adapter");
     assert_eq!(response["id"], 2);
     assert!(response["result"]["balance"].as_u64().is_some());
-    assert!(response["result"]["received"].as_u64().is_some());
+    assert!(response["result"].get("received").is_none());
+    assert!(
+        serde_json::from_value::<zrpc_protocol::BlockRef>(response["chain_context"].clone())
+            .is_ok()
+    );
 }

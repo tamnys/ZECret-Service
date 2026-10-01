@@ -45,7 +45,29 @@ let browserStage='startup';
       await page.waitForFunction(()=>!document.getElementById('run').disabled);
       assert.equal((await readReport()).error,null);
     }
+    await page.selectOption('#method','getblockcount');
+    await page.locator('#run').click();
+    await page.waitForFunction(()=>!document.getElementById('run').disabled);
+    assert.equal(await page.locator('#block-height').textContent(),'State at block 42');
+    assert.equal(await page.locator('#block-hash').textContent(),'a'.repeat(64));
+    assert.deepEqual((await readReport()).result.chain_context,{height:42,hash:'a'.repeat(64)});
     await page.screenshot({path:path.join(output,'m0-desktop.png'),fullPage:true});
+    // Submit exact-block JSON through the real local Rust endpoint, as the CLI
+    // does. Only the request is modified; the response is never mocked.
+    const exactBlockRequest=async(route)=>{
+      const request=route.request().postDataJSON();
+      request.expected_block={height:42,hash:'b'.repeat(64)};
+      await route.continue({postData:JSON.stringify(request)});
+    };
+    await page.route('**/api/query',exactBlockRequest);
+    await page.locator('#run').click();
+    await page.waitForFunction(()=>!document.getElementById('run').disabled);
+    const mismatch=await readReport();
+    assert.equal(mismatch.error.code,'block_mismatch');
+    assert.equal(mismatch.result,null);
+    assert.equal(mismatch.query_sent,false);
+    assert.equal(await page.locator('#block-context').isHidden(),true);
+    await page.unroute('**/api/query',exactBlockRequest);
     for(const scenario of ['unknown-release','wrong-key','invalid-nonce','altered-event-log','tor-unavailable','node-unavailable']){
       await page.selectOption('#scenario',scenario);
       await page.locator('#run').click();
@@ -55,7 +77,12 @@ let browserStage='startup';
       assert.equal(report.query_sent,false);
       if(scenario!=='node-unavailable') assert.equal(report.fixture_dispatched,false);
       assert.ok(report.error);
+      assert.equal(await page.locator('#block-context').isHidden(),true);
+      assert.equal(await page.locator('#block-hash').textContent(),'');
     }
+    await page.selectOption('#scenario','fixture');
+    await page.locator('#run').click();
+    await page.waitForFunction(()=>!document.getElementById('run').disabled);
     await page.setViewportSize({width:390,height:844});
     assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
     await page.locator('#result').scrollIntoViewIfNeeded();

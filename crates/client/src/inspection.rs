@@ -1,6 +1,5 @@
 //! Shared native Tor/bootstrap core for diagnostics and reviewed private sessions.
 use serde::Serialize;
-use serde_json::Value;
 use std::{
     net::SocketAddrV4,
     path::PathBuf,
@@ -392,7 +391,7 @@ pub async fn query_phala_trusted(
     raw_app_compose: &[u8],
     selection: &PhalaTrustedPolicy,
     body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
-) -> Result<Value, SafeError> {
+) -> Result<zrpc_protocol::RpcResult, SafeError> {
     let session =
         connect_phala_trusted(config, collateral_json, raw_app_compose, selection).await?;
     session.query_from_body(body).await
@@ -406,7 +405,7 @@ pub async fn query_endpoint(
     raw_app_compose: &[u8],
     selection: &ReleasePolicy,
     body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
-) -> Result<Value, SafeError> {
+) -> Result<zrpc_protocol::RpcResult, SafeError> {
     let session = connect_verified(config, collateral_json, raw_app_compose, selection).await?;
     session.query_from_body(body).await
 }

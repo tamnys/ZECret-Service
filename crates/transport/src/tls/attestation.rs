@@ -19,11 +19,12 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use zrpc_protocol::{
-    ATTESTATION_EXPORTER_LABEL, ErrorCode, GcpAttestationResponse, MAX_ATTESTATION_REQUEST_BYTES,
-    MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, Method,
-    PublicAttestationRequest, PublicAttestationResponse, Request as RpcRequest, RequestId,
-    SafeError, TestnetTransparentAddress, Verbosity, parse_attestation_response,
-    parse_gcp_attestation_response, parse_request,
+    ATTESTATION_EXPORTER_LABEL, BlockRef, ErrorCode, GcpAttestationResponse,
+    MAX_ATTESTATION_REQUEST_BYTES, MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES,
+    MAX_RESPONSE_BYTES, Method, PublicAttestationRequest, PublicAttestationResponse,
+    Request as RpcRequest, RequestId, RpcResult, SafeError, TestnetTransparentAddress, Verbosity,
+    parse_attestation_response, parse_gcp_attestation_response, parse_request,
+    validate_chain_context,
 };
 
 mod inspection;
@@ -459,6 +460,8 @@ pub struct PublicTestnetPreview {
     pub transparent_address: String,
     pub transparent_balance_zatoshis: u64,
     pub balance_context: &'static str,
+    pub chain_context: BlockRef,
+    pub balance_chain_context: BlockRef,
 }
 
 impl VerifiedRpcSession {
@@ -527,14 +530,14 @@ impl VerifiedRpcSession {
     pub async fn query_from_body(
         self,
         body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
-    ) -> Result<Value, SafeError> {
+    ) -> Result<RpcResult, SafeError> {
         self.query_from_body_async(|| async move { body() }).await
     }
 
     /// Async local body sources, such as the dashboard's HTTP request stream,
     /// are polled only while the managed Tor lease is still usable. A second
     /// check in `query` guards the wire write after body collection.
-    pub async fn query_from_body_async<F, Fut>(self, body: F) -> Result<Value, SafeError>
+    pub async fn query_from_body_async<F, Fut>(self, body: F) -> Result<RpcResult, SafeError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<u8>, SafeError>>,
@@ -558,7 +561,7 @@ impl VerifiedRpcSession {
         self,
         body: F,
         prepare: P,
-    ) -> Result<(Value, R), SafeError>
+    ) -> Result<(RpcResult, R), SafeError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<u8>, SafeError>>,
@@ -581,7 +584,7 @@ impl VerifiedRpcSession {
         .await
     }
 
-    pub async fn query(self, request: &RpcRequest) -> Result<Value, SafeError> {
+    pub async fn query(self, request: &RpcRequest) -> Result<RpcResult, SafeError> {
         self.query_with_claim(request, || Ok((None::<&[u8]>, (), || Ok(|| Ok(())))))
             .await
             .map(|(value, ())| value)
@@ -591,7 +594,7 @@ impl VerifiedRpcSession {
         mut self,
         request: &RpcRequest,
         prepare: P,
-    ) -> Result<(Value, R), SafeError>
+    ) -> Result<(RpcResult, R), SafeError>
     where
         P: FnOnce() -> Result<(Option<H>, R, C), SafeError>,
         H: AsRef<[u8]>,
@@ -669,11 +672,11 @@ impl PhalaTrustedRpcSession {
     pub async fn query_from_body(
         self,
         body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
-    ) -> Result<Value, SafeError> {
+    ) -> Result<RpcResult, SafeError> {
         self.0.query_from_body(body).await
     }
 
-    pub async fn query_from_body_async<F, Fut>(self, body: F) -> Result<Value, SafeError>
+    pub async fn query_from_body_async<F, Fut>(self, body: F) -> Result<RpcResult, SafeError>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<u8>, SafeError>>,
@@ -681,7 +684,7 @@ impl PhalaTrustedRpcSession {
         self.0.query_from_body_async(body).await
     }
 
-    pub async fn query(self, request: &RpcRequest) -> Result<Value, SafeError> {
+    pub async fn query(self, request: &RpcRequest) -> Result<RpcResult, SafeError> {
         self.0.query(request).await
     }
 }
@@ -723,7 +726,7 @@ impl PreviewRpcSession {
         Ok(())
     }
 
-    async fn fixed_request(&mut self, request: &RpcRequest) -> Result<Value, SafeError> {
+    async fn fixed_request(&mut self, request: &RpcRequest) -> Result<RpcResult, SafeError> {
         self.ensure_ready()?;
         let http = build_rpc_http(self.authority.as_str(), request)?;
         let collateral_deadline = self
@@ -751,7 +754,8 @@ impl PreviewRpcSession {
     ) -> Result<PublicTestnetPreview, SafeError> {
         let info =
             parse_request(br#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#)?;
-        let result = self.fixed_request(&info).await?;
+        let info_response = self.fixed_request(&info).await?;
+        let result = info_response.result;
         if result.get("chain").and_then(Value::as_str) != Some("test") {
             return Err(SafeError::new(
                 ErrorCode::WrongNetwork,
@@ -777,6 +781,7 @@ impl PreviewRpcSession {
         let balance_request = parse_request(&balance_body)?;
         let balance = self.fixed_request(&balance_request).await?;
         let transparent_balance_zatoshis = balance
+            .result
             .get("balance")
             .and_then(Value::as_u64)
             .ok_or_else(invalid_response)?;
@@ -786,7 +791,9 @@ impl PreviewRpcSession {
             best_block_hash,
             transparent_address: address.as_str().to_owned(),
             transparent_balance_zatoshis,
-            balance_context: "Node-reported balance; the displayed chain height was sampled before the balance request. Synchronization completeness is unverified.",
+            balance_context: "Confirmed balance at balance_chain_context. Chain status has its own chain_context; synchronization completeness is unverified.",
+            chain_context: info_response.chain_context.ok_or_else(invalid_response)?,
+            balance_chain_context: balance.chain_context.ok_or_else(invalid_response)?,
         })
     }
 }
@@ -809,7 +816,7 @@ async fn send_rpc(
     session: &mut OwnedHttpSession,
     request: &RpcRequest,
     http: Request<Full<Bytes>>,
-) -> Result<Value, SafeError> {
+) -> Result<RpcResult, SafeError> {
     session.origin.require_managed()?;
     let response = session
         .sender
@@ -839,6 +846,10 @@ async fn send_rpc(
         .await
         .map_err(|_| too_large())?
         .to_bytes();
+    decode_rpc_response(&body, request)
+}
+
+fn decode_rpc_response(body: &[u8], request: &RpcRequest) -> Result<RpcResult, SafeError> {
     if body
         .iter()
         .copied()
@@ -847,16 +858,28 @@ async fn send_rpc(
     {
         return Err(invalid_response());
     }
-    let response: WireRpcResponse =
-        serde_json::from_slice(&body).map_err(|_| invalid_response())?;
-    if response.jsonrpc != "2.0"
-        || response.id != *request.id()
-        || response.result.is_none()
-        || response.error.is_some()
-    {
+    let response: WireRpcResponse = serde_json::from_slice(body).map_err(|_| invalid_response())?;
+    if response.jsonrpc != "2.0" || response.id != *request.id() {
         return Err(invalid_response());
     }
-    Ok(response.result.unwrap())
+    if let Some(error) = response.error {
+        if response.result.is_none()
+            && response.chain_context.is_none()
+            && error.get("code").and_then(Value::as_str) == Some("block_mismatch")
+        {
+            return Err(SafeError::new(
+                ErrorCode::BlockMismatch,
+                "Result block does not match the requested block.",
+            ));
+        }
+        return Err(invalid_response());
+    }
+    let result = response.result.ok_or_else(invalid_response)?;
+    validate_chain_context(request, &result, response.chain_context.as_ref())?;
+    Ok(RpcResult {
+        result,
+        chain_context: response.chain_context,
+    })
 }
 
 #[derive(Deserialize)]
@@ -866,6 +889,7 @@ struct WireRpcResponse {
     id: RequestId,
     result: Option<Value>,
     error: Option<Value>,
+    chain_context: Option<BlockRef>,
 }
 
 fn finish_before_deadline<T>(
@@ -891,10 +915,13 @@ fn encode_request(request: &RpcRequest) -> Result<Vec<u8>, SafeError> {
             json!([txid.as_str(), matches!(verbosity, Verbosity::Verbose)])
         }
     };
-    let body = serde_json::to_vec(&json!({
+    let mut wire = json!({
         "jsonrpc":"2.0", "id":request.id(), "method":request.method().name(), "params":params
-    }))
-    .map_err(|_| unavailable())?;
+    });
+    if let Some(expected) = request.expected_block() {
+        wire["expected_block"] = json!(expected);
+    }
+    let body = serde_json::to_vec(&wire).map_err(|_| unavailable())?;
     if body.len() > MAX_REQUEST_BYTES {
         return Err(SafeError::new(
             ErrorCode::RequestTooLarge,
@@ -959,6 +986,64 @@ mod deadline_tests {
                 .unwrap();
         assert!(ensure_private_method(&status, false).is_ok());
         assert!(ensure_private_method(&preview, true).is_ok());
+    }
+
+    #[test]
+    fn native_response_requires_context_and_independently_checks_expected_block() {
+        let expected = json!({"height":42,"hash":"ab".repeat(32)});
+        let request = parse_request(
+            &serde_json::to_vec(&json!({
+                "jsonrpc":"2.0","id":7,"method":"getblockcount","expected_block":expected
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let encoded: Value = serde_json::from_slice(&encode_request(&request).unwrap()).unwrap();
+        assert_eq!(encoded["expected_block"], expected);
+        let wire = json!({"jsonrpc":"2.0","id":7,"result":42,"chain_context":expected});
+        let decode = |v: &Value| decode_rpc_response(&serde_json::to_vec(v).unwrap(), &request);
+        assert_eq!(
+            decode(&wire).unwrap().chain_context.unwrap(),
+            request.expected_block().unwrap().clone()
+        );
+        let mut missing = wire.clone();
+        missing.as_object_mut().unwrap().remove("chain_context");
+        assert_eq!(
+            decode(&missing).unwrap_err().code,
+            ErrorCode::ChainContextUnavailable
+        );
+        for (height, hash) in [(41, "ab"), (42, "cd")] {
+            let mut bad = wire.clone();
+            bad["chain_context"] = json!({"height":height,"hash":hash.repeat(32)});
+            bad["result"] = json!(height);
+            assert_eq!(decode(&bad).unwrap_err().code, ErrorCode::BlockMismatch);
+        }
+        for context in [
+            json!({"height":42,"hash":"bad"}),
+            json!([42, "ab".repeat(32)]),
+            json!({"hash":"ab".repeat(32)}),
+        ] {
+            let mut bad = wire.clone();
+            bad["chain_context"] = context;
+            assert_eq!(
+                decode(&bad).unwrap_err().code,
+                ErrorCode::InvalidBackendResponse
+            );
+        }
+        let remote_error = json!({"jsonrpc":"2.0","id":7,"error":{"code":"block_mismatch","message":"SYNTHETIC_PRIVATE_MARKER"}});
+        let error = decode(&remote_error).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BlockMismatch);
+        assert!(!error.to_string().contains("SYNTHETIC_PRIVATE_MARKER"));
+        let unpinned =
+            parse_request(br#"{"jsonrpc":"2.0","id":7,"method":"getblockcount"}"#).unwrap();
+        assert_eq!(
+            decode_rpc_response(&serde_json::to_vec(&wire).unwrap(), &unpinned)
+                .unwrap()
+                .chain_context
+                .unwrap()
+                .height,
+            42
+        );
     }
 
     #[test]

@@ -82,6 +82,29 @@ The protocol accepts these read-only methods:
 
 Wallet operations, transaction submission, batch requests, and arbitrary upstream URLs are rejected. The local demo returns fixtures; compatibility with a live Zebra release must be established before running a service.
 
+Chain status, block count, and confirmed address balances include
+`chain_context: {"height": ..., "hash": ...}`. This identifies the node state
+used for that result; it does not prove global chain freshness or private-mode
+approval. Chain-status diagnostics such as synchronization estimates are not
+block-state guarantees. The preview reports status and balance contexts
+separately because the chain can advance between those requests.
+
+To require an exact block, add `expected_block` to a covered JSON request passed
+to `query --stdin`. Both height and hash must match; otherwise the query fails
+without retrying or selecting another block. For example, this **synthetic**
+request matches the local fixture:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"getblockcount","expected_block":{"height":42,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+```
+
+This is an exact-match condition on current state, not a historical balance
+query. Address balances exclude mempool changes and omit the lifetime `received`
+field. An oversized UTXO response fails instead of producing a partial balance.
+Block and transaction lookup methods do not carry this context and reject
+`expected_block`. Upgrade the wrapper and native client together: covered
+responses without context are rejected by the new client.
+
 ## Inspect attestation evidence
 
 To inspect a saved hardware quote and its supporting verification data without making a network request:
