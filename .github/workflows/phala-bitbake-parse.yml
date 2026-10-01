@@ -114,12 +114,25 @@ jobs:
           (scratch / "native-input-receipt.json").write_bytes(receipt_bytes)
           PY
 
-      - name: Reconstruct source-only candidate with native ABI-smoked binaries
+      - name: Reconstruct source-only candidate with synthetic bound launch
         shell: bash
         run: |
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
           scratch="$source/.codex-tmp/phala-bitbake-parse"
+          printf '%s\n' '{"vm_config":"{}","kms_urls":["https://kms.example.invalid"]}' \
+            > "$scratch/synthetic-sys-config.json"
+          python3 -I "$source/experiments/ephemeral-runtime/prepare-split-launch.py" \
+            --image-ref example.invalid/synthetic@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+            --name SYNTHETIC_ONLY \
+            --key-provider-id 01 \
+            --sys-config "$scratch/synthetic-sys-config.json" \
+            --output-dir "$scratch/synthetic-launch" \
+            --node-startup-timeout-secs 1 \
+            --node-poll-interval-ms 1 \
+            --max-connections 1 \
+            --max-quotes 1 \
+            --quote-spacing-ms 1
           python3 -I "$source/experiments/ephemeral-runtime/prepare-packaging-source.py" \
             "$scratch/sources/dstack" \
             "$scratch/sources/meta-dstack" \
@@ -133,24 +146,37 @@ jobs:
             --meta-openembedded-source "$scratch/sources/meta-openembedded" \
             --meta-rust-bin-source "$scratch/sources/meta-rust-bin" \
             --meta-security-source "$scratch/sources/meta-security" \
-            --meta-virtualization-source "$scratch/sources/meta-virtualization"
-          python3 -I - "$scratch/candidate/packaging-manifest.json" <<'PY'
+            --meta-virtualization-source "$scratch/sources/meta-virtualization" \
+            --launch-config "$scratch/synthetic-launch/app-compose.json" \
+            --sys-config "$scratch/synthetic-launch/sys-config.json"
+          bash -n "$scratch/candidate/staged-source/dstack/basefiles/dstack-prepare.sh" \
+            "$scratch/candidate/staged-source/dstack/basefiles/app-compose.sh"
+          python3 -I - "$scratch" <<'PY'
           import json
           from pathlib import Path
           import sys
 
-          manifest = json.loads(Path(sys.argv[1]).read_bytes())
+          scratch = Path(sys.argv[1])
+          bundle = json.loads((scratch / "synthetic-launch/bundle-manifest.json").read_bytes())
+          guest = json.loads((scratch / "candidate/dstack/candidate-manifest.json").read_bytes())
+          manifest = json.loads((scratch / "candidate/packaging-manifest.json").read_bytes())
           if (manifest["runtime_guard_sha256"] !=
                   "56255740e6364f67d090d7ccb8ca29c015ce6f45fa0c93ba109e765583250bc9"
                   or manifest["quote_proxy_sha256"] !=
                   "6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186"
-                  or manifest["guest_launch_profile_bound"]
+                  or manifest["guest_launch_profile_bound"] is not True
+                  or guest["launch_profile_bound"] is not True
+                  or guest["launch_config_sha256"] != bundle["launch_config_sha256"]
+                  or guest["sys_config_sha256"] != bundle["sys_config_sha256"]
+                  or bundle["status"] != "local_source_only_unapproved"
+                  or bundle["application_image_reviewed"] is not False
+                  or bundle["private_accepted"] is not False
                   or manifest["binary_provenance_verified"]
                   or manifest["bitbake_executed"]
                   or manifest["private_accepted"]
                   or manifest["unresolved_meta_gitlinks"]):
               raise SystemExit("source-only candidate unexpectedly claims release evidence")
-          print("Checked source-only candidate reconstructed with native ABI-smoked binaries; private approval remains false.")
+          print("Synthetic launch bytes bound into pinned source package; image and private acceptance remain false.")
           PY
 
       - name: Stage exact Ubuntu host tools without installing packages
@@ -248,7 +274,7 @@ jobs:
           test -s "$build/pn-buildlist"
           test -s "$build/task-depends.dot"
           grep -Fx 'dstack-rootfs' "$build/pn-buildlist" >/dev/null
-          echo 'Pinned corrected-guest source with ABI-smoked native binaries parsed and produced a rootfs task dependency graph on native x86_64 Linux. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
+          echo 'Pinned corrected-guest source with synthetic bound launch bytes and ABI-smoked native binaries parsed and produced a rootfs task dependency graph on native x86_64 Linux. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
             >> "$GITHUB_STEP_SUMMARY"
 
       - name: Exercise one pinned BitBake worker task under scoped AppArmor permission
