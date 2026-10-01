@@ -115,6 +115,19 @@ Ubuntu `libevent-2.1-7t64` package whose SHA-256 matched that VM's APT
 index. This wrapper and extracted library live only in ignored local work
 state; they do not change the guest or client trust policy.
 
+On October 1, a managed browser-container preview using the public testnet
+fixture address `tm9iMLAuYMzJ6jtFLcA7rzUmfreGuKvr7Ma` failed during Tor
+SOCKS negotiation. It reported
+`tor_unavailable`, `public_query_sent: false` and `private_accepted: false`;
+there was no direct-network fallback. The same address then succeeded through
+the pinned Tor executable in Colima: the live quote, freshness and TLS-key
+checks passed before the public balance query, with Testnet height 4,424,935
+and a node-reported balance of 658,181,206,889 zatoshis. A later managed
+container run with the default fixture address also succeeded at height
+4,424,938. The single SOCKS failure is unresolved; these observations do not
+establish that every fresh Tor circuit will connect. The second address is
+public testnet input, not customer wallet material or private-mode evidence.
+
 At 2026-10-01 00:05 UTC, a local probe started the dashboard inside Colima,
 forwarded its assigned loopback port through SSH to the Mac, and retained its
 one-time bootstrap token and local capability only in process memory. From
