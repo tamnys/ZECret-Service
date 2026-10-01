@@ -1,14 +1,15 @@
-name: Phala pinned BitBake parse preflight
+name: Phala native corrected guest source preflight
 
 on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
   parse:
-    name: Native x86_64 source-only candidate parse
+    name: Native x86_64 candidate parse and dependency graph
     runs-on: ubuntu-24.04
     steps:
       - name: Fetch exact project and meta-dstack source objects
@@ -47,36 +48,81 @@ jobs:
           fetch_pinned meta-security https://github.com/Dstack-TEE/meta-security.git bc63d95746ef4f0ac6820165e5041d83647e8c9c
           fetch_pinned meta-virtualization https://github.com/Dstack-TEE/meta-virtualization.git 52cd8a290cf3989bc99bd9eb475b5db88000245a
 
-      - name: Reconstruct the checked candidate with synthetic binary placeholders
+      - name: Retrieve exact native guest binaries and ABI receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-bitbake-parse"
+          mkdir -p "$scratch/native-binaries"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/11139816826" > "$scratch/native-artifact-metadata.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/11139816826/zip" > "$scratch/native-artifact.zip"
+          python3 -I - "$scratch" <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import sys
+          import zipfile
+
+          scratch = Path(sys.argv[1])
+          metadata = json.loads((scratch / "native-artifact-metadata.json").read_bytes())
+          commit = "6bc4f6beea70f99b2aa112110554a6a8ff898d48"
+          expected_zip = "a0f25173c9723a0c87b5b7c22708adb64b85173289256999607fa0c1ad1815f7"
+          if (metadata.get("id") != 11139816826
+                  or metadata.get("name") != f"phala-guest-abi-{commit}"
+                  or metadata.get("digest") != f"sha256:{expected_zip}"
+                  or metadata.get("expired") is not False
+                  or metadata.get("workflow_run", {}).get("id") != 36812042568
+                  or metadata.get("workflow_run", {}).get("head_sha") != commit):
+              raise SystemExit("native guest ABI artifact identity differs")
+          archive = scratch / "native-artifact.zip"
+          with archive.open("rb") as stream:
+              if hashlib.file_digest(stream, "sha256").hexdigest() != expected_zip:
+                  raise SystemExit("native guest ABI artifact ZIP differs")
+          expected = {
+              "phala-runtime-guard": "56255740e6364f67d090d7ccb8ca29c015ce6f45fa0c93ba109e765583250bc9",
+              "zrpc-quote-proxy": "6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186",
+          }
+          with zipfile.ZipFile(archive) as bundle:
+              names = {"receipt.json"} | {"native-binaries/" + name for name in expected}
+              if set(bundle.namelist()) != names:
+                  raise SystemExit("native guest ABI artifact members differ")
+              receipt_bytes = bundle.read("receipt.json")
+              receipt = json.loads(receipt_bytes)
+              if (receipt.get("source_commit") != commit
+                      or receipt.get("guard_double_build_equal") is not True
+                      or receipt.get("stock_loader_denial_smoke_passed") is not True
+                      or receipt.get("corrected_guest_image_built") is not False
+                      or receipt.get("hardware_tested") is not False
+                      or receipt.get("private_accepted") is not False
+                      or receipt.get("guard_sha256") != expected["phala-runtime-guard"]
+                      or receipt.get("quote_proxy_sha256") != expected["zrpc-quote-proxy"]):
+                  raise SystemExit("native guest ABI receipt differs")
+              for name, digest in expected.items():
+                  payload = bundle.read("native-binaries/" + name)
+                  if hashlib.sha256(payload).hexdigest() != digest:
+                      raise SystemExit(f"native guest binary differs: {name}")
+                  path = scratch / "native-binaries" / name
+                  path.write_bytes(payload)
+                  path.chmod(0o555)
+          (scratch / "native-input-receipt.json").write_bytes(receipt_bytes)
+          PY
+
+      - name: Reconstruct source-only candidate with native ABI-smoked binaries
         shell: bash
         run: |
           set -euo pipefail
           source="$GITHUB_WORKSPACE/source"
           scratch="$source/.codex-tmp/phala-bitbake-parse"
-          python3 -I - "$scratch" <<'PY'
-          from pathlib import Path
-          import struct
-          import sys
-
-          scratch = Path(sys.argv[1])
-          for name in ("synthetic-guard", "synthetic-quote-proxy"):
-              data = bytearray(64)
-              data[:7] = b"\x7fELF\x02\x01\x01"
-              struct.pack_into("<H", data, 16, 3)
-              struct.pack_into("<H", data, 18, 62)
-              struct.pack_into("<I", data, 20, 1)
-              (scratch / name).write_bytes(data)
-          PY
-          guard_hash="$(sha256sum "$scratch/synthetic-guard" | cut -d ' ' -f 1)"
-          proxy_hash="$(sha256sum "$scratch/synthetic-quote-proxy" | cut -d ' ' -f 1)"
           python3 -I "$source/experiments/ephemeral-runtime/prepare-packaging-source.py" \
             "$scratch/sources/dstack" \
             "$scratch/sources/meta-dstack" \
             "$scratch/candidate" \
-            --runtime-guard "$scratch/synthetic-guard" \
-            --runtime-guard-sha256 "$guard_hash" \
-            --quote-proxy "$scratch/synthetic-quote-proxy" \
-            --quote-proxy-sha256 "$proxy_hash" \
+            --runtime-guard "$scratch/native-binaries/phala-runtime-guard" \
+            --runtime-guard-sha256 56255740e6364f67d090d7ccb8ca29c015ce6f45fa0c93ba109e765583250bc9 \
+            --quote-proxy "$scratch/native-binaries/zrpc-quote-proxy" \
+            --quote-proxy-sha256 6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186 \
             --poky-source "$scratch/sources/poky" \
             --meta-confidential-compute-source "$scratch/sources/meta-confidential-compute" \
             --meta-openembedded-source "$scratch/sources/meta-openembedded" \
@@ -89,13 +135,17 @@ jobs:
           import sys
 
           manifest = json.loads(Path(sys.argv[1]).read_bytes())
-          if (manifest["guest_launch_profile_bound"]
+          if (manifest["runtime_guard_sha256"] !=
+                  "56255740e6364f67d090d7ccb8ca29c015ce6f45fa0c93ba109e765583250bc9"
+                  or manifest["quote_proxy_sha256"] !=
+                  "6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186"
+                  or manifest["guest_launch_profile_bound"]
                   or manifest["binary_provenance_verified"]
                   or manifest["bitbake_executed"]
                   or manifest["private_accepted"]
                   or manifest["unresolved_meta_gitlinks"]):
               raise SystemExit("source-only candidate unexpectedly claims release evidence")
-          print("Checked source-only candidate reconstructed; binaries are synthetic placeholders.")
+          print("Checked source-only candidate reconstructed with native ABI-smoked binaries; private approval remains false.")
           PY
 
       - name: Stage exact Ubuntu host tools without installing packages
@@ -189,5 +239,9 @@ jobs:
             "
           EOF
           bitbake -p
-          echo 'Pinned corrected-guest source parsed on native x86_64 Linux with parse-only kernel revisions. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
+          bitbake -g dstack-rootfs
+          test -s "$build/pn-buildlist"
+          test -s "$build/task-depends.dot"
+          grep -Fx 'dstack-rootfs' "$build/pn-buildlist" >/dev/null
+          echo 'Pinned corrected-guest source with ABI-smoked native binaries parsed and produced a rootfs task dependency graph on native x86_64 Linux. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
             >> "$GITHUB_STEP_SUMMARY"
