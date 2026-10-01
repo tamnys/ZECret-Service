@@ -307,6 +307,28 @@ not support reading`; the later end-to-end public RPC response, rather than
 that log view, established Zebra readiness for the preview. No additional
 billable resource has been authorized by this observation.
 
+## October 1 read-only refresh
+
+At **06:14:27 UTC**, `zrpc lifecycle ledger inspect` read the original ledger
+without a provider request. It reported generation 6, one tracked resource,
+four retained observations, no deletion intent or uncommitted draft, and a
+**$2.389532 modeled cost floor** at the local clock time. The last authenticated
+provider observation in that ledger was at **02:10:06 UTC**; the modeled floor
+is neither a fresh inventory nor reconciled billing.
+
+At approximately **06:20 UTC**, the pinned Tor Project 0.4.9.13 command above
+again reached the existing TLS-passthrough route. Local inspection reported
+verified TDX hardware authenticity and public-preview security policy, fresh
+challenge and retained TLS-key binding. The wrapper returned Testnet height
+**4,426,376** and **zero zatoshis** for the synthetic fixture address.
+`public_preview_passed` was true; approved workload ownership was not checked,
+`private_accepted` and private `query_sent` remained false. The private local
+result is `.codex-tmp/live-preview-check-20261001.json` in the active worktree,
+SHA-256 `a424bf48a5c2db1c8961f8e2f82a8d3484a55b1e73a98bf9d40c9b3ec8f431ab`.
+This is live public-preview availability, not proof of the corrected image,
+disk isolation, guest administration policy or private-query readiness. No
+Phala management mutation or new resource was involved.
+
 ## Manual deletion and follow-up
 
 The operator chose manual cleanup. Before requesting deletion, run the native
