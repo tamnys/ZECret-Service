@@ -1,0 +1,111 @@
+name: Phala BitBake AppArmor profile probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scoped-userns:
+    name: Test a job-owned Python profile on native x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact public project and Poky source commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          poky="$GITHUB_WORKSPACE/poky"
+          for directory in "$source" "$poky"; do
+            mkdir "$directory"
+            git -C "$directory" init -q
+          done
+          git -c core.hooksPath=/dev/null -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -c core.hooksPath=/dev/null -C "$source" checkout -q --detach FETCH_HEAD
+          git -c core.hooksPath=/dev/null -C "$poky" fetch -q --no-tags --depth=1 \
+            https://github.com/yoctoproject/poky.git \
+            cd44e6bd40b0c1f498b3feaeb5e9b72f8bf32d41
+          test "$(git -C "$poky" rev-parse FETCH_HEAD)" = cd44e6bd40b0c1f498b3feaeb5e9b72f8bf32d41
+          git -c core.hooksPath=/dev/null -C "$poky" checkout -q --detach FETCH_HEAD
+
+      - name: Probe baseline, scoped AppArmor permission, and removal
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+          source="$GITHUB_WORKSPACE/source"
+          poky="$GITHUB_WORKSPACE/poky"
+          probe="$source/experiments/ephemeral-runtime/probe-bitbake-worker.py"
+          python="$GITHUB_WORKSPACE/zrpc-bitbake-probe-python3"
+          profile="$GITHUB_WORKSPACE/zrpc-bitbake-probe.apparmor"
+          install -m 0555 /usr/bin/python3 "$python"
+          cmp -s /usr/bin/python3 "$python"
+          [[ "$python" =~ ^/[A-Za-z0-9_./-]+$ ]]
+          cat > "$profile" <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          $python flags=(unconfined) {
+            userns,
+          }
+          EOF
+
+          loaded=0
+          cleanup() {
+            if [[ "$loaded" = 1 ]]; then
+              sudo -n apparmor_parser -R "$profile"
+            fi
+          }
+          trap cleanup EXIT
+
+          set +e
+          "$python" -I -B "$probe" "$poky" > "$GITHUB_WORKSPACE/baseline.json"
+          baseline_status=$?
+          set -e
+          cat "$GITHUB_WORKSPACE/baseline.json"
+          test "$baseline_status" -ne 0
+
+          sudo -n apparmor_parser -r "$profile"
+          loaded=1
+          set +e
+          "$python" -I -B "$probe" "$poky" > "$GITHUB_WORKSPACE/profile.json"
+          profile_status=$?
+          set -e
+          cat "$GITHUB_WORKSPACE/profile.json"
+
+          sudo -n apparmor_parser -R "$profile"
+          loaded=0
+          trap - EXIT
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+          set +e
+          "$python" -I -B "$probe" "$poky" > "$GITHUB_WORKSPACE/after-removal.json"
+          after_status=$?
+          set -e
+          cat "$GITHUB_WORKSPACE/after-removal.json"
+
+          python3 -I - "$GITHUB_WORKSPACE" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          baseline = json.loads((root / "baseline.json").read_bytes())
+          profile = json.loads((root / "profile.json").read_bytes())
+          after = json.loads((root / "after-removal.json").read_bytes())
+          if (baseline.get("status") != "blocked"
+                  or baseline.get("apparmor_userns_restriction") != "1"
+                  or profile.get("status") != "worker_namespace_probe_passed"
+                  or profile.get("apparmor_userns_restriction") != "1"
+                  or after.get("status") != "blocked"
+                  or after.get("apparmor_userns_restriction") != "1"
+                  or any(item.get("guest_image_built") is not False
+                         or item.get("private_mode_approved") is not False
+                         for item in (baseline, profile, after))):
+              raise SystemExit("scoped AppArmor permission did not pass and revert")
+          PY
+          test "$profile_status" -eq 0
+          test "$after_status" -ne 0
+          echo 'Job-owned AppArmor profile changed only the probe executable; the pinned BitBake worker namespace setup passed under the profile and failed again after its removal. No image was built or approved.' \
+            >> "$GITHUB_STEP_SUMMARY"
