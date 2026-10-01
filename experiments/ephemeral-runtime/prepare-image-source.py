@@ -131,6 +131,30 @@ if mountpoint -q /dstack; then
 fi
 # A non-recursive bind keeps the nested persistent data mount out of /dstack.
 mount --bind "$WORK_DIR" /dstack
+# The one persistent workload path contains public Testnet chain data only.
+# Refuse a replaced mount or a symlink supplied by an older disk image.
+if ! mountpoint -q "$DATA_MNT"; then
+    log "Encrypted data mount is unavailable"
+    exit 1
+fi
+mount -o remount,rw,noexec,nodev,nosuid,nosymfollow "$DATA_MNT"
+public_state="$DATA_MNT/zebra-public-testnet"
+if [ -L "$public_state" ] || { [ -e "$public_state" ] && [ ! -d "$public_state" ]; }; then
+    log "Refusing invalid public Zebra state"
+    exit 1
+fi
+if [ ! -e "$public_state" ]; then
+    mkdir -m 0700 "$public_state"
+fi
+chown 10001:10001 "$public_state"
+chmod 0700 "$public_state"
+if [ -L /var/lib/zebra-public ] || mountpoint -q /var/lib/zebra-public; then
+    log "Refusing existing public Zebra mount"
+    exit 1
+fi
+mkdir -p /var/lib/zebra-public
+mount --bind "$public_state" /var/lib/zebra-public
+mount -o remount,bind,rw,noexec,nodev,nosuid,nosymfollow /var/lib/zebra-public
 /usr/bin/phala-runtime-guard
 """,
     )
