@@ -3,7 +3,9 @@
 //! Restoring them cannot create a `ReadObservation`, attribute usage to a CVM,
 //! prove disk deletion or billing finality, or authorize a deletion retry.
 
-use crate::{LifecycleError, amount::ExactUsd, controller::TrackedCvm, nonempty};
+use crate::{
+    LifecycleError, amount::ExactUsd, controller::TrackedCvm, nonempty, provider_wire::UsageScopeId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -44,8 +46,8 @@ pub struct ObservedTarget {
 #[serde(deny_unknown_fields)]
 pub struct ObservedUsage {
     pub instance_id: String,
-    pub project_id: i64,
-    pub team_id: i64,
+    pub project_id: UsageScopeId,
+    pub team_id: UsageScopeId,
     pub timestamp: String,
     pub event_type: String,
     pub usage_type: String,
@@ -170,8 +172,8 @@ impl ObservedUsage {
     fn from_wire(row: &crate::provider_wire::UsageRow) -> Self {
         Self {
             instance_id: row.instance_id.clone(),
-            project_id: row.project_id,
-            team_id: row.team_id,
+            project_id: row.project_id.clone(),
+            team_id: row.team_id.clone(),
             timestamp: row.timestamp.clone(),
             event_type: row.event_type.clone(),
             usage_type: row.usage_type.clone(),
@@ -193,6 +195,8 @@ impl ObservedUsage {
         ]
         .into_iter()
         .any(|value| !nonempty(value))
+            || !self.project_id.valid()
+            || !self.team_id.valid()
         {
             return Err(INVALID);
         }
@@ -360,8 +364,8 @@ mod tests {
     fn row(key: &str, cost: &str) -> ObservedUsage {
         ObservedUsage::from_wire(&crate::provider_wire::UsageRow {
             instance_id: "unjoined-usage-instance".into(),
-            project_id: 1,
-            team_id: 2,
+            project_id: UsageScopeId::Number(1),
+            team_id: UsageScopeId::Number(2),
             timestamp: "provider timestamp".into(),
             event_type: "cvm".into(),
             usage_type: "compute".into(),
@@ -372,6 +376,31 @@ mod tests {
             billing_day: "provider day".into(),
             cost: ExactUsd::parse_json_number(cost).unwrap(),
         })
+    }
+
+    #[test]
+    fn usage_scope_ids_preserve_historical_numbers_and_current_strings() {
+        let historical = row("historical", "1e-7");
+        let historical_json = serde_json::to_value(&historical).unwrap();
+        assert_eq!(historical_json["project_id"], 1);
+        assert_eq!(historical_json["team_id"], 2);
+        assert_eq!(
+            serde_json::from_value::<ObservedUsage>(historical_json).unwrap(),
+            historical
+        );
+
+        let mut current = historical.clone();
+        current.project_id = UsageScopeId::Text("project-current".into());
+        current.team_id = UsageScopeId::Text("team-current".into());
+        current.validate().unwrap();
+        let current_json = serde_json::to_value(&current).unwrap();
+        assert_eq!(current_json["project_id"], "project-current");
+        assert_eq!(
+            serde_json::from_value::<ObservedUsage>(current_json).unwrap(),
+            current
+        );
+        current.team_id = UsageScopeId::Text(" ".into());
+        assert!(current.validate().is_err());
     }
 
     fn record(
@@ -476,7 +505,7 @@ mod tests {
                 "instance" => usage.instance_id = "changed".into(),
                 "category" => usage.usage_type = "storage".into(),
                 "timestamp" => usage.timestamp = "changed".into(),
-                "project" => usage.project_id += 1,
+                "project" => usage.project_id = UsageScopeId::Text("different".into()),
                 _ => usage.event_type = "changed".into(),
             }
             assert!(

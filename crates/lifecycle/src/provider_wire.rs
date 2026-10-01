@@ -8,7 +8,7 @@
 
 use crate::{LifecycleError, amount::ExactUsd};
 use serde::{
-    Deserialize, Deserializer,
+    Deserialize, Deserializer, Serialize,
     de::{self, MapAccess, Visitor},
 };
 use serde_json::value::RawValue;
@@ -53,8 +53,8 @@ pub struct UsageRow {
     /// The usage API describes this as a CVM UUID. Its relation to either CVM
     /// identifier remains unproven, even when their field names are the same.
     pub instance_id: String,
-    pub project_id: i64,
-    pub team_id: i64,
+    pub project_id: UsageScopeId,
+    pub team_id: UsageScopeId,
     pub timestamp: String,
     pub event_type: String,
     pub usage_type: String,
@@ -64,6 +64,25 @@ pub struct UsageRow {
     pub billing_hour: String,
     pub billing_day: String,
     pub cost: ExactUsd,
+}
+
+/// The reviewed schema uses JSON numbers, but the live versioned endpoint
+/// returned strings. Preserve either wire type in observations:
+/// neither representation is an authenticated CVM/usage join key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UsageScopeId {
+    Number(i64),
+    Text(String),
+}
+
+impl UsageScopeId {
+    pub(crate) fn valid(&self) -> bool {
+        match self {
+            Self::Number(_) => true,
+            Self::Text(value) => !value.trim().is_empty(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,8 +159,8 @@ struct InventoryPageWire {
 #[derive(Deserialize)]
 struct UsageRowWire {
     instance_id: String,
-    project_id: i64,
-    team_id: i64,
+    project_id: UsageScopeId,
+    team_id: UsageScopeId,
     timestamp: String,
     event_type: String,
     usage_type: String,
@@ -292,6 +311,9 @@ pub fn parse_usage_page(bytes: &[u8], body_bound: usize) -> Result<UsagePage, Li
             ] {
                 required_text(value)?;
             }
+            if !row.project_id.valid() || !row.team_id.valid() {
+                return Err(INVALID);
+            }
             let cost = charge(&row.cost)?;
             Ok(UsageRow {
                 instance_id: row.instance_id,
@@ -388,6 +410,29 @@ mod tests {
             parsed.usage[1].cost.ceil_microusd(),
             distinct.usage[1].cost.ceil_microusd()
         );
+    }
+
+    #[test]
+    fn accepts_current_string_scope_ids_without_conflating_historical_numbers() {
+        let live_shape = USAGE
+            .replace("\"project_id\": 11", "\"project_id\": \"project-current\"")
+            .replace("\"team_id\": 22", "\"team_id\": \"team-current\"");
+        let parsed = usage(&live_shape).unwrap();
+        assert_eq!(
+            parsed.usage[0].project_id,
+            UsageScopeId::Text("project-current".into())
+        );
+        assert_eq!(
+            parsed.usage[0].team_id,
+            UsageScopeId::Text("team-current".into())
+        );
+        assert_eq!(
+            usage(USAGE).unwrap().usage[0].project_id,
+            UsageScopeId::Number(11)
+        );
+        assert!(usage(&live_shape.replace("\"project-current\"", "\" \"")).is_err());
+        assert!(usage(&live_shape.replace("\"team-current\"", "[]")).is_err());
+        assert!(usage(&live_shape.replace("\"team-current\"", "true")).is_err());
     }
 
     #[test]
