@@ -35,9 +35,11 @@ launch document: the provider reports public logs and system information
 enabled and a nonempty pre-launch script, while the prepared document set the
 first two flags false and supplied no script. The inner Docker Compose bytes
 matched. We subsequently changed the two visibility flags to false through a
-field-only update and confirmed that readback. Please explain which layer
+field-only update and confirmed that readback. The live script exactly matches
+the public dstack-examples Phala pre-launch script at commit
+`4b1819d7f2cca610b2478a7be354358b1cad5b97`. Please explain which layer
 initially added or changed these fields, and how to make the reviewed launch
-document effective without an unreviewed script.
+document effective without an unapproved script.
 
 Is there a currently supported image or supported custom-image route that puts
 these runtime roots in memory and prevents every runtime startup/restart path
@@ -85,14 +87,17 @@ billable resources in response.
    override that could expose Zebra's loopback RPC directly.
    The live `compose_file` response includes a 17,569-byte pre-launch script
    (SHA-256 `982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8`)
-   that our launch document did not supply. A static scan found active
-   root-password, authorized-key and remote-fetch branches; an SSH-server term
-   appeared only in a comment. The stored SSH-key set and live Teepod
-   `ssh_authorized_keys` were both empty at the time of inspection. Is this
-   script supplied by Phala, when is it run, and what supported configuration
-   disables its administrative paths? What password, console, recovery and
-   future SSH-key update access remains available? We have not executed or
-   published the script contents.
+   that our launch document did not supply. Its bytes exactly match
+   [the dstack-examples Phala pre-launch script](https://github.com/Dstack-TEE/dstack-examples/blob/4b1819d7f2cca610b2478a7be354358b1cad5b97/phala-cloud-prelaunch-script/prelaunch.sh).
+   It unconditionally prunes Docker images/volumes and attempts a Compose pull;
+   root-password and authorized-key branches are conditional. The stored SSH-key
+   set and live Teepod `ssh_authorized_keys` were both empty; `allowed_envs` was
+   empty. The [Phala SSH guide](https://github.com/Phala-Network/phala-docs/blob/5176d4c53fcee5aec3a8ccbbb05840a0a678c553/phala-cloud/networking/enable-ssh-access.mdx)
+   says production images disable SSH and reject SSH passwords. Which layer
+   injects this script and when is it run? How can it be disabled for a reviewed
+   release, and what effective password, console, recovery, exec and future
+   SSH-key update access remains on this exact production guest? We have not
+   executed or published the live response contents.
 
 3. **Deletion and accounting contract.** For API version `2026-06-23`, the live
    CVM inventory and detail return `instance_id: null` but a nonempty `vm_uuid`.
