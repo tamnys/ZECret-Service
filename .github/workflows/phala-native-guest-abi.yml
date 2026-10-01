@@ -1,0 +1,268 @@
+name: Phala native guest binary ABI smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  abi:
+    name: Reproducible guard and stock-rootfs loader smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact project source and check reused proxy inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          export GIT_LFS_SKIP_SMUDGE=1
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -c core.hooksPath=/dev/null -C "$source" fetch -q --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -c core.hooksPath=/dev/null -C "$source" checkout -q --detach FETCH_HEAD
+          python3 -I - "$source" <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          source = Path(sys.argv[1])
+          # These source objects and locked inputs match the two-build receipt
+          # from commit f0c8709e073575296a17925851589f7c3a81337b.
+          expected = {
+              "crates/server": "7b2d91ff1a57fe04eefb3aa80fe8967e5cf991df",
+              "crates/protocol": "9dd835bfefbb8971f437866a09d2141ced1cd074",
+              "crates/payments": "3975cbe4d0da7711ab66d2db2a07a74ebf9d7926",
+              "Cargo.lock": "c11431c3234c2a112f3e3ee1b48fe23a43851fa6",
+              "Cargo.toml": "1bebd0faae83e3f3fd837001530dfbfcf4a6530e",
+              "rust-toolchain.toml": "37ecac2d81673573345e2545cb9a3f0382f75831",
+          }
+          for path, oid in expected.items():
+              actual = subprocess.check_output(
+                  ["git", "-C", str(source), "rev-parse", f"HEAD:{path}"],
+                  text=True).strip()
+              if actual != oid:
+                  raise SystemExit(f"reused native quote-proxy source changed: {path}")
+          PY
+
+      - name: Retrieve exact previously double-built quote proxy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-guest-abi"
+          mkdir -p "$scratch/native-binaries"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/11101841679" > "$scratch/artifact-metadata.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/11101841679/zip" > "$scratch/artifact.zip"
+          python3 -I - "$scratch" <<'PY'
+          from pathlib import Path
+          import hashlib
+          import io
+          import json
+          import sys
+          import tarfile
+          import zipfile
+
+          scratch = Path(sys.argv[1])
+          metadata = json.loads((scratch / "artifact-metadata.json").read_bytes())
+          commit = "f0c8709e073575296a17925851589f7c3a81337b"
+          name = f"native-rust-{commit}"
+          if (metadata.get("id") != 11101841679
+                  or metadata.get("name") != name
+                  or metadata.get("digest") !=
+                  "sha256:650af5e939480aa8b997561e453368fd8f7301c45c3e9b094b3b3dcbb8f55cbd"
+                  or metadata.get("expired") is not False
+                  or metadata.get("workflow_run", {}).get("id") != 36721090690
+                  or metadata.get("workflow_run", {}).get("head_sha") != commit):
+              raise SystemExit("native Rust artifact identity differs")
+          payload = (scratch / "artifact.zip").read_bytes()
+          if hashlib.sha256(payload).hexdigest() != (
+                  "650af5e939480aa8b997561e453368fd8f7301c45c3e9b094b3b3dcbb8f55cbd"):
+              raise SystemExit("native Rust artifact ZIP differs")
+          tar_name = name + ".tar"
+          with zipfile.ZipFile(io.BytesIO(payload)) as bundle:
+              if set(bundle.namelist()) != {tar_name, tar_name + ".sha256"}:
+                  raise SystemExit("native Rust artifact ZIP members differ")
+              archive_bytes = bundle.read(tar_name)
+              internal_sha = bundle.read(tar_name + ".sha256").decode().split()[0]
+          if hashlib.sha256(archive_bytes).hexdigest() != internal_sha:
+              raise SystemExit("native Rust inner archive differs")
+          with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
+              manifest_member = archive.getmember("./manifest.json")
+              binary_member = archive.getmember("./artifacts/zrpc-quote-proxy")
+              if not manifest_member.isfile() or not binary_member.isfile():
+                  raise SystemExit("native Rust archive members differ")
+              manifest = json.load(archive.extractfile(manifest_member))
+              binary = archive.extractfile(binary_member).read()
+          expected = "6e0a33f7a2aeadb3102c7af89135f0a5e13dea09641c6a86c65727f635308186"
+          if (manifest.get("source_commit") != commit
+                  or manifest.get("reproducible") is not True
+                  or manifest.get("artifact_sha256", {}).get("zrpc-quote-proxy") != expected
+                  or hashlib.sha256(binary).hexdigest() != expected):
+              raise SystemExit("native quote proxy differs from double-build receipt")
+          output = scratch / "native-binaries/zrpc-quote-proxy"
+          output.write_bytes(binary)
+          output.chmod(0o555)
+          PY
+
+      - name: Compile runtime guard twice with exact native Rust image
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-guest-abi"
+          rust_image="rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce"
+          docker pull --platform linux/amd64 "$rust_image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$rust_image")" = linux/amd64
+          docker image inspect --format '{{json .RepoDigests}}' "$rust_image" | grep -F 'sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce'
+          for attempt in a b; do
+            mkdir "$scratch/guard-$attempt"
+            docker run --rm --pull=never --platform linux/amd64 --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 --mount "type=bind,src=$source,dst=/workspace,readonly" --mount "type=bind,src=$scratch/guard-$attempt,dst=/out" --workdir /workspace --entrypoint /usr/bin/env "$rust_image" -i HOME=/nonexistent PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin RUSTUP_HOME=/usr/local/rustup RUSTUP_AUTO_INSTALL=0 RUSTUP_TOOLCHAIN=1.94.1-x86_64-unknown-linux-gnu LANG=C LC_ALL=C TZ=UTC sh -ceu '
+              rustc --version | grep -F "rustc 1.94.1"
+              rustc --edition=2021 --target x86_64-unknown-linux-gnu -C opt-level=2 -C strip=symbols --remap-path-prefix=/workspace=/src experiments/ephemeral-runtime/runtime-guard.rs -o /out/phala-runtime-guard
+            '
+          done
+          cmp "$scratch/guard-a/phala-runtime-guard" "$scratch/guard-b/phala-runtime-guard"
+          install -m 0555 "$scratch/guard-a/phala-runtime-guard" "$scratch/native-binaries/phala-runtime-guard"
+
+      - name: Fetch exact stock guest libraries without installing packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-guest-abi"
+          mkdir -p "$scratch/stock-libs" "$scratch/squashfs-tool"
+          python3 -I - "$scratch" <<'PY'
+          from pathlib import Path
+          import hashlib
+          import sys
+          import tarfile
+          import urllib.request
+
+          scratch = Path(sys.argv[1])
+          def fetch(url, target, size, digest):
+              observed = hashlib.sha256()
+              count = 0
+              with urllib.request.urlopen(url) as response, target.open("xb") as output:
+                  while chunk := response.read(1024 * 1024):
+                      count += len(chunk)
+                      if count > size:
+                          raise SystemExit("pinned download exceeds expected size")
+                      observed.update(chunk)
+                      output.write(chunk)
+              if count != size or observed.hexdigest() != digest:
+                  raise SystemExit("pinned download differs")
+
+          archive_path = scratch / "dstack-0.5.9.tar.gz"
+          fetch("https://github.com/Dstack-TEE/meta-dstack/releases/download/v0.5.9/dstack-0.5.9.tar.gz",
+                archive_path, 177808212,
+                "f3888f64e215bc1e1af53a1f3d13b4df48fe40d4a3059049bb87d4c7c06aff97")
+          with tarfile.open(archive_path, "r:gz") as archive:
+              members = [m for m in archive.getmembers()
+                         if m.name == "dstack-0.5.9/rootfs.img.verity"]
+              if len(members) != 1 or not members[0].isfile() or members[0].size != 161538048:
+                  raise SystemExit("pinned stock rootfs archive member differs")
+              rootfs = archive.extractfile(members[0])
+              target = scratch / "rootfs.img.verity"
+              observed = hashlib.sha256()
+              with target.open("xb") as output:
+                  while chunk := rootfs.read(1024 * 1024):
+                      observed.update(chunk)
+                      output.write(chunk)
+              if observed.hexdigest() != (
+                      "e92ad3aeae158f08706f634509f756d6d838c81dd08eded68cc4aab041fe7fd8"):
+                  raise SystemExit("pinned stock rootfs differs")
+          fetch("https://archive.ubuntu.com/ubuntu/pool/main/s/squashfs-tools/squashfs-tools_4.6.1-1build1_amd64.deb",
+                scratch / "squashfs-tools.deb", 189326,
+                "87fae263846bab255d4a51ad9fc623685497ad830db60758dde39589c9fdadcb")
+          PY
+          python3 -I "$source/records/probes/verify-v059-archive.py" "$scratch/dstack-0.5.9.tar.gz" > "$scratch/stock-archive-check.json"
+          dpkg-deb -x "$scratch/squashfs-tools.deb" "$scratch/squashfs-tool"
+          unsquashfs="$scratch/squashfs-tool/usr/bin/unsquashfs"
+          for name in ld-linux-x86-64.so.2 libc.so.6 libm.so.6 libgcc_s.so.1; do
+            "$unsquashfs" -cat "$scratch/rootfs.img.verity" "usr/lib/$name" > "$scratch/stock-libs/$name"
+            test -s "$scratch/stock-libs/$name"
+          done
+          chmod 0555 "$scratch/stock-libs/ld-linux-x86-64.so.2"
+          (cd "$scratch/stock-libs" && sha256sum -c - <<'EOF'
+          972d5167623e6facb9d65596f3bd0a7e09a4fccbe8db622cb9e6369fd7e91246  ld-linux-x86-64.so.2
+          cb41c98ada997e61738dad3d1f678ae8859375c1623edf4c8990b0d89e229cd2  libc.so.6
+          3cabeaadea80da5106b1713e860df707621908790d576c2cc547c4331e545e38  libm.so.6
+          af5f61d4c8b8cba0ee8105bc434f734f878eb21227503501e6ecd3e9309910c7  libgcc_s.so.1
+          EOF
+          )
+
+      - name: Execute denial paths against the exact stock guest loader
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-guest-abi"
+          libs="$scratch/stock-libs"
+          loader="$libs/ld-linux-x86-64.so.2"
+          for name in zrpc-quote-proxy phala-runtime-guard; do
+            binary="$scratch/native-binaries/$name"
+            file "$binary" | grep -F 'ELF 64-bit LSB'
+            "$loader" --inhibit-cache --library-path "$libs" --list "$binary" > "$scratch/$name.links"
+            python3 -I - "$scratch/$name.links" "$libs" <<'PY'
+          from pathlib import Path
+          import sys
+
+          listing = Path(sys.argv[1]).read_text()
+          root = str(Path(sys.argv[2]).resolve()) + "/"
+          if "not found" in listing:
+              raise SystemExit("stock loader reports missing shared library")
+          paths = [line.split(" => ", 1)[1].split()[0]
+                   for line in listing.splitlines() if " => " in line]
+          if not paths or any(not path.startswith(root) for path in paths):
+              raise SystemExit("stock loader resolved a library outside checked rootfs")
+          PY
+          done
+          if env -i PATH=/usr/bin:/bin "$loader" --inhibit-cache --library-path "$libs" "$scratch/native-binaries/zrpc-quote-proxy" --unsupported > "$scratch/proxy-denial.log" 2>&1; then
+            echo 'quote proxy accepted an unsupported argument' >&2
+            exit 1
+          fi
+          grep -F 'quote bridge accepts only --stock-preview' "$scratch/proxy-denial.log"
+          if env -i PATH=/usr/bin:/bin "$loader" --inhibit-cache --library-path "$libs" "$scratch/native-binaries/phala-runtime-guard" --unsupported > "$scratch/guard-denial.log" 2>&1; then
+            echo 'runtime guard accepted an unsupported argument' >&2
+            exit 1
+          fi
+          grep -F 'ArgumentsUnsupported' "$scratch/guard-denial.log"
+          python3 -I - "$scratch" "$GITHUB_SHA" <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import sys
+
+          scratch = Path(sys.argv[1])
+          revision = sys.argv[2]
+          binaries = scratch / "native-binaries"
+          receipt = {
+              "source_commit": revision,
+              "guard_sha256": hashlib.sha256((binaries / "phala-runtime-guard").read_bytes()).hexdigest(),
+              "guard_double_build_equal": True,
+              "quote_proxy_sha256": hashlib.sha256((binaries / "zrpc-quote-proxy").read_bytes()).hexdigest(),
+              "quote_proxy_prior_reproducible_artifact_id": 11101841679,
+              "stock_archive_sha256": "f3888f64e215bc1e1af53a1f3d13b4df48fe40d4a3059049bb87d4c7c06aff97",
+              "stock_rootfs_sha256": "e92ad3aeae158f08706f634509f756d6d838c81dd08eded68cc4aab041fe7fd8",
+              "stock_loader_denial_smoke_passed": True,
+              "corrected_guest_image_built": False,
+              "phala_admission_verified": False,
+              "hardware_tested": False,
+              "private_accepted": False,
+          }
+          (scratch / "receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+          PY
+          echo 'Native guest binaries ran their denial paths with the pinned stock guest loader and libraries. The corrected image is unbuilt and private mode remains blocked.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload unapproved native guest binary receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phala-guest-abi-${{ github.sha }}
+          path: |
+            ${{ github.workspace }}/source/.codex-tmp/phala-guest-abi/native-binaries/
+            ${{ github.workspace }}/source/.codex-tmp/phala-guest-abi/receipt.json
+          if-no-files-found: error
