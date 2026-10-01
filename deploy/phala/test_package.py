@@ -10,7 +10,7 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 HERE = Path(__file__).resolve().parent
@@ -356,6 +356,96 @@ class PackageTests(unittest.TestCase):
                   patch.object(supervisor, "mount_type", return_value="tmpfs")):
                 with self.assertRaisesRegex(RuntimeError, "app container exposes dstack socket"):
                     supervisor.run_app()
+
+    def test_split_node_refuses_quote_socket_before_snapshot_import(self):
+        quote_dir = self.root / "zrpc-quote"
+        quote_dir.mkdir()
+        with socket.socket(socket.AF_UNIX) as quote:
+            quote.bind(str(quote_dir / "quote.sock"))
+            snapshot = types.ModuleType("snapshot_import")
+            snapshot.ensure_snapshot = Mock()
+            with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
+                  patch.object(supervisor, "RUN", self.root),
+                  patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+                  patch.object(supervisor, "mount_type", return_value="tmpfs"),
+                  patch.object(supervisor.subprocess, "Popen") as started):
+                with self.assertRaisesRegex(RuntimeError, "guest control socket path"):
+                    supervisor.run_node()
+                snapshot.ensure_snapshot.assert_not_called()
+                started.assert_not_called()
+
+    def test_split_node_refuses_stale_cookie_before_snapshot_import(self):
+        state = self.root / "state"
+        state.mkdir(mode=0o700)
+        cookie_dir = self.root / "zrpc-node"
+        cookie_dir.mkdir(mode=0o700)
+        cookie = cookie_dir / ".cookie"
+        cookie.write_bytes(b"stale")
+        snapshot = types.ModuleType("snapshot_import")
+        snapshot.ensure_snapshot = Mock()
+        with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
+              patch.object(supervisor, "RUN", self.root),
+              patch.object(supervisor, "STATE", state),
+              patch.object(supervisor, "COOKIE_DIR", cookie_dir),
+              patch.object(supervisor, "COOKIE", cookie),
+              patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+              patch.object(supervisor, "mount_type",
+                           side_effect=lambda path: "tmpfs" if path == self.root else "ext4"),
+              patch.object(supervisor.subprocess, "Popen") as started):
+            with self.assertRaisesRegex(RuntimeError, "stale Zebra RPC cookie"):
+                supervisor.run_node()
+            snapshot.ensure_snapshot.assert_not_called()
+            started.assert_not_called()
+
+    def test_split_node_health_requires_cookie_rpc_and_no_quote_socket(self):
+        cookie = self.root / ".cookie"
+        cookie.write_bytes(b"synthetic")
+        cookie.chmod(0o600)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as node:
+            node.bind(("127.0.0.1", 0))
+            node.listen(1)
+            with (patch.object(supervisor, "RUN", self.root),
+                  patch.object(supervisor, "COOKIE", cookie),
+                  patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+                  patch.object(supervisor, "NODE_RPC", node.getsockname()),
+                  patch.dict(supervisor.os.environ, {"NODE_POLL_INTERVAL_MS": "1000"}),
+                  patch.object(supervisor, "mount_type", return_value="tmpfs")):
+                self.assertTrue(supervisor.node_health())
+                quote_dir = self.root / "zrpc-quote"
+                quote_dir.mkdir()
+                with socket.socket(socket.AF_UNIX) as quote:
+                    quote.bind(str(quote_dir / "quote.sock"))
+                    self.assertFalse(supervisor.node_health())
+                (quote_dir / "quote.sock").unlink()
+                cookie.chmod(0o644)
+                self.assertFalse(supervisor.node_health())
+
+    def test_split_wrapper_refuses_missing_quote_bridge(self):
+        with (patch.object(supervisor, "RUN", self.root),
+              patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+              patch.object(supervisor, "mount_type", return_value="tmpfs"),
+              patch.object(supervisor.subprocess, "Popen") as started):
+            with self.assertRaisesRegex(RuntimeError, "quote-only bridge"):
+                supervisor.run_wrapper()
+            started.assert_not_called()
+
+    def test_split_modes_refuse_root_group_before_any_startup(self):
+        with (patch.object(supervisor.os, "getegid", return_value=0),
+              patch.object(supervisor, "require_runtime_mount") as mounted,
+              patch.object(supervisor.subprocess, "Popen") as started):
+            for mode in (supervisor.run_node, supervisor.run_wrapper):
+                with self.subTest(mode=mode.__name__):
+                    with self.assertRaisesRegex(RuntimeError, "non-root identity"):
+                        mode()
+            mounted.assert_not_called()
+            started.assert_not_called()
+
+    def test_split_modes_are_explicit(self):
+        for mode, method in (("node", "run_node"), ("wrapper", "run_wrapper")):
+            with (patch.object(sys, "argv", ["supervisor.py", mode]),
+                  patch.object(supervisor, method) as started):
+                self.assertEqual(supervisor.main(), 1)
+                started.assert_called_once_with()
 
 
 if __name__ == "__main__":

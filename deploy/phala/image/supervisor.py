@@ -22,6 +22,7 @@ COOKIE = COOKIE_DIR / ".cookie"
 BACKEND = Path("/dstack.sock")
 STATE = Path("/var/lib/zebra")
 BIN = Path("/opt/zrpc/bin")
+NODE_RPC = ("127.0.0.1", 18232)
 
 
 def required_positive(name):
@@ -218,16 +219,152 @@ def run_app():
         terminate_children(children)
 
 
+def require_no_guest_control_sockets(paths):
+    for path in paths:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        raise RuntimeError("container exposes a guest control socket path")
+
+
+def run_node():
+    """Corrected-guest candidate: Zebra has no quote or dstack socket mount."""
+    if os.geteuid() == 0 or os.getegid() == 0:
+        raise RuntimeError("split node requires a dedicated non-root identity")
+    from snapshot_import import ensure_snapshot
+
+    require_runtime_mount()
+    require_no_guest_control_sockets((
+        BACKEND, RUN / "dstack.sock", RUN / "zrpc-quote" / "quote.sock",
+        RUN / "zrpc-quote" / "watch.sock",
+    ))
+    if mount_type(STATE) == "tmpfs":
+        raise RuntimeError("public Zebra state is not persistent")
+    state = STATE.stat()
+    if (not stat.S_ISDIR(state.st_mode) or state.st_uid != os.geteuid()
+            or stat.S_IMODE(state.st_mode) & 0o007):
+        raise RuntimeError("public Zebra state ownership is unavailable")
+    if COOKIE.exists() or COOKIE.is_symlink():
+        raise RuntimeError("stale Zebra RPC cookie")
+    ensure_snapshot()
+    COOKIE_DIR.mkdir(mode=0o700)
+    cookie_dir = COOKIE_DIR.stat()
+    if (cookie_dir.st_uid != os.geteuid()
+            or stat.S_IMODE(cookie_dir.st_mode) != 0o700):
+        raise RuntimeError("cookie directory ownership is unavailable")
+
+    children = []
+    try:
+        zebra = subprocess.Popen(
+            [str(BIN / "zebrad"), "-c", "/opt/zrpc/zebra.toml", "start"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        children.append(zebra)
+        install_stop_handler(children)
+        zebra.wait()
+        raise RuntimeError("Zebra stopped")
+    finally:
+        terminate_children(children)
+
+
+def node_health():
+    try:
+        require_runtime_mount()
+        require_no_guest_control_sockets((
+            BACKEND, RUN / "dstack.sock", RUN / "zrpc-quote" / "quote.sock",
+            RUN / "zrpc-quote" / "watch.sock",
+        ))
+        cookie = COOKIE.lstat()
+        if (not stat.S_ISREG(cookie.st_mode) or cookie.st_uid != os.geteuid()
+                or stat.S_IMODE(cookie.st_mode) != 0o600):
+            return False
+        timeout = required_positive("NODE_POLL_INTERVAL_MS") / 1000
+        with socket.create_connection(NODE_RPC, timeout=timeout):
+            return True
+    except (OSError, RuntimeError):
+        return False
+
+
+def run_wrapper():
+    """Corrected-guest candidate: only this container receives quote sockets."""
+    if os.geteuid() == 0 or os.getegid() == 0:
+        raise RuntimeError("split wrapper requires a dedicated non-root identity")
+    require_runtime_mount()
+    require_no_guest_control_sockets((BACKEND, RUN / "dstack.sock"))
+    quote_dir = RUN / "zrpc-quote"
+    try:
+        directory = quote_dir.lstat()
+        if (not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0
+                or directory.st_gid != os.getegid()
+                or stat.S_IMODE(directory.st_mode) != 0o750):
+            raise RuntimeError("quote-only bridge directory is unavailable")
+        for name in ("quote.sock", "watch.sock"):
+            item = (quote_dir / name).lstat()
+            if (not stat.S_ISSOCK(item.st_mode) or item.st_uid != 0
+                    or item.st_gid != os.getegid()
+                    or stat.S_IMODE(item.st_mode) != 0o660):
+                raise RuntimeError("quote-only bridge socket is unavailable")
+    except OSError as error:
+        raise RuntimeError("quote-only bridge socket is unavailable") from error
+
+    timeout = required_positive("NODE_STARTUP_TIMEOUT_SECS")
+    spacing = required_positive("NODE_POLL_INTERVAL_MS") / 1000
+    limits = (
+        required_positive("MAX_CONNECTIONS"),
+        required_positive("MAX_QUOTES"),
+        required_positive("QUOTE_SPACING_MS"),
+    )
+    deadline = time.monotonic() + timeout
+    while not COOKIE.exists():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("Zebra RPC cookie readiness timed out")
+        time.sleep(min(spacing, remaining))
+
+    children = []
+    try:
+        wrapper = subprocess.Popen(
+            [
+                str(BIN / "zrpc-node-wrapper"),
+                "--platform", "phala-dstack",
+                "--listen", "0.0.0.0:8443",
+                "--node", f"{NODE_RPC[0]}:{NODE_RPC[1]}",
+                "--max-connections", str(limits[0]),
+                "--max-quotes", str(limits[1]),
+                "--quote-spacing-ms", str(limits[2]),
+                "--access", "free-demo",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        children.append(wrapper)
+        install_stop_handler(children)
+        wrapper.wait()
+        raise RuntimeError("RPC wrapper stopped")
+    finally:
+        terminate_children(children)
+
+
 def main():
     if len(sys.argv) != 2:
         raise RuntimeError("exactly one service mode is required")
     mode = sys.argv[1]
     if mode == "quote-health":
         return 0 if quote_health() else 1
+    if mode == "node-health":
+        return 0 if node_health() else 1
     if mode == "quote":
         run_quote()
     elif mode == "app":
         run_app()
+    elif mode == "node":
+        run_node()
+    elif mode == "wrapper":
+        run_wrapper()
     else:
         raise RuntimeError("unknown service mode")
     return 1
