@@ -44,3 +44,13 @@ compatibility. Public build instructions alone cannot establish that a custom
 fixed image is accepted by the account's node/KMS selection. Local work may
 continue on a clearly unapproved candidate and exact-image failure/restart tests;
 selection for a hosted evaluation still requires supported-image/KMS evidence.
+
+On 2026-10-01, an authenticated, read-only
+`GET /api/v1/cvms/cvm_MeD4o0eQ/available-os-images` returned HTTP 200 for the
+running `prod9` CVM. Its complete response offered production 0.5.9 and 0.5.8
+and no development variant. The request used the existing workspace credential,
+an explicitly selected TLS trust root and the operator-approved 1 MiB response
+cap. This is a CVM-specific, provider-filtered upgrade list; it shows no
+self-service corrected image for this CVM. It neither rules out support-assisted
+custom-image admission nor proves that either offered stock image meets the
+private-mode requirements. No image change or other provider mutation followed.
