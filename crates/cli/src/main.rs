@@ -28,8 +28,11 @@ zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_
 zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] [--ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE] [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
+zrpc verify --privacy-profile phala-trusted --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
+zrpc query --privacy-profile phala-trusted [--stdin | --method METHOD] --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
 zrpc payments --help
 zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
+zrpc dashboard --privacy-profile phala-trusted --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE [--no-open]
 zrpc preview --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE [--address TESTNET_TRANSPARENT_ADDRESS]
 zrpc dashboard --preview --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE [--address TESTNET_TRANSPARENT_ADDRESS] [--no-open]
 zrpc demo [--no-open]
@@ -162,7 +165,7 @@ async fn run() -> Result<(), String> {
     let command = args.remove(0);
     match command.as_str(){
         "help"|"--help"=>{exhausted(&args)?;println!("{USAGE}");Ok(())},
-        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"phala-dstack","default_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","simulation_available":true,"public_endpoint_inspection_available":true,"public_preview_available":true,"public_preview_platform":"phala-dstack","tor":"not_checked; public inspection uses explicit SOCKS, Phala preview starts a selected local Tor executable, private mode blocked","hardware_verifier":"offline_dcap_qvl_0.6.3_inspection_and_phala_public_preview_only","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
+        "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"phala-dstack","default_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","phala_trusted_profile":"blocked_no_packaged_release","simulation_available":true,"public_endpoint_inspection_available":true,"public_preview_available":true,"public_preview_platform":"phala-dstack","tor":"not_checked; public inspection uses explicit SOCKS, Phala preview starts a selected local Tor executable, private mode blocked","hardware_verifier":"offline_dcap_qvl_0.6.3_diagnostic_and_phala_trusted_policy","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-endpoint"=>inspect_endpoint_command(args).await,
         "payments"=>payments::run(args),
         "lifecycle"=>provider_observation::run(args).await,
@@ -265,6 +268,18 @@ async fn run() -> Result<(), String> {
             Ok(())
         },
         "verify"=>{
+            let profile=take_value(&mut args,"--privacy-profile")?;
+            if profile.as_deref()==Some("phala-trusted") {
+                let live=phala_trusted_inputs(&mut args)?;
+                exhausted(&args)?;
+                let session=zrpc_client::inspection::connect_phala_trusted(&live.config,&live.collateral,&live.compose,&live.policy)
+                    .await.map_err(|error|error.to_string())?;
+                drop(session);
+                return print_json(json!({"mode":"phala_trusted_verified","simulation":false,
+                    "private_accepted":false,"phala_trusted_authorized":true,"query_sent":false,
+                    "trust_model":"phala_managed_guest_kms_runtime"}));
+            }
+            if profile.is_some(){return Err("unsupported privacy profile".into())}
             if args.is_empty() {
                 print_json(PrivateClient::new().verify())?;
                 std::process::exit(1)
@@ -293,6 +308,30 @@ async fn run() -> Result<(), String> {
             if stdin && method.is_some(){return Err("choose stdin or method".into())}
             if !simulation {
                 if scenario.is_some(){return Err("scenario is simulation-only".into())}
+                let profile=take_value(&mut args,"--privacy-profile")?;
+                if profile.as_deref()==Some("phala-trusted") {
+                    if args.iter().any(|arg|arg.starts_with("--ticket-")) {
+                        return Err("payments are unavailable for phala-trusted queries".into());
+                    }
+                    let live=phala_trusted_inputs(&mut args)?;
+                    exhausted(&args)?;
+                    if !stdin && method.is_none(){return Err("query requires --stdin or --method".into())}
+                    let session=zrpc_client::inspection::connect_phala_trusted(&live.config,&live.collateral,&live.compose,&live.policy)
+                        .await.map_err(|error|error.to_string())?;
+                    let result=session.query_from_body(move || private_query_body(stdin,method)).await;
+                    return match result {
+                        Ok(result)=>print_json(json!({"mode":"phala_trusted","simulation":false,
+                            "private_accepted":false,"phala_trusted_authorized":true,"query_sent":true,
+                            "trust_model":"phala_managed_guest_kms_runtime","result":result})),
+                        Err(error)=>{
+                            print_json(json!({"mode":"phala_trusted_error","simulation":false,
+                                "private_accepted":false,"phala_trusted_authorized":false,
+                                "query_sent":"unknown","error":error}))?;
+                            std::process::exit(1)
+                        }
+                    };
+                }
+                if profile.is_some(){return Err("unsupported privacy profile".into())}
                 let ticket_config=payments::QueryTicketConfig::parse(&mut args)?;
                 if args.is_empty() {
                     // Do not even read a customer body before authorization.
@@ -395,11 +434,18 @@ async fn run() -> Result<(), String> {
         },
         "dashboard"=>{
             let no_open=take_flag(&mut args,"--no-open");
+            let profile=take_value(&mut args,"--privacy-profile")?;
             if take_flag(&mut args,"--preview") {
+                if profile.is_some(){return Err("preview cannot select a privacy profile".into())}
                 let inputs=preview_inputs(&mut args)?;
                 exhausted(&args)?;
                 serve_dashboard(DashboardInputs::Preview(inputs),no_open).await
+            } else if profile.as_deref()==Some("phala-trusted") {
+                let live=phala_trusted_inputs(&mut args)?;
+                exhausted(&args)?;
+                serve_dashboard(DashboardInputs::PhalaTrusted(live),no_open).await
             } else {
+                if profile.is_some(){return Err("unsupported privacy profile".into())}
                 let live=live_inputs(&mut args)?;
                 exhausted(&args)?;
                 serve_dashboard(DashboardInputs::Live(live),no_open).await
@@ -436,9 +482,17 @@ struct LiveInputs {
     policy: zrpc_verifier::ReleasePolicy,
 }
 
+struct PhalaTrustedInputs {
+    config: zrpc_client::inspection::PrivateEndpointConfig,
+    collateral: Vec<u8>,
+    compose: Vec<u8>,
+    policy: zrpc_verifier::PhalaTrustedPolicy,
+}
+
 enum DashboardInputs {
     Simulation,
     Live(LiveInputs),
+    PhalaTrusted(PhalaTrustedInputs),
     Preview(PreviewInputs),
 }
 
@@ -510,6 +564,39 @@ fn live_inputs(args: &mut Vec<String>) -> Result<LiveInputs, String> {
     })
 }
 
+fn phala_trusted_inputs(args: &mut Vec<String>) -> Result<PhalaTrustedInputs, String> {
+    if required(args, "--platform")? != "phala-dstack" {
+        return Err("phala-trusted requires --platform phala-dstack".into());
+    }
+    let host = required(args, "--endpoint-host")?;
+    let port = required(args, "--endpoint-port")?
+        .parse::<u16>()
+        .map_err(|_| "invalid endpoint port")?;
+    let tor_executable = required(args, "--tor-executable")?;
+    let collateral_path = required(args, "--collateral")?;
+    let compose_path = required(args, "--app-compose")?;
+    let release_path = required(args, "--release-policy")?;
+    let config = zrpc_client::inspection::PrivateEndpointConfig::for_platform(
+        Backend::PhalaDstack,
+        &host,
+        port,
+        tor_executable,
+    )
+    .map_err(|error| error.to_string())?;
+    let collateral = fs::read(collateral_path).map_err(|_| "collateral unavailable")?;
+    let compose = fs::read(compose_path).map_err(|_| "app compose unavailable")?;
+    let policy = zrpc_verifier::PhalaTrustedPolicy::from_json(
+        &fs::read(release_path).map_err(|_| "release policy unavailable")?,
+    )
+    .map_err(|_| "release policy rejected")?;
+    Ok(PhalaTrustedInputs {
+        config,
+        collateral,
+        compose,
+        policy,
+    })
+}
+
 async fn serve_dashboard(input: DashboardInputs, no_open: bool) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
@@ -529,6 +616,18 @@ async fn serve_dashboard(input: DashboardInputs, no_open: bool) -> Result<(), St
                 ),
             )?,
             "LIVE CLIENT — private mode requires reviewed release acceptance",
+        ),
+        DashboardInputs::PhalaTrusted(live) => (
+            zrpc_cli::LocalSession::new_live(
+                address,
+                zrpc_cli::LiveConfiguration::new_phala_trusted(
+                    live.config,
+                    live.collateral,
+                    live.compose,
+                    live.policy,
+                ),
+            )?,
+            "Phala-trusting profile — guest, KMS and runtime are trusted",
         ),
         DashboardInputs::Preview(inputs) => (
             zrpc_cli::LocalSession::new_preview(

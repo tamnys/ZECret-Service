@@ -7,6 +7,7 @@ type Verification = {
 };
 type Report = {
   mode?: string; platform?: string; simulation: boolean; private_accepted: boolean;
+  phala_trusted_authorized?: boolean;
   query_sent: boolean | string; public_query_sent?: boolean | string; fixture_dispatched?: boolean;
   verification?: Verification; chain_readiness?: unknown;
   error?: unknown; result?: unknown; privacy_verification?: string;
@@ -27,7 +28,7 @@ const run = byId<HTMLButtonElement>('run');
 const session = byId('session');
 const methodSelect = byId<HTMLSelectElement>('method');
 let capability = '';
-let mode: 'simulation' | 'live_unverified' | 'live_testnet_preview' = 'simulation';
+let mode: 'simulation' | 'live_unverified' | 'live_testnet_preview' | 'phala_trusted_unverified' = 'simulation';
 let bootstrap = location.hash.slice(1);
 history.replaceState(null, '', location.pathname);
 
@@ -87,6 +88,9 @@ function show(report: Report, elapsed: number): void {
     byId('chain').textContent = String(report.chain_readiness ?? 'not_checked').replaceAll('_', ' ');
     byId('result-label').textContent = mode === 'simulation'
       ? (report.error ? 'SIMULATED REJECTION' : 'SYNTHETIC RESULT')
+      : mode === 'phala_trusted_unverified'
+        ? (report.phala_trusted_authorized === true && report.query_sent === true && !report.error
+          ? 'PHALA-TRUSTING RESPONSE' : report.phala_trusted_authorized === true ? 'QUERY FAILED' : 'RELEASE NOT APPROVED')
       : (report.private_accepted === true && report.query_sent === true && !report.error
         ? 'VERIFIED RESPONSE' : report.private_accepted === true ? 'QUERY FAILED' : 'PRIVATE MODE BLOCKED');
     renderEvidence(report.verification);
@@ -95,8 +99,11 @@ function show(report: Report, elapsed: number): void {
 }
 function updateMethodFields(): void {
   const method = methodSelect.value;
-  const live = mode === 'live_unverified';
+  const live = mode === 'live_unverified' || mode === 'phala_trusted_unverified';
   byId('live-params').hidden = !live;
+  if (mode === 'phala_trusted_unverified') {
+    byId('preview-fixture').hidden = method !== 'getaddressbalance';
+  }
   byId('height-param').hidden = !live || method !== 'getblockhash';
   byId('hash-param').hidden = !live || !['getblockheader', 'getrawtransaction'].includes(method);
   byId('verbosity-param').hidden = !live || !['getblockheader', 'getrawtransaction'].includes(method);
@@ -117,6 +124,10 @@ function requestForMethod(): string {
       throw new Error('Enter a whole block height from 0 through 2147483647.');
     }
     params = [height];
+  } else if (method === 'getaddressbalance' && mode === 'phala_trusted_unverified') {
+    const address = byId<HTMLInputElement>('preview-address').value.trim();
+    if (!address) throw new Error('Enter a Zcash testnet transparent address.');
+    params = [{addresses:[address]}];
   } else if (method === 'getblockheader' || method === 'getrawtransaction') {
     const hash = byId<HTMLInputElement>('hash').value.trim();
     if (!/^[a-fA-F0-9]{64}$/.test(hash)) {
@@ -131,7 +142,7 @@ function requestForMethod(): string {
   return JSON.stringify({jsonrpc:'2.0',id:1,method,params});
 }
 methodSelect.addEventListener('change', () => {
-  if (mode === 'live_unverified') {
+  if (mode === 'live_unverified' || mode === 'phala_trusted_unverified') {
     byId<HTMLInputElement>('height').value = '';
     byId<HTMLInputElement>('hash').value = '';
   }
@@ -149,7 +160,9 @@ run.addEventListener('click', async () => {
       : mode === 'live_testnet_preview' ? (report as Report).report?.preview
         ? 'Public testnet reads completed. Workload identity and private approval remain unverified.'
         : 'Preview stopped before public testnet results were available.'
-      : 'Local session ready. Private mode requires independent verification.';
+      : mode === 'phala_trusted_unverified'
+        ? 'Phala-trusting release approval is required before a request is sent.'
+        : 'Local session ready. Private mode requires independent verification.';
   }
   catch (error) { session.textContent = error instanceof Error ? error.message : 'Local request failed'; }
   finally { run.disabled = false; }
@@ -158,7 +171,7 @@ async function start(): Promise<void> {
   try {
     if (!/^[a-f0-9]{64}$/.test(bootstrap)) throw new Error('Open this dashboard from the zrpc CLI to establish a local session.');
     capability = bootstrap;
-    const result = await api('/api/bootstrap') as {capability:string;mode:'simulation'|'live_unverified'|'live_testnet_preview';platform?:string};
+    const result = await api('/api/bootstrap') as {capability:string;mode:typeof mode;platform?:string};
     capability = result.capability;
     mode = result.mode;
     bootstrap = '';
@@ -185,9 +198,12 @@ async function start(): Promise<void> {
       if (status.default_address) byId<HTMLInputElement>('preview-address').value = status.default_address;
       show(status, performance.now()-started);
       session.textContent = 'Ready. Check the live TDX quote and read public testnet data.';
-    } else if (mode === 'live_unverified') {
-      byId('mode-label').textContent = 'LIVE CLIENT · UNVERIFIED';
-      byId('mode-description').textContent = 'This dashboard can ask the native client to verify a remote endpoint. No private query is sent unless the independently reviewed release and live connection pass every check.';
+    } else if (mode === 'live_unverified' || mode === 'phala_trusted_unverified') {
+      const trusted = mode === 'phala_trusted_unverified';
+      byId('mode-label').textContent = trusted ? 'PHALA-TRUSTING · UNVERIFIED' : 'LIVE CLIENT · UNVERIFIED';
+      byId('mode-description').textContent = trusted
+        ? 'This profile trusts Phala with guest administration, KMS and persistent runtime state. The native client still requires a reviewed workload, live TDX quote, fresh TLS key binding and Tor before sending a query. It does not protect against Phala administrators.'
+        : 'This dashboard can ask the native client to verify a remote endpoint. No private query is sent unless the independently reviewed release and live connection pass every check.';
       byId('method-label').textContent = 'Typed testnet request';
       byId('scenario-label').style.display = 'none';
       byId('scenario').style.display = 'none';
@@ -196,20 +212,37 @@ async function start(): Promise<void> {
         if (option.value === 'getblockheader') option.textContent = 'Block header by hash';
         if (option.value === 'getrawtransaction') option.textContent = 'Transaction by ID';
       }
+      if (trusted) {
+        const addressOption = document.createElement('option');
+        addressOption.value = 'getaddressbalance';
+        addressOption.textContent = 'Testnet transparent address balance';
+        methodSelect.append(addressOption);
+        byId('preview-note').textContent = 'Only a valid testnet transparent P2PKH or P2SH address is accepted by the native client. Phala is trusted under this profile.';
+      }
       updateMethodFields();
       run.firstChild!.textContent = 'Try verified query ';
-      byId('release-note').textContent = `${result.platform === 'gcp-tdx' ? 'Google Cloud TDX' : 'Phala dstack'}: no approved production release is packaged yet. Private mode stays blocked.`;
-      byId('gate-note').textContent = result.platform === 'gcp-tdx'
+      byId('release-note').textContent = trusted
+        ? 'Phala-trusting profile: no reviewed live release is packaged yet. Queries remain blocked.'
+        : `${result.platform === 'gcp-tdx' ? 'Google Cloud TDX' : 'Phala dstack'}: no approved production release is packaged yet. Private mode stays blocked.`;
+      byId('gate-note').textContent = trusted
+        ? 'This qualified claim depends on Phala-operated guest, KMS and runtime controls. The local Rust client must approve the exact release and connection before reading your query.'
+        : result.platform === 'gcp-tdx'
         ? 'Google Cloud TDX boot integrity, administrative isolation, durable storage isolation, channel binding, and external cleanup still need independent validation.'
         : 'Phala Gates A–E still need genuine evidence.';
       const started = performance.now();
       const status = await api('/api/status') as Report;
-      if (status.mode !== 'live_unverified' || status.platform !== result.platform ||
+      if (status.mode !== mode || status.platform !== result.platform ||
           status.private_accepted !== false || status.query_sent !== false) {
         throw new Error('Local client status is inconsistent. Restart the dashboard from the CLI.');
       }
       show(status, performance.now()-started);
-      session.textContent = 'Local session ready. Private mode requires independent verification.';
+      session.textContent = trusted
+        ? 'Local session ready. A reviewed Phala-trusting release is required.'
+        : 'Local session ready. Private mode requires independent verification.';
+      if (trusted) {
+        const asideTitle = document.querySelector('.aside strong');
+        if (asideTitle) asideTitle.textContent = 'Phala-trusting mode is closed.';
+      }
     } else if (mode === 'simulation') {
       updateMethodFields();
       byId('mode-label').textContent = 'SIMULATION ONLY';

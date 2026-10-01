@@ -154,6 +154,7 @@ pub fn inspect_phala_public_preview_quote_and_report_data(
 enum Appraisal {
     Strict,
     PhalaPublicPreview,
+    PhalaTrusted,
 }
 
 fn inspect_quote_and_report_data_at(
@@ -254,6 +255,31 @@ pub(crate) fn inspect_phala_public_preview_quote_with_claims(
     }
 }
 
+/// The Phala-managed release profile uses the reviewed stock-platform flag
+/// allowances, while retaining production Intel roots, current collateral,
+/// UpToDate TCB, no advisories and debug rejection.
+pub(crate) fn inspect_phala_trusted_quote_with_claims(
+    quote: &[u8],
+    collateral_json: &[u8],
+    inspect: impl FnOnce(&QuoteClaims),
+) -> OfflineInspection {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(now) => inspect_at_with_appraisal(
+            quote,
+            collateral_json,
+            now.as_secs(),
+            "system_clock",
+            Appraisal::PhalaTrusted,
+            inspect,
+        ),
+        Err(_) => {
+            let mut report = OfflineInspection::new(None, "system_clock");
+            report.issue = Some(InspectionIssue::ClockUnavailable);
+            report
+        }
+    }
+}
+
 #[cfg(test)]
 fn inspect_at(
     quote: &[u8],
@@ -308,6 +334,8 @@ fn inspect_at_with_appraisal(
     let mut result = OfflineInspection::new(Some(now), time_source);
     if matches!(appraisal, Appraisal::PhalaPublicPreview) {
         result.policy = "public preview only: Intel-root TDX, UpToDate TCB, no advisories; dynamic platform, cached keys, SMT and untrusted quote trailer allowed; no private authority";
+    } else if matches!(appraisal, Appraisal::PhalaTrusted) {
+        result.policy = "Phala-managed guest trust: Intel-root TDX, UpToDate TCB, no advisories; dynamic platform, cached platform keys and SMT allowed; quote trailer untrusted";
     }
     // Upstream parse() permits trailing bytes. Use its complete decoder and
     // encoder to reject ignored bytes inside length envelopes too. Never use
@@ -315,7 +343,7 @@ fn inspect_at_with_appraisal(
     let mut input = quote;
     let parsed = match appraisal {
         Appraisal::Strict => Quote::decode_all(&mut input),
-        Appraisal::PhalaPublicPreview => Quote::decode(&mut input),
+        Appraisal::PhalaPublicPreview | Appraisal::PhalaTrusted => Quote::decode(&mut input),
     };
     let signed_length = quote.len() - input.len();
     if !parsed.is_ok_and(|parsed| parsed.encode().as_slice() == &quote[..signed_length]) {
@@ -373,7 +401,9 @@ fn inspect_at_with_appraisal(
     result.collateral_earliest_expiration_unix_seconds = Some(claims.earliest_expiration_date);
     let appraisal_result = match appraisal {
         Appraisal::Strict => appraise(&claims, now),
-        Appraisal::PhalaPublicPreview => appraise_phala_public_preview(&claims, now),
+        Appraisal::PhalaPublicPreview | Appraisal::PhalaTrusted => {
+            appraise_phala_public_preview(&claims, now)
+        }
     };
     match appraisal_result {
         Ok(()) => {

@@ -428,7 +428,13 @@ pub struct VerifiedRpcSession {
     session: OwnedHttpSession,
     deadline: Instant,
     authority: String,
+    allow_testnet_address: bool,
 }
+
+/// A retained connection approved under the explicit Phala-managed guest,
+/// KMS and runtime trust model. No conversion to the provider-independent
+/// `VerifiedRpcSession` is exposed to callers.
+pub struct PhalaTrustedRpcSession(VerifiedRpcSession);
 
 /// A diagnostic-attested, managed-Tor session for two typed public testnet
 /// reads. This type is distinct from `VerifiedRpcSession`, has no arbitrary
@@ -462,6 +468,16 @@ impl VerifiedRpcSession {
         authority: String,
         collateral_deadline: PrivateDeadline,
     ) -> Result<Self, SafeError> {
+        Self::from_inspection_for_profile(session, deadline, authority, collateral_deadline, false)
+    }
+
+    fn from_inspection_for_profile(
+        session: OwnedHttpSession,
+        deadline: Instant,
+        authority: String,
+        collateral_deadline: PrivateDeadline,
+        allow_testnet_address: bool,
+    ) -> Result<Self, SafeError> {
         session.origin.require_managed()?;
         session
             .private_deadline
@@ -471,6 +487,7 @@ impl VerifiedRpcSession {
             session,
             deadline,
             authority,
+            allow_testnet_address,
         };
         verified.ensure_private_ready()?;
         Ok(verified)
@@ -582,7 +599,7 @@ impl VerifiedRpcSession {
         A: FnOnce() -> Result<(), SafeError>,
     {
         self.ensure_private_ready()?;
-        ensure_private_method(request)?;
+        ensure_private_method(request, self.allow_testnet_address)?;
         let mut http = build_rpc_http(self.authority.as_str(), request)?;
         let operation_deadline = self.private_operation_deadline()?;
         self.ensure_private_ready()?;
@@ -618,14 +635,55 @@ impl VerifiedRpcSession {
     }
 }
 
-fn ensure_private_method(request: &RpcRequest) -> Result<(), SafeError> {
-    if matches!(request.method(), Method::GetPreviewAddressBalance { .. }) {
+fn ensure_private_method(
+    request: &RpcRequest,
+    allow_testnet_address: bool,
+) -> Result<(), SafeError> {
+    if !allow_testnet_address && matches!(request.method(), Method::GetPreviewAddressBalance { .. })
+    {
         return Err(SafeError::new(
             ErrorCode::MethodNotAllowed,
             "Transparent address balance is available only in the public preview.",
         ));
     }
     Ok(())
+}
+
+impl PhalaTrustedRpcSession {
+    fn from_authenticated_inspection(
+        session: OwnedHttpSession,
+        deadline: Instant,
+        authority: String,
+        collateral_deadline: PrivateDeadline,
+    ) -> Result<Self, SafeError> {
+        VerifiedRpcSession::from_inspection_for_profile(
+            session,
+            deadline,
+            authority,
+            collateral_deadline,
+            true,
+        )
+        .map(Self)
+    }
+
+    pub async fn query_from_body(
+        self,
+        body: impl FnOnce() -> Result<Vec<u8>, SafeError>,
+    ) -> Result<Value, SafeError> {
+        self.0.query_from_body(body).await
+    }
+
+    pub async fn query_from_body_async<F, Fut>(self, body: F) -> Result<Value, SafeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, SafeError>>,
+    {
+        self.0.query_from_body_async(body).await
+    }
+
+    pub async fn query(self, request: &RpcRequest) -> Result<Value, SafeError> {
+        self.0.query(request).await
+    }
 }
 
 impl PreviewRpcSession {
@@ -893,13 +951,14 @@ mod deadline_tests {
             zrpc_protocol::PREVIEW_TESTNET_ADDRESS,
         ).as_bytes()).unwrap();
         assert_eq!(
-            ensure_private_method(&preview).unwrap_err().code,
+            ensure_private_method(&preview, false).unwrap_err().code,
             ErrorCode::MethodNotAllowed
         );
         let status =
             parse_request(br#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#)
                 .unwrap();
-        assert!(ensure_private_method(&status).is_ok());
+        assert!(ensure_private_method(&status, false).is_ok());
+        assert!(ensure_private_method(&preview, true).is_ok());
     }
 
     #[test]

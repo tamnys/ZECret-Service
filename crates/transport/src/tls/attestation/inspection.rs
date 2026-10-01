@@ -1,22 +1,23 @@
 //! Diagnostic authentication consumes the session but never grants query authority.
 
 use super::{
-    PreviewRpcSession, PrivateDeadline, UnverifiedPublicEvidence, VerifiedRpcSession,
-    collateral_expired,
+    PhalaTrustedRpcSession, PreviewRpcSession, PrivateDeadline, UnverifiedPublicEvidence,
+    VerifiedRpcSession, collateral_expired,
 };
 use crate::tls::MAX_CONNECTION_LIFETIME;
 use serde::Serialize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use zrpc_protocol::Backend;
 use zrpc_verifier::{
-    ApprovedRelease, ReleasePolicy,
+    ApprovedRelease, PhalaTrustedPolicy, PhalaTrustedRelease, ReleasePolicy,
     gcp::BoundGcpWorkloadInspection,
     offline::{
         BoundQuoteInspection, InspectionStatus, inspect_phala_public_preview_quote_and_report_data,
     },
     workload::{
         BoundWorkloadInspection, WorkloadInspection, WorkloadPolicy,
-        inspect_phala_public_preview_workload, inspect_workload_and_report_data,
+        inspect_phala_public_preview_workload, inspect_phala_trusted_workload_and_report_data,
+        inspect_workload_and_report_data,
     },
 };
 
@@ -148,7 +149,7 @@ impl UnverifiedPublicEvidence {
         raw_app_compose: &[u8],
         policy: &WorkloadPolicy,
     ) -> EndpointInspection {
-        self.inspect_against(collateral_json, raw_app_compose, policy)
+        self.inspect_against(collateral_json, raw_app_compose, policy, false)
     }
 
     /// Retain the original connection only for typed public reads after
@@ -314,7 +315,7 @@ impl UnverifiedPublicEvidence {
             if !release.matches_launch_config(raw_app_compose) {
                 return None;
             }
-            let report = self.inspect_against(collateral_json, raw_app_compose, policy);
+            let report = self.inspect_against(collateral_json, raw_app_compose, policy, false);
             report
                 .diagnostic_passed()
                 .then_some(report.private_collateral_deadline)
@@ -335,11 +336,53 @@ impl UnverifiedPublicEvidence {
         )
     }
 
+    /// Authorize the explicitly qualified Phala-trusting profile. This has a
+    /// separate packaged catalog and never accepts diagnostic preview evidence.
+    pub fn authorize_phala_trusted(
+        self,
+        collateral_json: &[u8],
+        raw_app_compose: &[u8],
+        selection: &PhalaTrustedPolicy,
+    ) -> Result<PhalaTrustedRpcSession, zrpc_protocol::SafeError> {
+        self._session.origin.require_managed()?;
+        let releases = PhalaTrustedRelease::selected(selection)?;
+        if releases.is_empty() {
+            return Err(zrpc_protocol::SafeError::new(
+                zrpc_protocol::ErrorCode::UnknownRelease,
+                "This client has no selected reviewed Phala-trusting release.",
+            ));
+        }
+        let collateral_deadline = releases.iter().find_map(|release| {
+            let policy = release.workload();
+            if !release.matches_launch_config(raw_app_compose) {
+                return None;
+            }
+            let report = self.inspect_against(collateral_json, raw_app_compose, policy, true);
+            report
+                .diagnostic_passed()
+                .then_some(report.private_collateral_deadline)
+                .flatten()
+        });
+        let Some(collateral_deadline) = collateral_deadline else {
+            return Err(zrpc_protocol::SafeError::new(
+                zrpc_protocol::ErrorCode::PrivateModeUnavailable,
+                "Hardware, workload, freshness or live TLS key did not match a reviewed Phala-trusting release.",
+            ));
+        };
+        PhalaTrustedRpcSession::from_authenticated_inspection(
+            self._session,
+            self.deadline,
+            self.authority,
+            collateral_deadline,
+        )
+    }
+
     fn inspect_against(
         &self,
         collateral_json: &[u8],
         raw_app_compose: &[u8],
         policy: &WorkloadPolicy,
+        phala_trusted: bool,
     ) -> EndpointInspection {
         let mut report = EndpointInspection::new();
         self.check_session(&mut report);
@@ -364,14 +407,25 @@ impl UnverifiedPublicEvidence {
                 return report;
             }
         };
-        report.evidence = Some(inspect_workload_and_report_data(
-            &quote,
-            collateral_json,
-            self.evidence.event_log.as_bytes(),
-            raw_app_compose,
-            policy,
-            &self.expected_report_data,
-        ));
+        report.evidence = Some(if phala_trusted {
+            inspect_phala_trusted_workload_and_report_data(
+                &quote,
+                collateral_json,
+                self.evidence.event_log.as_bytes(),
+                raw_app_compose,
+                policy,
+                &self.expected_report_data,
+            )
+        } else {
+            inspect_workload_and_report_data(
+                &quote,
+                collateral_json,
+                self.evidence.event_log.as_bytes(),
+                raw_app_compose,
+                policy,
+                &self.expected_report_data,
+            )
+        });
         // Recheck after synchronous cryptographic/event-log work: its cost must
         // not extend the original lifetime or leave a closed session accepted.
         self.check_session(&mut report);

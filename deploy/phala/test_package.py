@@ -293,7 +293,7 @@ class PackageTests(unittest.TestCase):
         compose = json.loads(compose_bytes)
         app = json.loads(app_bytes)
         self.assertEqual(app["docker_compose_file"].encode(), compose_bytes)
-        self.assertNotIn("swap_size", app)
+        self.assertEqual(app["swap_size"], 0)
         self.assertNotIn("key_provider", app)
         self.assertEqual(receipt["docker_compose_file_sha256"], prepare.digest(compose_bytes))
         self.assertEqual(receipt["app_compose_file_sha256"], prepare.digest(app_bytes))
@@ -304,6 +304,10 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(compose["services"]["app"]["image"], image)
         self.assertEqual(compose["services"]["quote"]["image"], image)
         self.assertEqual(compose["volumes"]["runtime_tmpfs"]["driver_opts"]["type"], "tmpfs")
+        for service in ("quote", "app"):
+            self.assertEqual(compose["services"][service]["ulimits"]["core"], 0)
+            self.assertEqual(compose["services"][service]["tmpfs"],
+                             ["/tmp:rw,nosuid,nodev,noexec,mode=1777"])
         quote_bind = compose["services"]["quote"]["volumes"][1]
         self.assertEqual(quote_bind["source"], "/run/dstack.sock")
         self.assertEqual(quote_bind["target"], "/dstack.sock")
@@ -353,6 +357,7 @@ class PackageTests(unittest.TestCase):
             with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
                   patch.object(supervisor, "RUN", self.root),
                   patch.object(supervisor, "BACKEND", self.root / "quote-only.sock"),
+                  patch.object(supervisor.resource, "getrlimit", return_value=(0, 0)),
                   patch.object(supervisor, "mount_type", return_value="tmpfs")):
                 with self.assertRaisesRegex(RuntimeError, "app container exposes dstack socket"):
                     supervisor.run_app()
@@ -367,6 +372,7 @@ class PackageTests(unittest.TestCase):
             with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
                   patch.object(supervisor, "RUN", self.root),
                   patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+                  patch.object(supervisor.resource, "getrlimit", return_value=(0, 0)),
                   patch.object(supervisor, "mount_type", return_value="tmpfs"),
                   patch.object(supervisor.subprocess, "Popen") as started):
                 with self.assertRaisesRegex(RuntimeError, "guest control socket path"):
@@ -389,8 +395,9 @@ class PackageTests(unittest.TestCase):
               patch.object(supervisor, "COOKIE_DIR", cookie_dir),
               patch.object(supervisor, "COOKIE", cookie),
               patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+              patch.object(supervisor.resource, "getrlimit", return_value=(0, 0)),
               patch.object(supervisor, "mount_type",
-                           side_effect=lambda path: "tmpfs" if path == self.root else "ext4"),
+                           side_effect=lambda path: "tmpfs" if path in (self.root, Path("/tmp")) else "ext4"),
               patch.object(supervisor.subprocess, "Popen") as started):
             with self.assertRaisesRegex(RuntimeError, "stale Zebra RPC cookie"):
                 supervisor.run_node()
@@ -405,6 +412,7 @@ class PackageTests(unittest.TestCase):
         with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
               patch.object(supervisor, "RUN", self.root),
               patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+              patch.object(supervisor.resource, "getrlimit", return_value=(0, 0)),
               patch.object(supervisor, "mount_type", return_value="tmpfs"),
               patch.object(supervisor.subprocess, "Popen") as started):
             with self.assertRaises(FileExistsError):
