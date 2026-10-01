@@ -251,6 +251,21 @@ mode. Its comparison policy was derived from provider readback and is not an
 independent artifact approval. No resource mutation or additional spend was
 triggered.
 
+A later authenticated `GET /api/v1/cvms/cvm_MeD4o0eQ/stats` on 2026-10-01
+reported `is_online: true`, `status: running`, 7,867,019,264 bytes total
+memory, 7,204,847,616 bytes available, and zero swap. Its single reported disk
+had 83,937,857,536 bytes total and 65,836,134,400 bytes free. The response was
+read with the existing workspace credential, pinned TLS root, TLS 1.3 and the
+operator-approved 1 MiB cap; no raw response was retained. At 02:25 UTC, a
+fresh managed-Tor public preview independently verified its TDX quote, nonce
+and TLS-exporter binding, then returned Testnet height **4,425,071** and the
+zero-balance fixture address. `workload_identity_verified` and
+`private_accepted` remained false. Two earlier probes returned error envelopes,
+but their error fields were discarded by an overly narrow output filter, so
+their cause is unknown. This is point-in-time fit and availability evidence,
+not an import-memory peak, sustained uptime, independent chain-tip comparison,
+or private-mode acceptance. No provider mutation or new resource occurred.
+
 At 2026-10-01 00:05 UTC, a local probe started the dashboard inside Colima,
 forwarded its assigned loopback port through SSH to the Mac, and retained its
 one-time bootstrap token and local capability only in process memory. From
