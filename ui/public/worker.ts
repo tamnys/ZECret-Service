@@ -1,15 +1,15 @@
 /** Public, deterministic website API. It has no RPC, ticket, wallet, or status upstream. */
 
 const SOURCE = 'https://github.com/tamnys/ZECret-Service';
-const SNAPSHOT_DATE = '2026-09-30';
+const SNAPSHOT_DATE = '2026-10-01';
 
 const status = {
   kind: 'repository_snapshot',
   as_of: SNAPSHOT_DATE,
-  source: `${SOURCE}/blob/main/README.md`,
+  source: `${SOURCE}/blob/main/records/phala-block-context-rollout-2026-10-01.md`,
   release_approval: {
-    state: 'unavailable',
-    detail: 'No approved private release is packaged in this site.'
+    state: 'phala_trusted_testnet_approved',
+    detail: 'An approved Phala-trusting testnet release is packaged in the native client. The stricter provider-independent private profile remains unavailable.'
   },
   transport_attestation: {
     state: 'not_checked',
@@ -17,18 +17,18 @@ const status = {
   },
   payment: {
     state: 'local_poc_only',
-    detail: 'Native ticket issuance and redemption are implemented in a local proof of concept. Settlement is simulated; no ZEC payment or approved paid deployment is available.'
+    detail: 'Tickets remain a separate local proof of concept. The approved Phala-trusting testnet service does not accept ticket payments.'
   },
   chain_data: {
-    state: 'unavailable',
-    detail: 'No live testnet node or reviewed public status source is connected.'
+    state: 'live_testnet_query_recorded',
+    detail: 'A native client completed a live Zcash testnet query on 2026-10-01. This dated snapshot does not report current service health.'
   }
 } as const;
 
 const capabilities = {
   kind: 'informational_only',
   as_of: SNAPSHOT_DATE,
-  methods: ['getblockchaininfo', 'getblockcount', 'getblockhash', 'getblockheader', 'getrawtransaction'],
+  methods: ['getblockchaininfo', 'getblockcount', 'getblockhash', 'getblockheader', 'getrawtransaction', 'getaddressbalance'],
   private_rpc_from_website: false,
   ticket_handling_from_website: false,
   trusted_release_policy_from_website: false,

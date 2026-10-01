@@ -73,7 +73,7 @@
             <option value="ticket-replay">Simulated ticket replay rejected</option>
           </select>
           <button id="run-scenario" class="button primary" type="button">Show example</button>
-          <p>The ticket example is synthetic. Native ticket issuance and redemption exist only in a local proof of concept; paid access is not live.</p>
+          <p>The ticket example is synthetic. The approved Phala-trusting testnet service does not require or accept tickets.</p>
         </div>
         <div class="demo-output panel" aria-live="polite">
           <div class="output-top"><span>Example result</span><span class="fixture-pill">Synthetic fixture</span></div>
@@ -104,7 +104,7 @@
         </ol>
         <p class="payment-limit">A credit is used when the service admits a request. A node error or lost response can still consume it; the client does not automatically spend another.</p>
       </div>
-      <p class="demo-handoff">The local proof of concept puts ticket controls in the native <code>zrpc</code> CLI. Paid private queries still need an approved deployment. <a class="text-link" href="#quickstart">See the native-client setup →</a></p>
+      <p class="demo-handoff">Run live testnet queries with the approved Phala-trusting profile in the native <code>zrpc</code> client. Tickets remain a separate demo. <a class="text-link" href="#quickstart">See the native-client setup →</a></p>
     </section>
 
     <section class="section shell privacy-section" id="privacy" aria-labelledby="privacy-title">
@@ -127,9 +127,9 @@
           <div>
             <p class="section-label">For developers</p>
             <h2 id="quickstart-title">Run the native client locally.</h2>
-            <p>The current Rust CLI includes local synthetic examples. Build from source on Linux with the pinned Rust 1.94.1 toolchain and committed Cargo.lock.</p>
-            <p>These commands do not start a verified private session. There is no approved release download or checksum to link yet.</p>
-            <a class="text-link" href="https://github.com/tamnys/ZECret-Service/blob/main/README.md" rel="noreferrer noopener">Read the source setup guide →</a>
+            <p>Build the Rust client from source on Linux with the pinned Rust 1.94.1 toolchain and committed Cargo.lock. The approved Phala-trusting profile can query the running Zcash testnet service through Tor after it verifies the server.</p>
+            <p>The examples here stay local. The source guide has the live profile, release policy, and connection steps.</p>
+            <a class="text-link" href="https://github.com/tamnys/ZECret-Service/blob/main/README.md#live-phala-testnet-queries" rel="noreferrer noopener">Set up a live native query →</a>
           </div>
           <div class="code-card">
             <div class="code-title"><span>Local examples</span><span>zrpc</span></div>
@@ -141,7 +141,7 @@
             <p>The local dashboard opens through the native CLI. It is separate from this public site.</p>
           </div>
         </div>
-        <div class="methods"><h3>Supported read-only methods</h3><ul><li><code>getblockchaininfo</code></li><li><code>getblockcount</code></li><li><code>getblockhash</code></li><li><code>getblockheader</code></li><li><code>getrawtransaction</code></li></ul><p>Wallet methods, transaction submission, batches, and arbitrary upstream URLs are rejected. Requests with parameters use the native client's typed format.</p></div>
+        <div class="methods"><h3>Supported read-only methods</h3><ul><li><code>getblockchaininfo</code></li><li><code>getblockcount</code></li><li><code>getblockhash</code></li><li><code>getblockheader</code></li><li><code>getrawtransaction</code></li><li><code>getaddressbalance</code> for a testnet transparent address</li></ul><p>Wallet methods, transaction submission, batches, and arbitrary upstream URLs are rejected. Requests with parameters use the native client's typed format.</p></div>
       </div>
     </section>
 

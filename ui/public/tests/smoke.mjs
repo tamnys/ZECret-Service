@@ -19,23 +19,23 @@ test('static pages keep the public browser boundary', async () => {
   }
 });
 
-test('status separates unavailable live capabilities from fixtures', async () => {
+test('status separates approved native profile from browser fixtures', async () => {
   const response = await request('/api/status');
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('cache-control'), 'no-store');
   const status = await response.json();
   assert.equal(status.kind, 'repository_snapshot');
-  assert.equal(status.release_approval.state, 'unavailable');
+  assert.equal(status.release_approval.state, 'phala_trusted_testnet_approved');
   assert.equal(status.transport_attestation.state, 'not_checked');
   assert.equal(status.payment.state, 'local_poc_only');
-  assert.equal(status.chain_data.state, 'unavailable');
+  assert.equal(status.chain_data.state, 'live_testnet_query_recorded');
 
   const capabilities = await (await request('/api/capabilities')).json();
   assert.equal(capabilities.trusted_release_policy_from_website, false);
   assert.equal(capabilities.private_rpc_from_website, false);
   assert.equal(capabilities.ticket_handling_from_website, false);
   assert.deepEqual(capabilities.methods, [
-    'getblockchaininfo', 'getblockcount', 'getblockhash', 'getblockheader', 'getrawtransaction'
+    'getblockchaininfo', 'getblockcount', 'getblockhash', 'getblockheader', 'getrawtransaction', 'getaddressbalance'
   ]);
 });
 
