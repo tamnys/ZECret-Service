@@ -1,0 +1,46 @@
+name: Phala BitBake worker namespace probe
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  worker-namespace:
+    name: Probe pinned BitBake worker isolation on native x86_64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact public project and Poky source commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          source="$GITHUB_WORKSPACE/source"
+          poky="$GITHUB_WORKSPACE/poky"
+          for directory in "$source" "$poky"; do
+            mkdir "$directory"
+            git -C "$directory" init -q
+          done
+          git -c core.hooksPath=/dev/null -C "$source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -c core.hooksPath=/dev/null -C "$source" checkout -q --detach FETCH_HEAD
+          git -c core.hooksPath=/dev/null -C "$poky" fetch -q --no-tags --depth=1 \
+            https://github.com/yoctoproject/poky.git \
+            cd44e6bd40b0c1f498b3feaeb5e9b72f8bf32d41
+          test "$(git -C "$poky" rev-parse FETCH_HEAD)" = cd44e6bd40b0c1f498b3feaeb5e9b72f8bf32d41
+          git -c core.hooksPath=/dev/null -C "$poky" checkout -q --detach FETCH_HEAD
+
+      - name: Exercise the exact non-root BitBake worker namespace function
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          poky="$GITHUB_WORKSPACE/poky"
+          set +e
+          python3 -I -B "$source/experiments/ephemeral-runtime/probe-bitbake-worker.py" \
+            "$poky" | tee "$GITHUB_WORKSPACE/worker-namespace-result.json"
+          probe_status=${PIPESTATUS[0]}
+          set -e
+          cat "$GITHUB_WORKSPACE/worker-namespace-result.json" >> "$GITHUB_STEP_SUMMARY"
+          exit "$probe_status"
