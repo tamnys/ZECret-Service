@@ -396,6 +396,21 @@ class PackageTests(unittest.TestCase):
                 supervisor.run_node()
             snapshot.ensure_snapshot.assert_not_called()
             started.assert_not_called()
+            self.assertEqual((self.root / "zrpc-quote").stat().st_mode & 0o777, 0o700)
+
+    def test_split_node_refuses_preexisting_quote_mountpoint(self):
+        (self.root / "zrpc-quote").mkdir()
+        snapshot = types.ModuleType("snapshot_import")
+        snapshot.ensure_snapshot = Mock()
+        with (patch.dict(sys.modules, {"snapshot_import": snapshot}),
+              patch.object(supervisor, "RUN", self.root),
+              patch.object(supervisor, "BACKEND", self.root / "dstack-backend"),
+              patch.object(supervisor, "mount_type", return_value="tmpfs"),
+              patch.object(supervisor.subprocess, "Popen") as started):
+            with self.assertRaises(FileExistsError):
+                supervisor.run_node()
+            snapshot.ensure_snapshot.assert_not_called()
+            started.assert_not_called()
 
     def test_split_node_health_requires_cookie_rpc_and_no_quote_socket(self):
         cookie = self.root / ".cookie"
