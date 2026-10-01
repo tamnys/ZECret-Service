@@ -311,6 +311,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The image now refuses any guest-visible swap. GitHub's disposable
+          # runner enables host swap, which containers inherit via /proc/swaps.
+          sudo swapoff -a
+          test "$(wc -l </proc/swaps)" -eq 1
           python3 -I "$GITHUB_WORKSPACE/source/deploy/phala/check_native_mounts.py" \
             --image "zrpc-phala-native-smoke:checked-local"
           echo 'Local tmpfs, synthetic quote exchange, cold Zebra public RPC on retained TLS, write-method rejection, and existing-session closure on quote loss passed; no snapshot import, live dstack or TDX guest was used.' \
