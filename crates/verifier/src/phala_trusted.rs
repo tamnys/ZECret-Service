@@ -1,6 +1,6 @@
 //! Phala-managed guest approval is separate from provider-independent approval.
 //! The client packages exact reviewed manifest bytes; a local selection can
-//! only narrow this catalog. The catalog stays empty until live review.
+//! only narrow this catalog.
 
 use crate::{PhalaTrustedPolicy, invalid_policy, workload::WorkloadPolicy};
 use ez_hash::{Hasher, Sha256};
@@ -17,8 +17,15 @@ struct EmbeddedRelease {
     manifest_json: &'static [u8],
 }
 
-// A reviewed, live Phala artifact must be packaged by a later client release.
-const EMBEDDED_RELEASES: &[EmbeddedRelease] = &[];
+const EMBEDDED_RELEASES: &[EmbeddedRelease] = &[EmbeddedRelease {
+    id: "phala-prod9-testnet-20261001-1",
+    manifest_sha256: [
+        0x80, 0x73, 0xad, 0xda, 0x03, 0x3f, 0xf8, 0xb9, 0x64, 0xc4, 0x6d, 0x88, 0xe6, 0x72, 0x04,
+        0x9c, 0x0f, 0x5b, 0x43, 0xd9, 0x46, 0xdc, 0x79, 0x8c, 0x46, 0x82, 0x1f, 0xe1, 0x35, 0x23,
+        0x86, 0x69,
+    ],
+    manifest_json: include_bytes!("releases/phala-prod9-20261001.json"),
+}];
 
 pub(crate) fn is_embedded(id: &str) -> bool {
     EMBEDDED_RELEASES.iter().any(|release| release.id == id)
@@ -231,7 +238,24 @@ mod tests {
         policy.phala_trusted_enabled = true;
         policy.reviewed_release_ids.push("SYNTHETIC".into());
         assert!(PhalaTrustedRelease::selected(&policy).is_err());
-        assert!(EMBEDDED_RELEASES.is_empty());
+    }
+
+    #[test]
+    fn packaged_release_matches_only_the_reviewed_launch() {
+        let mut policy = PhalaTrustedPolicy::default();
+        policy.phala_trusted_enabled = true;
+        policy
+            .reviewed_release_ids
+            .push("phala-prod9-testnet-20261001-1".into());
+        let selected = PhalaTrustedRelease::selected(&policy).unwrap();
+        assert_eq!(selected.len(), 1);
+        let release = &selected[0];
+        let launch = include_bytes!("../../../deploy/phala/releases/2026-10-01/app-compose.json");
+        assert!(release.matches_launch_config(launch));
+        let mut changed = launch.to_vec();
+        changed[0] ^= 1;
+        assert!(!release.matches_launch_config(&changed));
+        assert!(!release.matches_launch_config(b"{}"));
     }
 
     #[test]
