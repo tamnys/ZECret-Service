@@ -103,8 +103,8 @@ HTTP 200. The preview reported `public_preview_passed: true`, Testnet height
 4,424,577, `workload_identity_verified: false` and `private_accepted: false`.
 The resulting local UI path is Mac loopback → SSH → Colima Rust client → local
 Tor → Phala. The probe did not open a graphical Mac browser or send a private
-request. It then closed the tunnel and dashboard. Its abrupt SSH teardown left one Tor
-child, which was explicitly terminated with its exact temporary directory
+request. It then closed the tunnel and dashboard. Its abrupt SSH teardown left
+one Tor child, which was explicitly terminated with its exact temporary directory
 removed. [PR #276](https://github.com/tamnys/ZECret-Service/pull/276)
 subsequently added a Linux parent-death guard; an abrupt client exit can still
 leave its temporary Tor directory, so it is not crash-time storage cleanup.
@@ -124,8 +124,7 @@ ssh -F /Users/j/.colima/ssh_config -N -L 127.0.0.1:PORT:127.0.0.1:PORT colima
 ```
 
 Open the one-time URL in the Mac browser. The local and remote ports must match
-because the dashboard validates
-Host and Origin. If that port is already occupied on the Mac, stop the
+because the dashboard validates Host and Origin. If that port is already occupied on the Mac, stop the
 dashboard and start it again for a new assigned port. Stop the dashboard with
 Ctrl-C, then stop the tunnel. This local wrapper depends on the ignored staged
 Tor and `libevent` artifacts on this Mac; the managed-container preview command
