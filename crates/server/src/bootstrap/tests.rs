@@ -512,9 +512,6 @@ async fn node_listener_uses_same_tls_session_and_only_typed_loopback_rpc() {
                         "getblockchaininfo" => serde_json::json!({
                             "chain":"test", "blocks":42, "bestblockhash":"ab".repeat(32)
                         }),
-                        "getbestblockheightandhash" => {
-                            serde_json::json!({"height":42,"hash":"ab".repeat(32)})
-                        }
                         _ => panic!("unapproved method reached the node"),
                     };
                     let reply = serde_json::json!({
@@ -586,10 +583,7 @@ async fn node_listener_uses_same_tls_session_and_only_typed_loopback_rpc() {
     assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], "SYNTHETIC_REQUEST");
     assert_eq!(response["result"], 42);
-    assert_eq!(
-        *seen.lock().unwrap(),
-        ["getblockchaininfo", "getbestblockheightandhash"]
-    );
+    assert_eq!(*seen.lock().unwrap(), ["getblockchaininfo"]);
     let mismatch = Request::post("/rpc")
         .header(header::HOST, "localhost")
         .header(header::CONTENT_TYPE, "application/json")
@@ -613,12 +607,7 @@ async fn node_listener_uses_same_tls_session_and_only_typed_loopback_rpc() {
     assert!(sender.send_request(rpc()).await.is_err());
     assert_eq!(
         *seen.lock().unwrap(),
-        [
-            "getblockchaininfo",
-            "getbestblockheightandhash",
-            "getblockchaininfo",
-            "getbestblockheightandhash"
-        ]
+        ["getblockchaininfo", "getblockchaininfo"]
     );
     quote_task.await.unwrap();
     zebra_task.await.unwrap();
