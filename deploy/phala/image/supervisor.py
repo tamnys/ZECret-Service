@@ -239,6 +239,15 @@ def run_node():
         BACKEND, RUN / "dstack.sock", RUN / "zrpc-quote" / "quote.sock",
         RUN / "zrpc-quote" / "watch.sock",
     ))
+    # Docker needs this target in both the image and the shared /run volume
+    # before it can bind the host bridge into the read-only wrapper container.
+    # The node sees only this empty tmpfs directory, never the mounted socket.
+    quote_target = RUN / "zrpc-quote"
+    quote_target.mkdir(mode=0o700)
+    target = quote_target.lstat()
+    if (not stat.S_ISDIR(target.st_mode) or target.st_uid != os.geteuid()
+            or stat.S_IMODE(target.st_mode) != 0o700):
+        raise RuntimeError("memory-backed quote mountpoint is unavailable")
     if mount_type(STATE) == "tmpfs":
         raise RuntimeError("public Zebra state is not persistent")
     state = STATE.stat()
