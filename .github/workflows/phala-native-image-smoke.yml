@@ -340,8 +340,8 @@ jobs:
           test "${GITHUB_REPOSITORY,,}" = tamnys/zecret-service
           scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-native-image-smoke"
           image=zrpc-phala-native-smoke:checked-local
-          expected_archive=026c4dc1d3756079a7ebeaff4e4cb28ac5cdb25d59f10fe3cc064e85370909de
-          expected_config=sha256:db5640e760fc8c69acf2fe1637f71b56100469fc58e437fc68646f2679dfaed2
+          expected_archive=e1a627738ee09cd7b493ccfcb2d5d445d9eba8be69c313dc98e7171f34bcbd3a
+          expected_config=sha256:24d63c23c8fa56330331f2c69a06848ede5a547482c68f437faa1e9342a4235d
           test "$(cat "$scratch/image-archive-sha256")" = "$expected_archive"
           test "$(docker image inspect --format '{{.Id}}' "$image")" = "$expected_config"
           repository=ghcr.io/tamnys/zecret-service-preview
