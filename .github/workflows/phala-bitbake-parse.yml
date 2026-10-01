@@ -2,6 +2,11 @@ name: Phala native corrected guest source preflight
 
 on:
   workflow_dispatch:
+    inputs:
+      worker_task_smoke:
+        description: Exercise one local-source BitBake task under a job-scoped AppArmor profile
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -244,4 +249,91 @@ jobs:
           test -s "$build/task-depends.dot"
           grep -Fx 'dstack-rootfs' "$build/pn-buildlist" >/dev/null
           echo 'Pinned corrected-guest source with ABI-smoked native binaries parsed and produced a rootfs task dependency graph on native x86_64 Linux. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Exercise one pinned BitBake worker task under scoped AppArmor permission
+        if: ${{ inputs.worker_task_smoke }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/phala-bitbake-parse"
+          staged="$scratch/candidate/staged-source"
+          build="$scratch/build"
+          poky="$scratch/sources/poky"
+          probe="$source/experiments/ephemeral-runtime/probe-bitbake-worker.py"
+          python="$scratch/hosttools/bin/bitbake-python3"
+          profile="$scratch/bitbake-python3.apparmor"
+          install -m 0555 /usr/bin/python3 "$python"
+          cmp -s /usr/bin/python3 "$python"
+          [[ "$python" =~ ^/[A-Za-z0-9_./-]+$ ]]
+          cat > "$profile" <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          $python flags=(unconfined) {
+            userns,
+          }
+          EOF
+
+          loaded=0
+          cleanup() {
+            if [[ "$loaded" = 1 ]]; then
+              sudo -n apparmor_parser -R "$profile"
+            fi
+          }
+          trap cleanup EXIT
+          set +e
+          "$python" -I -B "$probe" "$poky" > "$scratch/worker-baseline.json"
+          baseline_status=$?
+          set -e
+          cat "$scratch/worker-baseline.json"
+          test "$baseline_status" -ne 0
+
+          loaded=1
+          sudo -n apparmor_parser -r "$profile"
+          "$python" -I -B "$probe" "$poky" | tee "$scratch/worker-profile.json"
+          export PATH="$scratch/hosttools/bin:$PATH"
+          set +u
+          . "$staged/poky/oe-init-build-env" "$build" >/dev/null
+          set -euo pipefail
+          set +e
+          "$python" "$staged/poky/bitbake/bin/bitbake" -T 0 \
+            -c unpack texinfo-dummy-native
+          task_status=$?
+          "$python" "$staged/poky/bitbake/bin/bitbake" -m
+          stop_status=$?
+          set -e
+          python3 -I - "$python" <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+
+          executable = sys.argv[1]
+          survivors = []
+          for process in Path("/proc").iterdir():
+              if not process.name.isdecimal():
+                  continue
+              try:
+                  if os.readlink(process / "exe") == executable:
+                      survivors.append(process.name)
+              except OSError:
+                  pass
+          if survivors:
+              raise SystemExit("BitBake profile still has live Python processes")
+          PY
+
+          sudo -n apparmor_parser -R "$profile"
+          loaded=0
+          trap - EXIT
+          test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+          set +e
+          "$python" -I -B "$probe" "$poky" > "$scratch/worker-after-removal.json"
+          after_status=$?
+          set -e
+          cat "$scratch/worker-after-removal.json"
+          test "$after_status" -ne 0
+          test "$task_status" -eq 0
+          test "$stop_status" -eq 0
+          echo 'One pinned, local-source BitBake do_unpack task passed with worker namespace isolation under a job-scoped AppArmor profile. The profile was removed and the baseline restriction returned. This did not build a rootfs or image.' \
             >> "$GITHUB_STEP_SUMMARY"
