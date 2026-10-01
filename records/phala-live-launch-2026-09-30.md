@@ -40,6 +40,19 @@ was $0.793450 at that read; provider usage rows were empty, so this is not a
 billing reconciliation. Do not reinitialize the original ledger, fabricate an
 instance ID, or create another CVM.
 
+At 2026-10-01 00:37 UTC, Phala's versioned usage API returned eight rows with
+`project_id` and `team_id` encoded as JSON strings; the prior decoder expected
+integers and rejected the response. The corrected decoder preserves either
+wire type, including compatibility with the earlier numeric record format.
+A fresh authenticated,
+read-only observation then completed under the operator-approved 1 MiB response
+cap: one tracked CVM, no untracked CVMs, and eight unjoined usage rows. All
+eight `usage.instance_id` values matched this CVM's `vm_uuid`, while the CVM's
+own `instance_id` remained null. This observed equality is not a provider
+guarantee of a stable billing join or a final usage cutoff. The ledger remained
+at generation 3, and the modeled cost floor at the read was $1.022658; no
+provider charge was added to it.
+
 The stock HTTPS gateway URL terminated TLS outside the guest and could not
 carry the wrapper's retained TLS session. The documented `-8443s` gateway
 hostname passed TLS through to the guest: a separate diagnostic reached its

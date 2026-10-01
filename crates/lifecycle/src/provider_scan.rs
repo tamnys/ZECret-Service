@@ -262,7 +262,7 @@ fn checked_retention(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::amount::ExactUsd;
+    use crate::{amount::ExactUsd, provider_wire::UsageScopeId};
 
     fn bound(records: usize) -> NonZeroUsize {
         NonZeroUsize::new(records).unwrap()
@@ -294,8 +294,8 @@ mod tests {
     fn row(key: &str, amount: &str) -> UsageRow {
         UsageRow {
             instance_id: "usage-instance".to_owned(),
-            project_id: 1,
-            team_id: 2,
+            project_id: UsageScopeId::Number(1),
+            team_id: UsageScopeId::Number(2),
             timestamp: "2026-09-25T00:00:00Z".to_owned(),
             event_type: "cvm".to_owned(),
             usage_type: "compute".to_owned(),

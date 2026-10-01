@@ -189,8 +189,8 @@ fn identity_label(
 fn usage_projection(row: &zrpc_lifecycle::provider_wire::UsageRow) -> serde_json::Value {
     serde_json::json!({
         "instance_id": row.instance_id,
-        "project_id": row.project_id,
-        "team_id": row.team_id,
+        "project_id": &row.project_id,
+        "team_id": &row.team_id,
         "timestamp": row.timestamp,
         "event_type": row.event_type,
         "usage_type": row.usage_type,
