@@ -70,9 +70,9 @@ def candidate_prod(production: str, base: str) -> str:
     return production + f'''
 # Source-only private-profile candidate. The stock production recipe removes
 # getty/login, but the inspected image retains rescue, sulogin and generators.
-ROOTFS_POSTPROCESS_COMMAND += "zrpc_remove_local_admin;"
+ROOTFS_POSTPROCESS_COMMAND += "zrpc_strip_local_admin;"
 
-zrpc_remove_local_admin() {{
+zrpc_strip_local_admin() {{
     # BitBake expands these recipe variables before running the shell task.
     # Canonicalize and constrain them before touching the image tree.
     [ ! -L "${{IMAGE_ROOTFS}}" ] || return 1
