@@ -617,7 +617,7 @@ mod tests {
     async fn auth_downgrade_bad_version_and_truncation_fail_before_connect() {
         for method in [vec![5, 0], vec![4, 2], vec![5, 255], vec![5]] {
             let mut reply = ProxyReply::success();
-            reply.method = method;
+            reply.method = method.clone();
             let (config, proxy) = fake_proxy(vec![reply]).await;
             let endpoint = RemoteEndpoint::new("unresolved-fixture.invalid", 443).unwrap();
             let error = config
@@ -643,7 +643,7 @@ mod tests {
     async fn rejected_or_malformed_auth_fails_before_connect() {
         for auth in [vec![1, 1], vec![2, 0], vec![1]] {
             let mut reply = ProxyReply::success();
-            reply.auth = auth;
+            reply.auth = auth.clone();
             let (config, proxy) = fake_proxy(vec![reply]).await;
             let endpoint = RemoteEndpoint::new("unresolved-fixture.invalid", 443).unwrap();
             let error = config
@@ -676,7 +676,7 @@ mod tests {
             vec![5, 0],
         ] {
             let mut reply = ProxyReply::success();
-            reply.connect = connect;
+            reply.connect = connect.clone();
             let (config, proxy) = fake_proxy(vec![reply]).await;
             let error = config
                 .connect_bootstrap(&endpoint, IsolationLabel::new("fixture-secret").unwrap())
