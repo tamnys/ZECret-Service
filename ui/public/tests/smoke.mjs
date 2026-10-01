@@ -27,16 +27,14 @@ test('status reports the approved native profile without browser RPC access', as
   assert.equal(status.kind, 'repository_snapshot');
   assert.equal(status.release_approval.state, 'phala_trusted_testnet_approved');
   assert.equal(status.transport_attestation.state, 'not_checked');
-  assert.equal(status.payment.state, 'local_poc_only');
+  assert.equal(status.payment.state, 'free_tickets_required');
   assert.equal(status.chain_data.state, 'live_testnet_query_recorded');
 
   const capabilities = await (await request('/api/capabilities')).json();
   assert.equal(capabilities.trusted_release_policy_from_website, false);
   assert.equal(capabilities.private_rpc_from_website, false);
   assert.equal(capabilities.ticket_handling_from_website, false);
-  assert.deepEqual(capabilities.methods, [
-    'getblockchaininfo', 'getblockcount', 'getblockhash', 'getblockheader', 'getrawtransaction', 'getaddressbalance'
-  ]);
+  assert.deepEqual(capabilities.methods, ['getblockchaininfo']);
 });
 
 test('API rejects input, cross-origin access, and unknown routes', async () => {

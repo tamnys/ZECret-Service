@@ -21,7 +21,7 @@ With the development server running, open `http://127.0.0.1:8787/`. Run `pnpm ru
 
 1. Create a Cloudflare account on the **Workers Free** plan and select its provided `workers.dev` subdomain in the [Workers dashboard](https://dash.cloudflare.com/). No custom domain or paid service is required.
 2. In a private terminal, use `pnpm exec wrangler login --device --browser=false` and complete the approval in your browser. This [device flow](https://developers.cloudflare.com/workers/wrangler/commands/general/#use-wrangler-login-without-a-local-callback-server) works from a container without forwarding an OAuth callback port. Check the selected identity and account with `pnpm exec wrangler whoami`. Do not share login codes or API tokens in chat or a recorded terminal.
-3. Review `worker.ts` for current release, payment, and chain status before publishing. Its status is deliberately dated and must match the reviewed release record; it does not assert current service health. Build and check again.
+3. Review `worker.ts` for the current release, free-ticket requirement, and chain status before publishing. Its status is deliberately dated and must match the release record; it does not assert current service health. Build and check again.
 4. Deploy from `ui/public/` with the chosen Cloudflare account ID:
 
    ```sh

@@ -60,7 +60,7 @@
       <div class="section-head">
         <p class="section-label">Try it out</p>
         <h2 id="try-title">Run a live testnet query.</h2>
-        <p>Use the native <code>zrpc</code> client on Linux. The website does not send RPC requests or handle your query data.</p>
+        <p>Use the native <code>zrpc</code> client on Linux. Your tickets and queries stay in the client.</p>
       </div>
       <ol class="try-steps">
         <li>
@@ -69,14 +69,18 @@
 cd ZECret-Service</pre></div>
         </li>
         <li>
-          <div class="try-step-copy"><span class="try-number">02</span><div><h3>Build it</h3><p>Use Rust 1.94.1 and the committed dependency lockfile.</p></div></div>
-          <div class="code-card"><div class="code-title"><span>From the repository root</span><span>zrpc</span></div><pre>cargo build --locked -p zrpc-cli</pre></div>
+          <div class="try-step-copy"><span class="try-number">02</span><div><h3>Build it</h3><p>Use Rust 1.94.1 and the committed dependency lockfiles. You will also need Tor installed.</p></div></div>
+          <div class="code-card"><div class="code-title"><span>From the repository root</span><span>Linux</span></div><pre>cargo build --locked -p zrpc-cli
+cargo build --locked --manifest-path tools/payment-crypto/Cargo.toml</pre></div>
         </li>
         <li>
-          <div class="try-step-copy"><span class="try-number">03</span><div><h3>Connect to the service</h3><p>A live query needs Tor and current hardware attestation collateral. The client checks the approved release and its connection before sending a query.</p><a class="text-link" href="https://github.com/tamnys/ZECret-Service/blob/main/README.md#live-phala-testnet-queries" rel="noreferrer noopener">Follow the live query guide →</a></div></div>
+          <div class="try-step-copy"><span class="try-number">03</span><div><h3>Get free tickets</h3><p>Request up to 100 tickets at a time through the client. No account or payment is needed. The client verifies them and keeps them on your device.</p></div></div>
+        </li>
+        <li>
+          <div class="try-step-copy"><span class="try-number">04</span><div><h3>Make a query</h3><p>The client checks the service through Tor before sending your request. Each live query uses one ticket. The verification files are included in the source download.</p><a class="text-link" href="https://github.com/tamnys/ZECret-Service/blob/main/README.md#live-phala-testnet-queries" rel="noreferrer noopener">Follow the ticket and query guide →</a></div></div>
         </li>
       </ol>
-      <div class="methods"><h3>Supported read-only methods</h3><ul><li><code>getblockchaininfo</code></li><li><code>getblockcount</code></li><li><code>getblockhash</code></li><li><code>getblockheader</code></li><li><code>getrawtransaction</code></li><li><code>getaddressbalance</code> for a testnet transparent address</li></ul><p>Wallet methods, transaction submission, batches, and arbitrary upstream URLs are rejected. Requests with parameters use the native client's typed format.</p></div>
+      <div class="methods"><h3>Start with a read-only query</h3><p>Try <code>getblockchaininfo</code> to see the current Zcash testnet status. The <a class="text-link" href="https://github.com/tamnys/ZECret-Service#what-you-can-query" rel="noreferrer noopener">client guide</a> lists other accepted methods and parameter formats.</p></div>
     </section>
 
     <section class="section shell privacy-section" id="privacy" aria-labelledby="privacy-title">
@@ -95,6 +99,6 @@ cd ZECret-Service</pre></div>
 
   </main>
 
-  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret Service</strong><p>Private Zcash query research. Live queries use the native client.</p></div><div><a href="/privacy">Privacy model</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
+  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret Service</strong><p>Private Zcash queries through the native client.</p></div><div><a href="/privacy">Privacy model</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
 </body>
 </html>

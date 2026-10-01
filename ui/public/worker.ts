@@ -6,18 +6,18 @@ const SNAPSHOT_DATE = '2026-10-01';
 const status = {
   kind: 'repository_snapshot',
   as_of: SNAPSHOT_DATE,
-  source: `${SOURCE}/blob/main/records/phala-block-context-rollout-2026-10-01.md`,
+  source: `${SOURCE}/blob/main/records/phala-ticketed-rollout-2026-10-01.md`,
   release_approval: {
     state: 'phala_trusted_testnet_approved',
-    detail: 'An approved Phala-trusting testnet release is packaged in the native client. The stricter provider-independent private profile remains unavailable.'
+    detail: 'The approved Phala-trusting testnet release requires a free ticket for each native-client query. The stricter provider-independent private profile remains unavailable.'
   },
   transport_attestation: {
     state: 'not_checked',
     detail: 'A public website cannot verify a native Tor and attested TLS session.'
   },
   payment: {
-    state: 'local_poc_only',
-    detail: 'Tickets remain a separate local proof of concept. The approved Phala-trusting testnet service does not accept ticket payments.'
+    state: 'free_tickets_required',
+    detail: 'The native client automatically obtains free tickets from the issuer through Tor. No payment or account is required.'
   },
   chain_data: {
     state: 'live_testnet_query_recorded',
@@ -28,7 +28,7 @@ const status = {
 const capabilities = {
   kind: 'informational_only',
   as_of: SNAPSHOT_DATE,
-  methods: ['getblockchaininfo', 'getblockcount', 'getblockhash', 'getblockheader', 'getrawtransaction', 'getaddressbalance'],
+  methods: ['getblockchaininfo'],
   private_rpc_from_website: false,
   ticket_handling_from_website: false,
   trusted_release_policy_from_website: false,

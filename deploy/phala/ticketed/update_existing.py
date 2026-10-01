@@ -173,6 +173,10 @@ def run(args):
         "PATCH", f"/api/v1/cvms/{updater.CVM}/compose_file",
         {"compose_hash": receipt["new_launch_sha256"], "encrypted_env": sealed,
          "env_keys": list(ticket_compose.SECRETS), "update_env_vars": True})
+    if response is None:
+        response = {}
+    if not isinstance(response, dict):
+        raise ValueError("Phala ticketed update returned an unexpected response")
     updater.durable_new(outcome, {"http_status": status,
                                  "response_sha256": digest(response_raw),
                                  "provider_status": response.get("status"),

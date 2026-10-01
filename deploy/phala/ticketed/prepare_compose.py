@@ -53,7 +53,7 @@ def prepare(image_ref, output):
         "image": image_ref,
         "platform": "linux/amd64",
         "command": ["issuer"],
-        "user": "10003:0",
+        "user": "10003:10003",
         "read_only": True,
         "restart": "no",
         "cap_drop": ["ALL"],

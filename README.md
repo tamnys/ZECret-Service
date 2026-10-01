@@ -67,19 +67,52 @@ The stricter private profile is the default when `--simulate` and `--privacy-pro
 
 ## Live Phala testnet queries
 
-Build the native client from this source tree, then select `--privacy-profile phala-trusted --platform phala-dstack`. The client requires a local Tor executable, current attestation collateral, the exact [approved app-compose bytes](deploy/phala/releases/2026-10-01/block-context-app-compose.json), and the matching [release selection policy](deploy/phala/releases/2026-10-01/block-context-selection-policy.json). The [rollout record](records/phala-block-context-rollout-2026-10-01.md) identifies the approved release and its trust assumptions. The public website is not a source of release approval.
-
-Set `ZRPC_TOR` and `ZRPC_COLLATERAL` to absolute local paths for the reviewed Tor executable and current collateral file. From the repository root, verify the service before sending a query:
+Install Tor on Linux and build the native client and its separately locked ticket verifier from this source tree. The client includes the [current attestation collateral](deploy/phala/releases/2026-10-01/ticketed-collateral.json), [approved app-compose bytes](deploy/phala/releases/2026-10-01/ticketed-app-compose.json), [release selection policy](deploy/phala/releases/2026-10-01/ticketed-selection-policy.json), and [issuer public key](deploy/phala/ticketed/issuer-public.der). From the repository root, set the local paths and verify the service:
 
 ```sh
+cargo build --locked -p zrpc-cli
+cargo build --locked --manifest-path tools/payment-crypto/Cargo.toml
+ZRPC_TOR="$(command -v tor)"
+test -x "$ZRPC_TOR"
+ZRPC_COLLATERAL="$PWD/deploy/phala/releases/2026-10-01/ticketed-collateral.json"
+ZRPC_HELPER="$PWD/tools/payment-crypto/target/debug/zrpc-payment-crypto"
+ZRPC_ISSUER=il3hrcrare4fzp3ka6oe4ewl6433isnfzxdvnqe7cfyefhylkadyyead.onion
+ZRPC_TICKET_STORE="$HOME/.local/share/zrpc-tickets"
+mkdir -p "$HOME/.local/share"
+
 ./target/debug/zrpc verify --privacy-profile phala-trusted --platform phala-dstack \
   --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network \
   --endpoint-port 443 --tor-executable "$ZRPC_TOR" --collateral "$ZRPC_COLLATERAL" \
-  --app-compose deploy/phala/releases/2026-10-01/block-context-app-compose.json \
-  --release-policy deploy/phala/releases/2026-10-01/block-context-selection-policy.json
+  --app-compose deploy/phala/releases/2026-10-01/ticketed-app-compose.json \
+  --release-policy deploy/phala/releases/2026-10-01/ticketed-selection-policy.json
 ```
 
-For a read-only query, replace `verify` with `query --method getblockchaininfo` and use the same options. The client checks the approved release and a fresh attested connection before sending the method. This profile also supports a validated Zcash testnet transparent address with `query --stdin` and typed `getaddressbalance` parameters; it does not accept ticket or ZEC payment options.
+Request up to 100 free tickets per batch through the issuer's Tor onion service. The CLI creates an owner-private ticket store outside the repository and verifies each returned ticket against the bundled public key. No account or ZEC payment is needed.
+
+```sh
+./target/debug/zrpc payments get --credits 100 \
+  --ticket-store "$ZRPC_TICKET_STORE" \
+  --issuer-public-der deploy/phala/ticketed/issuer-public.der \
+  --issuer-name "$ZRPC_ISSUER" --crypto-helper "$ZRPC_HELPER" \
+  --issuer-onion "$ZRPC_ISSUER" --issuer-port 80 --tor-executable "$ZRPC_TOR"
+./target/debug/zrpc payments balance --ticket-store "$ZRPC_TICKET_STORE"
+```
+
+The live CLI requires a ticket for every query and marks it spent only after a successful response. If a response is uncertain, it keeps that ticket out of the available balance to prevent reuse. Run a read-only query with the same verified release:
+
+```sh
+./target/debug/zrpc query --privacy-profile phala-trusted --method getblockchaininfo \
+  --platform phala-dstack \
+  --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network \
+  --endpoint-port 443 --tor-executable "$ZRPC_TOR" --collateral "$ZRPC_COLLATERAL" \
+  --app-compose deploy/phala/releases/2026-10-01/ticketed-app-compose.json \
+  --release-policy deploy/phala/releases/2026-10-01/ticketed-selection-policy.json \
+  --ticket-store "$ZRPC_TICKET_STORE" \
+  --issuer-public-der deploy/phala/ticketed/issuer-public.der \
+  --issuer-name "$ZRPC_ISSUER" --crypto-helper "$ZRPC_HELPER"
+```
+
+The client checks the Phala-managed release, fresh hardware evidence, and the live TLS connection before sending the query. The website never handles tickets or queries. The bundled collateral is time-limited; an expired bundle fails closed and must be refreshed through a reviewed client release.
 
 ## What you can query
 
@@ -88,7 +121,6 @@ The protocol accepts these read-only methods:
 | Method | Purpose |
 | --- | --- |
 | `getblockchaininfo` | Read blockchain status. |
-| `getblockcount` | Read the current block height. |
 | `getblockhash` | Find a block's hash by height. |
 | `getblockheader` | Read a block header. |
 | `getrawtransaction` | Read a transaction by its ID. |
@@ -96,7 +128,7 @@ The protocol accepts these read-only methods:
 
 Wallet operations, transaction submission, batch requests, and arbitrary upstream URLs are rejected. The local demo returns fixtures; the approved Phala-trusting profile uses the live testnet service.
 
-Chain status, block count, and confirmed address balances include
+Chain status and confirmed address balances include
 `chain_context: {"height": ..., "hash": ...}`. This identifies the node state
 used for that result; it does not prove global chain freshness or private-mode
 approval. Chain-status diagnostics such as synchronization estimates are not
@@ -133,7 +165,7 @@ These tools inspect evidence. Passing an inspection does not approve a server re
 
 ## Develop or operate the service
 
-The Rust workspace separates request validation, attestation verification, transport, client logic, server wrappers, and resource lifecycle tools. The native CLI bundles the local dashboard; `ui/public/` contains a static demo site.
+The Rust workspace separates request validation, attestation verification, transport, client logic, server wrappers, and resource lifecycle tools. The native CLI bundles the local dashboard; `ui/public/` contains the public website.
 
 - [Local server wrapper](docs/public-wrapper.md): run an attestation-only listener.
 - [Google Cloud TDX](docs/gcp-tdx.md): native client commands, guest inputs, and operator lifecycle tooling.
