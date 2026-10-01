@@ -130,6 +130,17 @@ but this documentation is not an effective test of the exact running guest.
 We did not save or execute the live script or infer private-mode approval from
 the source match.
 
+At 2026-10-01 02:18 UTC, a read-only call to Phala's
+[`pre-launch-script/upgrade-status` endpoint](https://github.com/Phala-Network/phala-cloud/blob/ee941461e05004e4f80c26694f43c833bbc208b6/js/src/actions/cvms/get_prelaunch_script_upgrade_status.ts)
+used the existing workspace credential, a separately selected TLS trust root,
+TLS 1.3 and the operator-approved 1 MiB response cap. It returned HTTP 200:
+`current_hash` and `latest_official_hash` both equal the observed script
+SHA-256 above, `is_official: true`, `is_latest: true` and `can_upgrade: false`.
+This is provider-reported script status, consistent with the measured launch
+hash and public source. It does not identify which deployment layer inserted
+the script, whether it can be omitted, or which administrative branches ran.
+No script update, CVM mutation, resource creation or private query followed.
+
 On 2026-10-01, an authenticated, single-CVM dry run of Phala's
 [`PATCH /cvms/{cvmId}/instance-id` SDK operation](https://github.com/Phala-Network/phala-cloud/blob/ee941461e05004e4f80c26694f43c833bbc208b6/js/src/actions/cvms/refresh_cvm_instance_id.ts)
 used `dry_run: true` and `overwrite: false`. It returned HTTP 200 with
