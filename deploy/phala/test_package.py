@@ -293,7 +293,10 @@ class PackageTests(unittest.TestCase):
         compose = json.loads(compose_bytes)
         app = json.loads(app_bytes)
         self.assertEqual(app["docker_compose_file"].encode(), compose_bytes)
-        self.assertEqual(app["swap_size"], 0)
+        # dstack 0.5.9 defaults omitted swap_size to zero; the current Phala
+        # AppComposeV2 API does not declare this field. Supervisor rechecks
+        # /proc/swaps before either service starts.
+        self.assertNotIn("swap_size", app)
         self.assertNotIn("key_provider", app)
         self.assertEqual(receipt["docker_compose_file_sha256"], prepare.digest(compose_bytes))
         self.assertEqual(receipt["app_compose_file_sha256"], prepare.digest(app_bytes))

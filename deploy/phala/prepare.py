@@ -446,7 +446,6 @@ def launch_documents(args):
         "runner": "docker-compose",
         "docker_compose_file": compose_bytes.decode("ascii"),
         "storage_fs": "ext4",
-        "swap_size": 0,
         "kms_enabled": True,
         "tproxy_enabled": True,
         "public_logs": False,
