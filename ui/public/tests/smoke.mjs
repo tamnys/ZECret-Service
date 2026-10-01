@@ -27,7 +27,7 @@ test('status separates unavailable live capabilities from fixtures', async () =>
   assert.equal(status.kind, 'repository_snapshot');
   assert.equal(status.release_approval.state, 'unavailable');
   assert.equal(status.transport_attestation.state, 'not_checked');
-  assert.equal(status.payment.state, 'not_implemented');
+  assert.equal(status.payment.state, 'local_poc_only');
   assert.equal(status.chain_data.state, 'unavailable');
 
   const capabilities = await (await request('/api/capabilities')).json();

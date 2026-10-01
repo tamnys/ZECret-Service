@@ -73,7 +73,7 @@
             <option value="ticket-replay">Simulated ticket replay rejected</option>
           </select>
           <button id="run-scenario" class="button primary" type="button">Show example</button>
-          <p>The ticket example illustrates a proposed payment check. Ticket issuance and redemption are not implemented.</p>
+          <p>The ticket example is synthetic. Native ticket issuance and redemption exist only in a local proof of concept; paid access is not live.</p>
         </div>
         <div class="demo-output panel" aria-live="polite">
           <div class="output-top"><span>Example result</span><span class="fixture-pill">Synthetic fixture</span></div>
@@ -82,7 +82,29 @@
           <pre id="scenario-result" tabindex="0">No example loaded.</pre>
         </div>
       </div>
-      <p class="demo-handoff">Live private queries will use the native client, where Tor and attestation checks happen before a request is sent. <a class="text-link" href="#quickstart">See the native-client setup →</a></p>
+      <div class="payment-walkthrough" aria-labelledby="payment-title">
+        <div class="payment-intro">
+          <div>
+            <p class="section-label">Prepaid access</p>
+            <h3 id="payment-title">One credit per admitted query.</h3>
+            <p>The native client prepares a batch of private, one-use tickets. A separate issuer signs blinded requests. The resulting tickets contain no purchase ID, and your ticket store stays on your device.</p>
+          </div>
+          <div class="payment-example panel" aria-live="polite">
+            <span class="fixture-pill">Simulation · no ZEC payment</span>
+            <div class="payment-balance"><span>Example credits available</span><strong id="payment-balance">0</strong></div>
+            <p id="payment-step">Walk through a two-credit example. Nothing is purchased or stored.</p>
+            <button id="payment-next" class="button secondary" type="button">Prepare two credits</button>
+          </div>
+        </div>
+        <ol class="payment-steps">
+          <li><strong>Prepare</strong><span>The client creates blinded ticket requests.</span></li>
+          <li><strong>Issue</strong><span>After settlement, the issuer signs them. Settlement is simulated in the current proof of concept.</span></li>
+          <li><strong>Use</strong><span>After Tor and service verification, the client sends one ticket with a query.</span></li>
+          <li><strong>Check</strong><span>The service records the ticket as spent before forwarding the query. A replay is rejected.</span></li>
+        </ol>
+        <p class="payment-limit">A credit is used when the service admits a request. A node error or lost response can still consume it; the client does not automatically spend another.</p>
+      </div>
+      <p class="demo-handoff">The local proof of concept puts ticket controls in the native <code>zrpc</code> CLI. Paid private queries still need an approved deployment. <a class="text-link" href="#quickstart">See the native-client setup →</a></p>
     </section>
 
     <section class="section shell privacy-section" id="privacy" aria-labelledby="privacy-title">

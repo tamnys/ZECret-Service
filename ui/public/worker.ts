@@ -1,7 +1,7 @@
 /** Public, deterministic website API. It has no RPC, ticket, wallet, or status upstream. */
 
 const SOURCE = 'https://github.com/tamnys/ZECret-Service';
-const SNAPSHOT_DATE = '2026-09-29';
+const SNAPSHOT_DATE = '2026-09-30';
 
 const status = {
   kind: 'repository_snapshot',
@@ -16,8 +16,8 @@ const status = {
     detail: 'A public website cannot verify a native Tor and attested TLS session.'
   },
   payment: {
-    state: 'not_implemented',
-    detail: 'Prepaid ticket settlement, issuance, and redemption are not available.'
+    state: 'local_poc_only',
+    detail: 'Native ticket issuance and redemption are implemented in a local proof of concept. Settlement is simulated; no ZEC payment or approved paid deployment is available.'
   },
   chain_data: {
     state: 'unavailable',
@@ -57,7 +57,7 @@ const scenarios = {
   'ticket-replay': {
     kind: 'payment_simulation',
     title: 'Ticket replay rejected',
-    explanation: 'A proposed one-use ticket has already been spent in this illustration. Real issuance and redemption are not implemented.',
+    explanation: 'This synthetic ticket was already spent, so the illustrated service rejects its replay. Native ticket issuance and redemption have been tested locally; paid access is not live.',
     simulated_decision: 'rejected_in_fixture',
     reason: 'ticket_already_spent',
     real_private_query_sent: false,

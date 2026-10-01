@@ -55,3 +55,44 @@ runButton.addEventListener('click', async () => {
     runButton.disabled = false;
   }
 });
+
+const paymentBalance = getElement<HTMLElement>('payment-balance');
+const paymentStep = getElement<HTMLElement>('payment-step');
+const paymentNext = getElement<HTMLButtonElement>('payment-next');
+const paymentExample = [
+  {
+    balance: '0',
+    text: 'The native client prepares two blinded requests. This browser creates no real tickets.',
+    next: 'Simulate issuance'
+  },
+  {
+    balance: '2',
+    text: 'The operator simulates settlement. The issuer signs both requests, and the client stores two verified tickets locally. No ZEC is paid.',
+    next: 'Spend one credit'
+  },
+  {
+    balance: '1',
+    text: 'After verifying Tor and the service connection, the client sends one ticket. The service admits the query and records that ticket as spent.',
+    next: 'Try the same ticket again'
+  },
+  {
+    balance: '1',
+    text: 'The spent ticket cannot be used again. The remaining credit stays available in this example.',
+    next: 'Start again'
+  }
+] as const;
+let paymentStage = -1;
+
+paymentNext.addEventListener('click', () => {
+  paymentStage = paymentStage === paymentExample.length - 1 ? -1 : paymentStage + 1;
+  if (paymentStage === -1) {
+    paymentBalance.textContent = '0';
+    paymentStep.textContent = 'Walk through a two-credit example. Nothing is purchased or stored.';
+    paymentNext.textContent = 'Prepare two credits';
+    return;
+  }
+  const stage = paymentExample[paymentStage];
+  paymentBalance.textContent = stage.balance;
+  paymentStep.textContent = stage.text;
+  paymentNext.textContent = stage.next;
+});
