@@ -75,9 +75,10 @@ different from the prepared app-compose digest. It also reported
 nonempty 17,569-byte `pre_launch_script` with SHA-256
 `982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8`.
 The prepared document did not supply that script. A limited static pattern
-scan found root-password, SSH-key, SSH-server and remote-fetch terms in its
-text. This does not prove what executed or establish the script's origin; the
-raw response and script were not saved or printed. These readback mismatches
+scan found active root-password, authorized-key and remote-fetch branches;
+the SSH-server term appeared only in a comment. This does not prove what
+executed, that an SSH listener is reachable, or the script's origin. The raw
+response and script were not saved or printed. These readback mismatches
 preclude using the prepared app-compose hash as the live workload identity and
 reinforce the existing block on private mode. No resource update had been
 attempted at that read.
@@ -102,6 +103,25 @@ TLS-key checks before reading Testnet height **4,425,002** and the zero-balance
 fixture address. `private_accepted` remained false. This confirms the demo
 path resumed after the visibility update, not that historical public logs were
 removed or that stock-image privacy gates passed.
+
+On 2026-10-01, an authenticated read of the stored CVM SSH-key set
+returned zero keys and `restart_required: false`; the live Teepod user config
+also returned zero `ssh_authorized_keys`. These observations do not exclude
+password, console, rescue, or remotely configurable future access. The live
+script contains active root-password and authorized-key handling, but its
+actual execution and resulting authentication state were not inspected.
+
+On 2026-10-01, an authenticated, single-CVM dry run of Phala's
+[`PATCH /cvms/{cvmId}/instance-id` SDK operation](https://github.com/Phala-Network/phala-cloud/blob/ee941461e05004e4f80c26694f43c833bbc208b6/js/src/actions/cvms/refresh_cvm_instance_id.ts)
+used `dry_run: true` and `overwrite: false`. It returned HTTP 200 with
+`status: skipped`, `reason: gateway_rpc_failed`, `source: teepod_state`,
+`verified_with_gateway: false`, and null old/new instance IDs. A prior detail
+read still had `instance_id: null`. Only the dry-run request was submitted.
+We did not attempt a non-dry-run refresh, substitute `vm_uuid` into the CVM
+field, or accept the observed usage-row equality as an authenticated billing
+join. The canonical CVM remains tracked in the original ledger and the usage
+rows remain retained as unjoined evidence. Phala must clarify the failed
+gateway verification and supported billing mapping before final reconciliation.
 
 The stock HTTPS gateway URL terminated TLS outside the guest and could not
 carry the wrapper's retained TLS session. The documented `-8443s` gateway
