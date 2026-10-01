@@ -111,6 +111,25 @@ password, console, rescue, or remotely configurable future access. The live
 script contains active root-password and authorized-key handling, but its
 actual execution and resulting authentication state were not inspected.
 
+On 2026-10-01, the live script's exact byte length and SHA-256 matched
+[`phala-cloud-prelaunch-script/prelaunch.sh` at dstack-examples commit
+`4b1819d7f2cca610b2478a7be354358b1cad5b97`](https://github.com/Dstack-TEE/dstack-examples/blob/4b1819d7f2cca610b2478a7be354358b1cad5b97/phala-cloud-prelaunch-script/prelaunch.sh):
+17,569 bytes and
+`982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8`.
+This identifies the script's public source, not which Phala layer inserted it
+into this CVM or which branches executed. The source unconditionally calls
+Docker image/volume pruning and attempts `docker compose pull`; its root
+password and authorized-key changes are conditional on writable files and
+inputs. A fresh authenticated compose readback retained the same script hash,
+reported `allowed_envs: []`, and showed `runner: docker-compose`; the CVM
+remained `running`. Empty `allowed_envs` does not rule out encrypted variables,
+mutable `user_config`, console access or provider-controlled updates. The
+[Phala SSH guide](https://github.com/Phala-Network/phala-docs/blob/5176d4c53fcee5aec3a8ccbbb05840a0a678c553/phala-cloud/networking/enable-ssh-access.mdx)
+says production images disable SSH and dstack 0.5.6+ rejects SSH passwords,
+but this documentation is not an effective test of the exact running guest.
+We did not save or execute the live script or infer private-mode approval from
+the source match.
+
 On 2026-10-01, an authenticated, single-CVM dry run of Phala's
 [`PATCH /cvms/{cvmId}/instance-id` SDK operation](https://github.com/Phala-Network/phala-cloud/blob/ee941461e05004e4f80c26694f43c833bbc208b6/js/src/actions/cvms/refresh_cvm_instance_id.ts)
 used `dry_run: true` and `overwrite: false`. It returned HTTP 200 with
