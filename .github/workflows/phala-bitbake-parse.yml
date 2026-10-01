@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   parse:
-    name: Native x86_64 candidate parse and dry-run
+    name: Native x86_64 candidate parse and dependency graph
     runs-on: ubuntu-24.04
     steps:
       - name: Fetch exact project and meta-dstack source objects
@@ -239,6 +239,9 @@ jobs:
             "
           EOF
           bitbake -p
-          bitbake -n dstack-rootfs
-          echo 'Pinned corrected-guest source with ABI-smoked native binaries parsed and dry-ran on native x86_64 Linux. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
+          bitbake -g dstack-rootfs
+          test -s "$build/pn-buildlist"
+          test -s "$build/task-depends.dot"
+          grep -Fx 'dstack-rootfs' "$build/pn-buildlist" >/dev/null
+          echo 'Pinned corrected-guest source with ABI-smoked native binaries parsed and produced a rootfs task dependency graph on native x86_64 Linux. Production kernel revisions, image build, image publication, Phala resource, hardware boot and private approval remain unresolved.' \
             >> "$GITHUB_STEP_SUMMARY"
