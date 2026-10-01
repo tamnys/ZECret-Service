@@ -22,6 +22,8 @@ mod provider_watchdog;
 const USAGE: &str = "zrpc doctor
 zrpc inspect-quote --quote FILE --collateral FILE
 zrpc inspect-workload [--platform gcp-tdx|phala-dstack] --quote FILE --collateral FILE --event-log FILE --policy FILE
+zrpc inspect-preview-workload --quote FILE --collateral FILE --event-log FILE --app-compose FILE --policy FILE
+zrpc inspect-preview-endpoint --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --policy FILE
 zrpc inspect-endpoint [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --socks IPV4:PORT --collateral FILE --policy FILE
 zrpc verify [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
 zrpc query [--stdin | --method METHOD] [--ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE] [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE
@@ -129,6 +131,18 @@ fn compose_input(args: &mut Vec<String>, backend: Backend) -> Result<Vec<u8>, St
     }
 }
 
+fn preview_launch_consistent(report: &zrpc_verifier::workload::WorkloadInspection) -> bool {
+    use zrpc_verifier::offline::InspectionStatus::Verified;
+    report.quote.issue.is_none()
+        && report.workload_issue.is_none()
+        && report.quote.hardware_authenticity == Verified
+        && report.quote.security_policy == Verified
+        && report.quote.workload_policy == Verified
+        && report.runtime_event_integrity == Verified
+        && report.os_measurement_policy == Verified
+        && report.app_configuration_policy == Verified
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
@@ -191,6 +205,63 @@ async fn run() -> Result<(), String> {
                 }
             };
             if rejected { std::process::exit(1) }
+            Ok(())
+        },
+        "inspect-preview-workload"=>{
+            let quote_path=required(&mut args,"--quote")?;
+            let collateral_path=required(&mut args,"--collateral")?;
+            let event_log_path=required(&mut args,"--event-log")?;
+            let compose_path=required(&mut args,"--app-compose")?;
+            let policy_path=required(&mut args,"--policy")?;
+            exhausted(&args)?;
+            let policy=zrpc_verifier::workload::WorkloadPolicy::from_json(
+                &fs::read(policy_path).map_err(|_|"workload policy file unavailable")?
+            ).map_err(|_|"workload policy rejected")?;
+            let quote=fs::read(quote_path).map_err(|_|"quote file unavailable")?;
+            let collateral=fs::read(collateral_path).map_err(|_|"collateral file unavailable")?;
+            let event_log=fs::read(event_log_path).map_err(|_|"event log file unavailable")?;
+            let compose=fs::read(compose_path).map_err(|_|"app-compose unavailable")?;
+            let report=zrpc_verifier::workload::inspect_phala_public_preview_workload(
+                &quote,&collateral,&event_log,&compose,&policy
+            );
+            let passed=preview_launch_consistent(&report);
+            print_json(json!({
+                "mode":"public_preview_launch_inspection",
+                "approved_release":null,
+                "private_accepted":false,
+                "query_sent":false,
+                "diagnostic_policy_is_independent":false,
+                "launch_consistency_passed":passed,
+                "inspection":report
+            }))?;
+            if !passed { std::process::exit(1) }
+            Ok(())
+        },
+        "inspect-preview-endpoint"=>{
+            let (config,collateral)=preview_endpoint_inputs(&mut args)?;
+            let compose_path=required(&mut args,"--app-compose")?;
+            let policy_path=required(&mut args,"--policy")?;
+            exhausted(&args)?;
+            let compose=fs::read(compose_path).map_err(|_|"app-compose unavailable")?;
+            let policy=zrpc_verifier::workload::WorkloadPolicy::from_json(
+                &fs::read(policy_path).map_err(|_|"workload policy file unavailable")?
+            ).map_err(|_|"workload policy rejected")?;
+            let (inspection,workload)=zrpc_client::inspection::inspect_preview_launch(
+                &config,&collateral,&compose,&policy
+            ).await.map_err(|error|error.to_string())?;
+            let launch_consistency_passed=inspection.public_preview_passed()
+                && workload.as_ref().is_some_and(preview_launch_consistent);
+            print_json(json!({
+                "mode":"public_preview_launch_inspection",
+                "approved_release":null,
+                "private_accepted":false,
+                "query_sent":false,
+                "diagnostic_policy_is_independent":false,
+                "launch_consistency_passed":launch_consistency_passed,
+                "inspection":inspection,
+                "workload":workload
+            }))?;
+            if !launch_consistency_passed { std::process::exit(1) }
             Ok(())
         },
         "verify"=>{
@@ -378,6 +449,21 @@ struct PreviewInputs {
 }
 
 fn preview_inputs(args: &mut Vec<String>) -> Result<PreviewInputs, String> {
+    let (config, collateral) = preview_endpoint_inputs(args)?;
+    let address = TestnetTransparentAddress::parse(
+        &take_value(args, "--address")?.unwrap_or_else(|| PREVIEW_TESTNET_ADDRESS.to_owned()),
+    )
+    .map_err(|_| "address must be a valid Zcash testnet transparent address")?;
+    Ok(PreviewInputs {
+        config,
+        collateral,
+        address,
+    })
+}
+
+fn preview_endpoint_inputs(
+    args: &mut Vec<String>,
+) -> Result<(zrpc_client::inspection::PreviewEndpointConfig, Vec<u8>), String> {
     if required(args, "--platform")? != "phala-dstack" {
         return Err("preview platform must be phala-dstack".into());
     }
@@ -387,19 +473,11 @@ fn preview_inputs(args: &mut Vec<String>) -> Result<PreviewInputs, String> {
         .map_err(|_| "invalid endpoint port")?;
     let tor_executable = required(args, "--tor-executable")?;
     let collateral_path = required(args, "--collateral")?;
-    let address = TestnetTransparentAddress::parse(
-        &take_value(args, "--address")?.unwrap_or_else(|| PREVIEW_TESTNET_ADDRESS.to_owned()),
-    )
-    .map_err(|_| "address must be a valid Zcash testnet transparent address")?;
     let config =
         zrpc_client::inspection::PreviewEndpointConfig::for_phala(&host, port, tor_executable)
             .map_err(|error| error.to_string())?;
     let collateral = fs::read(collateral_path).map_err(|_| "collateral file unavailable")?;
-    Ok(PreviewInputs {
-        config,
-        collateral,
-        address,
-    })
+    Ok((config, collateral))
 }
 
 fn live_inputs(args: &mut Vec<String>) -> Result<LiveInputs, String> {

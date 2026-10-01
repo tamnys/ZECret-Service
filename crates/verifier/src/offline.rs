@@ -229,6 +229,31 @@ pub(crate) fn inspect_quote_with_claims(
     }
 }
 
+/// The same authenticated claims callback under the deliberately limited Phala
+/// public-preview appraisal. This is diagnostic only; callers cannot turn it
+/// into strict TCB acceptance or a private-session capability.
+pub(crate) fn inspect_phala_public_preview_quote_with_claims(
+    quote: &[u8],
+    collateral_json: &[u8],
+    inspect: impl FnOnce(&QuoteClaims),
+) -> OfflineInspection {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(now) => inspect_at_with_appraisal(
+            quote,
+            collateral_json,
+            now.as_secs(),
+            "system_clock",
+            Appraisal::PhalaPublicPreview,
+            inspect,
+        ),
+        Err(_) => {
+            let mut report = OfflineInspection::new(None, "system_clock");
+            report.issue = Some(InspectionIssue::ClockUnavailable);
+            report
+        }
+    }
+}
+
 #[cfg(test)]
 fn inspect_at(
     quote: &[u8],

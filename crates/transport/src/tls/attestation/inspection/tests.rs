@@ -181,6 +181,22 @@ async fn public_preview_rejects_synthetic_quote_before_any_rpc() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn preview_launch_diagnostic_rejects_synthetic_quote_without_workload_or_rpc() {
+    let (mut evidence, close, peer) = received_fixture().await;
+    let (tor, _listener) = ManagedTor::synthetic_live().unwrap();
+    evidence._session.origin = TransportOrigin::Managed(tor);
+    let (report, workload) = evidence
+        .inspect_public_preview_launch(b"{}", b"{}", &synthetic_policy())
+        .unwrap();
+    assert!(!report.public_preview_passed());
+    assert!(workload.is_none());
+    assert!(!report.private_accepted && !report.query_sent);
+    drop(close);
+    peer.await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn public_preview_rejects_challenge_mismatch_before_quote_and_rpc() {
     let (mut evidence, close, peer) = received_fixture().await;
     let (tor, _listener) = ManagedTor::synthetic_live().unwrap();

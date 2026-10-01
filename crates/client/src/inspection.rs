@@ -15,7 +15,11 @@ use zrpc_transport::{
     EndpointInspection, IsolationLabel, PublicTestnetPreview, RemoteEndpoint, TorConfig,
     UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
 };
-use zrpc_verifier::{ReleasePolicy, gcp::GcpWorkloadPolicy, workload::WorkloadPolicy};
+use zrpc_verifier::{
+    ReleasePolicy,
+    gcp::GcpWorkloadPolicy,
+    workload::{WorkloadInspection, WorkloadPolicy},
+};
 
 /// Explicit endpoint and numeric loopback SOCKS address. No discovery, defaults,
 /// direct mode, proxy environment or caller-supplied stream-isolation secret.
@@ -168,6 +172,41 @@ pub async fn preview_testnet(
                 preview: None,
                 query_error: Some(error),
             }),
+        }
+    }
+}
+
+/// Diagnose the current peer launch over the same managed-Tor, retained TLS
+/// attestation exchange as the public preview. The connection is consumed;
+/// this function has no RPC sender or reviewed-release acceptance path.
+pub async fn inspect_preview_launch(
+    config: &PreviewEndpointConfig,
+    collateral: &[u8],
+    raw_app_compose: &[u8],
+    policy: &WorkloadPolicy,
+) -> Result<(EndpointInspection, Option<WorkloadInspection>), SafeError> {
+    #[cfg(not(unix))]
+    return Err(SafeError::new(
+        ErrorCode::TorUnavailable,
+        "Managed local Tor requires a Unix-domain socket on this client platform.",
+    ));
+    #[cfg(unix)]
+    {
+        let tor = config
+            .tor
+            .get_or_try_init(|| async { ManagedTor::launch(&config.tor_executable) })
+            .await?;
+        let evidence = request_evidence_with(
+            Backend::PhalaDstack,
+            &config.endpoint,
+            EvidenceTransport::Managed(tor),
+        )
+        .await?;
+        match evidence {
+            NativeEvidence::Phala(evidence) => {
+                evidence.inspect_public_preview_launch(collateral, raw_app_compose, policy)
+            }
+            _ => Err(wrong_platform()),
         }
     }
 }

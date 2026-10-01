@@ -164,6 +164,27 @@ pub fn inspect_workload(
     .workload
 }
 
+/// Public-preview-only consistency check of a signed quote, replayed runtime
+/// events, and caller-supplied launch bytes. Caller expectations can come from
+/// the same provider and are not independent approval. This does not verify a
+/// live TLS key or grant private-query authority.
+pub fn inspect_phala_public_preview_workload(
+    quote: &[u8],
+    collateral_json: &[u8],
+    event_log_json: &[u8],
+    raw_app_compose: &[u8],
+    policy: &WorkloadPolicy,
+) -> WorkloadInspection {
+    let mut report =
+        inspect_workload_using(event_log_json, raw_app_compose, policy, None, |inspect| {
+            offline::inspect_phala_public_preview_quote_with_claims(quote, collateral_json, inspect)
+        })
+        .workload;
+    report.quote.operation = "public_preview_workload_inspection";
+    report.policy_source = "caller_supplied_public_preview_not_release_approval";
+    report
+}
+
 /// Authenticate supplied evidence at the current system clock before comparing
 /// signed REPORTDATA. Echoed report_data strings or provider assertions are not
 /// inputs. A match never approves the policy or constructs a verified channel.
@@ -194,8 +215,9 @@ fn inspect_workload_using(
     let mut checks = Checks::new();
     let mut report_data = InspectionStatus::NotChecked;
     let mut quote = inspect_quote(&mut |claims| {
-        // The callback runs only after strict hardware policy passed. Expected
-        // bytes and measurements cannot replace this authentication boundary.
+        // The callback runs only after the selected hardware appraisal passed.
+        // Public-preview appraisal is weaker than private release policy;
+        // expected bytes and measurements cannot replace either boundary.
         if let Some(td) = claims.report.as_td10() {
             if let Some(expected) = expected_report_data {
                 report_data = compare_report_data(td, expected);
