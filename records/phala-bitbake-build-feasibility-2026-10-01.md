@@ -1,0 +1,11 @@
+# Corrected Phala guest build feasibility — 2026-10-01 UTC
+
+The corrected guest is still a source candidate. No BitBake task has produced a rootfs or image, and no custom image has been admitted to Phala.
+
+- [Native guest ABI run 36812042568](https://github.com/tamnys/ZECret-service/actions/runs/36812042568) built the runtime guard reproducibly and executed the guard and quote proxy denial paths with libraries extracted from the verified stock rootfs. Its checked binary artifact is an input to the source preflight, not an installed guest.
+- [Native source preflight run 36812767277](https://github.com/tamnys/ZECret-service/actions/runs/36812767277) reconstructed the candidate with those binaries, parsed the pinned layers with `bitbake -p`, and generated the `dstack-rootfs` dependency graph with `bitbake -g`. Neither command executed build tasks or fetched the kernel.
+- [Task dry-run 36812467355](https://github.com/tamnys/ZECret-service/actions/runs/36812467355) showed that `bitbake -n` starts workers. Before task bodies ran, pinned BitBake's `disable_network` unshared a user/network namespace, then the GitHub runner denied its write to `/proc/self/uid_map` with `EPERM`. The earlier [root-owned namespace probe](https://github.com/tamnys/ZECret-service/actions/runs/36370805591) does not prove that BitBake's non-root worker can map its UID. Do not disable worker network isolation to make this runner pass.
+
+The selected `linux-yocto-dev` recipe uses `AUTOREV` for its machine and metadata sources. The fixed revisions in the parse workflow are the recipe's parse-only fallback, not reviewed production kernel inputs. The [focused, unsent Phala request](phala-image-build-inputs-support-request-2026-10-01.md) asks for the supported immutable inputs and image/KMS admission process.
+
+Before attempting a full build, use a native x86_64 Linux builder where the exact pinned BitBake worker can complete its UID/GID mapping and isolated task execution. Pin and verify the kernel sources, then run the image build and inspect its actual rootfs, artifact hashes and reconstructed measurements. A different builder or a passing graph alone would not establish boot behavior, Phala admission or private-mode acceptance.
