@@ -329,6 +329,17 @@ This is live public-preview availability, not proof of the corrected image,
 disk isolation, guest administration policy or private-query readiness. No
 Phala management mutation or new resource was involved.
 
+At **06:36:35 UTC**, an authenticated `zrpc lifecycle reconcile` read the
+existing CVM and committed the observation to the original ledger at generation
+7. The complete inventory contained the one tracked, running CVM and no
+untracked CVMs. Its `instance_id` was still null; eight usage rows remained
+unjoined. The modeled cost floor was **$2.479217**, not a reconciled provider
+charge. A separate ledger readback found five retained observations, no
+deletion intent or uncommitted draft, and a clock-advanced floor of **$2.480365**.
+The raw response and readback remain in the ignored original experiment
+directory. The operation changed no Phala resource and approved no private
+query.
+
 ## Manual deletion and follow-up
 
 The operator chose manual cleanup. Before requesting deletion, run the native
