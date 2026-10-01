@@ -1,0 +1,142 @@
+name: Phala stock TDX measurement reconstruction
+
+on:
+  push:
+    branches:
+      - codex/phala-measurement-reconstruction
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact project source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          mkdir "$GITHUB_WORKSPACE/source"
+          git -C "$GITHUB_WORKSPACE/source" init -q
+          git -c core.hooksPath=/dev/null -C "$GITHUB_WORKSPACE/source" fetch -q --no-tags --depth=1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE/source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -c core.hooksPath=/dev/null -C "$GITHUB_WORKSPACE/source" checkout -q --detach FETCH_HEAD
+
+      - name: Verify published stock OS archive and extract measured inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-stock-measurement"
+          mkdir -p "$scratch/image"
+          curl --fail --location --silent --show-error \
+            https://github.com/Dstack-TEE/meta-dstack/releases/download/v0.5.9/dstack-0.5.9.tar.gz \
+            --output "$scratch/dstack-0.5.9.tar.gz"
+          python3 -I "$GITHUB_WORKSPACE/source/records/probes/verify-v059-archive.py" \
+            "$scratch/dstack-0.5.9.tar.gz" > "$scratch/archive-check.json"
+          python3 -I - "$scratch" <<'PY'
+          from pathlib import Path
+          import json
+          import shutil
+          import sys
+          import tarfile
+
+          scratch = Path(sys.argv[1])
+          output = scratch / "image"
+          with tarfile.open(scratch / "dstack-0.5.9.tar.gz", "r:gz") as archive:
+              for name in ("metadata.json", "ovmf.fd", "bzImage", "initramfs.cpio.gz"):
+                  member = archive.getmember("dstack-0.5.9/" + name)
+                  if not member.isfile():
+                      raise SystemExit("stock image member is not regular")
+                  with archive.extractfile(member) as source, (output / name).open("xb") as target:
+                      shutil.copyfileobj(source, target)
+          metadata = json.loads((output / "metadata.json").read_bytes())
+          if metadata["version"] != "0.5.9" or metadata["is_dev"] is not False:
+              raise SystemExit("stock metadata differs")
+          PY
+
+      - name: Fetch pinned dstack measurement implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-stock-measurement"
+          mkdir "$scratch/dstack"
+          git -C "$scratch/dstack" init -q
+          git -c core.hooksPath=/dev/null -C "$scratch/dstack" fetch -q --no-tags --depth=1 \
+            https://github.com/Dstack-TEE/dstack.git 282eeb27d22d8f091ad0fa5a90e638f85cf68751
+          test "$(git -C "$scratch/dstack" rev-parse FETCH_HEAD)" = \
+            282eeb27d22d8f091ad0fa5a90e638f85cf68751
+          git -c core.hooksPath=/dev/null -C "$scratch/dstack" checkout -q --detach FETCH_HEAD
+
+      - name: Build maintained dstack-mr from its committed lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-stock-measurement"
+          rust_image='rust:1.92.0-bookworm@sha256:e90e846de4124376164ddfbaab4b0774c7bdeef5e738866295e5a90a34a307a2'
+          docker pull --platform linux/amd64 "$rust_image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$rust_image")" = linux/amd64
+          docker run --rm --pull=never --platform linux/amd64 \
+            --mount "type=bind,src=$scratch/dstack,dst=/source" \
+            --workdir /source --entrypoint cargo "$rust_image" \
+            build --locked -p dstack-mr-cli
+
+      - name: Reconstruct expected boot registers with pinned ACPI helper
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-stock-measurement"
+          helper_image='dstacktee/dstack-kms@sha256:11ac59f524a22462ccd2152219b0bec48a28ceb734e32500152d4abefab7a62a'
+          docker pull --platform linux/amd64 "$helper_image"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$helper_image")" = linux/amd64
+          docker run --rm --pull=never --platform linux/amd64 --network none \
+            --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+            --mount "type=bind,src=$scratch/dstack,target=/source,readonly" \
+            --mount "type=bind,src=$scratch/image,target=/image,readonly" \
+            --entrypoint /source/target/debug/dstack-mr "$helper_image" \
+            measure --cpu 4 --memory 8G --qemu-version 8.2.2 --json \
+            /image/metadata.json > "$scratch/measurements.json"
+          python3 -I - "$scratch" <<'PY'
+          from pathlib import Path
+          import hashlib
+          import json
+          import sys
+
+          scratch = Path(sys.argv[1])
+          measurement = json.loads((scratch / "measurements.json").read_bytes())
+          if set(measurement) != {"mrtd", "rtmr0", "rtmr1", "rtmr2"}:
+              raise SystemExit("unexpected measurement result")
+          if any(len(value) != 96 for value in measurement.values()):
+              raise SystemExit("invalid measurement length")
+          report = {
+              "schema_version": 1,
+              "status": "independent_stock_image_reconstruction_diagnostic",
+              "source_commit": "282eeb27d22d8f091ad0fa5a90e638f85cf68751",
+              "archive_sha256": "f3888f64e215bc1e1af53a1f3d13b4df48fe40d4a3059049bb87d4c7c06aff97",
+              "catalog_os_sha256": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
+              "acpi_helper_image": "dstacktee/dstack-kms@sha256:11ac59f524a22462ccd2152219b0bec48a28ceb734e32500152d4abefab7a62a",
+              "shape": {"cpu_count": 4, "memory_size": 8589934592,
+                        "qemu_version": "8.2.2", "pci_hole64_size": 0,
+                        "hotplug_off": False, "hugepages": False,
+                        "num_gpus": 0, "num_nvswitches": 0,
+                        "host_share_mode": "9p"},
+              "measurements": measurement,
+              "private_accepted": False,
+          }
+          (scratch / "report.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+          print(json.dumps(report, sort_keys=True, indent=2))
+          PY
+
+      - name: Preserve reconstruction inputs and result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phala-stock-measurement-${{ github.sha }}
+          path: |
+            source/.codex-tmp/phala-stock-measurement/archive-check.json
+            source/.codex-tmp/phala-stock-measurement/measurements.json
+            source/.codex-tmp/phala-stock-measurement/report.json
+          if-no-files-found: warn
