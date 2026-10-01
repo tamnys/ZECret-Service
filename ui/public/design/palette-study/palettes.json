@@ -1,0 +1,32 @@
+{
+  "graphite": {
+    "name": "Graphite",
+    "base": "#242424",
+    "surface": "#303030",
+    "line": "#484848",
+    "text": "#F2F2EF",
+    "muted": "#B5B5B5",
+    "button": "#DADADA",
+    "gold": "#F4B728"
+  },
+  "warm": {
+    "name": "Warm charcoal",
+    "base": "#282622",
+    "surface": "#34312E",
+    "line": "#49443E",
+    "text": "#EEEAE3",
+    "muted": "#BDB5AA",
+    "button": "#D8D1C6",
+    "gold": "#F4B728"
+  },
+  "slate": {
+    "name": "Slate",
+    "base": "#20252B",
+    "surface": "#2C333B",
+    "line": "#424B56",
+    "text": "#E9EDF2",
+    "muted": "#B4BEC9",
+    "button": "#CFD6DE",
+    "gold": "#F4B728"
+  }
+}

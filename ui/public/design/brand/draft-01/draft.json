@@ -1,0 +1,11 @@
+{
+  "name": "ZECret logo \u2014 draft 01",
+  "saved": "2026-09-29",
+  "status": "Selected by the user as the first draft logo, with the Graphite site palette.",
+  "palette": "palette.json",
+  "master": "zecret-mark.svg",
+  "dark_export": "zecret-mark-dark.svg",
+  "gold": "#F4B728",
+  "glyph_source": "https://z.cash/wp-content/uploads/2023/11/Brandmark-Yellow.svg",
+  "geometry": "Smaller standalone Zcash glyph, fitted fedora, slim mustache; hat and mustache lowered together."
+}

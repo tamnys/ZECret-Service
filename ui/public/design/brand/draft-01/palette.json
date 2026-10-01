@@ -1,0 +1,20 @@
+{
+  "name": "Graphite",
+  "selected": "2026-09-29",
+  "base": "#242424",
+  "surface": "#303030",
+  "line": "#484848",
+  "text": "#F2F2EF",
+  "muted": "#B5B5B5",
+  "button": "#DADADA",
+  "gold": "#F4B728",
+  "usage": {
+    "base": "Page background",
+    "surface": "Raised content panels",
+    "line": "Dividers and subtle borders",
+    "text": "Primary text",
+    "muted": "Secondary text",
+    "button": "Primary button background, with base-colored text",
+    "gold": "The Z in the logo"
+  }
+}

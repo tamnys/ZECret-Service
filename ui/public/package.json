@@ -1,0 +1,17 @@
+{
+  "name": "zecret-public-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "types": "wrangler types",
+    "check": "wrangler types && tsc --project tsconfig.worker.json && tsc --project tsconfig.browser.json --noEmit && wrangler deploy --dry-run",
+    "smoke": "node --test tests/smoke.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "wrangler": "4.136.1"
+  }
+}

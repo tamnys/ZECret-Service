@@ -4,7 +4,7 @@ ZECret service is an experimental privacy-focused way to read Zcash blockchain d
 
 The goal is simple: look up a block or transaction without giving a remote server an easy way to connect that lookup to you.
 
-**Current status:** this repository provides a local demo, attestation tools, a public testnet preview, and a separate Phala-trusting client profile. Neither the strict private profile nor the Phala-trusting profile includes an approved server release in this build, so both reject queries before reading a private request body. Endpoint inspection accepts a configured local SOCKS proxy; query commands start a selected local Tor executable after release selection. Nym is an intended alternative, not an available client option in this version. No hosted endpoint or live Zcash node is included in the repository.
+**Current status:** the native client packages an approved Phala-trusting release for live Zcash testnet queries. The stricter provider-independent private profile remains unavailable. The public website shows fixed examples and does not connect to the service. Query commands start a selected local Tor executable; Nym is an intended alternative, not an available client option in this version.
 
 ## How it works
 
@@ -38,7 +38,7 @@ Network privacy complements the TEE by making it harder to link a request to the
 
 | Option | What it provides | Availability here |
 | --- | --- | --- |
-| **Tor** | Routes connections through relays to hide the client's IP address from the destination. | Endpoint inspection uses an explicitly configured local SOCKS proxy. Query profiles start a local Tor child with a private Unix socket after selecting a packaged release; both catalogs are empty in this build. |
+| **Tor** | Routes connections through relays to hide the client's IP address from the destination. | Endpoint inspection uses an explicitly configured local SOCKS proxy. The approved Phala-trusting query profile starts a local Tor child with a private Unix socket. |
 | **Nym mixnet** | Mixes traffic with other users' traffic and adds cover traffic and timing delays to make connections harder to correlate. This adds latency. | Intended alternative; not yet selectable in this version. |
 
 Learn more about [Tor's protections](https://support.torproject.org/about-tor/introduction/protections/) and [how Nym's mixnet works](https://nym.com/nym_litepaper.pdf).
@@ -63,9 +63,23 @@ The command-line tool is named `zrpc`. These examples check the local setup, ret
 
 The dashboard listens only on `127.0.0.1` and loads no remote assets. If a browser cannot open automatically, use `demo --no-open` to display a one-time access link in your terminal. Keep that link private. When running in a container, open the dashboard from a browser in that container.
 
-Private mode is the default when `--simulate` is omitted. In this build it refuses before reading a query from standard input. Use synthetic data for demonstrations.
+The stricter private profile is the default when `--simulate` and `--privacy-profile` are omitted; it refuses before reading a query body because it has no approved release in this build. Select `phala-trusted` explicitly for live testnet queries.
 
-The qualified Phala profile must be selected with `--privacy-profile phala-trusted --platform phala-dstack` on `verify`, `query`, or `dashboard`. It requires the endpoint host and port, an absolute local Tor executable path, offline collateral, the exact Phala app-compose bytes, and a release-policy file selecting a client-packaged release. This build has no such release, so selection fails closed. The profile supports a validated Zcash testnet transparent address with `query --stdin` and typed `getaddressbalance` parameters; it does not accept payment options.
+## Live Phala testnet queries
+
+Build the native client from this source tree, then select `--privacy-profile phala-trusted --platform phala-dstack`. The client requires a local Tor executable, current attestation collateral, the exact [approved app-compose bytes](deploy/phala/releases/2026-10-01/block-context-app-compose.json), and the matching [release selection policy](deploy/phala/releases/2026-10-01/block-context-selection-policy.json). The [rollout record](records/phala-block-context-rollout-2026-10-01.md) identifies the approved release and its trust assumptions. The public website is not a source of release approval.
+
+Set `ZRPC_TOR` and `ZRPC_COLLATERAL` to absolute local paths for the reviewed Tor executable and current collateral file. From the repository root, verify the service before sending a query:
+
+```sh
+./target/debug/zrpc verify --privacy-profile phala-trusted --platform phala-dstack \
+  --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network \
+  --endpoint-port 443 --tor-executable "$ZRPC_TOR" --collateral "$ZRPC_COLLATERAL" \
+  --app-compose deploy/phala/releases/2026-10-01/block-context-app-compose.json \
+  --release-policy deploy/phala/releases/2026-10-01/block-context-selection-policy.json
+```
+
+For a read-only query, replace `verify` with `query --method getblockchaininfo` and use the same options. The client checks the approved release and a fresh attested connection before sending the method. This profile also supports a validated Zcash testnet transparent address with `query --stdin` and typed `getaddressbalance` parameters; it does not accept ticket or ZEC payment options.
 
 ## What you can query
 
@@ -80,7 +94,7 @@ The protocol accepts these read-only methods:
 | `getrawtransaction` | Read a transaction by its ID. |
 | `getaddressbalance` | Read one validated testnet transparent address balance in the Phala-trusting profile. |
 
-Wallet operations, transaction submission, batch requests, and arbitrary upstream URLs are rejected. The local demo returns fixtures; compatibility with a live Zebra release must be established before running a service.
+Wallet operations, transaction submission, batch requests, and arbitrary upstream URLs are rejected. The local demo returns fixtures; the approved Phala-trusting profile uses the live testnet service.
 
 Chain status, block count, and confirmed address balances include
 `chain_context: {"height": ..., "hash": ...}`. This identifies the node state

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="What ZECret Service's public site, native client, and proposed payments can and cannot protect.">
+  <title>Privacy model · ZECret Service</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="/" aria-label="ZECret Service home"><img src="/logo.svg" width="34" height="56" alt=""><span class="brand-wordmark"><span class="brand-name">ZECret</span><small>Service</small></span></a>
+      <nav aria-label="Main navigation">
+        <a href="/#how-it-works">How it works</a>
+        <a href="/#demo">Demo</a>
+        <a href="/#privacy">Privacy</a>
+        <a href="/#quickstart">For developers</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="shell privacy-main">
+    <p class="section-label">Privacy model · Experimental</p>
+    <h1>Where privacy begins and ends.</h1>
+    <p class="lede">The public demo shows fixed examples. For live Zcash testnet queries, the native client can verify and use the approved Phala-trusting release. The website itself does not make RPC queries.</p>
+
+    <div class="privacy-list">
+      <section>
+        <h2>Visiting this website</h2>
+        <div><p>Cloudflare serves this public site and can observe ordinary visitor metadata, including network addresses and request timing. The application adds no analytics, identity cookies, accounts, third-party scripts, or request-body logging.</p><p>This site does not accept transaction selections, wallet material, tickets, or native-client secrets. It does not connect to localhost. Tor use by the native CLI does not anonymize a browser visit here.</p><p>The demo API returns fixed public examples. Its output cannot approve a release or verify a private query.</p></div>
+      </section>
+      <section>
+        <h2>Using the native client</h2>
+        <div><p>The approved path is native Rust client → Tor → attested TLS connection → measured RPC wrapper → loopback Zebra testnet node. Before sending query parameters, the client checks a packaged release, hardware and workload evidence, freshness, and the live encrypted connection.</p><p>This is the Phala-trusting profile: it also trusts Phala's guest administration, KMS, and persistent runtime controls. The stricter provider-independent private profile remains unavailable. The bundled local dashboard shares the native client core and does not take trusted release settings from this website.</p></div>
+      </section>
+      <section id="payments">
+        <h2>Payment proof of concept</h2>
+        <div><p>The separate native ticket proof of concept keeps blinding state and one-use tickets in a private client store. The issuer signs blinded requests without receiving finalized tickets. A ticket-required service records spent-ticket markers without purchase references or query contents.</p><p>The approved Phala-trusting testnet service does not accept tickets or ZEC payments. In the ticket demo, a credit is used when a request is admitted; a node error or lost response can still consume it. The client does not automatically spend a replacement.</p><p>Blinding does not remove timing, network, or small-crowd correlation. Ordinary restart safety does not protect against malicious disk rollback. This website does not handle tickets or payments.</p></div>
+      </section>
+      <section>
+        <h2>Records and limits</h2>
+        <div><p>The browser demo does not intentionally save query history or remote diagnostics. CLI output remains on the user's device. The local dashboard keeps its access capability in memory and serves API results with no-store headers.</p><p>The service is designed not to persist request bodies, transaction selections, responses, customer identifiers, or query-to-payment mappings. That is an application policy, not proof that browsers, operating systems, providers, or compromised software retain nothing.</p><p>Tor cannot defeat every form of traffic analysis. Attestation does not prove blockchain consensus or that software has no bugs. Your device, release distribution, verifier, hardware vendor, firmware, and accepted platform stack remain part of the trust model.</p></div>
+      </section>
+    </div>
+    <aside class="privacy-sources"><h2>Read the project design</h2><p>The repository defines the security boundary, retention policy, and detailed design. Use those documents when building or reviewing the native path.</p><div><a href="https://github.com/tamnys/ZECret-Service/blob/main/SECURITY.md" rel="noreferrer noopener">Security boundary ↗</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/config/retention-policy.md" rel="noreferrer noopener">Retention policy ↗</a><a href="https://github.com/tamnys/ZECret-Service/blob/main/records/input-design.md" rel="noreferrer noopener">Design record ↗</a></div></aside>
+    <p><a class="text-link" href="/">← Back to the homepage</a></p>
+  </main>
+
+  <footer class="site-footer"><div class="shell footer-inner"><div><strong>ZECret Service</strong><p>Experimental Zcash testnet research. Public examples are synthetic.</p></div><div><a href="/">Home</a><a href="https://github.com/tamnys/ZECret-Service" rel="noreferrer noopener">Source ↗</a></div></div></footer>
+</body>
+</html>

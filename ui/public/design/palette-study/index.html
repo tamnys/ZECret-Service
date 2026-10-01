@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<title>ZECret — dark palette study</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#eae9e5;color:#242424;font:16px/1.5 Arial,Helvetica,sans-serif}
+main{max-width:1460px;margin:auto;padding:34px 36px 28px}
+.intro{display:flex;justify-content:space-between;align-items:end;gap:30px;padding-bottom:24px;border-bottom:1px solid #c9c8c3;margin-bottom:28px}
+h1{font-size:28px;font-weight:600;letter-spacing:-.9px;margin:0 0 6px}
+.intro p{margin:0;color:#60605b;font-size:14px}
+.controls{display:flex;flex-wrap:wrap;gap:6px;flex:none}
+.controls button{font:inherit;font-size:12px;border:1px solid #b7b7b1;background:transparent;color:#41413c;padding:8px 12px;border-radius:3px;cursor:pointer}
+.controls button[aria-pressed=true]{background:#33332f;color:#fafaf6;border-color:#33332f}
+.controls button:focus-visible{outline:2px solid #242424;outline-offset:3px}
+.studies{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px}
+.study[hidden]{display:none}
+.study h2{font-size:18px;letter-spacing:-.3px;margin:0;font-weight:600}
+.study h2 span{color:#72726c;font-size:12px;font-weight:400;margin-left:8px;letter-spacing:0}
+.study .caption{font-size:13px;margin:4px 0 18px;color:#60605b}
+.screen{background:var(--base);color:var(--text);border:1px solid var(--line)}
+.screen-header{margin:0 24px;padding:19px 0 17px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:18px}
+.brand{display:flex;align-items:center;gap:8px;white-space:nowrap;color:var(--text);font-size:20px;letter-spacing:-.7px}
+.brand svg{width:20px;height:32px;flex:none}
+.brand b{font-weight:750}.brand span{font-weight:400}
+.nav{display:flex;gap:15px;color:var(--muted);font-size:11px}
+.content{padding:35px 24px 28px}
+.kicker{font-size:10px;letter-spacing:.65px;color:var(--muted);margin:0 0 14px}
+.screen h3{font-size:35px;line-height:1.12;letter-spacing:-1.35px;font-weight:500;margin:0 0 20px}
+.lede{font-size:14px;line-height:1.65;margin:0;color:var(--muted);max-width:320px;min-height:69px}
+.actions{margin:26px 0 32px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.primary{display:inline-block;background:var(--button);color:var(--base);padding:10px 13px;font-size:12px;font-weight:600;border-radius:2px;white-space:nowrap}
+.secondary{font-size:12px;color:var(--text);text-decoration:underline;text-underline-offset:4px;white-space:nowrap}
+.demo{background:var(--surface);padding:18px}
+.demo-head{display:flex;justify-content:space-between;gap:12px;align-items:center;font-size:12px;margin-bottom:14px}
+.demo-head span:last-child{color:var(--muted);font-size:10px}
+.row{display:flex;justify-content:space-between;gap:12px;font-size:11px;padding:10px 0;border-top:1px solid var(--line)}
+.row span:first-child{color:var(--muted)}
+.demo p{font-size:11px;margin:9px 0 0;color:var(--muted)}
+.mini-footer{padding-top:22px;display:flex;justify-content:space-between;color:var(--muted);font-size:10px}
+.swatches{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:15px}
+.swatch i{display:block;height:25px;background:var(--chip);border:1px solid #c2c1bc}
+.swatch span{display:block;font-size:10px;margin-top:5px;color:#55554f}
+.swatch code{display:block;font-size:10px;letter-spacing:-.1px;color:#64645e;margin-top:1px}
+.note{margin:24px 0 0;padding-top:18px;border-top:1px solid #c9c8c3;display:flex;justify-content:space-between;gap:24px;font-size:12px;color:#60605b}
+.note p{margin:0}.gold{display:inline-block;width:9px;height:9px;background:#f4b728;margin-right:6px}
+.studies.single{display:block;max-width:1020px;margin:auto}.single .content{padding:56px 48px 42px}.single .screen-header{margin:0 48px}.single .screen h3{font-size:55px}.single .lede{max-width:510px;min-height:0;font-size:17px}.single .demo{max-width:500px}.single .swatches{max-width:650px}.single .primary,.single .secondary{font-size:14px}.single .kicker{font-size:12px}
+@media(max-width:1000px){main{padding:26px 22px}.intro{display:block}.controls{margin-top:18px}.studies{gap:16px}.screen-header{margin:0 18px}.content{padding:28px 18px 22px}.nav{gap:8px}.screen h3{font-size:29px}.actions{gap:14px}.lede{font-size:13px;min-height:86px}.swatch code{font-size:9px}.brand{font-size:18px}}
+@media(max-width:760px){.studies{grid-template-columns:1fr;gap:32px}.study h2{font-size:21px}.screen-header{margin:0 25px}.content{padding:34px 25px 27px}.screen h3{font-size:39px}.lede{min-height:0;font-size:15px}.swatch code{font-size:11px}.swatch span{font-size:11px}.nav{font-size:12px;gap:14px}.note{display:block}.note p+p{margin-top:9px}.single .content{padding:34px 25px 27px}.single .screen-header{margin:0 25px}.single .screen h3{font-size:39px}.single .lede{font-size:15px}}
+</style>
+</head>
+<body>
+<main>
+<header class="intro"><div><h1>ZECret / Dark palettes</h1><p>Draft 01 logo. Layered grays, silver buttons, and a small gold accent.</p></div><div class="controls" role="group" aria-label="Palette preview"><button data-view="all" aria-pressed="true">Compare</button><button data-view="graphite" aria-pressed="false">A · Graphite</button><button data-view="warm" aria-pressed="false">B · Warm charcoal</button><button data-view="slate" aria-pressed="false">C · Slate</button></div></header>
+<div class="studies" id="studies"></div>
+<footer class="note"><p><span class="gold"></span>Zcash gold #F4B728 stays in the logo.</p><p>Palette exploration · Preview content only</p></footer>
+</main>
+<script>
+const palettes = [
+ {id:'graphite',letter:'A',name:'Graphite',description:'Neutral gray. The simplest starting point.',tag:'Recommended',base:'#242424',surface:'#303030',line:'#484848',text:'#F2F2EF',muted:'#B5B5B5',button:'#DADADA'},
+ {id:'warm',letter:'B',name:'Warm charcoal',description:'A softer gray with a subtle warm undertone.',tag:'',base:'#282622',surface:'#34312E',line:'#49443E',text:'#EEEAE3',muted:'#BDB5AA',button:'#D8D1C6'},
+ {id:'slate',letter:'C',name:'Slate',description:'Cool gray with a restrained blue undertone.',tag:'',base:'#20252B',surface:'#2C333B',line:'#424B56',text:'#E9EDF2',muted:'#B4BEC9',button:'#CFD6DE'}
+];
+const mark = `<svg viewBox="14 3 36 59" aria-hidden="true"><svg x="22" y="22" width="20" height="32" viewBox="443.69 369.42 192.62 341.03"><path fill="#f4b728" d="M636.31 414.7v41.09l-114.28 155h114.28v54.5h-73.67v45.16h-45.28v-45.16h-73.67v-41.09l114.16-155h-114.16v-54.5h73.67v-45.28h45.28v45.28h73.67Z"/></svg><g transform="translate(0 2)" fill="currentColor"><path d="M23.7 20L26.2 11.3Q26.5 10.4 27.3 10.8L32 12.5L36.7 10.8Q37.5 10.4 37.8 11.3L40.3 20ZM18.5 20Q32 18.4 45.5 20V22.5Q32 24 18.5 22.5Z"/><path d="M32 41.6C30.8 40 29.2 40.2 27.5 41.5C25.5 43 23.7 43.2 22.4 41.8C23.1 45.1 27.8 46 32 43.2C36.2 46 40.9 45.1 41.6 41.8C40.3 43.2 38.5 43 36.5 41.5C34.8 40.2 33.2 40 32 41.6Z"/></g></svg>`;
+document.getElementById('studies').innerHTML = palettes.map(p => `<section class="study" data-palette="${p.id}" style="${['base','surface','line','text','muted','button'].map(k=>`--${k}:${p[k]}`).join(';')}"><h2>${p.letter} / ${p.name}<span>${p.tag}</span></h2><p class="caption">${p.description}</p><div class="screen"><header class="screen-header"><div class="brand">${mark}<span><b>ZEC</b>ret</span></div><div class="nav"><span>Privacy</span><span>Source ↗</span></div></header><div class="content"><p class="kicker">EXPERIMENTAL · ZCASH TESTNET</p><h3>Private access<br>to Zcash.</h3><p class="lede">Explore the experimental native client and the privacy model behind each query.</p><div class="actions"><span class="primary">Explore the demo</span><span class="secondary">Privacy model →</span></div><section class="demo"><div class="demo-head"><strong>The public demo</strong><span>Synthetic examples</span></div><div class="row"><span>Network</span><span>Zcash testnet</span></div><div class="row"><span>Requests</span><span>Read-only examples</span></div><div class="row"><span>Live service</span><span>Not available</span></div><p>No live RPC request runs in this demo.</p></section><div class="mini-footer"><span>Experimental software</span><span>View source ↗</span></div></div></div><div class="swatches">${[['base','Canvas'],['surface','Surface'],['line','Divider'],['text','Text'],['button','Button']].map(([k,label])=>`<div class="swatch" style="--chip:${p[k]}"><i></i><span>${label}</span><code>${p[k]}</code></div>`).join('')}</div></section>`).join('');
+for (const button of document.querySelectorAll('[data-view]')) button.addEventListener('click', () => {
+ const view = button.dataset.view;
+ for (const b of document.querySelectorAll('[data-view]')) b.setAttribute('aria-pressed',String(b === button));
+ for (const s of document.querySelectorAll('[data-palette]')) s.hidden = view !== 'all' && view !== s.dataset.palette;
+ document.getElementById('studies').classList.toggle('single',view !== 'all');
+});
+</script>
+</body>
+</html>
