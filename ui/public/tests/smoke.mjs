@@ -34,7 +34,7 @@ test('status reports the approved native profile without browser RPC access', as
   assert.equal(capabilities.trusted_release_policy_from_website, false);
   assert.equal(capabilities.private_rpc_from_website, false);
   assert.equal(capabilities.ticket_handling_from_website, false);
-  assert.deepEqual(capabilities.methods, ['getblockchaininfo']);
+  assert.deepEqual(capabilities.methods, ['getblockchaininfo', 'getblockcount']);
 });
 
 test('API rejects input, cross-origin access, and unknown routes', async () => {

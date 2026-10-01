@@ -45,6 +45,15 @@ const EMBEDDED_RELEASES: &[EmbeddedRelease] = &[
         ],
         manifest_json: include_bytes!("releases/phala-prod9-ticketed-20261001.json"),
     },
+    EmbeddedRelease {
+        id: "phala-prod9-testnet-blockcount-20261001-4",
+        manifest_sha256: [
+            0x51, 0xe7, 0x01, 0x61, 0x01, 0xb2, 0x2e, 0x18, 0x58, 0x8f, 0xf1, 0xac, 0xcb, 0xa9,
+            0x19, 0xd6, 0x6f, 0x35, 0x71, 0xbb, 0x59, 0x1e, 0xcf, 0xcd, 0xee, 0xdb, 0x5f, 0x1d,
+            0xd0, 0x67, 0xb7, 0x5c,
+        ],
+        manifest_json: include_bytes!("releases/phala-prod9-blockcount-20261001.json"),
+    },
 ];
 
 pub(crate) fn is_embedded(id: &str) -> bool {
@@ -292,6 +301,23 @@ mod tests {
             "../../../deploy/phala/releases/2026-10-01/block-context-app-compose.json"
         );
         let previous = include_bytes!("../../../deploy/phala/releases/2026-10-01/app-compose.json");
+        assert!(release.matches_launch_config(current));
+        assert!(!release.matches_launch_config(previous));
+    }
+
+    #[test]
+    fn blockcount_release_rejects_previous_launch() {
+        let policy = PhalaTrustedPolicy {
+            phala_trusted_enabled: true,
+            reviewed_release_ids: vec!["phala-prod9-testnet-blockcount-20261001-4".into()],
+            ..PhalaTrustedPolicy::default()
+        };
+        let selected = PhalaTrustedRelease::selected(&policy).unwrap();
+        let release = &selected[0];
+        let current =
+            include_bytes!("../../../deploy/phala/releases/2026-10-01/blockcount-app-compose.json");
+        let previous =
+            include_bytes!("../../../deploy/phala/releases/2026-10-01/ticketed-app-compose.json");
         assert!(release.matches_launch_config(current));
         assert!(!release.matches_launch_config(previous));
     }

@@ -67,14 +67,14 @@ The stricter private profile is the default when `--simulate` and `--privacy-pro
 
 ## Live Phala testnet queries
 
-Install Tor on Linux and build the native client and its separately locked ticket verifier from this source tree. The client includes the [current attestation collateral](deploy/phala/releases/2026-10-01/ticketed-collateral.json), [approved app-compose bytes](deploy/phala/releases/2026-10-01/ticketed-app-compose.json), [release selection policy](deploy/phala/releases/2026-10-01/ticketed-selection-policy.json), and [issuer public key](deploy/phala/ticketed/issuer-public.der). From the repository root, set the local paths and verify the service:
+Install Tor on Linux and build the native client and its separately locked ticket verifier from this source tree. The client includes the [current attestation collateral](deploy/phala/releases/2026-10-01/blockcount-collateral.json), [approved app-compose bytes](deploy/phala/releases/2026-10-01/blockcount-app-compose.json), [release selection policy](deploy/phala/releases/2026-10-01/blockcount-selection-policy.json), and [issuer public key](deploy/phala/ticketed/issuer-public.der). From the repository root, set the local paths and verify the service:
 
 ```sh
 cargo build --locked -p zrpc-cli
 cargo build --locked --manifest-path tools/payment-crypto/Cargo.toml
 ZRPC_TOR="$(command -v tor)"
 test -x "$ZRPC_TOR"
-ZRPC_COLLATERAL="$PWD/deploy/phala/releases/2026-10-01/ticketed-collateral.json"
+ZRPC_COLLATERAL="$PWD/deploy/phala/releases/2026-10-01/blockcount-collateral.json"
 ZRPC_HELPER="$PWD/tools/payment-crypto/target/debug/zrpc-payment-crypto"
 ZRPC_ISSUER=il3hrcrare4fzp3ka6oe4ewl6433isnfzxdvnqe7cfyefhylkadyyead.onion
 ZRPC_TICKET_STORE="$HOME/.local/share/zrpc-tickets"
@@ -83,8 +83,8 @@ mkdir -p "$HOME/.local/share"
 ./target/debug/zrpc verify --privacy-profile phala-trusted --platform phala-dstack \
   --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network \
   --endpoint-port 443 --tor-executable "$ZRPC_TOR" --collateral "$ZRPC_COLLATERAL" \
-  --app-compose deploy/phala/releases/2026-10-01/ticketed-app-compose.json \
-  --release-policy deploy/phala/releases/2026-10-01/ticketed-selection-policy.json
+  --app-compose deploy/phala/releases/2026-10-01/blockcount-app-compose.json \
+  --release-policy deploy/phala/releases/2026-10-01/blockcount-selection-policy.json
 ```
 
 Request up to 100 free tickets per batch through the issuer's Tor onion service. The CLI creates an owner-private ticket store outside the repository and verifies each returned ticket against the bundled public key. No account or ZEC payment is needed.
@@ -105,14 +105,14 @@ The live CLI requires a ticket for every query and marks it spent only after a s
   --platform phala-dstack \
   --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network \
   --endpoint-port 443 --tor-executable "$ZRPC_TOR" --collateral "$ZRPC_COLLATERAL" \
-  --app-compose deploy/phala/releases/2026-10-01/ticketed-app-compose.json \
-  --release-policy deploy/phala/releases/2026-10-01/ticketed-selection-policy.json \
+  --app-compose deploy/phala/releases/2026-10-01/blockcount-app-compose.json \
+  --release-policy deploy/phala/releases/2026-10-01/blockcount-selection-policy.json \
   --ticket-store "$ZRPC_TICKET_STORE" \
   --issuer-public-der deploy/phala/ticketed/issuer-public.der \
   --issuer-name "$ZRPC_ISSUER" --crypto-helper "$ZRPC_HELPER"
 ```
 
-The client checks the Phala-managed release, fresh hardware evidence, and the live TLS connection before sending the query. The website never handles tickets or queries. The bundled collateral is time-limited; an expired bundle fails closed and must be refreshed through a reviewed client release.
+Use the same query command with `--method getblockcount` to read the current testnet height. The client checks the Phala-managed release, fresh hardware evidence, and the live TLS connection before sending the query. The website never handles tickets or queries. The bundled collateral is time-limited; an expired bundle fails closed and must be refreshed through a reviewed client release.
 
 ## What you can query
 
@@ -121,6 +121,7 @@ The protocol accepts these read-only methods:
 | Method | Purpose |
 | --- | --- |
 | `getblockchaininfo` | Read blockchain status. |
+| `getblockcount` | Read the current block height. |
 | `getblockhash` | Find a block's hash by height. |
 | `getblockheader` | Read a block header. |
 | `getrawtransaction` | Read a transaction by its ID. |
