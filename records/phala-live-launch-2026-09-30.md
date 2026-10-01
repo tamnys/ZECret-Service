@@ -53,6 +53,13 @@ guarantee of a stable billing join or a final usage cutoff. The ledger remained
 at generation 3, and the modeled cost floor at the read was $1.022658; no
 provider charge was added to it.
 
+At 2026-10-01 00:40 UTC, `zrpc lifecycle reconcile` repeated the authenticated
+read and committed its eight unjoined usage rows to the original ledger at
+generation 4. The committed modeled cost floor was $1.036907. A subsequent
+ledger readback found two retained observations and the same one tracked CVM.
+No Phala mutation occurred, no usage row was accepted as a charge, and billing
+finality remains unverified.
+
 The stock HTTPS gateway URL terminated TLS outside the guest and could not
 carry the wrapper's retained TLS session. The documented `-8443s` gateway
 hostname passed TLS through to the guest: a separate diagnostic reached its
