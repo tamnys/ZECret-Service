@@ -27,7 +27,8 @@ jobs:
           git -c core.hooksPath=/dev/null -C "$source" checkout -q --detach FETCH_HEAD
 
           fetch_pinned() {
-            local name="$1" url="$2" commit="$3" directory="$scratch/sources/$name"
+            local name="$1" url="$2" commit="$3"
+            local directory="$scratch/sources/$name"
             mkdir -p "$directory"
             git -C "$directory" init -q
             git -c core.hooksPath=/dev/null -C "$directory" fetch -q \
