@@ -98,6 +98,46 @@ jobs:
           print("Checked source-only candidate reconstructed; binaries are synthetic placeholders.")
           PY
 
+      - name: Stage exact Ubuntu host tools without installing packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          scratch="$GITHUB_WORKSPACE/source/.codex-tmp/phala-bitbake-parse"
+          mkdir -p "$scratch/packages" "$scratch/hosttools-root" "$scratch/hosttools/bin"
+          python3 -I - "$scratch/packages" <<'PY'
+          import hashlib
+          from pathlib import Path
+          import sys
+          import urllib.request
+
+          destination = Path(sys.argv[1])
+          # Exact Noble amd64 identities from packages.ubuntu.com. Download
+          # bytes are checked before dpkg-deb extracts them; no package hooks run.
+          packages = {
+              "chrpath_0.16-2build1_amd64.deb": (
+                  "https://archive.ubuntu.com/ubuntu/pool/universe/c/chrpath/chrpath_0.16-2build1_amd64.deb",
+                  12754,
+                  "3711df193e4a970ddd3cf786d0ba56ee59735be5ee2c1bf73d365d4ae7e1b85f",
+              ),
+              "diffstat_1.66-1build1_amd64.deb": (
+                  "https://archive.ubuntu.com/ubuntu/pool/main/d/diffstat/diffstat_1.66-1build1_amd64.deb",
+                  29688,
+                  "e4a1530fed8990fb04fa92d6021cb4dcbd6e09ff943e629a5a17d5bf8de6ab79",
+              ),
+          }
+          for name, (url, size, expected_sha256) in packages.items():
+              with urllib.request.urlopen(url) as response:
+                  payload = response.read(size + 1)
+              if (len(payload) != size
+                      or hashlib.sha256(payload).hexdigest() != expected_sha256):
+                  raise SystemExit(f"pinned Ubuntu host tool differs: {name}")
+              (destination / name).write_bytes(payload)
+          PY
+          dpkg-deb -x "$scratch/packages/chrpath_0.16-2build1_amd64.deb" "$scratch/hosttools-root"
+          dpkg-deb -x "$scratch/packages/diffstat_1.66-1build1_amd64.deb" "$scratch/hosttools-root"
+          install -m 0555 "$scratch/hosttools-root/usr/bin/chrpath" "$scratch/hosttools/bin/chrpath"
+          install -m 0555 "$scratch/hosttools-root/usr/bin/diffstat" "$scratch/hosttools/bin/diffstat"
+
       - name: Parse all pinned layers without fetching or building
         shell: bash
         run: |
@@ -106,6 +146,7 @@ jobs:
           scratch="$source/.codex-tmp/phala-bitbake-parse"
           staged="$scratch/candidate/staged-source"
           build="$scratch/build"
+          export PATH="$scratch/hosttools/bin:$PATH"
           python3 -I - <<'PY'
           import os
           if os.statvfs("/tmp").f_flag & os.ST_NOEXEC:
