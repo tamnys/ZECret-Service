@@ -50,8 +50,7 @@ def prepare(image_ref, output):
             or any(inner["services"][name]["image"] != PREVIOUS_IMAGE
                    for name in ("app", "issuer"))):
         raise ValueError("previous ticketed service set differs")
-    for name in ("app", "issuer"):
-        inner["services"][name]["image"] = image_ref
+    inner["services"]["app"]["image"] = image_ref
     inner_bytes = canonical(inner)
     outer["docker_compose_file"] = inner_bytes.decode("ascii")
     outer_bytes = canonical(outer)

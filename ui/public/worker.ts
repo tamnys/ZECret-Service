@@ -6,7 +6,7 @@ const SNAPSHOT_DATE = '2026-10-01';
 const status = {
   kind: 'repository_snapshot',
   as_of: SNAPSHOT_DATE,
-  source: `${SOURCE}/blob/main/records/phala-ticketed-rollout-2026-10-01.md`,
+  source: `${SOURCE}/blob/main/records/phala-blockcount-rollout-2026-10-01.md`,
   release_approval: {
     state: 'phala_trusted_testnet_approved',
     detail: 'The approved Phala-trusting testnet release requires a free ticket for each native-client query. The stricter provider-independent private profile remains unavailable.'
@@ -28,7 +28,7 @@ const status = {
 const capabilities = {
   kind: 'informational_only',
   as_of: SNAPSHOT_DATE,
-  methods: ['getblockchaininfo'],
+  methods: ['getblockchaininfo', 'getblockcount'],
   private_rpc_from_website: false,
   ticket_handling_from_website: false,
   trusted_release_policy_from_website: false,
