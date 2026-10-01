@@ -307,19 +307,42 @@ jobs:
           python3 -I - "$python" <<'PY'
           import os
           from pathlib import Path
+          import select
           import sys
 
           executable = sys.argv[1]
-          survivors = []
-          for process in Path("/proc").iterdir():
-              if not process.name.isdecimal():
-                  continue
+          def profiled_processes():
+              for process in Path("/proc").iterdir():
+                  if not process.name.isdecimal():
+                      continue
+                  try:
+                      if os.readlink(process / "exe") == executable:
+                          yield int(process.name)
+                  except OSError:
+                      pass
+
+          pending = {}
+          for pid in profiled_processes():
               try:
-                  if os.readlink(process / "exe") == executable:
-                      survivors.append(process.name)
-              except OSError:
+                  pending[os.pidfd_open(pid)] = pid
+              except ProcessLookupError:
                   pass
-          if survivors:
+          if pending:
+              print("Waiting for profiled BitBake processes to exit:",
+                    sorted(pending.values()), flush=True)
+          poller = select.poll()
+          for fd in pending:
+              poller.register(fd, select.POLLIN | select.POLLHUP)
+          try:
+              while pending:
+                  for fd, _event in poller.poll():
+                      poller.unregister(fd)
+                      os.close(fd)
+                      del pending[fd]
+          finally:
+              for fd in pending:
+                  os.close(fd)
+          if list(profiled_processes()):
               raise SystemExit("BitBake profile still has live Python processes")
           PY
 
