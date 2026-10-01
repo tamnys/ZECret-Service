@@ -316,6 +316,15 @@ jobs:
           echo 'Local tmpfs, synthetic quote exchange, cold Zebra public RPC on retained TLS, write-method rejection, and existing-session closure on quote loss passed; no snapshot import, live dstack or TDX guest was used.' \
             >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Check split candidate modes and quote-socket isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I "$GITHUB_WORKSPACE/source/deploy/phala/check_split_mounts.py" \
+            --image "zrpc-phala-native-smoke:checked-local"
+          echo 'Native split-mode smoke passed with an isolated Zebra container, synthetic snapshot marker and quote bridge, retained TLS, and session closure on bridge loss. No corrected guest or private approval was established.' \
+            >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish only the reviewed public-preview image
         if: ${{ inputs.publish_to_ghcr }}
         shell: bash
