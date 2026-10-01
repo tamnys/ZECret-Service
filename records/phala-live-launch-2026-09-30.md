@@ -43,9 +43,10 @@ instance ID, or create another CVM.
 The stock HTTPS gateway URL terminated TLS outside the guest and could not
 carry the wrapper's retained TLS session. The documented `-8443s` gateway
 hostname passed TLS through to the guest: a separate diagnostic reached its
-self-signed TLS 1.3 certificate. The native client used a freshly staged Tor
-0.4.9.13 package whose Tor Project repository signature, package hash and
-release age were checked by `tools/tor/prepare.py` without a hold exception.
+self-signed TLS 1.3 certificate. The Tor Project 0.4.9.13 package is pinned in
+`tools/tor/package.lock.json`; the corrected run below staged it with
+`tools/tor/prepare.py`, which checked the repository signature, package hash
+and release age without a hold exception.
 The first live `zrpc preview` call reached the attestation exchange through Tor
 and sent **zero** RPC requests because quote appraisal failed.
 
@@ -67,24 +68,34 @@ the approved workload, private storage policy, administration boundary or
 genuine private-mode acceptance. The approved-release catalog remains empty,
 and private queries remain blocked.
 
-At 2026-09-30 23:50 UTC, the following command succeeded from the current
-managed browser-container checkout. The hostname is the live `prod9` app ID's
-TLS-passthrough route, not the gateway-terminated HTTPS route. The local
-collateral file is an explicitly staged input; the verifier did not fetch it
-while handling the query.
+The command recorded in [PR #274](https://github.com/tamnys/ZECret-Service/pull/274)
+at 23:50 UTC succeeded but pointed to a different, Ubuntu-packaged Tor
+**0.4.9.11** binary under `tor-tool/extract/usr/bin/tor`. It did not establish
+use of the pinned Tor Project 0.4.9.13 executable. At 23:57 UTC the package
+preparer staged the pinned executable at the path below, and this corrected
+command succeeded from the current managed browser-container checkout. The
+hostname is the live `prod9` app ID's TLS-passthrough route, not the
+gateway-terminated HTTPS route. The local collateral file is an explicitly
+staged input; the verifier did not fetch it while handling the query.
 
 ```sh
-/Users/j/.codex/bin/codex-in-container --trust untrusted --profile browser --command cargo run --locked --manifest-path /workspace/.worktrees/phala-snapshot-preview/Cargo.toml -p zrpc-cli -- preview --platform phala-dstack --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network --endpoint-port 443 --tor-executable /workspace/.codex-tmp/phala-live-20260930/tor-tool/extract/usr/bin/tor --collateral /workspace/.codex-tmp/phala-live-20260930/collateral.json
+/Users/j/.codex/bin/codex-in-container --trust untrusted --profile browser --command cargo run --locked --manifest-path /workspace/.worktrees/phala-snapshot-preview/Cargo.toml -p zrpc-cli -- preview --platform phala-dstack --endpoint-host 5af400d6c4fd5312a9b9693fe0988d5bdc0ee726-8443s.dstack-pha-prod9.phala.network --endpoint-port 443 --tor-executable /workspace/.codex-tmp/phala-live-20260930/tor-project-0.4.9.13/bin/tor --collateral /workspace/.codex-tmp/phala-live-20260930/collateral.json
 ```
 
 The live result reported `public_preview_passed: true`, Intel-root TDX quote
 and public-preview TCB policy verified, fresh challenge and retained TLS key
-binding verified, Testnet height 4,424,560 and zero zatoshis for the synthetic
+binding verified, Testnet height 4,424,566 and zero zatoshis for the synthetic
 fixture address. It reported `workload_identity_verified: false`,
 `private_accepted: false` and no private query. The height and balance are
 node-reported at different instants; synchronization completeness was not
 independently established. This command is a repeatable public demo, not a
-release-approval test.
+release-approval test. The same pinned Tor executable also ran a successful
+native public preview in the Colima VM using a local loader wrapper and the
+Ubuntu `libevent-2.1-7t64` package whose SHA-256 matched that VM's APT
+index. This wrapper and extracted library live only in ignored local work
+state; they do not change the guest or client trust policy. A separate
+loopback-only SSH tunnel test reached a Colima listener from the Mac, but the
+dashboard itself has not yet been exercised over that tunnel.
 
 Phala's live stats reported zero swap and a running DStack 0.5.9 guest. The
 stock dashboard's container-log view returned `configured logging driver does
