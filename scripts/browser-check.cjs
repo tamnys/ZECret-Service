@@ -52,6 +52,22 @@ let browserStage='startup';
     assert.equal(await page.locator('#block-hash').textContent(),'a'.repeat(64));
     assert.deepEqual((await readReport()).result.chain_context,{height:42,hash:'a'.repeat(64)});
     await page.screenshot({path:path.join(output,'m0-desktop.png'),fullPage:true});
+    // Submit exact-block JSON through the real local Rust endpoint, as the CLI
+    // does. Only the request is modified; the response is never mocked.
+    const exactBlockRequest=async(route)=>{
+      const request=route.request().postDataJSON();
+      request.expected_block={height:42,hash:'b'.repeat(64)};
+      await route.continue({postData:JSON.stringify(request)});
+    };
+    await page.route('**/api/query',exactBlockRequest);
+    await page.locator('#run').click();
+    await page.waitForFunction(()=>!document.getElementById('run').disabled);
+    const mismatch=await readReport();
+    assert.equal(mismatch.error.code,'block_mismatch');
+    assert.equal(mismatch.result,null);
+    assert.equal(mismatch.query_sent,false);
+    assert.equal(await page.locator('#block-context').isHidden(),true);
+    await page.unroute('**/api/query',exactBlockRequest);
     for(const scenario of ['unknown-release','wrong-key','invalid-nonce','altered-event-log','tor-unavailable','node-unavailable']){
       await page.selectOption('#scenario',scenario);
       await page.locator('#run').click();
