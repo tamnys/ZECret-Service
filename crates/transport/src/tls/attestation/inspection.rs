@@ -14,7 +14,10 @@ use zrpc_verifier::{
     offline::{
         BoundQuoteInspection, InspectionStatus, inspect_phala_public_preview_quote_and_report_data,
     },
-    workload::{BoundWorkloadInspection, WorkloadPolicy, inspect_workload_and_report_data},
+    workload::{
+        BoundWorkloadInspection, WorkloadInspection, WorkloadPolicy,
+        inspect_phala_public_preview_workload, inspect_workload_and_report_data,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -170,6 +173,38 @@ impl UnverifiedPublicEvidence {
             deadline,
         )?;
         Ok((report, Some(preview)))
+    }
+
+    /// Compare the peer's fresh quote and event log with caller-supplied
+    /// launch bytes under the public-preview TCB appraisal. This is only a
+    /// diagnostic: the policy is not a reviewed release and the connection is
+    /// consumed without yielding either public or private RPC authority.
+    pub fn inspect_public_preview_launch(
+        self,
+        collateral_json: &[u8],
+        raw_app_compose: &[u8],
+        policy: &WorkloadPolicy,
+    ) -> Result<(EndpointInspection, Option<WorkloadInspection>), zrpc_protocol::SafeError> {
+        self._session.origin.require_managed()?;
+        let mut report = self.inspect_public_preview_evidence(collateral_json);
+        report.operation = "public_preview_launch_inspection";
+        if !report.public_preview_passed() {
+            return Ok((report, None));
+        }
+        let quote = hex::decode(&self.evidence.quote).map_err(|_| {
+            zrpc_protocol::SafeError::new(
+                zrpc_protocol::ErrorCode::InvalidRequest,
+                "Attestation quote encoding is invalid.",
+            )
+        })?;
+        let workload = inspect_phala_public_preview_workload(
+            &quote,
+            collateral_json,
+            self.evidence.event_log.as_bytes(),
+            raw_app_compose,
+            policy,
+        );
+        Ok((report, Some(workload)))
     }
 
     fn inspect_public_preview_evidence(&self, collateral_json: &[u8]) -> EndpointInspection {

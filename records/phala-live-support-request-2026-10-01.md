@@ -14,11 +14,12 @@ running CVM:
    added a 17,569-byte script (SHA-256
    `982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8`).
    The script exactly matches [this dstack example](https://github.com/Dstack-TEE/dstack-examples/blob/4b1819d7f2cca610b2478a7be354358b1cad5b97/phala-cloud-prelaunch-script/prelaunch.sh).
-   We corrected the two visibility flags, but the script remains. Which layer
-   adds it, how do we deploy without it, and which exact launch-document bytes
-   are measured into the guest's quote? On this production image, which
-   SSH, console, recovery, exec and configuration-update paths can change the
-   guest after attestation?
+   We corrected the two visibility flags, but the script remains. Our local
+   verifier replayed a fresh quote's event log and matched its `compose-hash`
+   to the current API readback. Which layer adds the script, can it be disabled,
+   and does that measured hash cover the exact document used to start the guest?
+   On this production image, which SSH, console, recovery, exec and
+   configuration-update paths can change the guest after attestation?
 
 2. API version `2026-06-23` still returns `instance_id: null`, although
    `no_instance_id` is false and the CVM is running. A dry run of

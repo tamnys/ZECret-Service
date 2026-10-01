@@ -225,6 +225,21 @@ that the Phala node was near its observed tip. It is not network-wide consensus,
 proof of the Phala node's own verification progress at that instant, or
 private-mode acceptance. No new Phala resource or management mutation occurred.
 
+At 2026-10-01 02:02 UTC, a new read-only diagnostic requested fresh evidence
+from the live TLS-passthrough endpoint through the pinned managed Tor child.
+The native client verified the Intel-root TDX quote, current collateral, fresh
+nonce and exporter binding on that retained connection. It replayed the peer's
+event log against the signed RTMR values and compared the measured
+`compose-hash` with the exact 20,444-byte `app_compose` returned by the current
+Phala attestation API; all public-preview launch-consistency checks passed.
+The older saved quote and current provider event log had failed RTMR replay,
+which confirms that mixing evidence from different observations is invalid.
+The diagnostic sent no RPC query, approved no release and did not establish
+the script's provenance, administrative isolation, KMS/disk trust or private
+mode. Its comparison policy was derived from provider readback and is not an
+independent artifact approval. No resource mutation or additional spend was
+triggered.
+
 At 2026-10-01 00:05 UTC, a local probe started the dashboard inside Colima,
 forwarded its assigned loopback port through SSH to the Mac, and retained its
 one-time bootstrap token and local capability only in process memory. From
