@@ -138,6 +138,34 @@ if ! mountpoint -q "$DATA_MNT"; then
     exit 1
 fi
 mount -o remount,rw,noexec,nodev,nosuid,nosymfollow "$DATA_MNT"
+# A stock-image disk can retain Docker state or a former swapfile. Do not
+# bring such a disk into this profile; this check cannot prove erased blocks.
+shopt -s nullglob dotglob
+for entry in "$DATA_MNT"/*; do
+    case "$entry" in
+        "$DATA_MNT/zebra-public-testnet")
+            if [ -L "$entry" ] || [ ! -d "$entry" ]; then
+                log "Refusing invalid public Zebra state"
+                exit 1
+            fi
+            ;;
+        "$DATA_MNT/lost+found")
+            if [ -L "$entry" ] || [ ! -d "$entry" ]; then
+                log "Refusing invalid ext4 recovery directory"
+                exit 1
+            fi
+            for recovered in "$entry"/*; do
+                log "Refusing recovered persistent data"
+                exit 1
+            done
+            ;;
+        *)
+            log "Refusing unexpected persistent data"
+            exit 1
+            ;;
+    esac
+done
+shopt -u nullglob dotglob
 public_state="$DATA_MNT/zebra-public-testnet"
 if [ -L "$public_state" ] || { [ -e "$public_state" ] && [ ! -d "$public_state" ]; }; then
     log "Refusing invalid public Zebra state"

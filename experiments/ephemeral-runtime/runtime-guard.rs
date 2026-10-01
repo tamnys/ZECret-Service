@@ -41,6 +41,7 @@ enum Denial {
     NonMemoryRuntimeMount,
     NonMemoryDescendantMount,
     PublicStateMountUnsafe,
+    PublicRootContentsUnsafe,
     SharedRuntimeUnsafe,
     MalformedSwaps,
     SwapPresent,
@@ -314,6 +315,39 @@ fn live_public_state() -> Result<(), Denial> {
     Ok(())
 }
 
+fn check_public_root(root: &Path, required_uid: u32) -> Result<(), Denial> {
+    let metadata = fs::symlink_metadata(root).map_err(|_| Denial::PublicRootContentsUnsafe)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink()
+        || metadata.uid() != required_uid
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err(Denial::PublicRootContentsUnsafe);
+    }
+    for item in fs::read_dir(root).map_err(|_| Denial::PublicRootContentsUnsafe)? {
+        let item = item.map_err(|_| Denial::PublicRootContentsUnsafe)?;
+        let name = item.file_name();
+        let entry = fs::symlink_metadata(item.path())
+            .map_err(|_| Denial::PublicRootContentsUnsafe)?;
+        if !entry.is_dir() || entry.file_type().is_symlink() {
+            return Err(Denial::PublicRootContentsUnsafe);
+        }
+        match name.as_bytes() {
+            b"zebra-public-testnet" => {}
+            b"lost+found" => {
+                if entry.uid() != required_uid
+                    || fs::read_dir(item.path())
+                        .map_err(|_| Denial::PublicRootContentsUnsafe)?
+                        .next().is_some()
+                {
+                    return Err(Denial::PublicRootContentsUnsafe);
+                }
+            }
+            _ => return Err(Denial::PublicRootContentsUnsafe),
+        }
+    }
+    Ok(())
+}
+
 fn check_shared_runtime(mountinfo: &[u8]) -> Result<(), Denial> {
     if parse_mountinfo(mountinfo)?.iter().any(|mount| {
         mount.point == Path::new(SHARED_RUNTIME)
@@ -451,6 +485,7 @@ fn live_check() -> Result<(), Denial> {
     let roots = live_roots()?;
     check(&mounts, &swaps, &roots)?;
     check_public_data_mount(&mounts)?;
+    check_public_root(Path::new(PUBLIC_DATA_MOUNT), 0)?;
     live_public_state()?;
     check_shared_runtime(&mounts)?;
     live_shared_runtime()?;
@@ -471,6 +506,7 @@ fn live_check() -> Result<(), Denial> {
         return Err(Denial::ObservedStateChanged);
     }
     live_public_state()?;
+    check_public_root(Path::new(PUBLIC_DATA_MOUNT), 0)?;
     live_shared_runtime()?;
     if let Mode::MarkStart(service) = mode {
         mark_start(Path::new("/run/zrpc-starts"), service, 0)?;
@@ -571,6 +607,45 @@ mod tests {
             let changed = format!("{MEMORY}42 1 0:42 / {point} rw - tmpfs tmpfs rw\n");
             assert_eq!(check_shared_runtime(changed.as_bytes()), Err(Denial::SharedRuntimeUnsafe));
         }
+    }
+
+    #[test]
+    fn persistent_root_refuses_stock_runtime_and_recovered_data() {
+        let unique = format!(
+            "zrpc-public-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let uid = fs::metadata(&root).unwrap().uid();
+        let zebra = root.join("zebra-public-testnet");
+        fs::create_dir(&zebra).unwrap();
+        assert_eq!(check_public_root(&root, uid), Ok(()));
+        let recovery = root.join("lost+found");
+        fs::create_dir(&recovery).unwrap();
+        assert_eq!(check_public_root(&root, uid), Ok(()));
+        fs::write(recovery.join("recovered-private"), b"canary").unwrap();
+        assert_eq!(check_public_root(&root, uid), Err(Denial::PublicRootContentsUnsafe));
+        fs::remove_file(recovery.join("recovered-private")).unwrap();
+        for name in ["var", "swapfile", ".old-private-state"] {
+            let unexpected = root.join(name);
+            fs::create_dir(&unexpected).unwrap();
+            assert_eq!(check_public_root(&root, uid), Err(Denial::PublicRootContentsUnsafe));
+            fs::remove_dir(&unexpected).unwrap();
+        }
+        fs::remove_dir(&recovery).unwrap();
+        std::os::unix::fs::symlink("zebra-public-testnet", &recovery).unwrap();
+        assert_eq!(check_public_root(&root, uid), Err(Denial::PublicRootContentsUnsafe));
+        fs::remove_file(&recovery).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o722)).unwrap();
+        assert_eq!(check_public_root(&root, uid), Err(Denial::PublicRootContentsUnsafe));
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
