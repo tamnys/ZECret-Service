@@ -824,6 +824,47 @@ async fn null_instance_can_prepare_exact_tracked_deletion_without_claiming_ident
 }
 
 #[tokio::test]
+async fn null_instance_dispatches_exact_tracked_delete_without_claiming_cleanup() {
+    let fixture = Fixture::with_instance(WORKSPACE, CVM, START, None);
+    let mut store = fixture.open();
+    let detail = DETAIL.replace(&format!("\"{INSTANCE}\""), "null");
+    let server = Server::start(
+        vec![
+            response("200 OK", AUTH),
+            response("200 OK", &detail),
+            delete_reply(204),
+        ],
+        HOST,
+    )
+    .await;
+    let prepared = authenticate(&server)
+        .await
+        .prepare_with_clock(&mut store, 0, CVM, || Ok(START))
+        .await
+        .unwrap();
+    assert_eq!(
+        prepared.preparation_readback(),
+        PreparationReadback::IncompleteCvmFields
+    );
+    assert!(prepared.intent_record().target.instance_id.is_none());
+    let report = prepared.dispatch_with_clock(|| Ok(START)).await.unwrap();
+    assert_eq!(report.provider_outcome(), DeletionOutcome::Initiated204);
+    assert_eq!(report.outcome_journal(), OutcomeJournal::Committed);
+    assert!(!report.cleanup_complete());
+    assert!(!report.independent_disk_deletion_verified());
+    assert_eq!(store.ledger().unwrap().deletion_intents().len(), 1);
+    server.wait_closed(3).await;
+    assert_eq!(
+        request_methods(&server),
+        [
+            "GET /api/v1/auth/me HTTP/1.1",
+            "GET /api/v1/cvms/synthetic%2Dcvm%2D1 HTTP/1.1",
+            "DELETE /api/v1/cvms/synthetic%2Dcvm%2D1 HTTP/1.1",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn dropping_prepared_or_unpolled_dispatch_leaves_one_pending_intent() {
     for drop_future in [false, true] {
         let fixture = Fixture::standard();
