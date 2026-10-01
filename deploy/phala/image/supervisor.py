@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Container-local process supervision for the public Phala preview."""
 
+import base64
 import os
 from pathlib import Path
 import queue
@@ -24,6 +25,11 @@ BACKEND = Path("/dstack.sock")
 STATE = Path("/var/lib/zebra")
 BIN = Path("/opt/zrpc/bin")
 NODE_RPC = ("127.0.0.1", 18232)
+SPENT = Path("/var/lib/zrpc-spent")
+ISSUER = Path("/var/lib/zrpc-issuer")
+ISSUER_RUN = RUN / "zrpc-issuer"
+ISSUER_BIND = ("127.0.0.1", 18555)
+TICKET = Path("/opt/zrpc/ticket")
 
 
 def required_positive(name):
@@ -153,7 +159,31 @@ def run_quote():
         wake_write.close()
 
 
-def run_app():
+def require_private_persistent_mount(path):
+    if mount_type(path) == "tmpfs":
+        raise RuntimeError("private payment state is not persistent")
+    item = path.lstat()
+    if (not stat.S_ISDIR(item.st_mode) or item.st_uid != os.geteuid()
+            or stat.S_IMODE(item.st_mode) & 0o077):
+        raise RuntimeError("private payment state ownership is unavailable")
+
+
+def initialize_store(command, path):
+    if path.exists() or path.is_symlink():
+        return
+    result = subprocess.run(
+        [str(BIN / "zrpc"), "payments", command, "--" +
+         ("spent-store" if command == "init-redeemer" else "issuer-store"), str(path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError("payment state initialization failed")
+
+
+def run_app(ticketed=False):
     from snapshot_import import ensure_snapshot
 
     require_runtime_mount()
@@ -167,6 +197,9 @@ def run_app():
         raise RuntimeError("public Zebra state ownership is unavailable")
     if stat.S_IMODE(state.st_mode) & 0o007:
         raise RuntimeError("public Zebra state is world-accessible")
+    if ticketed:
+        require_private_persistent_mount(SPENT)
+        initialize_store("init-redeemer", SPENT / "store")
     ensure_snapshot()
     COOKIE_DIR.mkdir(mode=0o700)
     if COOKIE_DIR.stat().st_uid != os.geteuid():
@@ -197,8 +230,7 @@ def run_app():
             if remaining <= 0:
                 raise RuntimeError("Zebra RPC cookie readiness timed out")
             time.sleep(min(spacing, remaining))
-        wrapper = subprocess.Popen(
-            [
+        wrapper_command = [
                 str(BIN / "zrpc-node-wrapper"),
                 "--platform", "phala-dstack",
                 "--listen", "0.0.0.0:8443",
@@ -206,8 +238,20 @@ def run_app():
                 "--max-connections", str(limits[0]),
                 "--max-quotes", str(limits[1]),
                 "--quote-spacing-ms", str(limits[2]),
-                "--access", "free-demo",
-            ],
+                "--access", "ticket-required" if ticketed else "free-demo",
+            ]
+        if ticketed:
+            hostname = (TICKET / "issuer-hostname").read_text(encoding="ascii").strip()
+            if not valid_onion_hostname(hostname):
+                raise RuntimeError("issuer identity unavailable")
+            wrapper_command += [
+                "--issuer-public-der", str(TICKET / "issuer-public.der"),
+                "--issuer-name", hostname,
+                "--crypto-helper", str(BIN / "zrpc-payment-crypto"),
+                "--spent-store", str(SPENT / "store"),
+            ]
+        wrapper = subprocess.Popen(
+            wrapper_command,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -223,6 +267,98 @@ def run_app():
             threading.Thread(target=watch_exit, args=(child,), daemon=True).start()
         exits.get()
         raise RuntimeError("Zebra or RPC wrapper stopped")
+    finally:
+        terminate_children(children)
+
+
+def valid_onion_hostname(value):
+    alphabet = set("abcdefghijklmnopqrstuvwxyz234567")
+    return (len(value) == 62 and value.endswith(".onion")
+            and set(value[:56]) <= alphabet)
+
+
+def private_runtime_file(path, value):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(value)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def decoded_secret(name, minimum, maximum):
+    encoded = os.environ.pop(name, None)
+    if not encoded:
+        raise RuntimeError("encrypted issuer configuration unavailable")
+    try:
+        value = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error) as error:
+        raise RuntimeError("encrypted issuer configuration invalid") from error
+    if not minimum <= len(value) <= maximum:
+        raise RuntimeError("encrypted issuer configuration invalid")
+    return value
+
+
+def run_issuer():
+    if os.geteuid() == 0 or os.getegid() == 0:
+        raise RuntimeError("issuer sidecar requires a dedicated non-root identity")
+    require_runtime_mount()
+    require_no_guest_control_sockets((BACKEND, RUN / "dstack.sock",
+                                      RUN / "zrpc-quote" / "quote.sock"))
+    require_private_persistent_mount(ISSUER)
+    hostname = (TICKET / "issuer-hostname").read_text(encoding="ascii").strip()
+    if not valid_onion_hostname(hostname):
+        raise RuntimeError("issuer identity unavailable")
+    if ISSUER_RUN.exists() or ISSUER_RUN.is_symlink():
+        raise RuntimeError("stale issuer runtime state")
+    ISSUER_RUN.mkdir(mode=0o700)
+    onion = ISSUER_RUN / "onion"
+    onion.mkdir(mode=0o700)
+    (ISSUER_RUN / "tor-data").mkdir(mode=0o700)
+    private_runtime_file(ISSUER_RUN / "issuer-private.der",
+                         decoded_secret("ZRPC_ISSUER_PRIVATE_DER_B64", 1, 65535))
+    private_runtime_file(onion / "hs_ed25519_secret_key",
+                         decoded_secret("ZRPC_ONION_SECRET_KEY_B64", 96, 96))
+    private_runtime_file(onion / "hs_ed25519_public_key",
+                         (TICKET / "hs_ed25519_public_key").read_bytes())
+    private_runtime_file(onion / "hostname", (hostname + "\n").encode("ascii"))
+    initialize_store("init-issuer", ISSUER / "store")
+    tor_environment = {"PATH": "/usr/bin:/bin", "HOME": str(ISSUER_RUN),
+                       "LD_LIBRARY_PATH": str(TICKET / "tor")}
+    children = []
+    try:
+        tor = subprocess.Popen(
+            [str(TICKET / "tor/tor"), "--RunAsDaemon", "0",
+             "--DataDirectory", str(ISSUER_RUN / "tor-data"),
+             "--HiddenServiceDir", str(onion), "--HiddenServiceVersion", "3",
+             "--HiddenServicePort", f"80 {ISSUER_BIND[0]}:{ISSUER_BIND[1]}",
+             "--SocksPort", "0", "--GeoIPFile", str(TICKET / "data/geoip"),
+             "--GeoIPv6File", str(TICKET / "data/geoip6")],
+            env=tor_environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        children.append(tor)
+        issuer = subprocess.Popen(
+            [str(BIN / "zrpc"), "payments", "serve-free",
+             "--bind", f"{ISSUER_BIND[0]}:{ISSUER_BIND[1]}",
+             "--issuer-store", str(ISSUER / "store"),
+             "--issuer-public-der", str(TICKET / "issuer-public.der"),
+             "--issuer-private-der", str(ISSUER_RUN / "issuer-private.der"),
+             "--issuer-name", hostname,
+             "--crypto-helper", str(BIN / "zrpc-payment-crypto"),
+             "--max-batch", "100", "--io-timeout-seconds", "300"],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(ISSUER_RUN)},
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        children.append(issuer)
+        install_stop_handler(children)
+        exits = queue.Queue()
+        for child in children:
+            threading.Thread(target=lambda process=child: (process.wait(), exits.put(process)),
+                             daemon=True).start()
+        exits.get()
+        raise RuntimeError("Tor or free-ticket issuer stopped")
     finally:
         terminate_children(children)
 
@@ -379,6 +515,10 @@ def main():
         run_quote()
     elif mode == "app":
         run_app()
+    elif mode == "ticketed-app":
+        run_app(ticketed=True)
+    elif mode == "issuer":
+        run_issuer()
     elif mode == "node":
         run_node()
     elif mode == "wrapper":

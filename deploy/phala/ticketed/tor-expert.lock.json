@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "release": "15.0.23",
+  "architecture": "linux-x86_64",
+  "published_utc": "2026-09-15T11:41:37Z",
+  "minimum_age_days": 7,
+  "archive_url": "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-linux-x86_64-15.0.23.tar.gz",
+  "archive_sha256": "08d49de27f542b8f73e2014e064d8320562b5d20019c03d4725c5a5249d97985",
+  "signature_url": "https://archive.torproject.org/tor-package-archive/torbrowser/15.0.23/tor-expert-bundle-linux-x86_64-15.0.23.tar.gz.asc",
+  "signature_sha256": "7acc65d2ceb74b6e32b945bb069ce82e9a9a1b1c8f6294a13563d58cacd26612",
+  "signing_key_url": "https://keys.openpgp.org/vks/v1/by-fingerprint/EF6E286DDA85EA2A4BA7DE684E2C6E8793298290",
+  "signing_key_sha256": "7cec103d0be11b608f61850143101e56f0ba45383b61f44835300ff54ef93032",
+  "signing_key_primary_fingerprint": "EF6E286DDA85EA2A4BA7DE684E2C6E8793298290"
+}
