@@ -12,7 +12,8 @@ pub mod quote_proxy;
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use zrpc_protocol::{
-    ErrorCode, MAX_RESPONSE_BYTES, Method, Request, SafeError, Verbosity, parse_request,
+    BlockRef, ErrorCode, MAX_RESPONSE_BYTES, Method, Request, SafeError, Verbosity, parse_request,
+    validate_chain_context,
 };
 
 const NODE_FIXTURE: &str = include_str!("../../../tests/fixtures/node.json");
@@ -79,9 +80,21 @@ impl FixtureServer {
                 }
             }
             // This route is synthetic; only LocalNode queries the real Zebra node.
-            Method::GetPreviewAddressBalance { .. } => json!({"balance": 0, "received": 0}),
+            Method::GetPreviewAddressBalance { .. } => json!({"balance": 0}),
         };
-        let response = json!({"jsonrpc":"2.0","id":request.id(),"result":result});
+        let context = if request.method().requires_chain_context() {
+            Some(BlockRef::from_parts(
+                &fixture["height"],
+                &fixture["block_hash"],
+            )?)
+        } else {
+            None
+        };
+        validate_chain_context(request, &result, context.as_ref())?;
+        let mut response = json!({"jsonrpc":"2.0","id":request.id(),"result":result});
+        if let Some(context) = context {
+            response["chain_context"] = json!(context);
+        }
         check_response_bound(&response)?;
         Ok(response)
     }
@@ -143,7 +156,7 @@ mod tests {
         }))
         .unwrap();
         let response = FixtureServer::handle(&bytes, NodeState::FixtureAvailable).unwrap();
-        assert_eq!(response["result"], json!({"balance": 0, "received": 0}));
+        assert_eq!(response["result"], json!({"balance": 0}));
     }
 
     #[test]

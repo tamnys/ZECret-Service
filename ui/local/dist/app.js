@@ -46,6 +46,12 @@ function renderEvidence(verification) {
 }
 function show(report, elapsed) {
     byId('result').textContent = JSON.stringify(report, null, 2);
+    const context = report.report?.preview?.balance_chain_context ?? report.chain_context
+        ?? (report.simulation ? report.result?.chain_context : null);
+    byId('block-context').hidden = !context;
+    byId('block-height').textContent = context ? `State at block ${context.height}` : '';
+    byId('block-hash').textContent = context?.hash ?? '';
+    byId('block-subject').textContent = mode === 'live_testnet_preview' ? 'Confirmed address balance' : 'Result chain state';
     if (mode === 'live_testnet_preview') {
         const preview = report.report?.preview;
         const sent = report.report?.public_query_sent ?? report.public_query_sent;
@@ -137,6 +143,9 @@ methodSelect.addEventListener('change', () => {
 });
 run.addEventListener('click', async () => {
     run.disabled = true;
+    byId('block-context').hidden = true;
+    byId('block-height').textContent = '';
+    byId('block-hash').textContent = '';
     const started = performance.now();
     try {
         const report = mode === 'live_testnet_preview'

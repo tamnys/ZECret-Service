@@ -322,7 +322,7 @@ async fn run() -> Result<(), String> {
                     return match result {
                         Ok(result)=>print_json(json!({"mode":"phala_trusted","simulation":false,
                             "private_accepted":false,"phala_trusted_authorized":true,"query_sent":true,
-                            "trust_model":"phala_managed_guest_kms_runtime","result":result})),
+                            "trust_model":"phala_managed_guest_kms_runtime","result":result.result,"chain_context":result.chain_context})),
                         Err(error)=>{
                             print_json(json!({"mode":"phala_trusted_error","simulation":false,
                                 "private_accepted":false,"phala_trusted_authorized":false,
@@ -375,7 +375,7 @@ async fn run() -> Result<(), String> {
                 };
                 match result {
                     Ok(result)=>{
-                        let mut output=json!({"mode":"private","simulation":false,"private_accepted":true,"query_sent":true,"result":result});
+                        let mut output=json!({"mode":"private","simulation":false,"private_accepted":true,"query_sent":true,"result":result.result,"chain_context":result.chain_context});
                         if let Some(state)=ticket_state {output["ticket_state"]=json!(state)}
                         print_json(output)
                     },

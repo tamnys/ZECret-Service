@@ -3,6 +3,7 @@
 mod cookie_file;
 #[cfg(target_os = "linux")]
 pub use cookie_file::stage_gcp_cookie;
+mod chain;
 mod identity;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -24,8 +25,8 @@ use std::{
 };
 use tokio::{net::TcpStream, sync::Semaphore};
 use zrpc_protocol::{
-    BACKEND_TIMEOUT_SECONDS, EXECUTING_QUERIES, ErrorCode, MAX_RESPONSE_BYTES, Method,
-    QUEUED_QUERIES, Request, SafeError, Verbosity, parse_request,
+    BACKEND_TIMEOUT_SECONDS, BlockRef, EXECUTING_QUERIES, ErrorCode, MAX_RESPONSE_BYTES, Method,
+    QUEUED_QUERIES, Request, SafeError, Verbosity, parse_request, validate_chain_context,
 };
 
 /// Only an operator-provided internal cookie is accepted, never browser headers.
@@ -159,17 +160,41 @@ impl LocalNode {
                 "The internal node did not report Zcash testnet.",
             ));
         }
-        let result = if matches!(request.method(), Method::GetBlockchainInfo) {
-            info
-        } else {
-            self.call(
-                &mut sender,
-                request.method().name(),
-                params(request.method()),
-            )
-            .await?
+        let (result, chain_context) = match request.method() {
+            Method::GetBlockchainInfo => {
+                let context = BlockRef::from_parts(&info["blocks"], &info["bestblockhash"])?;
+                (info, Some(context))
+            }
+            Method::GetBlockCount => {
+                let tip = self
+                    .call(&mut sender, "getbestblockheightandhash", json!([]))
+                    .await?;
+                let context = BlockRef::from_parts(&tip["height"], &tip["hash"])?;
+                (json!(context.height), Some(context))
+            }
+            Method::GetPreviewAddressBalance { address } => {
+                let utxos = self
+                    .call(
+                        &mut sender,
+                        "getaddressutxos",
+                        json!([{"addresses":[address.as_str()], "chainInfo":true}]),
+                    )
+                    .await?;
+                let (balance, context) = chain::balance(&utxos, address)?;
+                (json!({"balance":balance}), Some(context))
+            }
+            _ => (
+                self.call(
+                    &mut sender,
+                    request.method().name(),
+                    params(request.method()),
+                )
+                .await?,
+                None,
+            ),
         };
         validate_result(request.method(), &result)?;
+        validate_chain_context(request, &result, chain_context.as_ref())?;
         if let Method::GetBlockHeader {
             hash,
             verbosity: Verbosity::Verbose,
@@ -183,7 +208,10 @@ impl LocalNode {
             let header = identity::header(&raw, hash.as_str())?;
             identity::verbose_header(&result, &header)?;
         }
-        let response = json!({"jsonrpc":"2.0", "id":request.id(), "result":result});
+        let mut response = json!({"jsonrpc":"2.0", "id":request.id(), "result":result});
+        if let Some(context) = chain_context {
+            response["chain_context"] = json!(context);
+        }
         // The caller's original ID can increase size; bound the returned envelope too.
         super::check_response_bound(&response)?;
         Ok(response)
@@ -510,9 +538,11 @@ mod tests {
                                         "getblockchaininfo" => if matches!(mode, Mode::Mainnet) {
                                             json!({"chain":"main"})
                                         } else { chain() },
-                                        "getblockcount" => json!(42),
+                                        "getbestblockheightandhash" => json!({"height":42,"hash":"ab".repeat(32)}),
                                         "getblockhash" => json!("ab".repeat(32)),
-                                        "getaddressbalance" => json!({"balance": 7, "received": 11}),
+                                        "getaddressutxos" => json!({"height":43,"hash":"cd".repeat(32),"utxos":[{
+                                            "address":params[0]["addresses"][0],"txid":"ab".repeat(32),"outputIndex":0,"satoshis":7,"height":40
+                                        }]}),
                                         "getblockheader" if params[1] == true => serde_json::from_str(HEADER_JSON).unwrap(),
                                         "getrawtransaction" if params[1] == 1 => json!({"txid":TX_ID, "hex":TX.trim()}),
                                         "getblockheader" => json!(HEADER.trim()),
@@ -592,6 +622,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expected_block_matches_the_result_and_never_causes_a_retry() {
+        let backend = fake(Mode::Good).await;
+        for (method, params, height, hash) in [
+            ("getblockcount", json!([]), 42, "ab"),
+            ("getblockchaininfo", json!([]), 42, "ab"),
+            (
+                "getaddressbalance",
+                json!([{"addresses":[zrpc_protocol::PREVIEW_TESTNET_ADDRESS]}]),
+                43,
+                "cd",
+            ),
+        ] {
+            for (selected_height, selected_hash, matched) in [
+                (height, hash, true),
+                (height - 1, hash, false),
+                (height, "ef", false),
+            ] {
+                let before = backend.seen.lock().unwrap().len();
+                let request = serde_json::to_vec(
+                    &json!({"jsonrpc":"2.0","id":1,"method":method,"params":params,
+                    "expected_block":{"height":selected_height,"hash":selected_hash.repeat(32)}}),
+                )
+                .unwrap();
+                let result = backend.node.handle(&request).await;
+                if matched {
+                    assert_eq!(
+                        result.unwrap()["chain_context"],
+                        json!({"height":height,"hash":hash.repeat(32)})
+                    );
+                } else {
+                    assert_eq!(result.unwrap_err().code, ErrorCode::BlockMismatch);
+                }
+                assert_eq!(
+                    backend.seen.lock().unwrap().len() - before,
+                    if method == "getblockchaininfo" { 1 } else { 2 }
+                );
+            }
+        }
+        let oversized = fake(Mode::Oversized).await;
+        assert_eq!(
+            oversized
+                .node
+                .handle(&request(
+                    "getaddressbalance",
+                    json!([{"addresses":[zrpc_protocol::PREVIEW_TESTNET_ADDRESS]}])
+                ))
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::ResponseTooLarge
+        );
+    }
+
+    #[tokio::test]
     async fn address_balance_forwards_only_validated_testnet_transparent_selection() {
         let fake = fake(Mode::Good).await;
         let exact = json!([{"addresses": [zrpc_protocol::PREVIEW_TESTNET_ADDRESS]}]);
@@ -601,12 +685,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response["id"], MARKER);
-        assert_eq!(response["result"], json!({"balance": 7, "received": 11}));
+        assert_eq!(response["result"], json!({"balance": 7}));
+        // Chain status was at 42/ab; the balance belongs to its own 43/cd state.
+        assert_eq!(
+            response["chain_context"],
+            json!({"height":43,"hash":"cd".repeat(32)})
+        );
         let seen = fake.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].body["method"], "getblockchaininfo");
-        assert_eq!(seen[1].body["method"], "getaddressbalance");
-        assert_eq!(seen[1].body["params"], exact);
+        assert_eq!(seen[1].body["method"], "getaddressutxos");
+        assert_eq!(
+            seen[1].body["params"],
+            json!([{"addresses":exact[0]["addresses"],"chainInfo":true}])
+        );
         assert_eq!(seen[0].connection, seen[1].connection);
         drop(seen);
 
@@ -618,7 +710,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             fake.seen.lock().unwrap().last().unwrap().body["params"],
-            second_params
+            json!([{"addresses":second_params[0]["addresses"],"chainInfo":true}])
         );
 
         for selection in [

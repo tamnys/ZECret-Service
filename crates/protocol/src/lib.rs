@@ -3,6 +3,8 @@
 
 mod attestation;
 pub use attestation::*;
+mod chain;
+pub use chain::{BlockRef, RpcResult, validate_chain_context};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -78,6 +80,8 @@ pub enum ErrorCode {
     BackendBusy,
     BackendTimeout,
     InvalidBackendResponse,
+    ChainContextUnavailable,
+    BlockMismatch,
     WrongNetwork,
     FixtureNotFound,
     PrivateModeUnavailable,
@@ -125,7 +129,8 @@ pub enum RequestId {
     Text(String),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct Hash32(String);
 
 impl Hash32 {
@@ -188,6 +193,13 @@ pub enum Method {
 }
 
 impl Method {
+    pub fn requires_chain_context(&self) -> bool {
+        matches!(
+            self,
+            Self::GetBlockchainInfo | Self::GetBlockCount | Self::GetPreviewAddressBalance { .. }
+        )
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Self::GetBlockchainInfo => "getblockchaininfo",
@@ -205,6 +217,7 @@ impl Method {
 pub struct Request {
     id: RequestId,
     method: Method,
+    expected_block: Option<BlockRef>,
 }
 
 impl Request {
@@ -213,6 +226,9 @@ impl Request {
     }
     pub fn method(&self) -> &Method {
         &self.method
+    }
+    pub fn expected_block(&self) -> Option<&BlockRef> {
+        self.expected_block.as_ref()
     }
 }
 
@@ -232,6 +248,8 @@ struct WireRequest {
     method: String,
     #[serde(default)]
     params: Vec<Value>,
+    #[serde(default)]
+    expected_block: Option<BlockRef>,
 }
 
 /// Keep duplicate nested keys visible for the single transparent address selector.
@@ -245,6 +263,8 @@ struct AddressBalanceWireRequest {
     #[serde(rename = "method")]
     _method: String,
     params: [AddressBalanceSelection; 1],
+    #[serde(default, rename = "expected_block")]
+    _expected_block: Option<BlockRef>,
 }
 
 #[derive(Deserialize)]
@@ -332,7 +352,14 @@ pub fn parse_request(bytes: &[u8]) -> Result<Request, ProtocolError> {
             ));
         }
     };
-    Ok(Request { id: raw.id, method })
+    if raw.expected_block.is_some() && !method.requires_chain_context() {
+        return Err(invalid_parameters());
+    }
+    Ok(Request {
+        id: raw.id,
+        method,
+        expected_block: raw.expected_block,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

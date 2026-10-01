@@ -349,7 +349,7 @@ async fn query(State(session): State<LocalSession>, request: Request) -> Respons
                 "trust_model":match live.policy { LivePolicy::Strict(_) => "independent_guest", LivePolicy::PhalaTrusted(_) => "phala_managed_guest_kms_runtime" },
                 "platform":live.config.platform(),
                 "verification":{"transport":"verified","hardware":"verified","application":"verified","key_binding":"verified","freshness":"verified","release":"approved"},
-                "query_sent":true,"error":null,"result":result}),
+                "query_sent":true,"error":null,"result":result.result,"chain_context":result.chain_context}),
             )
             .into_response(),
             Err(error) if error.code == zrpc_protocol::ErrorCode::RequestTooLarge => {

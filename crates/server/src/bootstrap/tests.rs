@@ -495,37 +495,43 @@ async fn node_listener_uses_same_tls_session_and_only_typed_loopback_rpc() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let seen_by_node = seen.clone();
     let zebra_task = tokio::spawn(async move {
-        let (stream, _) = zebra.accept().await.unwrap();
-        let service = hyper::service::service_fn(move |request: Request<Incoming>| {
-            let seen = seen_by_node.clone();
-            async move {
-                assert_eq!(request.uri(), "/");
-                assert!(request.headers().contains_key(header::AUTHORIZATION));
-                let body = request.into_body().collect().await.unwrap().to_bytes();
-                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                let method = value["method"].as_str().unwrap();
-                seen.lock().unwrap().push(method.to_owned());
-                let result = match method {
-                    "getblockchaininfo" => serde_json::json!({
-                        "chain":"test", "blocks":42, "bestblockhash":"ab".repeat(32)
-                    }),
-                    "getblockcount" => serde_json::json!(42),
-                    _ => panic!("unapproved method reached the node"),
-                };
-                let reply = serde_json::json!({
-                    "jsonrpc":"2.0", "id":value["id"], "result":result
-                });
-                Ok::<_, Infallible>(
-                    Response::builder()
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Full::new(Bytes::from(serde_json::to_vec(&reply).unwrap())))
-                        .unwrap(),
-                )
-            }
-        });
-        let _ = hyper::server::conn::http1::Builder::new()
-            .serve_connection(TokioIo::new(stream), service)
-            .await;
+        // This test sends a successful query and an exact-block mismatch.
+        for _ in 0..2 {
+            let seen_by_node = seen_by_node.clone();
+            let (stream, _) = zebra.accept().await.unwrap();
+            let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                let seen = seen_by_node.clone();
+                async move {
+                    assert_eq!(request.uri(), "/");
+                    assert!(request.headers().contains_key(header::AUTHORIZATION));
+                    let body = request.into_body().collect().await.unwrap().to_bytes();
+                    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    let method = value["method"].as_str().unwrap();
+                    seen.lock().unwrap().push(method.to_owned());
+                    let result = match method {
+                        "getblockchaininfo" => serde_json::json!({
+                            "chain":"test", "blocks":42, "bestblockhash":"ab".repeat(32)
+                        }),
+                        "getbestblockheightandhash" => {
+                            serde_json::json!({"height":42,"hash":"ab".repeat(32)})
+                        }
+                        _ => panic!("unapproved method reached the node"),
+                    };
+                    let reply = serde_json::json!({
+                        "jsonrpc":"2.0", "id":value["id"], "result":result
+                    });
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Full::new(Bytes::from(serde_json::to_vec(&reply).unwrap())))
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = hyper::server::conn::http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        }
     });
 
     let node = LocalNode::new(
@@ -582,15 +588,37 @@ async fn node_listener_uses_same_tls_session_and_only_typed_loopback_rpc() {
     assert_eq!(response["result"], 42);
     assert_eq!(
         *seen.lock().unwrap(),
-        ["getblockchaininfo", "getblockcount"]
+        ["getblockchaininfo", "getbestblockheightandhash"]
     );
+    let mismatch = Request::post("/rpc")
+        .header(header::HOST, "localhost")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "jsonrpc":"2.0","id":"SYNTHETIC_REQUEST","method":"getblockcount",
+                "expected_block":{"height":42,"hash":"cd".repeat(32)}
+            }))
+            .unwrap(),
+        )))
+        .unwrap();
+    let rejected = sender.send_request(mismatch).await.unwrap();
+    assert_eq!(rejected.status(), StatusCode::OK);
+    let rejected: serde_json::Value =
+        serde_json::from_slice(&rejected.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(rejected["error"]["code"], "block_mismatch");
+    assert!(rejected.get("result").is_none());
     drop(bridge_peer);
     assert!(listener_task.await.unwrap().is_err());
     let _ = driver.await;
     assert!(sender.send_request(rpc()).await.is_err());
     assert_eq!(
         *seen.lock().unwrap(),
-        ["getblockchaininfo", "getblockcount"]
+        [
+            "getblockchaininfo",
+            "getbestblockheightandhash",
+            "getblockchaininfo",
+            "getbestblockheightandhash"
+        ]
     );
     quote_task.await.unwrap();
     zebra_task.await.unwrap();

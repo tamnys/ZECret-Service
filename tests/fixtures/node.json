@@ -8,6 +8,7 @@
     "fixture_only": true,
     "chain": "testnet",
     "blocks": 42,
+    "bestblockhash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "headers": 42,
     "initialblockdownload": false,
     "readiness": "synthetic"

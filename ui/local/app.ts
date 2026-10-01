@@ -5,7 +5,9 @@ type Verification = {
   channel_binding?: string; key_binding?: string; freshness?: string;
   release_approval?: string; release?: string;
 };
+type BlockRef = {height:number;hash:string};
 type Report = {
+  chain_context?: BlockRef | null;
   mode?: string; platform?: string; simulation: boolean; private_accepted: boolean;
   phala_trusted_authorized?: boolean;
   query_sent: boolean | string; public_query_sent?: boolean | string; fixture_dispatched?: boolean;
@@ -17,7 +19,8 @@ type Report = {
     inspection:{hardware_evidence?:{hardware_authenticity?:string;security_policy?:string};
       freshness?:string;live_key_binding?:string};
     preview?: {reported_chain:string;blocks:number;best_block_hash:string;
-      transparent_address:string;transparent_balance_zatoshis:number} | null} | null;
+      transparent_address:string;transparent_balance_zatoshis:number;
+      chain_context:BlockRef;balance_chain_context:BlockRef} | null} | null;
 };
 const byId = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -64,6 +67,12 @@ function renderEvidence(verification?: Verification): void {
 }
 function show(report: Report, elapsed: number): void {
   byId('result').textContent = JSON.stringify(report, null, 2);
+  const context = report.report?.preview?.balance_chain_context ?? report.chain_context
+    ?? (report.simulation ? (report.result as {chain_context?:BlockRef} | null)?.chain_context : null);
+  byId('block-context').hidden = !context;
+  byId('block-height').textContent = context ? `State at block ${context.height}` : '';
+  byId('block-hash').textContent = context?.hash ?? '';
+  byId('block-subject').textContent = mode === 'live_testnet_preview' ? 'Confirmed address balance' : 'Result chain state';
   if (mode === 'live_testnet_preview') {
     const preview = report.report?.preview;
     const sent = report.report?.public_query_sent ?? report.public_query_sent;
@@ -150,6 +159,9 @@ methodSelect.addEventListener('change', () => {
 });
 run.addEventListener('click', async () => {
   run.disabled = true;
+  byId('block-context').hidden = true;
+  byId('block-height').textContent = '';
+  byId('block-hash').textContent = '';
   const started = performance.now();
   try {
     const report = mode === 'live_testnet_preview'
