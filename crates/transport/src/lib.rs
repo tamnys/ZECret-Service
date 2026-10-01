@@ -18,7 +18,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
 };
-use tokio_socks::tcp::Socks5Stream;
+use tokio_socks::{Error as SocksError, tcp::Socks5Stream};
 use zrpc_protocol::{ErrorCode, Request, SafeError};
 use zrpc_verifier::VerifiedChannel;
 
@@ -181,12 +181,7 @@ pub(crate) async fn negotiate_socks(
         &isolation.0,
     )
     .await
-    .map_err(|_| {
-        SafeError::new(
-            ErrorCode::TorUnavailable,
-            "SOCKS authentication or connection negotiation failed.",
-        )
-    })?;
+    .map_err(socks_failure)?;
     Ok(UnverifiedChannel {
         socket: Some(socket),
         origin,
@@ -196,6 +191,35 @@ pub(crate) async fn negotiate_socks(
             _ => format!("{}:{}", endpoint.hostname, endpoint.port),
         }),
     })
+}
+
+fn socks_failure(error: SocksError) -> SafeError {
+    // Never serialize the library error: an I/O error could contain a peer
+    // address, and the isolation label is a credential for the Tor stream.
+    let message = match error {
+        SocksError::NoAcceptableAuthMethods
+        | SocksError::UnknownAuthMethod
+        | SocksError::PasswordAuthFailure(_)
+        | SocksError::AuthorizationRequired
+        | SocksError::IdentdAuthFailure
+        | SocksError::InvalidUserIdAuthFailure
+        | SocksError::InvalidAuthValues(_) => {
+            "SOCKS did not accept required password authentication."
+        }
+        SocksError::Io(ref cause) if cause.kind() == io::ErrorKind::InvalidData => {
+            "SOCKS authentication or protocol response was invalid."
+        }
+        SocksError::GeneralSocksServerFailure
+        | SocksError::NetworkUnreachable
+        | SocksError::HostUnreachable
+        | SocksError::ConnectionRefused
+        | SocksError::TtlExpired => "SOCKS reported an endpoint connection failure.",
+        SocksError::ConnectionNotAllowedByRuleset
+        | SocksError::CommandNotSupported
+        | SocksError::AddressTypeNotSupported => "SOCKS rejected the endpoint connection.",
+        _ => "SOCKS negotiation failed or was interrupted.",
+    };
+    SafeError::new(ErrorCode::TorUnavailable, message)
 }
 
 /// A DNS hostname or numeric IP and port, always sent through SOCKS.
@@ -602,6 +626,12 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::TorUnavailable);
             assert!(!format!("{error:?}").contains("fixture-secret"));
+            if method == [5, 0] {
+                assert_eq!(
+                    error.message,
+                    "SOCKS authentication or protocol response was invalid."
+                );
+            }
             let seen = proxy.await.unwrap().pop().unwrap();
             assert!(seen.username.is_empty());
             assert!(seen.hostname.is_empty());
@@ -616,12 +646,17 @@ mod tests {
             reply.auth = auth;
             let (config, proxy) = fake_proxy(vec![reply]).await;
             let endpoint = RemoteEndpoint::new("unresolved-fixture.invalid", 443).unwrap();
-            assert!(
-                config
-                    .connect_bootstrap(&endpoint, IsolationLabel::new("fixture-secret").unwrap())
-                    .await
-                    .is_err()
-            );
+            let error = config
+                .connect_bootstrap(&endpoint, IsolationLabel::new("fixture-secret").unwrap())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::TorUnavailable);
+            if auth == [1, 1] {
+                assert_eq!(
+                    error.message,
+                    "SOCKS did not accept required password authentication."
+                );
+            }
             let seen = proxy.await.unwrap().pop().unwrap();
             assert!(seen.hostname.is_empty());
             assert!(seen.remaining.is_empty());
@@ -643,12 +678,17 @@ mod tests {
             let mut reply = ProxyReply::success();
             reply.connect = connect;
             let (config, proxy) = fake_proxy(vec![reply]).await;
-            assert!(
-                config
-                    .connect_bootstrap(&endpoint, IsolationLabel::new("fixture-secret").unwrap())
-                    .await
-                    .is_err()
-            );
+            let error = config
+                .connect_bootstrap(&endpoint, IsolationLabel::new("fixture-secret").unwrap())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::TorUnavailable);
+            if connect == [5, 5, 0, 1] {
+                assert_eq!(
+                    error.message,
+                    "SOCKS reported an endpoint connection failure."
+                );
+            }
             assert!(proxy.await.unwrap().pop().unwrap().remaining.is_empty());
             assert_eq!(trap.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
         }
