@@ -78,7 +78,7 @@ class PackagingSourceTests(unittest.TestCase):
         candidate = packaging.candidate_guest_recipe(
             RECIPE, runtime, "a" * 64, "b" * 64, "c" * 64)
         self.assertIn("inherit systemd useradd", candidate)
-        self.assertIn('GROUPADD_PARAM:${PN} = "-r zrpc-wrapper"', candidate)
+        self.assertIn('GROUPADD_PARAM:${PN} = "-r -g 10001 zrpc-wrapper"', candidate)
         self.assertIn("zrpc-quote-proxy.service", candidate)
         self.assertNotIn('rsync -a --exclude="target"', candidate)
         self.assertIn('rsync -a --files-from="${REPO_ROOT}/zrpc-dstack-files.txt"',

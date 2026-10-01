@@ -48,6 +48,31 @@ jobs:
                   raise SystemExit(f"reused native quote-proxy source changed: {path}")
           PY
 
+      - name: Parse split Compose and exercise native bind flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          python3 -I - "$source" <<'PY'
+          import importlib.util
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          root = Path(sys.argv[1])
+          directory = root / "experiments/ephemeral-runtime"
+          spec = importlib.util.spec_from_file_location(
+              "guest_source", directory / "prepare-image-source.py")
+          guest = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(guest)
+          fixture = directory / "fixtures/split-compose-synthetic.json"
+          guest.validate_compose_file(fixture.read_text())
+          subprocess.run(["docker", "compose", "--file", str(fixture),
+                          "config", "--quiet"], check=True)
+          print("Exact synthetic split Compose parsed by project and Docker")
+          PY
+          bash "$source/experiments/ephemeral-runtime/check-bind-flags-native.sh"
+
       - name: Retrieve exact previously double-built quote proxy
         shell: bash
         env:

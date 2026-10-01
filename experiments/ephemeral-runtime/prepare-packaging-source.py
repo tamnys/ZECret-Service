@@ -193,7 +193,7 @@ def candidate_guest_recipe(source: str, runtime, list_digest: str,
     source = replace_once(source, "inherit systemd\n",
                           'inherit systemd useradd\n\n'
                           'USERADD_PACKAGES = "${PN}"\n'
-                          'GROUPADD_PARAM:${PN} = "-r zrpc-wrapper"\n')
+                          'GROUPADD_PARAM:${PN} = "-r -g 10001 zrpc-wrapper"\n')
     source = replace_once(
         source,
         'DSTACK_SERVICES = "dstack-guest-agent.socket dstack-guest-agent.service '
