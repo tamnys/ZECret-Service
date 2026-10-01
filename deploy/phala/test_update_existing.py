@@ -1,10 +1,13 @@
 """Negative checks for the one-CVM operator update boundary."""
 
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 
 SOURCE = Path(__file__).with_name("update_existing.py")
@@ -70,6 +73,61 @@ class ExistingUpdateTests(unittest.TestCase):
             link.symlink_to(secret)
             with self.assertRaises(OSError):
                 update.checked_token(link)
+
+    def test_apply_persists_intent_before_sole_patch(self):
+        _, desired = update.checked_candidate()
+        old_compose = '{"services":{"old":{}}}'
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            os.chmod(state, 0o700)
+            (state / "ledger").mkdir()
+            (state / "original.json").write_text(json.dumps({"binding": {
+                "workspace_id": update.WORKSPACE,
+                "experiment_id": "PHALA_PUBLIC_PREVIEW_20260930_ONE",
+                "total_ceiling_microusd": 50_000_000,
+                "deletion_deadline_unix_seconds": 1_791_404_615,
+            }}))
+
+            class FakeApi:
+                calls = []
+
+                def __init__(self, token):
+                    self.assert_token = token
+
+                def request(self, method, path, body=None):
+                    self.calls.append((method, path))
+                    if method == "PATCH":
+                        intent = state / "trusted-update-intent.json"
+                        assert intent.is_file()
+                        assert body == desired
+                        assert path == f"/api/v1/cvms/{update.CVM}/docker-compose"
+                        return 202, b'{"status":"in_progress"}', {
+                            "status": "in_progress"}
+                    if path.endswith("/compose_file"):
+                        compose = {"public_logs": False,
+                                   "public_sysinfo": False,
+                                   "pre_launch_script": "script",
+                                   "docker_compose_file": old_compose}
+                        raw = json.dumps(compose).encode()
+                        return 200, raw, compose
+                    return 200, b"{}", self.detail
+
+            FakeApi.detail = self.detail
+            argv = ["update_existing.py", "apply", "--token-file",
+                    str(state / "unused-token"), "--state-dir", str(state)]
+            with (mock.patch.object(update, "Api", FakeApi),
+                  mock.patch.object(update, "checked_token", return_value="synthetic"),
+                  mock.patch.object(update, "OLD_COMPOSE_SHA256",
+                                    update.digest(old_compose.encode())),
+                  mock.patch("sys.argv", argv),
+                  mock.patch("sys.stdout", new_callable=io.StringIO)):
+                self.assertEqual(update.main(), 0)
+            self.assertEqual(FakeApi.calls,
+                             [("GET", f"/api/v1/cvms/{update.CVM}"),
+                              ("GET", f"/api/v1/cvms/{update.CVM}/compose_file"),
+                              ("PATCH", f"/api/v1/cvms/{update.CVM}/docker-compose")])
+            outcome = json.loads((state / "trusted-update-outcome.json").read_bytes())
+            self.assertIs(outcome["private_accepted"], False)
 
 
 if __name__ == "__main__":
