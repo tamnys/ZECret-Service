@@ -324,6 +324,9 @@ print('SESSION_CLOSED', flush=True)
 
 
 def docker(*args):
+    if args and args[0] == "run":
+        args = ("run", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,mode=1777",
+                "--ulimit", "core=0:0", *args[1:])
     subprocess.run(["docker", *args], check=True)
 
 
