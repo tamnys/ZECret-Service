@@ -1,0 +1,160 @@
+name: Phala ticket-required image
+
+on:
+  workflow_dispatch:
+    inputs:
+      native_run:
+        description: Successful native Cargo gate run ID
+        required: true
+        type: string
+      native_commit:
+        description: Exact source commit of the native binary artifact
+        required: true
+        type: string
+      native_artifact_digest:
+        description: SHA-256 digest of the GitHub native artifact zip
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fetch exact image source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "${GITHUB_REPOSITORY,,}" = tamnys/zecret-service
+          test "$GITHUB_REF" = refs/heads/zec-try-it-out
+          source="$GITHUB_WORKSPACE/source"
+          mkdir "$source"
+          git -C "$source" init -q
+          git -C "$source" fetch -q --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$source" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$source" checkout -q --detach FETCH_HEAD
+
+      - name: Fetch checked native artifact and signed Tor bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_RUN: ${{ inputs.native_run }}
+          NATIVE_COMMIT: ${{ inputs.native_commit }}
+          NATIVE_ARTIFACT_DIGEST: ${{ inputs.native_artifact_digest }}
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/ticketed-image"
+          mkdir -p "$scratch/native" "$scratch/tor"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$NATIVE_RUN/artifacts" > "$scratch/artifacts.json"
+          python3 -I - "$scratch/artifacts.json" <<'PY'
+          import json, os, re, sys
+          from pathlib import Path
+          artifacts = json.loads(Path(sys.argv[1]).read_bytes()).get('artifacts', [])
+          commit = os.environ['NATIVE_COMMIT']
+          run = os.environ['NATIVE_RUN']
+          digest = os.environ['NATIVE_ARTIFACT_DIGEST']
+          if not re.fullmatch(r'[0-9a-f]{40}', commit) or not re.fullmatch(r'[0-9]+', run) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+              raise SystemExit('native artifact identity is invalid')
+          matching = [item for item in artifacts if item.get('name') == 'native-rust-' + commit]
+          if (len(matching) != 1 or matching[0].get('digest') != digest
+                  or matching[0].get('expired') is not False
+                  or matching[0].get('workflow_run', {}).get('head_sha') != commit
+                  or matching[0].get('workflow_run', {}).get('id') != int(run)):
+              raise SystemExit('native artifact metadata differs')
+          PY
+          gh run download "$NATIVE_RUN" --repo "$GITHUB_REPOSITORY" \
+            --name "native-rust-$NATIVE_COMMIT" --dir "$scratch/native"
+          (cd "$scratch/native" && sha256sum -c "native-rust-$NATIVE_COMMIT.tar.sha256")
+          python3 -I - "$source" "$scratch/tor" <<'PY'
+          import hashlib, json, sys, urllib.request
+          from pathlib import Path
+          source, output = map(Path, sys.argv[1:])
+          lock = json.loads((source / 'deploy/phala/ticketed/tor-expert.lock.json').read_bytes())
+          for stem, name in (
+              ('archive', 'tor-expert.tar.gz'),
+              ('signature', 'tor-expert.tar.gz.asc'),
+              ('signing_key', 'tor-signing-key.asc'),
+          ):
+              target = output / name
+              observed = hashlib.sha256()
+              with urllib.request.urlopen(lock[stem + '_url']) as response, target.open('xb') as file:
+                  for block in iter(lambda: response.read(1024 * 1024), b''):
+                      observed.update(block)
+                      file.write(block)
+              if observed.hexdigest() != lock[stem + '_sha256']:
+                  raise SystemExit('Tor artifact differs from the lock')
+          PY
+          native_sha="$(cut -d ' ' -f 1 "$scratch/native/native-rust-$NATIVE_COMMIT.tar.sha256")"
+          python3 -I "$source/deploy/phala/ticketed/prepare_image.py" \
+            --native-bundle "$scratch/native/native-rust-$NATIVE_COMMIT.tar" \
+            --native-bundle-sha256 "$native_sha" \
+            --revision "$NATIVE_COMMIT" \
+            --tor-archive "$scratch/tor/tor-expert.tar.gz" \
+            --tor-signature "$scratch/tor/tor-expert.tar.gz.asc" \
+            --tor-signing-key "$scratch/tor/tor-signing-key.asc" \
+            --output "$scratch/context" > "$scratch/context-receipt.json"
+
+      - name: Build twice, smoke, and publish the exact image
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source="$GITHUB_WORKSPACE/source"
+          scratch="$source/.codex-tmp/ticketed-image"
+          context="$scratch/context"
+          base=ghcr.io/tamnys/zecret-service-preview@sha256:a73f032681a26f8b2cb960cd32f355c478612e49ae657b5ca656f2b105fb4d78
+          buildkit=moby/buildkit:v0.33.0@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+          image=zrpc-ticketed:checked-local
+          docker pull --platform linux/amd64 "$base"
+          docker pull --platform linux/amd64 "$buildkit"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$base")" = linux/amd64
+          docker buildx create --name zrpc-ticketed-repro --driver docker-container \
+            --driver-opt "image=$buildkit" --bootstrap
+          docker buildx inspect --bootstrap zrpc-ticketed-repro > "$scratch/builder-inspect.txt"
+          grep -E '^BuildKit version:[[:space:]]+v0\.33\.0$' "$scratch/builder-inspect.txt"
+          epoch="$(date -u -d "$(docker image inspect --format '{{.Created}}' "$base")" +%s)"
+          for pass in first second; do
+            docker buildx build --builder zrpc-ticketed-repro --platform linux/amd64 --network none \
+              --pull=false --no-cache --build-arg "SOURCE_DATE_EPOCH=$epoch" \
+              --tag "$image" \
+              --output "type=docker,dest=$scratch/image-$pass.tar,rewrite-timestamp=true" \
+              "$context"
+          done
+          cmp "$scratch/image-first.tar" "$scratch/image-second.tar"
+          docker load --input "$scratch/image-first.tar"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = linux/amd64
+          test "$(docker image inspect --format '{{.Config.User}}' "$image")" = 10001:0
+          docker run --rm --pull=never --network none --read-only \
+            --entrypoint /opt/zrpc/bin/zrpc "$image" payments --help > "$scratch/zrpc-help.txt"
+          grep -F -- 'serve-free' "$scratch/zrpc-help.txt"
+          docker run --rm --pull=never --network none --read-only \
+            --entrypoint /opt/zrpc/bin/zrpc-node-wrapper "$image" --help > "$scratch/wrapper-help.txt"
+          grep -F -- 'ticket-required' "$scratch/wrapper-help.txt"
+          docker run --rm --pull=never --network none --read-only \
+            --env LD_LIBRARY_PATH=/opt/zrpc/ticket/tor \
+            --entrypoint /opt/zrpc/ticket/tor/tor "$image" --version > "$scratch/tor-version.txt"
+          grep -F -- 'Tor version' "$scratch/tor-version.txt"
+          repository=ghcr.io/tamnys/zecret-service-preview
+          tag="$repository:ticketed-$GITHUB_SHA"
+          docker tag "$image" "$tag"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin >/dev/null
+          push_output="$(docker push "$tag")"
+          digest="$(printf '%s\n' "$push_output" | sed -nE 's/.*digest: (sha256:[a-f0-9]{64}).*/\1/p' | tail -1)"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          docker logout ghcr.io >/dev/null
+          docker manifest inspect "$repository@$digest" > "$scratch/published-manifest.json"
+          printf '%s\n' "$repository@$digest" > "$scratch/published-image-ref.txt"
+          {
+            echo 'Ticket-required image reproduced, smoked, and published.'
+            echo "Source commit: $GITHUB_SHA"
+            echo "Image ID: $(docker image inspect --format '{{.Id}}' "$image")"
+            echo "Image ref: $repository@$digest"
+            echo "Context receipt SHA-256: $(sha256sum "$scratch/context-receipt.json" | cut -d ' ' -f 1)"
+          } >> "$GITHUB_STEP_SUMMARY"
