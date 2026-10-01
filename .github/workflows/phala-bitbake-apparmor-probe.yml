@@ -67,8 +67,8 @@ jobs:
           cat "$GITHUB_WORKSPACE/baseline.json"
           test "$baseline_status" -ne 0
 
-          sudo -n apparmor_parser -r "$profile"
           loaded=1
+          sudo -n apparmor_parser -r "$profile"
           set +e
           "$python" -I -B "$probe" "$poky" > "$GITHUB_WORKSPACE/profile.json"
           profile_status=$?
