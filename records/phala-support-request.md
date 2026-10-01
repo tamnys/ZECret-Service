@@ -85,15 +85,24 @@ billable resources in response.
    override that could expose Zebra's loopback RPC directly.
    The live `compose_file` response includes a 17,569-byte pre-launch script
    (SHA-256 `982181610f70be9087b1c69b36b719b47b82d37fcef8acc9289ed3bb3095ffe8`)
-   that our launch document did not supply. A static scan found root-password,
-   SSH-key, SSH-server and remote-fetch terms. Is this script supplied by Phala,
-   when is it run, and what supported configuration disables its administrative
-   paths? We have not executed or published its contents.
+   that our launch document did not supply. A static scan found active
+   root-password, authorized-key and remote-fetch branches; an SSH-server term
+   appeared only in a comment. The stored SSH-key set and live Teepod
+   `ssh_authorized_keys` were both empty at the time of inspection. Is this
+   script supplied by Phala, when is it run, and what supported configuration
+   disables its administrative paths? What password, console, recovery and
+   future SSH-key update access remains available? We have not executed or
+   published the script contents.
 
 3. **Deletion and accounting contract.** For API version `2026-06-23`, the live
    CVM inventory and detail return `instance_id: null` but a nonempty `vm_uuid`.
    The authenticated `compose_file` readback reports `no_instance_id: false`.
-   Why is the CVM instance ID still null, and does that state change on reboot?
+   A single-CVM dry run of `PATCH /cvms/{cvmId}/instance-id` with
+   `overwrite: false` returned `status: skipped`,
+   `reason: gateway_rpc_failed`, `source: teepod_state`,
+   `verified_with_gateway: false`, and null old/new IDs. Why does gateway
+   verification fail for this running CVM, how can the ID be repaired safely,
+   and does that state change on reboot?
    Eight usage rows returned `instance_id` equal to that `vm_uuid`. Is that the
    supported, stable mapping for billing, including replicas, restarts and
    deletion? The same response returned `project_id` and `team_id` as JSON
