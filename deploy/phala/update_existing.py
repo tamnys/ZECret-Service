@@ -84,10 +84,11 @@ def checked_token(path):
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_mode & 0o077:
             raise ValueError("token file permissions must exclude group and others")
-        token = os.read(descriptor, 1025).strip()
+        with os.fdopen(os.dup(descriptor), "rb") as source:
+            token = source.read().strip()
     finally:
         os.close(descriptor)
-    if not token.startswith(b"phak_") or len(token) > 1024:
+    if not token.startswith(b"phak_"):
         raise ValueError("Phala workspace token unavailable")
     return token.decode("ascii")
 
@@ -99,8 +100,7 @@ class Api:
         self.context.minimum_version = ssl.TLSVersion.TLSv1_3
 
     def request(self, method, path, body=None):
-        connection = http.client.HTTPSConnection(HOST, context=self.context,
-                                                timeout=20)
+        connection = http.client.HTTPSConnection(HOST, context=self.context)
         headers = {
             "Accept": "application/json",
             "Accept-Encoding": "identity",
