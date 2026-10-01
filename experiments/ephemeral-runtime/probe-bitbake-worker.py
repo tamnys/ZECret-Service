@@ -66,8 +66,10 @@ def main() -> int:
                 or os.readlink("/proc/self/ns/net") == original_net):
             return report("blocked", reason="BitBake did not isolate the worker",
                           **context)
-        if (read_optional("/proc/self/uid_map") != f"{uid} {uid} 1"
-                or read_optional("/proc/self/gid_map") != f"{gid} {gid} 1"
+        if ((read_optional("/proc/self/uid_map") or "").split()
+                != [str(uid), str(uid), "1"]
+                or (read_optional("/proc/self/gid_map") or "").split()
+                != [str(gid), str(gid), "1"]
                 or read_optional("/proc/self/setgroups") != "deny"):
             return report("blocked", reason="worker identity map differs",
                           **context)
