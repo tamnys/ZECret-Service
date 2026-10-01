@@ -111,7 +111,11 @@ jobs:
           if os.statvfs("/tmp").f_flag & os.ST_NOEXEC:
               raise SystemExit("native runner /tmp is noexec; pinned BitBake refuses to parse")
           PY
+          # Pinned oe-init-build-env reads optional unset shell variables such
+          # as BBSERVER. Restore nounset before any candidate configuration.
+          set +u
           . "$staged/poky/oe-init-build-env" "$build" >/dev/null
+          set -euo pipefail
           cp "$staged/bb-build/conf/local.conf" "$build/conf/local.conf"
           cat >> "$build/conf/local.conf" <<'EOF'
           BB_NO_NETWORK = "1"
