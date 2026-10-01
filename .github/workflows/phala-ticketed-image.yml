@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           test "$(uname -m)" = x86_64
           test "${GITHUB_REPOSITORY,,}" = tamnys/zecret-service
-          test "$GITHUB_REF" = refs/heads/zec-try-it-out
+          test "$GITHUB_REF" = refs/heads/main
           source="$GITHUB_WORKSPACE/source"
           mkdir "$source"
           git -C "$source" init -q
