@@ -40,8 +40,8 @@ class RootfsSourceTests(unittest.TestCase):
         self.unrelated.parent.mkdir(parents=True, exist_ok=True)
         self.unrelated.write_text("SYNTHETIC_ONLY")
         candidate = rootfs_source.candidate_prod(PROD, BASE)
-        self.function = "zrpc_remove_local_admin() {" + candidate.split(
-            "zrpc_remove_local_admin() {", 1
+        self.function = "zrpc_strip_local_admin() {" + candidate.split(
+            "zrpc_strip_local_admin() {", 1
         )[1]
 
     def run_function(
@@ -63,7 +63,7 @@ class RootfsSourceTests(unittest.TestCase):
                 environment["IMAGE_ROOTFS"] = str(root)
             environment["WORKDIR"] = self.scratch.name
         return subprocess.run(
-            ["sh", "-c", "set -eu\n" + function + "\nzrpc_remove_local_admin\n"],
+            ["sh", "-c", "set -eu\n" + function + "\nzrpc_strip_local_admin\n"],
             env=environment,
             capture_output=True,
             check=False,
