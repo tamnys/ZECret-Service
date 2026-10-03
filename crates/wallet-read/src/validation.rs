@@ -49,7 +49,7 @@ fn height_range(range: Option<wire::BlockRange>) -> Result<(), Status> {
     let end = range.end.ok_or_else(invalid)?;
     block_id(&start)?;
     block_id(&end)?;
-    if !start.hash.is_empty() || !end.hash.is_empty() {
+    if !start.hash.is_empty() || !end.hash.is_empty() || start.height > end.height {
         return Err(invalid());
     }
     Ok(())
@@ -303,7 +303,17 @@ mod tests {
                 hash: vec![],
             }),
         };
-        assert!(validate_unary_request(ReadMethod::GetBlockRange, &range.encode_to_vec()).is_ok());
+        assert!(validate_unary_request(ReadMethod::GetBlockRange, &range.encode_to_vec()).is_err());
+        let ascending = wire::BlockRange {
+            end: Some(wire::BlockId {
+                height: 10,
+                hash: vec![],
+            }),
+            ..range.clone()
+        };
+        assert!(
+            validate_unary_request(ReadMethod::GetBlockRange, &ascending.encode_to_vec()).is_ok()
+        );
         let missing_end = wire::BlockRange {
             end: None,
             ..range.clone()
