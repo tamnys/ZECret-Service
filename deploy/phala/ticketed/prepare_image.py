@@ -119,6 +119,7 @@ def prepare(args):
         write(context / "Dockerfile", b"FROM " + BASE_IMAGE.encode() + b"\n"
               + template[len(prefix):], 0o644)
         write(context / "supervisor.py", regular_bytes(HERE.parent / "image/supervisor.py"), 0o644)
+        write(context / "zebra.toml", regular_bytes(HERE.parent / "image/zebra.toml"), 0o644)
         for name, data in binaries.items():
             write(context / "bin" / name, data, 0o555)
         for name, data in public.items():

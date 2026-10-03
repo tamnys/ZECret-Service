@@ -2,6 +2,7 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 USER 0:0
 COPY --chmod=0555 supervisor.py /opt/zrpc/supervisor.py
+COPY --chmod=0444 zebra.toml /opt/zrpc/zebra.toml
 COPY --chmod=0555 bin/zrpc /opt/zrpc/bin/zrpc
 COPY --chmod=0555 bin/zrpc-node-wrapper /opt/zrpc/bin/zrpc-node-wrapper
 COPY --chmod=0555 bin/zrpc-payment-crypto /opt/zrpc/bin/zrpc-payment-crypto
