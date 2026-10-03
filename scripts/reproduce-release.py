@@ -41,6 +41,7 @@ ARTIFACTS = (
     ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),
     ("zrpc-lifecycle", "zrpc-gcp-import-producer"),
     ("zrpc-uki-digest", "zrpc-uki-digest"),
+    ("zrpc-wallet-reference", "zrpc-wallet-reference"),
 )
 PAYMENT_HELPER = ("zrpc-payment-crypto", "zrpc-payment-crypto")
 ALL_ARTIFACTS = (*ARTIFACTS, PAYMENT_HELPER)

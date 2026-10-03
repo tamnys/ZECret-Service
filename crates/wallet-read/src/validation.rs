@@ -149,6 +149,50 @@ fn malformed_response() -> Status {
 /// not turn a node response into an independently validated Zcash consensus
 /// proof; a maintained wallet scanner still performs its own protocol checks.
 pub fn validate_compact_block(block: &wire::CompactBlock) -> Result<(), Status> {
+    validate_block_shape(block)?;
+    for tx in &block.vtx {
+        validate_compact_tx(tx)?;
+    }
+    Ok(())
+}
+
+/// Zebra's nullifier-only method deliberately removes note commitments,
+/// ephemeral keys, and ciphertext, while retaining spend nullifiers. It must
+/// not be accepted as a complete compact block for wallet note scanning.
+pub fn validate_nullifier_only_block(block: &wire::CompactBlock) -> Result<(), Status> {
+    validate_block_shape(block)?;
+    let metadata = block
+        .chain_metadata
+        .as_ref()
+        .ok_or_else(malformed_response)?;
+    if metadata.sapling_commitment_tree_size != 0
+        || metadata.orchard_commitment_tree_size != 0
+        || metadata.ironwood_commitment_tree_size != 0
+    {
+        return Err(malformed_response());
+    }
+    for tx in &block.vtx {
+        if tx.hash.len() != 32
+            || !tx.outputs.is_empty()
+            || tx.spends.iter().any(|spend| spend.nf.len() != 32)
+            || tx
+                .actions
+                .iter()
+                .chain(tx.ironwood_actions.iter())
+                .any(|action| {
+                    action.nullifier.len() != 32
+                        || !action.cmx.is_empty()
+                        || !action.ephemeral_key.is_empty()
+                        || !action.ciphertext.is_empty()
+                })
+        {
+            return Err(malformed_response());
+        }
+    }
+    Ok(())
+}
+
+fn validate_block_shape(block: &wire::CompactBlock) -> Result<(), Status> {
     if block.proto_version != 0
         || block.height > u32::MAX as u64
         || block.hash.len() != 32
@@ -160,7 +204,6 @@ pub fn validate_compact_block(block: &wire::CompactBlock) -> Result<(), Status> 
     }
     let mut previous_index = None;
     for tx in &block.vtx {
-        validate_compact_tx(tx)?;
         if previous_index.is_some_and(|index| tx.index <= index) {
             return Err(malformed_response());
         }
@@ -202,6 +245,7 @@ pub struct RangeContinuity {
     previous_hash: Option<[u8; 32]>,
     previous_parent: Option<[u8; 32]>,
     first_anchor: Option<[u8; 32]>,
+    nullifiers_only: bool,
 }
 
 /// Subtree positions are implicit in the streamed response. A successful EOF
@@ -255,11 +299,23 @@ impl RangeContinuity {
             previous_hash: None,
             previous_parent: None,
             first_anchor,
+            nullifiers_only: false,
+        }
+    }
+
+    pub fn new_nullifiers_only(start: u32, end: u32, first_anchor: Option<[u8; 32]>) -> Self {
+        Self {
+            nullifiers_only: true,
+            ..Self::new(start, end, first_anchor)
         }
     }
 
     pub fn observe(&mut self, block: &wire::CompactBlock) -> Result<(), Status> {
-        validate_compact_block(block)?;
+        if self.nullifiers_only {
+            validate_nullifier_only_block(block)?;
+        } else {
+            validate_compact_block(block)?;
+        }
         let expected = self.next_height.ok_or_else(malformed_response)?;
         if block.height != u64::from(expected) {
             return Err(malformed_response());
@@ -493,5 +549,33 @@ mod tests {
             ..Default::default()
         });
         assert!(validate_compact_block(&block).is_err());
+    }
+
+    #[test]
+    fn nullifier_blocks_require_pruned_notes_and_cannot_pass_full_scan_validation() {
+        let mut block = block(8, 8, 7);
+        block.vtx.push(wire::CompactTx {
+            index: 1,
+            hash: vec![1; 32],
+            ironwood_actions: vec![wire::CompactOrchardAction {
+                nullifier: vec![2; 32],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(validate_nullifier_only_block(&block).is_ok());
+        assert!(validate_compact_block(&block).is_err());
+        let mut range = RangeContinuity::new_nullifiers_only(8, 8, Some([7; 32]));
+        range.observe(&block).unwrap();
+        range.finish().unwrap();
+        block.vtx[0].ironwood_actions[0].ciphertext = vec![3; 52];
+        assert!(validate_nullifier_only_block(&block).is_err());
+        block.vtx[0].ironwood_actions[0].ciphertext.clear();
+        block
+            .chain_metadata
+            .as_mut()
+            .unwrap()
+            .ironwood_commitment_tree_size = 1;
+        assert!(validate_nullifier_only_block(&block).is_err());
     }
 }

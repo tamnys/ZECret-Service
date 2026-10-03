@@ -4,7 +4,8 @@
 
 use crate::{
     RangeContinuity, ReadMethod, SubtreeContinuity, validate_client_stream_address,
-    validate_compact_block, validate_compact_tx, validate_unary_request, wire,
+    validate_compact_block, validate_compact_tx, validate_nullifier_only_block,
+    validate_unary_request, wire,
 };
 use futures_util::{StreamExt, stream};
 use prost::Message;
@@ -188,8 +189,13 @@ fn checked_blocks(
     input: tonic::Streaming<wire::CompactBlock>,
     start: u32,
     end: u32,
+    nullifiers_only: bool,
 ) -> ReadStream<wire::CompactBlock> {
-    let continuity = Arc::new(Mutex::new(Some(RangeContinuity::new(start, end, None))));
+    let continuity = Arc::new(Mutex::new(Some(if nullifiers_only {
+        RangeContinuity::new_nullifiers_only(start, end, None)
+    } else {
+        RangeContinuity::new(start, end, None)
+    })));
     let check_each = continuity.clone();
     let blocks = input.map(move |item| {
         let block = item.map_err(sanitize)?;
@@ -253,7 +259,12 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
             .await
             .map_err(sanitize)?
             .into_inner();
-        check_selected_block(&response, &selected)?;
+        validate_nullifier_only_block(&response)?;
+        if (!selected.hash.is_empty() && response.hash != selected.hash)
+            || (selected.hash.is_empty() && response.height != selected.height)
+        {
+            return Err(invalid_data());
+        }
         Ok(Response::new(response))
     }
 
@@ -272,7 +283,7 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
             .await
             .map_err(sanitize)?
             .into_inner();
-        Ok(Response::new(checked_blocks(input, start, end)))
+        Ok(Response::new(checked_blocks(input, start, end, false)))
     }
 
     type GetBlockRangeNullifiersStream = ReadStream<wire::CompactBlock>;
@@ -293,7 +304,7 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
             .await
             .map_err(sanitize)?
             .into_inner();
-        Ok(Response::new(checked_blocks(input, start, end)))
+        Ok(Response::new(checked_blocks(input, start, end, true)))
     }
 
     async fn get_transaction(

@@ -70,6 +70,7 @@ class GuestRustInputTests(unittest.TestCase):
                              "zrpc-gcp-lifecycle": "zrpc-lifecycle",
                              "zrpc-gcp-import-producer": "zrpc-lifecycle",
                              "zrpc-uki-digest": "zrpc-uki-digest",
+                             "zrpc-wallet-reference": "zrpc-wallet-reference",
                              "zrpc-payment-crypto": "zrpc-payment-crypto"}.get(name, "zrpc-server"),
                  "name": name} for name in sorted(digests)
             ],

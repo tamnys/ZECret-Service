@@ -285,7 +285,7 @@ where
             emit!(Block, item)
         }
         WalletReadResult::BlockNullifiers(item) => {
-            zrpc_wallet_read::validate_compact_block(&item).map_err(|_| invalid_chain())?;
+            zrpc_wallet_read::validate_nullifier_only_block(&item).map_err(|_| invalid_chain())?;
             if !selected_block.is_some_and(|selected| selected_block_matches(selected, &item)) {
                 return Err(invalid_chain());
             }
@@ -302,7 +302,8 @@ where
         }
         WalletReadResult::BlockRangeNullifiers(mut stream) => {
             let range = range.ok_or_else(invalid_chain)?;
-            let mut continuity = RangeContinuity::new(range.start, range.end, prior_block_hash);
+            let mut continuity =
+                RangeContinuity::new_nullifiers_only(range.start, range.end, prior_block_hash);
             while let Some(item) = stream.next().await? {
                 continuity.observe(&item).map_err(|_| invalid_chain())?;
                 emit!(BlockRangeNullifiers, item);
