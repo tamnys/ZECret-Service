@@ -26,6 +26,7 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
 };
 use tokio_rustls::server::TlsStream;
+use tonic::{body::Body, codegen::Service};
 use zeroize::Zeroizing;
 use zrpc_payments::{Admission, Redeemer};
 #[cfg(test)]
@@ -34,6 +35,9 @@ use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, ErrorCode, MAX_ATTESTATION_REQUEST_BYTES,
     MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
     PublicAttestationResponse, SafeError, parse_attestation_request, parse_request,
+};
+use zrpc_wallet_read::{
+    ReadMethod, backend::ZebraReadOnly, wire::compact_tx_streamer_server::CompactTxStreamerServer,
 };
 
 fn unavailable() -> SafeError {
@@ -178,6 +182,7 @@ impl Drop for AbortOnDrop {
 struct Shared<Q> {
     source: Q,
     node: Option<LocalNode>,
+    wallet_backend: Option<ZebraReadOnly>,
     payment: Option<Arc<Redeemer>>,
     connections: Arc<Semaphore>,
     quotes: Semaphore,
@@ -189,6 +194,7 @@ impl<Q: QuoteSource> Shared<Q> {
         Self {
             source,
             node: None,
+            wallet_backend: None,
             payment: None,
             connections: Arc::new(Semaphore::new(limits.connections.get())),
             quotes: Semaphore::new(limits.quotes.get()),
@@ -258,6 +264,15 @@ impl AttestationService {
         let shared = Arc::get_mut(&mut self.shared).ok_or_else(unavailable)?;
         shared.node = Some(node);
         shared.payment = Some(payment);
+        Ok(self)
+    }
+
+    /// Add Zebra's typed read-only gRPC adapter. The caller must bind Zebra's
+    /// listener to loopback and keep this wrapper's wallet route disabled until
+    /// the native verified transport and exact release are ready.
+    pub fn with_wallet_backend(mut self, backend: ZebraReadOnly) -> Result<Self, SafeError> {
+        let shared = Arc::get_mut(&mut self.shared).ok_or_else(unavailable)?;
+        shared.wallet_backend = Some(backend);
         Ok(self)
     }
     // Only tests may inject a pre-negotiated stream. Production listener owns
@@ -354,6 +369,7 @@ struct Session {
     challenged: AtomicBool,
     attestation_issued: AtomicBool,
     paid_rpc_attempted: AtomicBool,
+    wallet_rpc_attempted: AtomicBool,
 }
 
 #[cfg(test)]
@@ -397,6 +413,7 @@ async fn serve_until<Q: QuoteSource>(
         challenged: AtomicBool::new(false),
         attestation_issued: AtomicBool::new(false),
         paid_rpc_attempted: AtomicBool::new(false),
+        wallet_rpc_attempted: AtomicBool::new(false),
     });
     let service = hyper::service::service_fn(|request| {
         let shared = shared.clone();
@@ -424,8 +441,8 @@ async fn serve_until<Q: QuoteSource>(
     }
 }
 
-fn reply(status: StatusCode, body: Bytes) -> Response<Full<Bytes>> {
-    let mut response = Response::new(Full::new(body));
+fn reply(status: StatusCode, body: Bytes) -> Response<Body> {
+    let mut response = Response::new(Body::new(Full::new(body)));
     *response.status_mut() = status;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -437,7 +454,7 @@ fn reply(status: StatusCode, body: Bytes) -> Response<Full<Bytes>> {
     );
     response
 }
-fn failure(status: StatusCode) -> Response<Full<Bytes>> {
+fn failure(status: StatusCode) -> Response<Body> {
     reply(
         status,
         Bytes::from_static(br#"{"error":"public_attestation_unavailable"}"#),
@@ -447,7 +464,7 @@ async fn handle<Q: QuoteSource>(
     shared: Arc<Shared<Q>>,
     session: Arc<Session>,
     request: Request<Incoming>,
-) -> Response<Full<Bytes>> {
+) -> Response<Body> {
     if session.io.check_deadline().is_err() {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     }
@@ -461,6 +478,9 @@ async fn handle<Q: QuoteSource>(
     match request.uri().path_and_query().map(|p| p.as_str()) {
         Some("/rpc") if version == Version::HTTP_11 => {
             return handle_rpc(shared, session, request).await;
+        }
+        Some(path) if version == Version::HTTP_2 && ReadMethod::from_path(path).is_some() => {
+            return handle_wallet_rpc(shared, session, request).await;
         }
         Some("/attestation") => {}
         _ => return failure(StatusCode::NOT_FOUND),
@@ -567,14 +587,88 @@ async fn handle<Q: QuoteSource>(
     reply(StatusCode::OK, Bytes::from(output.0))
 }
 
+async fn handle_wallet_rpc<Q: QuoteSource>(
+    shared: Arc<Shared<Q>>,
+    session: Arc<Session>,
+    mut request: Request<Incoming>,
+) -> Response<Body> {
+    let Some(backend) = shared.wallet_backend.as_ref() else {
+        return failure(StatusCode::NOT_FOUND);
+    };
+    // Claim the one wallet RPC on this connection before polling its body.
+    // HTTP/2 can deliver parallel streams, so this is a connection-wide atom.
+    if !session.attestation_issued.load(Ordering::SeqCst)
+        || session.io.check_deadline().is_err()
+        || session.wallet_rpc_attempted.swap(true, Ordering::SeqCst)
+        || session.paid_rpc_attempted.swap(true, Ordering::SeqCst)
+    {
+        return failure(StatusCode::FORBIDDEN);
+    }
+    let authorization = if shared.payment.is_some() {
+        let mut values = request.headers().get_all(header::AUTHORIZATION).iter();
+        let Some(value) = values.next() else {
+            return failure(StatusCode::FORBIDDEN);
+        };
+        if values.next().is_some() {
+            return failure(StatusCode::FORBIDDEN);
+        }
+        Some(Zeroizing::new(value.as_bytes().to_vec()))
+    } else {
+        if request.headers().contains_key(header::AUTHORIZATION) {
+            return failure(StatusCode::FORBIDDEN);
+        }
+        None
+    };
+    if request.headers().contains_key(header::CONTENT_ENCODING)
+        || request.headers().contains_key("grpc-encoding")
+        || request
+            .headers()
+            .get_all(header::CONTENT_TYPE)
+            .iter()
+            .count()
+            != 1
+        || request
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .is_none_or(|value| value != "application/grpc")
+    {
+        return failure(StatusCode::BAD_REQUEST);
+    }
+    if let Some(payment) = &shared.payment {
+        let Some(header) = authorization.as_ref() else {
+            return failure(StatusCode::FORBIDDEN);
+        };
+        if !matches!(
+            payment.redeem(header, session.io.1).await,
+            Ok(Admission::Accepted)
+        ) || session.io.check_deadline().is_err()
+        {
+            return failure(StatusCode::FORBIDDEN);
+        }
+    }
+    request.headers_mut().remove(header::AUTHORIZATION);
+    // Generated Tonic service dispatches only the allowlisted path selected
+    // above. Its backing implementation validates typed requests and strips
+    // backend metadata/errors; SendTransaction and Ping cannot reach Zebra.
+    let mut service = CompactTxStreamerServer::new(backend.clone());
+    match service.call(request).await {
+        Ok(response) => response,
+        Err(_) => failure(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
 async fn handle_rpc<Q: QuoteSource>(
     shared: Arc<Shared<Q>>,
     session: Arc<Session>,
     request: Request<Incoming>,
-) -> Response<Full<Bytes>> {
+) -> Response<Body> {
     let Some(node) = shared.node.as_ref() else {
         return failure(StatusCode::NOT_FOUND);
     };
+    if shared.wallet_backend.is_some() && session.wallet_rpc_attempted.swap(true, Ordering::SeqCst)
+    {
+        return failure(StatusCode::FORBIDDEN);
+    }
     // Reject before reading any body unless this exact TLS session completed
     // its one nonce/exporter quote exchange. The native client independently
     // gates private bodies on reviewed-release approval; the preview client

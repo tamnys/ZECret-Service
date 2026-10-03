@@ -250,7 +250,9 @@ async fn quote_uses_own_live_session_exporter_and_connection_nonce_only_once() {
 async fn http2_quote_uses_same_tls_exporter_and_does_not_enable_http1_rpc() {
     let source = FakeQuote::new();
     let calls = source.calls.clone();
-    let shared = Arc::new(Shared::new(source, limits(1, 1, Duration::from_nanos(1))));
+    let mut shared = Arc::new(Shared::new(source, limits(1, 1, Duration::from_nanos(1))));
+    Arc::get_mut(&mut shared).unwrap().wallet_backend =
+        Some(ZebraReadOnly::new("127.0.0.1:9067".parse().unwrap()).unwrap());
     let (mut server_config, mut client_config) = configs();
     Arc::get_mut(&mut server_config).unwrap().alpn_protocols = vec![b"h2".to_vec()];
     Arc::get_mut(&mut client_config).unwrap().alpn_protocols = vec![b"h2".to_vec()];
@@ -291,6 +293,19 @@ async fn http2_quote_uses_same_tls_exporter_and_does_not_enable_http1_rpc() {
             .body(Full::new(Bytes::from(body)))
             .unwrap()
     };
+    let wallet_path = ReadMethod::GetLatestBlock.path();
+    let wallet_request = || {
+        Request::post(format!("https://fixture.invalid{wallet_path}"))
+            .header(header::CONTENT_TYPE, "application/grpc")
+            .body(Full::new(Bytes::from_static(&[0, 0, 0, 0, 0])))
+            .unwrap()
+    };
+    assert_eq!(
+        read(client.send_request(wallet_request()).await.unwrap())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
     let (status, evidence) = read(
         client
             .send_request(send("/attestation", nonce_body(nonce)))
@@ -304,12 +319,27 @@ async fn http2_quote_uses_same_tls_exporter_and_does_not_enable_http1_rpc() {
     assert_eq!(*calls.lock().unwrap(), vec![expected]);
     let (status, _) = read(
         client
+            .send_request(send(
+                "/cash.z.wallet.sdk.rpc.CompactTxStreamer/SendTransaction",
+                vec![],
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = read(
+        client
             .send_request(send("/attestation", nonce_body([30; 32])))
             .await
             .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = read(client.send_request(wallet_request()).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = read(client.send_request(wallet_request()).await.unwrap()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = read(
         client
             .send_request(send("/rpc", b"private".to_vec()))

@@ -151,29 +151,35 @@ pub fn validate_compact_block(block: &wire::CompactBlock) -> Result<(), Status> 
     }
     let mut previous_index = None;
     for tx in &block.vtx {
-        if tx.hash.len() != 32 || previous_index.is_some_and(|index| tx.index <= index) {
+        validate_compact_tx(tx)?;
+        if previous_index.is_some_and(|index| tx.index <= index) {
             return Err(malformed_response());
         }
         previous_index = Some(tx.index);
-        if tx.spends.iter().any(|spend| spend.nf.len() != 32)
-            || tx.outputs.iter().any(|output| {
-                output.cmu.len() != 32
-                    || output.ephemeral_key.len() != 32
-                    || output.ciphertext.len() != 52
+    }
+    Ok(())
+}
+
+pub fn validate_compact_tx(tx: &wire::CompactTx) -> Result<(), Status> {
+    if tx.hash.len() != 32
+        || tx.spends.iter().any(|spend| spend.nf.len() != 32)
+        || tx.outputs.iter().any(|output| {
+            output.cmu.len() != 32
+                || output.ephemeral_key.len() != 32
+                || output.ciphertext.len() != 52
+        })
+        || tx
+            .actions
+            .iter()
+            .chain(tx.ironwood_actions.iter())
+            .any(|action| {
+                action.nullifier.len() != 32
+                    || action.cmx.len() != 32
+                    || action.ephemeral_key.len() != 32
+                    || action.ciphertext.len() != 52
             })
-            || tx
-                .actions
-                .iter()
-                .chain(tx.ironwood_actions.iter())
-                .any(|action| {
-                    action.nullifier.len() != 32
-                        || action.cmx.len() != 32
-                        || action.ephemeral_key.len() != 32
-                        || action.ciphertext.len() != 52
-                })
-        {
-            return Err(malformed_response());
-        }
+    {
+        return Err(malformed_response());
     }
     Ok(())
 }
