@@ -140,6 +140,7 @@ jobs:
           git -C "$source" diff --quiet
 
       - name: Build and export matching native binaries with no network or source write access
+        id: native_build
         shell: bash
         env:
           RUST_IMAGE: rust:1-trixie@sha256:f2a0f2b3529c9bbbf5479d131611451a3cc3956d9a11374d6d4ba96f059c1dce
@@ -174,6 +175,21 @@ jobs:
             ' sh "$GITHUB_SHA"
           test "$(git -C "$source" rev-parse HEAD)" = "$GITHUB_SHA"
           git -C "$source" diff --quiet -- Cargo.lock Cargo.toml rust-toolchain.toml tools/payment-crypto/Cargo.lock tools/payment-crypto/Cargo.toml
+
+      - name: Preserve failed native build diagnostics
+        if: ${{ failure() && steps.native_build.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-build-failure-${{ github.sha }}
+          path: |
+            ${{ github.workspace }}/native-cargo/reproduction/release-${{ github.sha }}/manifest.json
+            ${{ github.workspace }}/native-cargo/reproduction/release-${{ github.sha }}/build-a/build.log
+            ${{ github.workspace }}/native-cargo/reproduction/release-${{ github.sha }}/build-b/build.log
+            ${{ github.workspace }}/native-cargo/reproduction/release-${{ github.sha }}/build-a/static-import.log
+            ${{ github.workspace }}/native-cargo/reproduction/release-${{ github.sha }}/build-b/static-import.log
+            ${{ github.workspace }}/native-cargo/reproduction/release-${{ github.sha }}/build-a/payment-helper.log
+            ${{ github.workspace }}/native-cargo/reproduction/release-${{ github.sha }}/build-b/payment-helper.log
+          if-no-files-found: warn
 
       - name: Exercise the exact matched static import producer on synthetic media
         shell: bash
