@@ -34,6 +34,10 @@ type ReadStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'stat
 pub type LocalClient = wire::compact_tx_streamer_client::CompactTxStreamerClient<
     tonic::service::interceptor::InterceptedService<Channel, LocalCapabilityInterceptor>,
 >;
+pub type MaintainedScannerClient =
+    zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<
+        tonic::service::interceptor::InterceptedService<Channel, LocalCapabilityInterceptor>,
+    >;
 
 fn unavailable() -> SafeError {
     SafeError::new(
@@ -102,6 +106,8 @@ impl Interceptor for LocalCapabilityInterceptor {
 /// deliberately rejected by the bridge.
 pub struct LocalWalletAdapter {
     client: LocalClient,
+    channel: Channel,
+    interceptor: LocalCapabilityInterceptor,
 }
 
 impl LocalWalletAdapter {
@@ -136,14 +142,24 @@ impl LocalWalletAdapter {
         let interceptor = LocalCapabilityInterceptor(Arc::new(SecretBytes::new(value)));
         Ok(Self {
             client: wire::compact_tx_streamer_client::CompactTxStreamerClient::with_interceptor(
-                channel,
-                interceptor,
+                channel.clone(),
+                interceptor.clone(),
             ),
+            channel,
+            interceptor,
         })
     }
 
     pub fn client(&mut self) -> &mut LocalClient {
         &mut self.client
+    }
+
+    /// Uses the maintained `zcash_client_backend` generated protobuf types and
+    /// their native sync APIs, while retaining the bridge's local capability.
+    pub fn maintained_scanner_client(&self) -> MaintainedScannerClient {
+        zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient::with_interceptor(
+            self.channel.clone(), self.interceptor.clone(),
+        )
     }
 }
 
@@ -573,6 +589,7 @@ impl CompactTxStreamer for WalletBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message;
 
     #[test]
     fn local_capability_rejects_missing_wrong_and_browser_metadata() {
@@ -609,5 +626,43 @@ mod tests {
             "private-one-run-token".parse().unwrap(),
         );
         assert!(authenticate(okay, &expected).is_ok());
+    }
+
+    #[test]
+    fn pinned_zebra_compact_wire_preserves_ironwood_for_maintained_scanner() {
+        use zcash_client_backend::proto::{
+            compact_formats as maintained, service as maintained_service,
+        };
+        let tx = wire::CompactTx {
+            index: 3,
+            hash: vec![7; 32],
+            ironwood_actions: vec![wire::CompactOrchardAction {
+                nullifier: vec![1; 32],
+                cmx: vec![2; 32],
+                ephemeral_key: vec![3; 32],
+                ciphertext: vec![4; 52],
+            }],
+            ..Default::default()
+        };
+        let scanned = maintained::CompactTx::decode(tx.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(scanned.index, 3);
+        assert_eq!(scanned.txid, vec![7; 32]);
+        assert_eq!(scanned.ironwood_actions.len(), 1);
+        assert_eq!(scanned.ironwood_actions[0].nullifier, vec![1; 32]);
+        let request = wire::BlockRange {
+            start: Some(wire::BlockId {
+                height: 5,
+                hash: vec![],
+            }),
+            end: Some(wire::BlockId {
+                height: 6,
+                hash: vec![],
+            }),
+        };
+        let maintained =
+            maintained_service::BlockRange::decode(request.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(maintained.start.unwrap().height, 5);
+        assert_eq!(maintained.end.unwrap().height, 6);
+        assert!(maintained.pool_types.is_empty());
     }
 }
