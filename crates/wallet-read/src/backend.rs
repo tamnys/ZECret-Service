@@ -3,8 +3,8 @@
 //! wrapper must still authorize each remote call before invoking it.
 
 use crate::{
-    RangeContinuity, ReadMethod, validate_client_stream_address, validate_compact_block,
-    validate_compact_tx, validate_unary_request, wire,
+    RangeContinuity, ReadMethod, SubtreeContinuity, validate_client_stream_address,
+    validate_compact_block, validate_compact_tx, validate_unary_request, wire,
 };
 use futures_util::{StreamExt, stream};
 use prost::Message;
@@ -94,16 +94,6 @@ fn check_selected_tree_state(
         if display != selected.hash {
             return Err(invalid_data());
         }
-    }
-    Ok(())
-}
-
-fn check_subtree(root: &wire::SubtreeRoot) -> Result<(), Status> {
-    if root.root_hash.len() != 32
-        || root.completing_block_hash.len() != 32
-        || root.completing_block_height > u32::MAX as u64
-    {
-        return Err(invalid_data());
     }
     Ok(())
 }
@@ -497,15 +487,16 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
     ) -> Result<Response<Self::GetSubtreeRootsStream>, Status> {
         let request = request.into_inner();
         validate_unary_request(ReadMethod::GetSubtreeRoots, &request.encode_to_vec())?;
+        let mut continuity = SubtreeContinuity::new(request.start_index, request.max_entries);
         let mut client = self.client().await?;
         let input = client
             .get_subtree_roots(request)
             .await
             .map_err(sanitize)?
             .into_inner();
-        let output = input.map(|item| {
+        let output = input.map(move |item| {
             let value = item.map_err(sanitize)?;
-            check_subtree(&value)?;
+            continuity.observe(&value)?;
             Ok(value)
         });
         Ok(Response::new(Box::pin(output)))

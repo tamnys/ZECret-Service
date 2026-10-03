@@ -10,7 +10,7 @@ use zrpc_payments::{ClientStore, IssuerPublic};
 use zrpc_protocol::{ErrorCode, SafeError};
 use zrpc_transport::WalletReadResult;
 use zrpc_verifier::PhalaTrustedPolicy;
-use zrpc_wallet_read::{RangeContinuity, ReadMethod, WalletReadRequest, wire};
+use zrpc_wallet_read::{RangeContinuity, ReadMethod, SubtreeContinuity, WalletReadRequest, wire};
 
 fn ticket_error() -> SafeError {
     SafeError::new(
@@ -183,6 +183,7 @@ impl WalletReader {
         let method = Mutex::new(None);
         let range = Mutex::new(None);
         let selected_block = Mutex::new(None);
+        let subtree = Mutex::new(None);
         let (result, marker) = session
             .read_from_request_async(
                 || async {
@@ -190,6 +191,12 @@ impl WalletReader {
                     *method.lock().map_err(|_| invalid_chain())? = Some(request.method());
                     *range.lock().map_err(|_| invalid_chain())? = range_spec(&request);
                     *selected_block.lock().map_err(|_| invalid_chain())? = block_spec(&request);
+                    *subtree.lock().map_err(|_| invalid_chain())? = match &request {
+                        WalletReadRequest::SubtreeRoots(value) => {
+                            Some((value.start_index, value.max_entries))
+                        }
+                        _ => None,
+                    };
                     Ok(request)
                 },
                 || {
@@ -221,8 +228,16 @@ impl WalletReader {
             .ok_or_else(invalid_chain)?;
         let range = *range.lock().map_err(|_| invalid_chain())?;
         let selected_block = *selected_block.lock().map_err(|_| invalid_chain())?;
-        let delivered_items =
-            drain_result(result, range, selected_block, prior_block_hash, &mut sink).await?;
+        let subtree = *subtree.lock().map_err(|_| invalid_chain())?;
+        let delivered_items = drain_result(
+            result,
+            range,
+            selected_block,
+            subtree,
+            prior_block_hash,
+            &mut sink,
+        )
+        .await?;
         self.tickets
             .mark_spent(marker)
             .map_err(|_| ticket_error())?;
@@ -238,6 +253,7 @@ async fn drain_result<S, SFut>(
     result: WalletReadResult,
     range: Option<RangeSpec>,
     selected_block: Option<BlockSpec>,
+    subtree: Option<(u32, u32)>,
     prior_block_hash: Option<[u8; 32]>,
     sink: &mut S,
 ) -> Result<u64, SafeError>
@@ -315,7 +331,14 @@ where
             }
             emit!(LatestTreeState, item)
         }
-        WalletReadResult::SubtreeRoots(mut value) => stream!(value, SubtreeRoots),
+        WalletReadResult::SubtreeRoots(mut value) => {
+            let (start_index, max_entries) = subtree.ok_or_else(invalid_chain)?;
+            let mut continuity = SubtreeContinuity::new(start_index, max_entries);
+            while let Some(item) = value.next().await? {
+                continuity.observe(&item).map_err(|_| invalid_chain())?;
+                emit!(SubtreeRoots, item);
+            }
+        }
         WalletReadResult::AddressUtxos(item) => emit!(AddressUtxos, item),
         WalletReadResult::AddressUtxosStream(mut value) => {
             stream!(value, AddressUtxosStream)
