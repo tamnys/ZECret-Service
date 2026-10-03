@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest", "crates/payments", "crates/wallet-read", "crates/wallet-sdk"]
+members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest", "crates/payments", "crates/wallet-read", "crates/wallet-sdk", "crates/wallet-reference"]
 
 [workspace.package]
 version = "0.1.0"
@@ -34,6 +34,11 @@ chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
 zcash_primitives = { version = "=0.30.1", default-features = false }
 zcash_protocol = { version = "=0.10.5", default-features = false }
 zcash_address = { version = "=0.13.0", default-features = false }
+zcash_client_backend = { version = "=0.24.0", default-features = false, features = ["orchard", "transparent-inputs", "sync", "lightwalletd-tonic-transport"] }
+zcash_client_sqlite = { version = "=0.22.0", default-features = false, features = ["orchard", "transparent-inputs"] }
+zcash_keys = { version = "=0.16.1", default-features = false, features = ["orchard", "transparent-inputs"] }
+async-trait = "=0.1.92"
+rand_core = { version = "=0.6.4", features = ["getrandom"] }
 
 # Maintained dstack runtime-event encoding/replay, pinned to the catalog OS source.
 cc-eventlog = { git = "https://github.com/Dstack-TEE/dstack", rev = "282eeb27d22d8f091ad0fa5a90e638f85cf68751", version = "=0.5.9" }

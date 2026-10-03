@@ -1,0 +1,258 @@
+//! Durable cache for public compact blocks. Initial wallet recovery does not
+//! retain the entire requested chain range in process memory.
+
+use async_trait::async_trait;
+use prost::Message;
+use rusqlite::{Connection, OpenFlags, params};
+use std::{error::Error, fmt, path::Path, sync::Mutex};
+use zcash_client_backend::{
+    data_api::{
+        chain::{BlockCache, BlockSource, error::Error as ChainError},
+        scanning::ScanRange,
+    },
+    proto::compact_formats::CompactBlock,
+};
+use zcash_protocol::consensus::BlockHeight;
+
+#[derive(Debug)]
+pub enum CacheError {
+    Database,
+    Decode,
+    Missing,
+    Poisoned,
+    Height,
+}
+
+impl fmt::Display for CacheError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Database => "compact block cache database unavailable",
+            Self::Decode => "compact block cache contains malformed data",
+            Self::Missing => "compact block cache range is incomplete",
+            Self::Poisoned => "compact block cache lock unavailable",
+            Self::Height => "compact block cache height is invalid",
+        })
+    }
+}
+
+impl Error for CacheError {}
+
+pub struct SqliteBlockCache(Mutex<Connection>);
+
+impl SqliteBlockCache {
+    pub fn open(path: &Path) -> Result<Self, CacheError> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|_| CacheError::Database)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS compact_blocks (
+                height INTEGER PRIMARY KEY NOT NULL,
+                payload BLOB NOT NULL
+            );",
+        )
+        .map_err(|_| CacheError::Database)?;
+        Ok(Self(Mutex::new(conn)))
+    }
+
+    fn selected(
+        &self,
+        start: u32,
+        end: Option<u32>,
+        limit: Option<usize>,
+    ) -> Result<Vec<CompactBlock>, CacheError> {
+        let conn = self.0.lock().map_err(|_| CacheError::Poisoned)?;
+        let mut stmt = conn
+            .prepare("SELECT height, payload FROM compact_blocks WHERE height >= ?1 AND (?2 IS NULL OR height < ?2) ORDER BY height ASC")
+            .map_err(|_| CacheError::Database)?;
+        let mut rows = stmt
+            .query(params![i64::from(start), end.map(i64::from)])
+            .map_err(|_| CacheError::Database)?;
+        let mut result = Vec::new();
+        let mut expected = start;
+        while limit.is_none_or(|max| result.len() < max) {
+            let Some(row) = rows.next().map_err(|_| CacheError::Database)? else {
+                break;
+            };
+            let height: i64 = row.get(0).map_err(|_| CacheError::Database)?;
+            if height != i64::from(expected) {
+                return Err(CacheError::Missing);
+            }
+            let payload: Vec<u8> = row.get(1).map_err(|_| CacheError::Database)?;
+            let block = CompactBlock::decode(payload.as_slice()).map_err(|_| CacheError::Decode)?;
+            if block.height != u64::from(expected) {
+                return Err(CacheError::Decode);
+            }
+            result.push(block);
+            expected = expected.checked_add(1).ok_or(CacheError::Height)?;
+        }
+        if end.is_some_and(|end| expected != end)
+            || limit.is_some_and(|requested| result.len() != requested)
+        {
+            return Err(CacheError::Missing);
+        }
+        Ok(result)
+    }
+}
+
+impl BlockSource for SqliteBlockCache {
+    type Error = CacheError;
+
+    fn with_blocks<F, WalletErrT>(
+        &self,
+        from_height: Option<BlockHeight>,
+        limit: Option<usize>,
+        mut with_block: F,
+    ) -> Result<(), ChainError<WalletErrT, Self::Error>>
+    where
+        F: FnMut(CompactBlock) -> Result<(), ChainError<WalletErrT, Self::Error>>,
+    {
+        let start = if let Some(height) = from_height {
+            height.into()
+        } else {
+            let conn = self
+                .0
+                .lock()
+                .map_err(|_| ChainError::BlockSource(CacheError::Poisoned))?;
+            let first: Option<i64> = conn
+                .query_row("SELECT MIN(height) FROM compact_blocks", [], |row| {
+                    row.get(0)
+                })
+                .map_err(|_| ChainError::BlockSource(CacheError::Database))?;
+            let Some(first) = first else { return Ok(()) };
+            u32::try_from(first).map_err(|_| ChainError::BlockSource(CacheError::Height))?
+        };
+        let blocks = self
+            .selected(start, None, limit)
+            .map_err(ChainError::BlockSource)?;
+        for block in blocks {
+            with_block(block)?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BlockCache for SqliteBlockCache {
+    fn get_tip_height(
+        &self,
+        range: Option<&ScanRange>,
+    ) -> Result<Option<BlockHeight>, Self::Error> {
+        let conn = self.0.lock().map_err(|_| CacheError::Poisoned)?;
+        let (start, end) = match range {
+            Some(range) => (
+                Some(i64::from(u32::from(range.block_range().start))),
+                Some(i64::from(u32::from(range.block_range().end))),
+            ),
+            None => (None, None),
+        };
+        let tip: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(height) FROM compact_blocks WHERE (?1 IS NULL OR height >= ?1) AND (?2 IS NULL OR height < ?2)",
+                params![start, end],
+                |row| row.get(0),
+            )
+            .map_err(|_| CacheError::Database)?;
+        tip.map(|height| {
+            u32::try_from(height)
+                .map(BlockHeight::from_u32)
+                .map_err(|_| CacheError::Height)
+        })
+        .transpose()
+    }
+
+    async fn read(&self, range: &ScanRange) -> Result<Vec<CompactBlock>, Self::Error> {
+        self.selected(
+            range.block_range().start.into(),
+            Some(range.block_range().end.into()),
+            None,
+        )
+    }
+
+    async fn insert(&self, compact_blocks: Vec<CompactBlock>) -> Result<(), Self::Error> {
+        let mut conn = self.0.lock().map_err(|_| CacheError::Poisoned)?;
+        let tx = conn.transaction().map_err(|_| CacheError::Database)?;
+        for block in compact_blocks {
+            let height = u32::try_from(block.height).map_err(|_| CacheError::Height)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO compact_blocks(height, payload) VALUES(?1, ?2)",
+                params![i64::from(height), block.encode_to_vec()],
+            )
+            .map_err(|_| CacheError::Database)?;
+        }
+        tx.commit().map_err(|_| CacheError::Database)
+    }
+
+    async fn delete(&self, range: ScanRange) -> Result<(), Self::Error> {
+        let conn = self.0.lock().map_err(|_| CacheError::Poisoned)?;
+        conn.execute(
+            "DELETE FROM compact_blocks WHERE height >= ?1 AND height < ?2",
+            params![
+                i64::from(u32::from(range.block_range().start)),
+                i64::from(u32::from(range.block_range().end))
+            ],
+        )
+        .map_err(|_| CacheError::Database)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zcash_client_backend::data_api::scanning::ScanPriority;
+
+    fn block(height: u64) -> CompactBlock {
+        CompactBlock {
+            height,
+            ..Default::default()
+        }
+    }
+
+    fn range(start: u32, end: u32) -> ScanRange {
+        ScanRange::from_parts(
+            BlockHeight::from_u32(start)..BlockHeight::from_u32(end),
+            ScanPriority::Historic,
+        )
+    }
+
+    #[tokio::test]
+    async fn incomplete_range_never_looks_complete() {
+        let cache = SqliteBlockCache::open(Path::new(":memory:")).unwrap();
+        cache.insert(vec![block(1), block(3)]).await.unwrap();
+        assert!(matches!(
+            cache.read(&range(1, 4)).await,
+            Err(CacheError::Missing)
+        ));
+        assert!(matches!(
+            cache.with_blocks::<_, ()>(Some(BlockHeight::from_u32(1)), None, |_| Ok(())),
+            Err(ChainError::BlockSource(CacheError::Missing))
+        ));
+        cache.insert(vec![block(2)]).await.unwrap();
+        assert_eq!(cache.read(&range(1, 4)).await.unwrap().len(), 3);
+        assert!(matches!(
+            cache.with_blocks::<_, ()>(Some(BlockHeight::from_u32(1)), Some(4), |_| Ok(())),
+            Err(ChainError::BlockSource(CacheError::Missing))
+        ));
+        cache.delete(range(2, 4)).await.unwrap();
+        assert_eq!(
+            cache.get_tip_height(None).unwrap(),
+            Some(BlockHeight::from_u32(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_insert_rolls_back_entire_batch() {
+        let cache = SqliteBlockCache::open(Path::new(":memory:")).unwrap();
+        assert!(matches!(
+            cache
+                .insert(vec![block(1), block(u64::from(u32::MAX) + 1)])
+                .await,
+            Err(CacheError::Height)
+        ));
+        assert_eq!(cache.get_tip_height(None).unwrap(), None);
+    }
+}
