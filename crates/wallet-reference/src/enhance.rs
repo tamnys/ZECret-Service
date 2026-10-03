@@ -79,7 +79,7 @@ fn decode_checked_transaction(
     Ok(transaction)
 }
 
-fn decode_transaction(
+pub(crate) fn decode_transaction(
     raw: &RawTransaction,
     parse_height: BlockHeight,
 ) -> Result<Transaction, &'static str> {
@@ -91,6 +91,16 @@ fn decode_transaction(
         return Err("node returned a transaction with trailing data");
     }
     Ok(transaction)
+}
+
+pub(crate) fn decode_pending_transaction(
+    raw: &RawTransaction,
+    next_height: BlockHeight,
+) -> Result<Transaction, &'static str> {
+    if raw.height != 0 {
+        return Err("mempool stream contained a mined transaction");
+    }
+    decode_transaction(raw, next_height)
 }
 
 fn mined_history_bounds(
@@ -287,6 +297,19 @@ mod tests {
             Ok(ChainTxState::Mined(BlockHeight::from_u32(42)))
         );
         assert!(ChainTxState::from_wire_height(u64::from(u32::MAX) + 1).is_err());
+    }
+
+    #[test]
+    fn pending_stream_requires_unmined_raw_transaction() {
+        let data =
+            hex::decode(include_str!("../../../tests/fixtures/zcash/testnet-v4-tx.hex").trim())
+                .unwrap();
+        let next_height = BlockHeight::from_u32(280_003);
+        let raw = RawTransaction { data, height: 0 };
+        assert!(decode_pending_transaction(&raw, next_height).is_ok());
+        assert!(
+            decode_pending_transaction(&RawTransaction { height: 1, ..raw }, next_height).is_err()
+        );
     }
 
     #[test]

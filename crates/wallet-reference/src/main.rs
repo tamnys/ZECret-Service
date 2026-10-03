@@ -11,17 +11,18 @@ use std::{
     io::Read,
     net::SocketAddr,
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use zcash_client_backend::{
-    data_api::wallet::ConfirmationsPolicy,
+    data_api::wallet::{ConfirmationsPolicy, decrypt_and_store_transaction},
     data_api::{AccountBirthday, AccountPurpose, WalletRead, WalletWrite},
-    proto::service::BlockId,
+    proto::service::{BlockId, ChainSpec, Empty},
     sync,
 };
 use zcash_client_sqlite::{WalletDb, util::SystemClock, wallet::init::init_wallet_db};
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_protocol::consensus::Network;
+use zcash_primitives::block::BlockHash;
+use zcash_protocol::consensus::{BlockHeight, Network};
 use zeroize::Zeroize;
 use zrpc_payments::PrivateDirectory;
 use zrpc_wallet_sdk::bridge::LocalWalletAdapter;
@@ -37,7 +38,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match args.next().as_deref().and_then(|mode| mode.to_str()) {
         Some("init") => init(args).await,
         Some("scan") => scan(args).await,
-        _ => Err("usage: zrpc-wallet-reference {init|scan} ...".into()),
+        Some("pending") => pending(args).await,
+        _ => Err("usage: zrpc-wallet-reference {init|scan|pending} ...".into()),
     }
 }
 
@@ -123,29 +125,22 @@ async fn init(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn scan(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
-    let usage = "usage: zrpc-wallet-reference scan LOOPBACK_HOST:PORT CAPABILITY_DIR WALLET_DB CACHE_DB BATCH_SIZE";
-    let bind = parse_bind(args.next().ok_or(usage)?)?;
-    let capability_dir = PathBuf::from(args.next().ok_or(usage)?);
-    let wallet_path = PathBuf::from(args.next().ok_or(usage)?);
-    let cache_path = PathBuf::from(args.next().ok_or(usage)?);
-    let batch_size: u32 = args.next().ok_or(usage)?.to_string_lossy().parse()?;
-    if args.next().is_some() || batch_size == 0 {
-        return Err(usage.into());
-    }
+type LocalWallet = WalletDb<Connection, Network, SystemClock, rand_core::OsRng>;
 
-    // Both SQLite files stay under an owner-private directory, separate from
-    // the bridge process. Never create a wallet database by typo or follow a
-    // symbolic link to an unrelated file.
+fn same_scanned_tip(height: BlockHeight, hash: BlockHash, node: &BlockId) -> bool {
+    node.height == u64::from(u32::from(height)) && node.hash.as_slice() == hash.0
+}
+
+fn open_existing_wallet(wallet_path: &Path) -> Result<LocalWallet, Box<dyn Error>> {
+    // The wallet database stays under an owner-private directory, separate
+    // from the bridge. Never create it by typo or follow a symbolic link.
     let wallet_parent = wallet_path.parent().ok_or("wallet path has no parent")?;
     PrivateDirectory::open(wallet_parent)?;
-    PrivateDirectory::open(cache_path.parent().ok_or("cache path has no parent")?)?;
     let metadata = fs::symlink_metadata(&wallet_path)?;
     if !metadata.is_file()
         || metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.nlink() != 1
-        || wallet_path == cache_path
     {
         return Err("wallet database path must be an owner-private regular file".into());
     }
@@ -157,11 +152,29 @@ async fn scan(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
 
     // The wallet database is never mounted into or opened by the local bridge.
     // It must have been initialized with viewing keys by the wallet application.
-    let mut wallet =
+    let wallet =
         WalletDb::from_connection(conn, Network::TestNetwork, SystemClock, rand_core::OsRng);
     if wallet.get_account_ids()?.is_empty() {
         return Err("wallet database has no locally imported viewing-key account".into());
     }
+    Ok(wallet)
+}
+
+async fn scan(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
+    let usage = "usage: zrpc-wallet-reference scan LOOPBACK_HOST:PORT CAPABILITY_DIR WALLET_DB CACHE_DB BATCH_SIZE";
+    let bind = parse_bind(args.next().ok_or(usage)?)?;
+    let capability_dir = PathBuf::from(args.next().ok_or(usage)?);
+    let wallet_path = PathBuf::from(args.next().ok_or(usage)?);
+    let cache_path = PathBuf::from(args.next().ok_or(usage)?);
+    let batch_size: u32 = args.next().ok_or(usage)?.to_string_lossy().parse()?;
+    if args.next().is_some() || batch_size == 0 {
+        return Err(usage.into());
+    }
+    if wallet_path == cache_path {
+        return Err("wallet database and compact cache must differ".into());
+    }
+    PrivateDirectory::open(cache_path.parent().ok_or("cache path has no parent")?)?;
+    let mut wallet = open_existing_wallet(&wallet_path)?;
     let adapter = LocalWalletAdapter::connect(bind, &capability_dir).await?;
     let mut client = adapter.maintained_scanner_client();
     let cache = SqliteBlockCache::open(&cache_path)?;
@@ -206,6 +219,52 @@ async fn scan(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn pending(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
+    let usage = "usage: zrpc-wallet-reference pending LOOPBACK_HOST:PORT CAPABILITY_DIR WALLET_DB";
+    let bind = parse_bind(args.next().ok_or(usage)?)?;
+    let capability_dir = PathBuf::from(args.next().ok_or(usage)?);
+    let wallet_path = PathBuf::from(args.next().ok_or(usage)?);
+    if args.next().is_some() {
+        return Err(usage.into());
+    }
+    let mut wallet = open_existing_wallet(&wallet_path)?;
+    let summary = wallet
+        .get_wallet_summary(ConfirmationsPolicy::default())?
+        .ok_or("scan the wallet before reading the mempool")?;
+    if !summary.is_synced() {
+        return Err("finish the local wallet scan before reading the mempool".into());
+    }
+    let local_tip = summary.chain_tip_height();
+    let adapter = LocalWalletAdapter::connect(bind, &capability_dir).await?;
+    let mut client = adapter.maintained_scanner_client();
+    let node_tip = client.get_latest_block(ChainSpec {}).await?.into_inner();
+    let local_hash = wallet
+        .get_block_hash(local_tip)?
+        .ok_or("wallet scan tip hash unavailable")?;
+    if !same_scanned_tip(local_tip, local_hash, &node_tip) {
+        return Err("wallet scan tip differs from the node; scan again first".into());
+    }
+    let next_height = BlockHeight::from_u32(
+        u32::from(local_tip)
+            .checked_add(1)
+            .ok_or("wallet chain height overflow")?,
+    );
+    let mut stream = client.get_mempool_stream(Empty {}).await?.into_inner();
+    let mut processed = 0_u64;
+    while let Some(raw) = stream.message().await? {
+        let transaction = enhance::decode_pending_transaction(&raw, next_height)?;
+        decrypt_and_store_transaction(&Network::TestNetwork, &mut wallet, &transaction, None)?;
+        processed = processed
+            .checked_add(1)
+            .ok_or("mempool transaction count overflow")?;
+    }
+    // Zebra closes this stream at a new best-chain block. Transactions seen
+    // during the stream are observations, never a completed current snapshot
+    // or evidence that a disappeared transaction was confirmed.
+    println!("mempool_transactions_processed={processed} status=observed_rescan_to_reconcile");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +293,27 @@ mod tests {
         let link = directory.path().join("link");
         symlink(path, &link).unwrap();
         assert!(read_viewing_key(link).is_err());
+    }
+
+    #[test]
+    fn pending_reader_tip_comparison_uses_internal_hash_bytes() {
+        let hash: [u8; 32] = std::array::from_fn(|index| index as u8);
+        let height = BlockHeight::from_u32(42);
+        assert!(same_scanned_tip(
+            height,
+            BlockHash(hash),
+            &BlockId {
+                height: 42,
+                hash: hash.to_vec(),
+            }
+        ));
+        assert!(!same_scanned_tip(
+            height,
+            BlockHash(hash),
+            &BlockId {
+                height: 42,
+                hash: hash.iter().rev().copied().collect(),
+            }
+        ));
     }
 }
