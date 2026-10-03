@@ -2,7 +2,9 @@
 //! The SDK holds no wallet keys, decrypted notes, or wallet database.
 #![forbid(unsafe_code)]
 
-use std::{cell::Cell, future::Future};
+pub mod bridge;
+
+use std::{future::Future, sync::Mutex};
 use zrpc_client::inspection::{PrivateEndpointConfig, connect_phala_trusted_wallet};
 use zrpc_payments::{ClientStore, IssuerPublic};
 use zrpc_protocol::{ErrorCode, SafeError};
@@ -131,14 +133,14 @@ impl WalletReader {
             &self.policy,
         )
         .await?;
-        let method = Cell::new(None);
-        let range = Cell::new(None);
+        let method = Mutex::new(None);
+        let range = Mutex::new(None);
         let (result, marker) = session
             .read_from_request_async(
                 || async {
                     let request = request().await?;
-                    method.set(Some(request.method()));
-                    range.set(range_spec(&request));
+                    *method.lock().map_err(|_| invalid_chain())? = Some(request.method());
+                    *range.lock().map_err(|_| invalid_chain())? = range_spec(&request);
                     Ok(request)
                 },
                 || {
@@ -164,9 +166,12 @@ impl WalletReader {
                 },
             )
             .await?;
-        let method = method.get().ok_or_else(invalid_chain)?;
-        let delivered_items =
-            drain_result(result, range.get(), prior_block_hash, &mut sink).await?;
+        let method = method
+            .lock()
+            .map_err(|_| invalid_chain())?
+            .ok_or_else(invalid_chain)?;
+        let range = *range.lock().map_err(|_| invalid_chain())?;
+        let delivered_items = drain_result(result, range, prior_block_hash, &mut sink).await?;
         self.tickets
             .mark_spent(marker)
             .map_err(|_| ticket_error())?;

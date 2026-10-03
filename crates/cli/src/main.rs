@@ -18,6 +18,7 @@ mod provider_observation;
 mod provider_schedule;
 mod provider_settings;
 mod provider_watchdog;
+mod wallet_bridge;
 
 const USAGE: &str = "zrpc doctor
 zrpc inspect-quote --quote FILE --collateral FILE
@@ -31,6 +32,7 @@ zrpc query [--stdin | --method METHOD] --simulate [--scenario SCENARIO]
 zrpc verify --privacy-profile phala-trusted --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
 zrpc query --privacy-profile phala-trusted [--stdin | --method METHOD] --ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
 zrpc payments --help
+zrpc wallet-bridge --privacy-profile phala-trusted --platform phala-dstack --bind 127.0.0.1:PORT --capability-dir NEW_PRIVATE_DIR --ticket-store PRIVATE_DIR --issuer-public-der FILE --issuer-name NAME --crypto-helper FILE --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE
 zrpc dashboard [--platform gcp-tdx|phala-dstack] --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --release-policy FILE [--no-open]
 zrpc dashboard --privacy-profile phala-trusted --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE --app-compose FILE --release-policy FILE [--no-open]
 zrpc preview --platform phala-dstack --endpoint-host HOST_OR_IP --endpoint-port PORT --tor-executable ABSOLUTE_PATH --collateral FILE [--address TESTNET_TRANSPARENT_ADDRESS]
@@ -168,6 +170,7 @@ async fn run() -> Result<(), String> {
         "doctor"=>{exhausted(&args)?;print_json(json!({"milestone":"M0","primary_platform":"phala-dstack","default_platform":"gcp-tdx","platforms":["gcp-tdx","phala-dstack"],"private_mode":"blocked","phala_trusted_profile":"blocked_no_packaged_release","simulation_available":true,"public_endpoint_inspection_available":true,"public_preview_available":true,"public_preview_platform":"phala-dstack","tor":"not_checked; public inspection uses explicit SOCKS, Phala preview starts a selected local Tor executable, private mode blocked","hardware_verifier":"offline_dcap_qvl_0.6.3_diagnostic_and_phala_trusted_policy","approved_release":null,"gates":{"A":"unresolved","B":"unresolved","C":"unresolved","D":"unresolved","E":"unresolved"},"gcp_gates":{"reproducible_guest":"unproven","hardware_boot_chain":"unproven","administrative_isolation":"unproven","durable_storage_isolation":"unproven","tls_exporter_review":"unproven","external_cleanup":"unproven"},"deployment_enabled":false,"cloud_resources_created_by_this_binary":0}))},
         "inspect-endpoint"=>inspect_endpoint_command(args).await,
         "payments"=>payments::run(args).await,
+        "wallet-bridge"=>wallet_bridge::run(args).await,
         "lifecycle"=>provider_observation::run(args).await,
         "inspect-quote"=>{
             let quote_path=required(&mut args,"--quote")?;

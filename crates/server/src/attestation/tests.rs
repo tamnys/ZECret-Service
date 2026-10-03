@@ -351,6 +351,17 @@ async fn http2_quote_uses_same_tls_exporter_and_does_not_enable_http1_rpc() {
     drop(server);
 }
 
+#[test]
+fn wallet_backend_cannot_be_attached_to_a_free_listener() {
+    let service = AttestationService::new(
+        Path::new("/run/zrpc-quote/quote.sock"),
+        limits(1, 1, Duration::from_nanos(1)),
+    )
+    .unwrap();
+    let backend = ZebraReadOnly::new("127.0.0.1:9067".parse().unwrap()).unwrap();
+    assert!(service.with_wallet_backend(backend).is_err());
+}
+
 #[tokio::test]
 async fn gcp_response_has_separate_wire_format_and_same_live_exporter() {
     struct FakeGcp(Arc<Mutex<Vec<[u8; 64]>>>);

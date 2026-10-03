@@ -272,6 +272,9 @@ impl AttestationService {
     /// the native verified transport and exact release are ready.
     pub fn with_wallet_backend(mut self, backend: ZebraReadOnly) -> Result<Self, SafeError> {
         let shared = Arc::get_mut(&mut self.shared).ok_or_else(unavailable)?;
+        if shared.payment.is_none() || shared.wallet_backend.is_some() {
+            return Err(unavailable());
+        }
         shared.wallet_backend = Some(backend);
         Ok(self)
     }

@@ -245,6 +245,7 @@ def run_app(ticketed=False):
             if not valid_onion_hostname(hostname):
                 raise RuntimeError("issuer identity unavailable")
             wrapper_command += [
+                "--wallet-backend", "127.0.0.1:9067",
                 "--issuer-public-der", str(TICKET / "issuer-public.der"),
                 "--issuer-name", hostname,
                 "--crypto-helper", str(BIN / "zrpc-payment-crypto"),
