@@ -138,6 +138,9 @@ jobs:
             --entrypoint /opt/zrpc/bin/zrpc-node-wrapper "$image" --help > "$scratch/wrapper-help.txt"
           grep -F -- 'ticket-required' "$scratch/wrapper-help.txt"
           docker run --rm --pull=never --network none --read-only \
+            --entrypoint /bin/cat "$image" /opt/zrpc/zebra.toml > "$scratch/image-zebra.toml"
+          cmp "$source/deploy/phala/image/zebra.toml" "$scratch/image-zebra.toml"
+          docker run --rm --pull=never --network none --read-only \
             --env LD_LIBRARY_PATH=/opt/zrpc/ticket/tor \
             --entrypoint /opt/zrpc/ticket/tor/tor "$image" --version > "$scratch/tor-version.txt"
           grep -F -- 'Tor version' "$scratch/tor-version.txt"
