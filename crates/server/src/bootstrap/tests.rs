@@ -235,7 +235,10 @@ async fn assert_closed_without_application_bytes(stream: &mut (impl AsyncRead + 
 #[test]
 fn generated_config_has_no_resumption_early_data_or_key_logger() {
     let config = ephemeral_config().unwrap();
-    assert_eq!(config.alpn_protocols, [b"http/1.1".to_vec()]);
+    assert_eq!(
+        config.alpn_protocols,
+        [b"http/1.1".to_vec(), b"h2".to_vec()]
+    );
     assert_eq!(config.send_tls13_tickets, 0);
     assert!(!config.ticketer.enabled());
     assert!(!config.session_storage.can_cache());
@@ -333,7 +336,7 @@ async fn stalled_handshake_expires_and_other_alpn_is_rejected() {
     tokio::time::resume();
     wait_released(&running.service).await;
     let mut config = (*client_config()).clone();
-    config.alpn_protocols = vec![b"h2".to_vec()];
+    config.alpn_protocols = vec![b"spdy/3".to_vec()];
     let socket = TcpStream::connect(running.address).await.unwrap();
     assert!(
         TlsConnector::from(Arc::new(config))

@@ -379,10 +379,11 @@ async fn serve_until<Q: QuoteSource>(
     deadline: tokio::time::Instant,
 ) -> Result<(), SafeError> {
     let (_, tls) = stream.get_ref();
+    let http2 = tls.alpn_protocol() == Some(b"h2");
     if tokio::time::Instant::now() >= deadline
         || tls.is_handshaking()
         || tls.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
-        || tls.alpn_protocol() != Some(b"http/1.1")
+        || (tls.alpn_protocol() != Some(b"http/1.1") && !http2)
         || !matches!(
             tls.handshake_kind(),
             Some(rustls::HandshakeKind::Full | rustls::HandshakeKind::FullWithHelloRetryRequest)
@@ -403,13 +404,24 @@ async fn serve_until<Q: QuoteSource>(
         async move { Ok::<_, Infallible>(handle(shared, session, request).await) }
     });
     // Dropping the connection future also drops an in-progress quote future.
-    tokio::time::timeout_at(
-        deadline,
-        hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(io), service),
-    )
-    .await
-    .map_err(|_| unavailable())?
-    .map_err(|_| unavailable())
+    if http2 {
+        tokio::time::timeout_at(
+            deadline,
+            hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .serve_connection(TokioIo::new(io), service),
+        )
+        .await
+        .map_err(|_| unavailable())?
+        .map_err(|_| unavailable())
+    } else {
+        tokio::time::timeout_at(
+            deadline,
+            hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(io), service),
+        )
+        .await
+        .map_err(|_| unavailable())?
+        .map_err(|_| unavailable())
+    }
 }
 
 fn reply(status: StatusCode, body: Bytes) -> Response<Full<Bytes>> {
@@ -439,14 +451,17 @@ async fn handle<Q: QuoteSource>(
     if session.io.check_deadline().is_err() {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     }
+    let version = request.version();
     if request.method() != hyper::Method::POST
-        || request.uri().authority().is_some()
-        || request.version() != Version::HTTP_11
+        || !matches!(version, Version::HTTP_11 | Version::HTTP_2)
+        || (version == Version::HTTP_11 && request.uri().authority().is_some())
     {
         return failure(StatusCode::NOT_FOUND);
     }
     match request.uri().path_and_query().map(|p| p.as_str()) {
-        Some("/rpc") => return handle_rpc(shared, session, request).await,
+        Some("/rpc") if version == Version::HTTP_11 => {
+            return handle_rpc(shared, session, request).await;
+        }
         Some("/attestation") => {}
         _ => return failure(StatusCode::NOT_FOUND),
     }

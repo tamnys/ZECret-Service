@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest", "crates/payments"]
+members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest", "crates/payments", "crates/wallet-read"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,7 +22,7 @@ rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "z
 zeroize = "=1.9.0"
 percent-encoding = "=2.3.2"
 # The internal node adapter uses an already-connected loopback socket, no resolver.
-hyper = { version = "=1.11.1", default-features = false, features = ["client", "http1"] }
+hyper = { version = "=1.11.1", default-features = false, features = ["client", "http1", "http2"] }
 hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 http-body-util = "=0.1.5"
 bytes = "=1.12.1"
@@ -49,3 +49,7 @@ object = { version = "=0.39.0", default-features = false, features = ["elf", "pe
 # Offline quote verification only: no PCCS/HTTP fetch or permissive TCB override.
 dcap-qvl = { version = "=0.6.3", default-features = false, features = ["std", "ring", "default-x509"] }
 parity-scale-codec = { version = "=3.7.5", default-features = false, features = ["std"] }
+prost = "=0.14.3"
+tonic = { version = "=0.14.5", default-features = false, features = ["codegen", "transport", "router"] }
+tonic-prost = "=0.14.5"
+tonic-prost-build = "=0.14.5"
