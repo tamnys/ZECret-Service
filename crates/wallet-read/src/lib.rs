@@ -6,9 +6,11 @@ pub mod wire {
     tonic::include_proto!("cash.z.wallet.sdk.rpc");
 }
 
+pub mod backend;
 mod validation;
 pub use validation::{
-    RangeContinuity, validate_client_stream_address, validate_compact_block, validate_unary_request,
+    RangeContinuity, validate_client_stream_address, validate_compact_block, validate_compact_tx,
+    validate_unary_request,
 };
 
 /// The complete read-only subset of the pinned Zebra service. A method must

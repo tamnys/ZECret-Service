@@ -27,6 +27,8 @@ zcash_primitives.workspace = true
 zcash_protocol.workspace = true
 zrpc-protocol = { path = "../protocol" }
 zrpc-payments = { path = "../payments" }
+zrpc-wallet-read = { path = "../wallet-read" }
+tonic.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
