@@ -4408,6 +4408,7 @@ name = "zrpc-wallet-reference"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "hex",
  "libc",
  "prost",
  "rand_core",
@@ -4415,9 +4416,11 @@ dependencies = [
  "rustix",
  "tempfile",
  "tokio",
+ "tonic",
  "zcash_client_backend",
  "zcash_client_sqlite",
  "zcash_keys",
+ "zcash_primitives",
  "zcash_protocol",
  "zeroize",
  "zrpc-payments",

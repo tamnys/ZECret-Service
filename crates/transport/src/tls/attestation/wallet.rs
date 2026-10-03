@@ -58,6 +58,17 @@ fn status_error(status: tonic::Status) -> SafeError {
     SafeError::new(code, message)
 }
 
+fn transaction_status_error(status: tonic::Status) -> SafeError {
+    if status.code() == tonic::Code::NotFound {
+        SafeError::new(
+            ErrorCode::WalletTransactionNotFound,
+            "Wallet transaction was not found by the node.",
+        )
+    } else {
+        status_error(status)
+    }
+}
+
 fn check_live(session: &OwnedHttpSession, deadline: Instant) -> Result<(), SafeError> {
     session.origin.require_managed()?;
     if Instant::now() >= deadline {
@@ -300,7 +311,15 @@ impl PhalaTrustedWalletSession {
             WalletReadRequest::BlockRangeNullifiers(value) => {
                 streamed!(get_block_range_nullifiers, value, BlockRangeNullifiers)
             }
-            WalletReadRequest::Transaction(value) => unary!(get_transaction, value, Transaction),
+            WalletReadRequest::Transaction(value) => {
+                let response = client
+                    .get_transaction(with_authorization(value, authorization))
+                    .await
+                    .map_err(transaction_status_error)?
+                    .into_inner();
+                check_live(&session, deadline)?;
+                WalletReadResult::Transaction(response)
+            }
             WalletReadRequest::TaddressTxids(value) => {
                 streamed!(get_taddress_txids, value, TaddressTxids)
             }
@@ -346,6 +365,18 @@ impl PhalaTrustedWalletSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_transaction_lookup_reports_missing_transaction() {
+        let missing = tonic::Status::not_found("backend-private detail");
+        assert_eq!(
+            status_error(missing.clone()).code,
+            ErrorCode::NodeUnavailable
+        );
+        let safe = transaction_status_error(missing);
+        assert_eq!(safe.code, ErrorCode::WalletTransactionNotFound);
+        assert!(!safe.message.contains("backend-private detail"));
+    }
     use crate::{
         ManagedTor, TransportOrigin,
         tls::{

@@ -10,7 +10,9 @@ zcash_client_backend.workspace = true
 zcash_client_sqlite.workspace = true
 zcash_keys.workspace = true
 zcash_protocol.workspace = true
+zcash_primitives.workspace = true
 rand_core.workspace = true
+tonic.workspace = true
 rusqlite.workspace = true
 prost.workspace = true
 async-trait.workspace = true
@@ -22,3 +24,4 @@ zrpc-wallet-sdk = { path = "../wallet-sdk" }
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+hex.workspace = true

@@ -27,6 +27,7 @@ use zrpc_payments::PrivateDirectory;
 use zrpc_wallet_sdk::bridge::LocalWalletAdapter;
 
 mod cache;
+mod enhance;
 use cache::SqliteBlockCache;
 
 #[tokio::main]
@@ -172,17 +173,23 @@ async fn scan(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
         batch_size,
     )
     .await?;
+    let enhanced = enhance::process_snapshot(&mut client, &mut wallet).await?;
 
     // Only local derived totals and heights are printed. `is_synced` is the
     // maintained wallet scanner's local progress, not a claim of global tip
     // freshness or provider-independent TEE isolation.
     if let Some(summary) = wallet.get_wallet_summary(ConfirmationsPolicy::default())? {
         println!(
-            "wallet_scan_height={} wallet_tip_height={} wallet_scan_complete={} accounts={}",
+            "wallet_scan_height={} wallet_tip_height={} compact_scan_complete={} accounts={} enhanced_transactions={} status_checks={} mined_transparent_checks={} unresolved_transparent_history={} remaining_transaction_requests={}",
             u32::from(summary.fully_scanned_height()),
             u32::from(summary.chain_tip_height()),
             summary.is_synced(),
-            summary.account_balances().len()
+            summary.account_balances().len(),
+            enhanced.enhanced,
+            enhanced.status_checks,
+            enhanced.mined_transparent_checks,
+            enhanced.unresolved_transparent_history,
+            enhanced.remaining_requests,
         );
         for (account, balance) in summary.account_balances() {
             println!(
