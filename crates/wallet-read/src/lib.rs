@@ -7,6 +7,8 @@ pub mod wire {
 }
 
 pub mod backend;
+mod operation;
+pub use operation::WalletReadRequest;
 mod validation;
 pub use validation::{
     RangeContinuity, validate_client_stream_address, validate_compact_block, validate_compact_tx,

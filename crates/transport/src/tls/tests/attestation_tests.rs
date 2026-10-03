@@ -6,6 +6,61 @@ use zrpc_protocol::{
     parse_attestation_request,
 };
 
+#[tokio::test]
+async fn http2_wallet_bootstrap_retains_exporter_and_only_returns_unverified_evidence() {
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::{Request, Response, StatusCode, Version, body::Incoming, header};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use std::convert::Infallible;
+
+    let (client, server) = connect_wallet_pair(server_config(false, Some(WALLET_ALPN))).await;
+    let client = client.unwrap();
+    assert_eq!(client.stream.get_ref().1.alpn_protocol(), Some(WALLET_ALPN));
+    let established = client.established;
+    let pending = client.prepare_challenge().unwrap();
+    let nonce = *pending.nonce().unwrap();
+    let server = server.unwrap();
+    let expected = server
+        .get_ref()
+        .1
+        .export_keying_material(
+            [0; 64],
+            zrpc_protocol::ATTESTATION_EXPORTER_LABEL,
+            Some(&nonce),
+        )
+        .unwrap();
+    let peer = tokio::spawn(async move {
+        let service = hyper::service::service_fn(|request: Request<Incoming>| async move {
+            assert_eq!(request.version(), Version::HTTP_2);
+            assert_eq!(request.uri().path(), "/attestation");
+            assert_eq!(request.method(), hyper::Method::POST);
+            assert_eq!(
+                request.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/json"
+            );
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            let parsed = parse_attestation_request(&body).unwrap();
+            let mut response = Response::new(Full::new(Bytes::from(synthetic_body(parsed.nonce))));
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            Ok::<_, Infallible>(response)
+        });
+        let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(server), service)
+            .await;
+    });
+    let evidence = pending.request_attestation().await.unwrap();
+    evidence.assert_retained_binding_for_test(expected, nonce, established);
+    assert!(!evidence.private_rpc_allowed());
+    assert_eq!(evidence.raw_unverified().quote, "00");
+    drop(evidence);
+    peer.await.unwrap();
+}
+
 pub(in crate::tls) async fn read_public_request(
     server: &mut ServerStream<TcpStream>,
 ) -> PublicAttestationRequest {

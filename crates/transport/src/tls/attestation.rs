@@ -4,8 +4,13 @@ use super::{BootstrapStream, MAX_CONNECTION_LIFETIME, PendingChallenge, unavaila
 use crate::TransportOrigin;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::{Request, StatusCode, Version, client::conn::http1, header};
-use hyper_util::rt::TokioIo;
+use hyper::{
+    Request, StatusCode, Version,
+    body::Incoming,
+    client::conn::{http1, http2},
+    header,
+};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -18,6 +23,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tonic::body::Body;
 use zrpc_protocol::{
     ATTESTATION_EXPORTER_LABEL, BlockRef, ErrorCode, GcpAttestationResponse,
     MAX_ATTESTATION_REQUEST_BYTES, MAX_ATTESTATION_RESPONSE_BYTES, MAX_REQUEST_BYTES,
@@ -30,6 +36,8 @@ use zrpc_protocol::{
 mod inspection;
 pub use inspection::{EndpointInspection, EndpointInspectionIssue};
 mod gcp;
+mod wallet;
+pub use wallet::{PhalaTrustedWalletSession, WalletReadResult, WalletReadStream};
 
 fn invalid_response() -> SafeError {
     SafeError::new(
@@ -97,10 +105,44 @@ impl PrivateDeadline {
 
 struct OwnedHttpSession {
     // Retain ownership but never expose this application-writing capability.
-    sender: http1::SendRequest<Full<Bytes>>,
+    sender: SessionSender,
     driver: tokio::task::JoinHandle<()>,
     private_deadline: Arc<OnceLock<PrivateDeadline>>,
     origin: TransportOrigin,
+}
+
+enum SessionSender {
+    Json(http1::SendRequest<Full<Bytes>>),
+    Wallet(http2::SendRequest<Body>),
+}
+
+impl SessionSender {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Json(sender) => sender.is_closed(),
+            Self::Wallet(sender) => sender.is_closed(),
+        }
+    }
+
+    fn is_json(&self) -> bool {
+        matches!(self, Self::Json(_))
+    }
+
+    async fn send_attestation(
+        &mut self,
+        request: Request<Full<Bytes>>,
+    ) -> Result<hyper::Response<Incoming>, SafeError> {
+        match self {
+            Self::Json(sender) => sender
+                .send_request(request)
+                .await
+                .map_err(|_| unavailable()),
+            Self::Wallet(sender) => sender
+                .send_request(request.map(Body::new))
+                .await
+                .map_err(|_| unavailable()),
+        }
+    }
 }
 
 // The timer around an HTTP future is not a write barrier: Tokio polls the
@@ -255,7 +297,13 @@ impl PendingChallenge {
                 "Public attestation request exceeds the release-policy limit.",
             ));
         }
-        let request = Request::post("/attestation")
+        let h2 = self.tls.stream.get_ref().1.alpn_protocol() == Some(super::WALLET_ALPN);
+        let attestation_uri = if h2 {
+            format!("https://{}/attestation", self.tls.authority)
+        } else {
+            "/attestation".to_owned()
+        };
+        let request = Request::post(attestation_uri)
             .header(header::HOST, self.tls.authority)
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json")
@@ -265,28 +313,44 @@ impl PendingChallenge {
         // Hyper receives the owned TLS stream. This API neither opens a socket
         // nor resolves a host, follows a redirect, retries, or consults proxies.
         let private_deadline = Arc::new(OnceLock::new());
-        let (sender, connection) = http1::handshake(TokioIo::new(DeadlineIo {
+        let io = TokioIo::new(DeadlineIo {
             stream: self.tls.stream,
             deadline,
             private_deadline: Arc::clone(&private_deadline),
             origin: origin.clone(),
-        }))
-        .await
-        .map_err(|_| unavailable())?;
+        });
+        let (sender, driver) = if h2 {
+            let (sender, connection) = http2::handshake(TokioExecutor::new(), io)
+                .await
+                .map_err(|_| unavailable())?;
+            (
+                SessionSender::Wallet(sender),
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                }),
+            )
+        } else {
+            let (sender, connection) = http1::handshake(io).await.map_err(|_| unavailable())?;
+            (
+                SessionSender::Json(sender),
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                }),
+            )
+        };
         let mut session = OwnedHttpSession {
             sender,
-            driver: tokio::spawn(async move {
-                let _ = connection.await;
-            }),
+            driver,
             private_deadline,
             origin,
         };
-        let response = session
-            .sender
-            .send_request(request)
-            .await
-            .map_err(|_| unavailable())?;
-        if response.status() != StatusCode::OK || response.version() != Version::HTTP_11 {
+        let response = session.sender.send_attestation(request).await?;
+        let required_version = if h2 {
+            Version::HTTP_2
+        } else {
+            Version::HTTP_11
+        };
+        if response.status() != StatusCode::OK || response.version() != required_version {
             return Err(invalid_response());
         }
         let headers = response.headers();
@@ -516,6 +580,14 @@ impl VerifiedRpcSession {
         Ok(())
     }
 
+    fn ensure_json_ready(&self) -> Result<(), SafeError> {
+        self.ensure_private_ready()?;
+        if !self.session.sender.is_json() {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+
     fn private_operation_deadline(&self) -> Result<Instant, SafeError> {
         let collateral_deadline = self
             .session
@@ -542,12 +614,12 @@ impl VerifiedRpcSession {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Vec<u8>, SafeError>>,
     {
-        self.ensure_private_ready()?;
+        self.ensure_json_ready()?;
         let deadline = self.private_operation_deadline()?;
         let bytes = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), body())
             .await
             .map_err(|_| self.ensure_lifetimes().err().unwrap_or_else(expired))??;
-        self.ensure_private_ready()?;
+        self.ensure_json_ready()?;
         let request = parse_request(&bytes)?;
         self.query(&request).await
     }
@@ -570,12 +642,12 @@ impl VerifiedRpcSession {
         C: FnOnce() -> Result<A, SafeError>,
         A: FnOnce() -> Result<(), SafeError>,
     {
-        self.ensure_private_ready()?;
+        self.ensure_json_ready()?;
         let deadline = self.private_operation_deadline()?;
         let bytes = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), body())
             .await
             .map_err(|_| self.ensure_lifetimes().err().unwrap_or_else(expired))??;
-        self.ensure_private_ready()?;
+        self.ensure_json_ready()?;
         let request = parse_request(&bytes)?;
         self.query_with_claim(&request, || {
             let (header, receipt, claim) = prepare()?;
@@ -601,23 +673,23 @@ impl VerifiedRpcSession {
         C: FnOnce() -> Result<A, SafeError>,
         A: FnOnce() -> Result<(), SafeError>,
     {
-        self.ensure_private_ready()?;
+        self.ensure_json_ready()?;
         ensure_private_method(request, self.allow_testnet_address)?;
         let mut http = build_rpc_http(self.authority.as_str(), request)?;
         let operation_deadline = self.private_operation_deadline()?;
-        self.ensure_private_ready()?;
+        self.ensure_json_ready()?;
         let (authorization, receipt, claim) = prepare()?;
         if let Some(authorization) = authorization {
             let value = header::HeaderValue::from_bytes(authorization.as_ref())
                 .map_err(|_| unavailable())?;
             http.headers_mut().insert(header::AUTHORIZATION, value);
         }
-        self.ensure_private_ready()?;
+        self.ensure_json_ready()?;
         let release_untransmitted = claim()?;
         // A failed check here precedes the first send attempt. Restore only
         // this confirmed unsent claim; after send_rpc starts, any failure is
         // ambiguous and the caller must leave the ticket uncertain.
-        if let Err(error) = self.ensure_private_ready() {
+        if let Err(error) = self.ensure_json_ready() {
             release_untransmitted()?;
             return Err(error);
         }
@@ -702,6 +774,12 @@ impl PhalaTrustedRpcSession {
 
     pub async fn query(self, request: &RpcRequest) -> Result<RpcResult, SafeError> {
         self.0.query(request).await
+    }
+
+    /// Preserve the same approved Phala-trusting session for one typed wallet
+    /// read. HTTP/1.1 JSON sessions cannot be converted to wallet sessions.
+    pub fn into_wallet(self) -> Result<PhalaTrustedWalletSession, SafeError> {
+        PhalaTrustedWalletSession::new(self.0)
     }
 }
 
@@ -834,11 +912,10 @@ async fn send_rpc(
     http: Request<Full<Bytes>>,
 ) -> Result<RpcResult, SafeError> {
     session.origin.require_managed()?;
-    let response = session
-        .sender
-        .send_request(http)
-        .await
-        .map_err(|_| unavailable())?;
+    let SessionSender::Json(sender) = &mut session.sender else {
+        return Err(unavailable());
+    };
+    let response = sender.send_request(http).await.map_err(|_| unavailable())?;
     if response.status() != StatusCode::OK || response.version() != Version::HTTP_11 {
         return Err(unavailable());
     }

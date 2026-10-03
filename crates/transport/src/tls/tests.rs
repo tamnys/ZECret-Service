@@ -111,6 +111,25 @@ pub(super) async fn connect_pair(
     Result<PublicBootstrapTls, SafeError>,
     std::io::Result<ServerStream<TcpStream>>,
 ) {
+    connect_pair_with(config, false).await
+}
+
+pub(super) async fn connect_wallet_pair(
+    config: Arc<ServerConfig>,
+) -> (
+    Result<PublicBootstrapTls, SafeError>,
+    std::io::Result<ServerStream<TcpStream>>,
+) {
+    connect_pair_with(config, true).await
+}
+
+async fn connect_pair_with(
+    config: Arc<ServerConfig>,
+    wallet: bool,
+) -> (
+    Result<PublicBootstrapTls, SafeError>,
+    std::io::Result<ServerStream<TcpStream>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let tor = TorConfig::new(match listener.local_addr().unwrap() {
         std::net::SocketAddr::V4(address) => address,
@@ -131,7 +150,11 @@ pub(super) async fn connect_pair(
         )
         .await
         .unwrap();
-    let client = channel.start_tls().await;
+    let client = if wallet {
+        channel.start_wallet_tls().await
+    } else {
+        channel.start_tls().await
+    };
     (client, server.await.unwrap())
 }
 
@@ -218,7 +241,7 @@ async fn disconnected_bootstrap_cannot_start_tls() {
 
 #[test]
 fn key_logging_and_early_data_are_disabled_by_configuration() {
-    let config = bootstrap_config().unwrap();
+    let config = bootstrap_config(ALPN).unwrap();
     assert!(!config.enable_early_data);
     assert!(!config.enable_secret_extraction);
     assert!(!config.key_log.will_log("CLIENT_TRAFFIC_SECRET_0"));
@@ -304,7 +327,7 @@ async fn openssl_exporter_matches_independent_server() {
         .parse()
         .expect("numeric OpenSSL fixture port");
     let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    let mut stream = TlsConnector::from(bootstrap_config().unwrap())
+    let mut stream = TlsConnector::from(bootstrap_config(ALPN).unwrap())
         .connect(
             ServerName::try_from("unresolved-fixture.invalid").unwrap(),
             socket,

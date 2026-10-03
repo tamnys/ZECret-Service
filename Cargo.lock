@@ -3517,14 +3517,17 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "prost",
  "rustls",
  "serde",
  "serde_json",
  "tokio",
  "tokio-rustls",
  "tokio-socks",
+ "tonic",
  "zrpc-protocol",
  "zrpc-verifier",
+ "zrpc-wallet-read",
 ]
 
 [[package]]
@@ -3565,4 +3568,17 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "zrpc-protocol",
+]
+
+[[package]]
+name = "zrpc-wallet-sdk"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "zrpc-client",
+ "zrpc-payments",
+ "zrpc-protocol",
+ "zrpc-transport",
+ "zrpc-verifier",
+ "zrpc-wallet-read",
 ]
