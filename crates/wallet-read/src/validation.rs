@@ -111,7 +111,13 @@ pub fn validate_unary_request(method: ReadMethod, payload: &[u8]) -> Result<Vec<
         | ReadMethod::GetLightdInfo => Ok(decode::<wire::Empty>(payload)?.encode_to_vec()),
         ReadMethod::GetSubtreeRoots => {
             let request = decode::<wire::GetSubtreeRootsArg>(payload)?;
-            if wire::ShieldedProtocol::try_from(request.shielded_protocol).is_err() {
+            // Zebra v6.4.2 stores subtree indexes and nonzero result limits as
+            // u16. It rejects an oversized start, but silently clamps an
+            // oversized limit, which would look like a complete shorter read.
+            if wire::ShieldedProtocol::try_from(request.shielded_protocol).is_err()
+                || request.start_index > u16::MAX.into()
+                || request.max_entries > u16::MAX.into()
+            {
                 return Err(invalid());
             }
             Ok(request.encode_to_vec())
@@ -196,6 +202,48 @@ pub struct RangeContinuity {
     previous_hash: Option<[u8; 32]>,
     previous_parent: Option<[u8; 32]>,
     first_anchor: Option<[u8; 32]>,
+}
+
+/// Subtree positions are implicit in the streamed response. A successful EOF
+/// can contain fewer roots than requested when the tree has not reached them,
+/// but cannot contain more roots or a position outside Zebra's index domain.
+pub struct SubtreeContinuity {
+    start_index: u32,
+    max_entries: u32,
+    observed: u32,
+    previous_height: Option<u64>,
+}
+
+impl SubtreeContinuity {
+    pub fn new(start_index: u32, max_entries: u32) -> Self {
+        Self {
+            start_index,
+            max_entries,
+            observed: 0,
+            previous_height: None,
+        }
+    }
+
+    pub fn observe(&mut self, root: &wire::SubtreeRoot) -> Result<(), Status> {
+        let index = self
+            .start_index
+            .checked_add(self.observed)
+            .ok_or_else(malformed_response)?;
+        if index > u16::MAX.into()
+            || (self.max_entries != 0 && self.observed >= self.max_entries)
+            || root.root_hash.len() != 32
+            || root.completing_block_hash.len() != 32
+            || root.completing_block_height > u32::MAX.into()
+            || self
+                .previous_height
+                .is_some_and(|prior| root.completing_block_height <= prior)
+        {
+            return Err(malformed_response());
+        }
+        self.observed += 1;
+        self.previous_height = Some(root.completing_block_height);
+        Ok(())
+    }
 }
 
 impl RangeContinuity {
@@ -362,6 +410,46 @@ mod tests {
         assert!(
             validate_unary_request(ReadMethod::GetTransaction, &invalid.encode_to_vec()).is_err()
         );
+    }
+
+    #[test]
+    fn subtree_requests_and_stream_positions_respect_pinned_zebra_limits() {
+        let mut request = wire::GetSubtreeRootsArg {
+            start_index: u16::MAX.into(),
+            shielded_protocol: wire::ShieldedProtocol::Orchard.into(),
+            max_entries: 0,
+        };
+        assert!(
+            validate_unary_request(ReadMethod::GetSubtreeRoots, &request.encode_to_vec()).is_ok()
+        );
+        request.start_index += 1;
+        assert!(
+            validate_unary_request(ReadMethod::GetSubtreeRoots, &request.encode_to_vec()).is_err()
+        );
+        request.start_index = 0;
+        request.max_entries = u32::from(u16::MAX) + 1;
+        assert!(
+            validate_unary_request(ReadMethod::GetSubtreeRoots, &request.encode_to_vec()).is_err()
+        );
+
+        let root = |height| wire::SubtreeRoot {
+            root_hash: vec![1; 32],
+            completing_block_hash: vec![2; 32],
+            completing_block_height: height,
+        };
+        let mut at_last_index = SubtreeContinuity::new(u16::MAX.into(), 0);
+        assert!(at_last_index.observe(&root(50)).is_ok());
+        assert!(at_last_index.observe(&root(51)).is_err());
+
+        let mut limited = SubtreeContinuity::new(7, 2);
+        assert!(limited.observe(&root(50)).is_ok());
+        assert!(limited.observe(&root(50)).is_err());
+        assert!(limited.observe(&root(51)).is_ok());
+        assert!(limited.observe(&root(52)).is_err());
+        let mut malformed = SubtreeContinuity::new(0, 0);
+        let mut bad_hash = root(50);
+        bad_hash.completing_block_hash.clear();
+        assert!(malformed.observe(&bad_hash).is_err());
     }
 
     fn block(height: u64, hash: u8, parent: u8) -> wire::CompactBlock {
