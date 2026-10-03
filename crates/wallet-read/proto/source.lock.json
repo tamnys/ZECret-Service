@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "repository": "ZcashFoundation/zebra",
+  "source_commit": "e3eef2f37c35127ad1769f19a1ebc7eaa5d5d291",
+  "source_directory": "zebra-rpc/proto",
+  "files": {
+    "service.proto": "sha256:77454df4cfb67e1fdc66039a43ec0bf3d6f2fae7b6eb66bec11ac7d63bd22eac",
+    "compact_formats.proto": "sha256:913dec2938b0301f41577ef5927734ba8af0e7ebefeb6588a2c62299875e0387"
+  }
+}

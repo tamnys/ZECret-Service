@@ -247,6 +247,81 @@ async fn quote_uses_own_live_session_exporter_and_connection_nonce_only_once() {
 }
 
 #[tokio::test]
+async fn http2_quote_uses_same_tls_exporter_and_does_not_enable_http1_rpc() {
+    let source = FakeQuote::new();
+    let calls = source.calls.clone();
+    let shared = Arc::new(Shared::new(source, limits(1, 1, Duration::from_nanos(1))));
+    let (mut server_config, mut client_config) = configs();
+    Arc::get_mut(&mut server_config).unwrap().alpn_protocols = vec![b"h2".to_vec()];
+    Arc::get_mut(&mut client_config).unwrap().alpn_protocols = vec![b"h2".to_vec()];
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = AbortOnDrop(tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let tls = TlsAcceptor::from(server_config)
+            .accept(socket)
+            .await
+            .unwrap();
+        let _ = serve(shared, tls).await;
+    }));
+    let socket = TcpStream::connect(address).await.unwrap();
+    let tls = TlsConnector::from(client_config)
+        .connect(ServerName::try_from("fixture.invalid").unwrap(), socket)
+        .await
+        .unwrap();
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+    let nonce = [29; 32];
+    let expected = tls
+        .get_ref()
+        .1
+        .export_keying_material([0u8; 64], ATTESTATION_EXPORTER_LABEL, Some(&nonce))
+        .unwrap();
+    let (mut client, connection) = hyper::client::conn::http2::handshake(
+        hyper_util::rt::TokioExecutor::new(),
+        TokioIo::new(tls),
+    )
+    .await
+    .unwrap();
+    let _driver = AbortOnDrop(tokio::spawn(async move {
+        let _ = connection.await;
+    }));
+    let send = |path: &str, body: Vec<u8>| {
+        Request::post(format!("https://fixture.invalid{path}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Full::new(Bytes::from(body)))
+            .unwrap()
+    };
+    let (status, evidence) = read(
+        client
+            .send_request(send("/attestation", nonce_body(nonce)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let evidence = zrpc_protocol::parse_attestation_response(&evidence).unwrap();
+    assert_eq!(hex::decode(evidence.report_data).unwrap(), expected);
+    assert_eq!(*calls.lock().unwrap(), vec![expected]);
+    let (status, _) = read(
+        client
+            .send_request(send("/attestation", nonce_body([30; 32])))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = read(
+        client
+            .send_request(send("/rpc", b"private".to_vec()))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    drop(server);
+}
+
+#[tokio::test]
 async fn gcp_response_has_separate_wire_format_and_same_live_exporter() {
     struct FakeGcp(Arc<Mutex<Vec<[u8; 64]>>>);
     impl QuoteSource for FakeGcp {

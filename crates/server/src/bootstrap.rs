@@ -59,7 +59,7 @@ fn ephemeral_config() -> Result<Arc<ServerConfig>, SafeError> {
         .map_err(|_| unavailable())?
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)));
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"http/1.1".to_vec(), b"h2".to_vec()];
     config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
     config.send_tls13_tickets = 0;
     // The pinned builder installs NeverProducesTickets. Fail closed if that
