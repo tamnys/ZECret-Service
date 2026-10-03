@@ -3408,6 +3408,7 @@ dependencies = [
  "zrpc-protocol",
  "zrpc-transport",
  "zrpc-verifier",
+ "zrpc-wallet-sdk",
 ]
 
 [[package]]
@@ -3574,7 +3575,15 @@ dependencies = [
 name = "zrpc-wallet-sdk"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "libc",
+ "rustix",
+ "subtle",
  "tokio",
+ "tonic",
+ "zeroize",
  "zrpc-client",
  "zrpc-payments",
  "zrpc-protocol",

@@ -13,6 +13,7 @@ zrpc-client = { path = "../client" }
 zrpc-payments = { path = "../payments" }
 zrpc-protocol = { path = "../protocol" }
 zrpc-transport = { path = "../transport" }
+zrpc-wallet-sdk = { path = "../wallet-sdk" }
 zrpc-verifier = { path = "../verifier" }
 
 zrpc-lifecycle = { path = "../lifecycle" }

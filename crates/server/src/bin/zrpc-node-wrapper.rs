@@ -18,9 +18,10 @@ use zrpc_server::{
     bootstrap::BoundNodeListener,
     node::{CookieAuth, LocalNode},
 };
+use zrpc_wallet_read::backend::ZebraReadOnly;
 
 const COOKIE_PATH: &str = "/run/zrpc-node/.cookie";
-const USAGE: &str = "zrpc-node-wrapper --listen NUMERIC_IP:PORT --node LOOPBACK_IPV4:PORT --max-connections COUNT --max-quotes COUNT --quote-spacing-ms INTEGER --access free-demo|ticket-required\nTicket-required mode also needs --issuer-public-der ROOT_OWNED_FILE --issuer-name COMMON_NAME --crypto-helper ROOT_OWNED_EXECUTABLE --spent-store PRIVATE_DIR. Measured guest only; the Zebra cookie remains on tmpfs. This launcher does not approve client private mode.";
+const USAGE: &str = "zrpc-node-wrapper --listen NUMERIC_IP:PORT --node LOOPBACK_IPV4:PORT --max-connections COUNT --max-quotes COUNT --quote-spacing-ms INTEGER --access free-demo|ticket-required [--wallet-backend LOOPBACK_IPV4:PORT]\nTicket-required mode also needs --issuer-public-der ROOT_OWNED_FILE --issuer-name COMMON_NAME --crypto-helper ROOT_OWNED_EXECUTABLE --spent-store PRIVATE_DIR. The wallet backend is Phala ticket-required only. Measured guest only; the Zebra cookie remains on tmpfs. This launcher does not approve client private mode.";
 
 enum PaymentAccess {
     FreeDemo,
@@ -38,6 +39,7 @@ struct Config {
     node: SocketAddrV4,
     limits: BootstrapLimits,
     payment: PaymentAccess,
+    wallet_backend: Option<SocketAddrV4>,
 }
 
 fn take(args: &mut Vec<String>, name: &str) -> Result<String, &'static str> {
@@ -72,6 +74,21 @@ fn parse(mut args: Vec<String>) -> Result<Config, &'static str> {
     } else {
         false
     };
+    let wallet_backend = if args.iter().any(|arg| arg == "--wallet-backend") {
+        let address: SocketAddrV4 = take(&mut args, "--wallet-backend")?
+            .parse()
+            .map_err(|_| "wallet backend must use IPv4 loopback")?;
+        if gcp
+            || !matches!(payment, PaymentAccess::TicketRequired { .. })
+            || !address.ip().is_loopback()
+            || address.port() == 0
+        {
+            return Err("wallet backend requires Phala ticketed loopback mode");
+        }
+        Some(address)
+    } else {
+        None
+    };
     let listen: SocketAddr = take(&mut args, "--listen")?
         .parse()
         .map_err(|_| "invalid numeric listen address")?;
@@ -104,6 +121,7 @@ fn parse(mut args: Vec<String>) -> Result<Config, &'static str> {
         node,
         limits,
         payment,
+        wallet_backend,
     })
 }
 
@@ -180,11 +198,17 @@ async fn run() -> Result<(), &'static str> {
         node: node_address,
         limits,
         payment,
+        wallet_backend,
     } = parse(args)?;
     if rustix::process::geteuid().as_raw() == 0 {
         return Err("node wrapper must run as a non-root user");
     }
     let payment = paid_redeemer(payment)?;
+    let wallet_backend = wallet_backend
+        .map(|address| {
+            ZebraReadOnly::new(SocketAddr::V4(address)).map_err(|_| "wallet backend unavailable")
+        })
+        .transpose()?;
     let cookie_path = if gcp {
         "/run/zrpc-wrapper/.cookie"
     } else {
@@ -200,13 +224,19 @@ async fn run() -> Result<(), &'static str> {
         .map_err(|_| "shutdown signal unavailable")?;
     // The production constructor has no caller-supplied quote socket: it
     // probes only the local quote-only bridge before binding TCP.
-    let listener = match (gcp, payment) {
-        (true, Some(payment)) => {
+    let listener = match (gcp, payment, wallet_backend) {
+        (false, Some(payment), Some(wallet_backend)) => {
+            BoundNodeListener::bind_paid_wallet(listen, limits, node, payment, wallet_backend).await
+        }
+        (_, _, Some(_)) => return Err("wallet backend requires Phala ticketed mode"),
+        (true, Some(payment), None) => {
             BoundNodeListener::bind_gcp_paid(listen, limits, node, payment).await
         }
-        (false, Some(payment)) => BoundNodeListener::bind_paid(listen, limits, node, payment).await,
-        (true, None) => BoundNodeListener::bind_gcp(listen, limits, node).await,
-        (false, None) => BoundNodeListener::bind(listen, limits, node).await,
+        (false, Some(payment), None) => {
+            BoundNodeListener::bind_paid(listen, limits, node, payment).await
+        }
+        (true, None, None) => BoundNodeListener::bind_gcp(listen, limits, node).await,
+        (false, None, None) => BoundNodeListener::bind(listen, limits, node).await,
     }
     .map_err(|_| "node listener unavailable")?;
     listener
@@ -303,6 +333,26 @@ mod tests {
             parse(args.clone()).unwrap().payment,
             PaymentAccess::TicketRequired { .. }
         ));
+        let mut wallet = args.clone();
+        wallet.extend(["--wallet-backend".into(), "127.0.0.1:9067".into()]);
+        assert_eq!(
+            parse(wallet.clone()).unwrap().wallet_backend,
+            Some("127.0.0.1:9067".parse().unwrap())
+        );
+        for bad in ["0.0.0.0:9067", "127.0.0.1:0", "localhost:9067"] {
+            let mut changed = wallet.clone();
+            let index = changed
+                .iter()
+                .position(|arg| arg == "--wallet-backend")
+                .unwrap();
+            changed[index + 1] = bad.into();
+            assert!(parse(changed).is_err(), "{bad}");
+        }
+        wallet.extend(["--platform".into(), "gcp-tdx".into()]);
+        assert!(parse(wallet).is_err());
+        let mut free_wallet = valid();
+        free_wallet.extend(["--wallet-backend".into(), "127.0.0.1:9067".into()]);
+        assert!(parse(free_wallet).is_err());
         for option in [
             "--issuer-public-der",
             "--issuer-name",

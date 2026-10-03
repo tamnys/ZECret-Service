@@ -29,6 +29,7 @@ use tokio_rustls::TlsAcceptor;
 use zeroize::Zeroizing;
 use zrpc_payments::Redeemer;
 use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
+use zrpc_wallet_read::backend::ZebraReadOnly;
 
 fn unavailable() -> SafeError {
     SafeError::new(
@@ -256,6 +257,7 @@ impl BoundNodeListener {
             node,
             Some(bridge_watch),
             None,
+            None,
         )
         .await
     }
@@ -276,6 +278,31 @@ impl BoundNodeListener {
             node,
             Some(bridge_watch),
             Some(payment),
+            None,
+        )
+        .await
+    }
+
+    /// Phala-trusting wallet profile: the gRPC route is opt-in and can only
+    /// coexist with a locally configured ticket redeemer.
+    pub async fn bind_paid_wallet(
+        address: SocketAddr,
+        limits: BootstrapLimits,
+        node: LocalNode,
+        payment: Arc<Redeemer>,
+        wallet_backend: ZebraReadOnly,
+    ) -> Result<Self, SafeError> {
+        let quote_socket = Path::new(QUOTE_SOCKET_PATH);
+        probe_private_quote_socket(quote_socket).await?;
+        let bridge_watch = connect_quote_watch(Path::new(QUOTE_WATCH_SOCKET_PATH)).await?;
+        Self::bind_with_socket(
+            address,
+            quote_socket,
+            limits,
+            node,
+            Some(bridge_watch),
+            Some(payment),
+            Some(wallet_backend),
         )
         .await
     }
@@ -288,7 +315,16 @@ impl BoundNodeListener {
         node: LocalNode,
         bridge_watch: Option<UnixStream>,
     ) -> Result<Self, SafeError> {
-        Self::bind_with_socket(address, quote_socket, limits, node, bridge_watch, None).await
+        Self::bind_with_socket(
+            address,
+            quote_socket,
+            limits,
+            node,
+            bridge_watch,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn bind_with_socket(
@@ -298,11 +334,16 @@ impl BoundNodeListener {
         node: LocalNode,
         bridge_watch: Option<UnixStream>,
         payment: Option<Arc<Redeemer>>,
+        wallet_backend: Option<ZebraReadOnly>,
     ) -> Result<Self, SafeError> {
         let service = AttestationService::new(quote_socket, limits)?;
         let service = match payment {
             Some(payment) => service.with_paid_node(node, payment)?,
             None => service.with_node(node)?,
+        };
+        let service = match wallet_backend {
+            Some(backend) => service.with_wallet_backend(backend)?,
+            None => service,
         };
         Ok(Self {
             listener: BoundPublicListener::bind_service(address, service).await?,
