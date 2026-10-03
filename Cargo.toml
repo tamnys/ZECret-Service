@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest", "crates/payments", "crates/wallet-read"]
+members = ["crates/protocol", "crates/verifier", "crates/transport", "crates/client", "crates/server", "crates/lifecycle", "crates/cli", "crates/uki-digest", "crates/payments", "crates/wallet-read", "crates/wallet-sdk"]
 
 [workspace.package]
 version = "0.1.0"

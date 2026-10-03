@@ -18,8 +18,9 @@ use zrpc_protocol::{ErrorCode, MAX_CONNECTION_LIFETIME_SECONDS, SafeError};
 
 mod attestation;
 pub use attestation::{
-    EndpointInspection, EndpointInspectionIssue, PhalaTrustedRpcSession, PreviewRpcSession,
-    PublicTestnetPreview, UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession,
+    EndpointInspection, EndpointInspectionIssue, PhalaTrustedRpcSession, PhalaTrustedWalletSession,
+    PreviewRpcSession, PublicTestnetPreview, UnverifiedGcpEvidence, UnverifiedPublicEvidence,
+    VerifiedRpcSession, WalletReadResult, WalletReadStream,
 };
 
 type BootstrapStream = TlsStream<Socks5Stream<RequirePassword<ProxySocket>>>;
@@ -27,7 +28,10 @@ type BootstrapStream = TlsStream<Socks5Stream<RequirePassword<ProxySocket>>>;
 // Design §7 limits each connection to five minutes before a new handshake and
 // challenge. This is an upper lifetime bound, not evidence of quote freshness.
 const MAX_CONNECTION_LIFETIME: Duration = Duration::from_secs(MAX_CONNECTION_LIFETIME_SECONDS);
-const ALPN: &[u8] = b"http/1.1";
+const JSON_ALPN: &[u8] = b"http/1.1";
+const WALLET_ALPN: &[u8] = b"h2";
+#[cfg(test)]
+const ALPN: &[u8] = JSON_ALPN;
 
 fn unavailable() -> SafeError {
     SafeError::new(
@@ -89,7 +93,7 @@ impl ServerCertVerifier for BootstrapVerifier {
     }
 }
 
-fn bootstrap_config() -> Result<Arc<ClientConfig>, SafeError> {
+fn bootstrap_config(alpn: &'static [u8]) -> Result<Arc<ClientConfig>, SafeError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut config = ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -102,7 +106,7 @@ fn bootstrap_config() -> Result<Arc<ClientConfig>, SafeError> {
     config.enable_secret_extraction = false;
     // Never consult SSLKEYLOGFILE, even when inherited by the native process.
     config.key_log = Arc::new(rustls::NoKeyLog);
-    config.alpn_protocols = vec![ALPN.to_vec()];
+    config.alpn_protocols = vec![alpn.to_vec()];
     Ok(Arc::new(config))
 }
 
@@ -111,12 +115,25 @@ impl UnverifiedChannel {
     /// carried from SOCKS CONNECT; there is no resolver, redirect, or reconnect.
     /// This verifies TLS key possession only. No certificate identity is trusted.
     pub async fn start_tls(self) -> Result<PublicBootstrapTls, SafeError> {
+        self.start_tls_with_alpn(JSON_ALPN).await
+    }
+
+    /// Wallet bootstrap negotiates HTTP/2 on the same one-use TLS session.
+    /// This type still cannot carry wallet input before quote approval.
+    pub async fn start_wallet_tls(self) -> Result<PublicBootstrapTls, SafeError> {
+        self.start_tls_with_alpn(WALLET_ALPN).await
+    }
+
+    async fn start_tls_with_alpn(
+        self,
+        alpn: &'static [u8],
+    ) -> Result<PublicBootstrapTls, SafeError> {
         let socket = self.socket.ok_or_else(unavailable)?;
         self.origin.ensure_usable()?;
         let authority = self.authority.ok_or_else(unavailable)?;
         let name = ServerName::try_from(self.server_name.ok_or_else(unavailable)?)
             .map_err(|_| unavailable())?;
-        let stream = TlsConnector::from(bootstrap_config()?)
+        let stream = TlsConnector::from(bootstrap_config(alpn)?)
             .connect(name, socket)
             .await
             .map_err(|_| unavailable())?;
@@ -127,7 +144,7 @@ impl UnverifiedChannel {
                 connection.handshake_kind(),
                 Some(HandshakeKind::Full | HandshakeKind::FullWithHelloRetryRequest)
             )
-            || connection.alpn_protocol() != Some(ALPN)
+            || connection.alpn_protocol() != Some(alpn)
         {
             return Err(unavailable());
         }

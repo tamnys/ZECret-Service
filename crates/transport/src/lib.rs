@@ -29,8 +29,9 @@ mod tls;
 pub use managed_tor::{ManagedTor, valid_v3_onion_host};
 pub use tls::{
     EndpointInspection, EndpointInspectionIssue, PendingChallenge, PhalaTrustedRpcSession,
-    PreviewRpcSession, PublicBootstrapTls, PublicTestnetPreview, UnverifiedGcpEvidence,
-    UnverifiedPublicEvidence, VerifiedRpcSession,
+    PhalaTrustedWalletSession, PreviewRpcSession, PublicBootstrapTls, PublicTestnetPreview,
+    UnverifiedGcpEvidence, UnverifiedPublicEvidence, VerifiedRpcSession, WalletReadResult,
+    WalletReadStream,
 };
 
 /// A configuration value is not evidence that Tor is connected or functional.

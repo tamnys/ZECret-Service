@@ -1,0 +1,274 @@
+//! Testnet wallet reads over one retained, Phala-trusting verified connection.
+//! The SDK holds no wallet keys, decrypted notes, or wallet database.
+#![forbid(unsafe_code)]
+
+use std::{cell::Cell, future::Future};
+use zrpc_client::inspection::{PrivateEndpointConfig, connect_phala_trusted_wallet};
+use zrpc_payments::{ClientStore, IssuerPublic};
+use zrpc_protocol::{ErrorCode, SafeError};
+use zrpc_transport::WalletReadResult;
+use zrpc_verifier::PhalaTrustedPolicy;
+use zrpc_wallet_read::{RangeContinuity, ReadMethod, WalletReadRequest, wire};
+
+fn ticket_error() -> SafeError {
+    SafeError::new(
+        ErrorCode::PrivateModeUnavailable,
+        "Wallet ticket unavailable.",
+    )
+}
+
+fn invalid_chain() -> SafeError {
+    SafeError::new(
+        ErrorCode::BlockMismatch,
+        "Wallet block range is incomplete or disconnected.",
+    )
+}
+
+/// Every item is a pinned protobuf type. A result is complete only when
+/// `WalletReader::read_from_request` returns successfully; a partial stream
+/// must not be applied as a completed balance, history, or UTXO set.
+pub enum WalletReadItem {
+    LatestBlock(wire::BlockId),
+    Block(wire::CompactBlock),
+    BlockNullifiers(wire::CompactBlock),
+    BlockRange(wire::CompactBlock),
+    BlockRangeNullifiers(wire::CompactBlock),
+    Transaction(wire::RawTransaction),
+    TaddressTxids(wire::RawTransaction),
+    TaddressTransactions(wire::RawTransaction),
+    TaddressBalance(wire::Balance),
+    TaddressBalanceStream(wire::Balance),
+    MempoolTx(wire::CompactTx),
+    MempoolStream(wire::RawTransaction),
+    TreeState(wire::TreeState),
+    LatestTreeState(wire::TreeState),
+    SubtreeRoots(wire::SubtreeRoot),
+    AddressUtxos(wire::GetAddressUtxosReplyList),
+    AddressUtxosStream(wire::GetAddressUtxosReply),
+    LightdInfo(wire::LightdInfo),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalletReadCompletion {
+    pub method: ReadMethod,
+    pub delivered_items: u64,
+    /// This describes only completion of one backend RPC, not an atomic chain
+    /// snapshot or global node freshness.
+    pub ticket_spent: bool,
+}
+
+#[derive(Clone, Copy)]
+struct RangeSpec {
+    start: u32,
+    end: u32,
+}
+
+fn range_spec(request: &WalletReadRequest) -> Option<RangeSpec> {
+    let range = match request {
+        WalletReadRequest::BlockRange(value) | WalletReadRequest::BlockRangeNullifiers(value) => {
+            value
+        }
+        _ => return None,
+    };
+    Some(RangeSpec {
+        start: u32::try_from(range.start.as_ref()?.height).ok()?,
+        end: u32::try_from(range.end.as_ref()?.height).ok()?,
+    })
+}
+
+/// One SDK instance serializes access to its durable ticket store. Every read
+/// obtains a fresh Tor stream, TLS connection, quote, collateral appraisal and
+/// release approval. It never reconnects inside an RPC.
+pub struct WalletReader {
+    endpoint: PrivateEndpointConfig,
+    collateral: Vec<u8>,
+    app_compose: Vec<u8>,
+    policy: PhalaTrustedPolicy,
+    issuer: IssuerPublic,
+    tickets: ClientStore,
+}
+
+impl WalletReader {
+    pub fn new(
+        endpoint: PrivateEndpointConfig,
+        collateral: Vec<u8>,
+        app_compose: Vec<u8>,
+        policy: PhalaTrustedPolicy,
+        issuer: IssuerPublic,
+        tickets: ClientStore,
+    ) -> Self {
+        Self {
+            endpoint,
+            collateral,
+            app_compose,
+            policy,
+            issuer,
+            tickets,
+        }
+    }
+
+    /// The request future is not polled until the retained TLS connection is
+    /// verified. The sink is awaited for each item to propagate backpressure.
+    /// Dropping this future cancels the RPC and leaves any claimed ticket
+    /// uncertain. A failed sink likewise cannot turn a partial stream into a
+    /// completed read.
+    pub async fn read_from_request<F, Fut, S, SFut>(
+        &mut self,
+        request: F,
+        mut sink: S,
+        prior_block_hash: Option<[u8; 32]>,
+    ) -> Result<WalletReadCompletion, SafeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<WalletReadRequest, SafeError>>,
+        S: FnMut(WalletReadItem) -> SFut,
+        SFut: Future<Output = Result<(), SafeError>>,
+    {
+        let session = connect_phala_trusted_wallet(
+            &self.endpoint,
+            &self.collateral,
+            &self.app_compose,
+            &self.policy,
+        )
+        .await?;
+        let method = Cell::new(None);
+        let range = Cell::new(None);
+        let (result, marker) = session
+            .read_from_request_async(
+                || async {
+                    let request = request().await?;
+                    method.set(Some(request.method()));
+                    range.set(range_spec(&request));
+                    Ok(request)
+                },
+                || {
+                    let ticket = self
+                        .tickets
+                        .preview_available()
+                        .map_err(|_| ticket_error())?
+                        .ok_or_else(ticket_error)?;
+                    let authorization = self
+                        .issuer
+                        .authorization_for(ticket.token.expose())
+                        .map_err(|_| ticket_error())?;
+                    let marker = ticket.marker;
+                    let store = &mut self.tickets;
+                    Ok((authorization, marker, move || {
+                        store.claim_available(&ticket).map_err(|_| ticket_error())?;
+                        Ok(move || {
+                            store
+                                .release_untransmitted(&ticket)
+                                .map_err(|_| ticket_error())
+                        })
+                    }))
+                },
+            )
+            .await?;
+        let method = method.get().ok_or_else(invalid_chain)?;
+        let delivered_items =
+            drain_result(result, range.get(), prior_block_hash, &mut sink).await?;
+        self.tickets
+            .mark_spent(marker)
+            .map_err(|_| ticket_error())?;
+        Ok(WalletReadCompletion {
+            method,
+            delivered_items,
+            ticket_spent: true,
+        })
+    }
+}
+
+async fn drain_result<S, SFut>(
+    result: WalletReadResult,
+    range: Option<RangeSpec>,
+    prior_block_hash: Option<[u8; 32]>,
+    sink: &mut S,
+) -> Result<u64, SafeError>
+where
+    S: FnMut(WalletReadItem) -> SFut,
+    SFut: Future<Output = Result<(), SafeError>>,
+{
+    let mut delivered = 0_u64;
+    macro_rules! emit {
+        ($variant:ident, $item:expr) => {{
+            sink(WalletReadItem::$variant($item)).await?;
+            delivered = delivered.checked_add(1).ok_or_else(invalid_chain)?;
+        }};
+    }
+    macro_rules! stream {
+        ($stream:ident, $variant:ident) => {{
+            while let Some(item) = $stream.next().await? {
+                emit!($variant, item);
+            }
+        }};
+    }
+    match result {
+        WalletReadResult::LatestBlock(item) => emit!(LatestBlock, item),
+        WalletReadResult::Block(item) => {
+            zrpc_wallet_read::validate_compact_block(&item).map_err(|_| invalid_chain())?;
+            emit!(Block, item)
+        }
+        WalletReadResult::BlockNullifiers(item) => {
+            zrpc_wallet_read::validate_compact_block(&item).map_err(|_| invalid_chain())?;
+            emit!(BlockNullifiers, item)
+        }
+        WalletReadResult::BlockRange(mut stream) => {
+            let range = range.ok_or_else(invalid_chain)?;
+            let mut continuity = RangeContinuity::new(range.start, range.end, prior_block_hash);
+            while let Some(item) = stream.next().await? {
+                continuity.observe(&item).map_err(|_| invalid_chain())?;
+                emit!(BlockRange, item);
+            }
+            continuity.finish().map_err(|_| invalid_chain())?;
+        }
+        WalletReadResult::BlockRangeNullifiers(mut stream) => {
+            let range = range.ok_or_else(invalid_chain)?;
+            let mut continuity = RangeContinuity::new(range.start, range.end, prior_block_hash);
+            while let Some(item) = stream.next().await? {
+                continuity.observe(&item).map_err(|_| invalid_chain())?;
+                emit!(BlockRangeNullifiers, item);
+            }
+            continuity.finish().map_err(|_| invalid_chain())?;
+        }
+        WalletReadResult::Transaction(item) => emit!(Transaction, item),
+        WalletReadResult::TaddressTxids(mut value) => stream!(value, TaddressTxids),
+        WalletReadResult::TaddressTransactions(mut value) => {
+            stream!(value, TaddressTransactions)
+        }
+        WalletReadResult::TaddressBalance(item) => emit!(TaddressBalance, item),
+        WalletReadResult::TaddressBalanceStream(item) => emit!(TaddressBalanceStream, item),
+        WalletReadResult::MempoolTx(mut value) => stream!(value, MempoolTx),
+        WalletReadResult::MempoolStream(mut value) => stream!(value, MempoolStream),
+        WalletReadResult::TreeState(item) => emit!(TreeState, item),
+        WalletReadResult::LatestTreeState(item) => emit!(LatestTreeState, item),
+        WalletReadResult::SubtreeRoots(mut value) => stream!(value, SubtreeRoots),
+        WalletReadResult::AddressUtxos(item) => emit!(AddressUtxos, item),
+        WalletReadResult::AddressUtxosStream(mut value) => {
+            stream!(value, AddressUtxosStream)
+        }
+        WalletReadResult::LightdInfo(item) => emit!(LightdInfo, item),
+    }
+    Ok(delivered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_context_is_only_taken_from_typed_compact_block_reads() {
+        let range = wire::BlockRange {
+            start: Some(wire::BlockId {
+                height: 50,
+                hash: vec![],
+            }),
+            end: Some(wire::BlockId {
+                height: 52,
+                hash: vec![],
+            }),
+        };
+        let selected = range_spec(&WalletReadRequest::BlockRange(range)).unwrap();
+        assert_eq!((selected.start, selected.end), (50, 52));
+        assert!(range_spec(&WalletReadRequest::LightdInfo(wire::Empty {})).is_none());
+    }
+}

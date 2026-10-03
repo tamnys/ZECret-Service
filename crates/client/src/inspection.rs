@@ -14,7 +14,7 @@ use zrpc_transport::{
     EndpointInspection, IsolationLabel, PublicTestnetPreview, RemoteEndpoint, TorConfig,
     UnverifiedGcpEvidence, UnverifiedPublicEvidence,
 };
-pub use zrpc_transport::{PhalaTrustedRpcSession, VerifiedRpcSession};
+pub use zrpc_transport::{PhalaTrustedRpcSession, PhalaTrustedWalletSession, VerifiedRpcSession};
 use zrpc_verifier::{
     PhalaTrustedPolicy, PhalaTrustedRelease, ReleasePolicy,
     gcp::GcpWorkloadPolicy,
@@ -350,6 +350,30 @@ pub async fn connect_phala_trusted(
     raw_app_compose: &[u8],
     selection: &PhalaTrustedPolicy,
 ) -> Result<PhalaTrustedRpcSession, SafeError> {
+    connect_phala_trusted_with_wire(config, collateral_json, raw_app_compose, selection, false)
+        .await
+}
+
+/// One attested HTTP/2 wallet connection. There is no conversion from a
+/// diagnostic inspection or HTTP/1.1 JSON connection to this client type.
+pub async fn connect_phala_trusted_wallet(
+    config: &PrivateEndpointConfig,
+    collateral_json: &[u8],
+    raw_app_compose: &[u8],
+    selection: &PhalaTrustedPolicy,
+) -> Result<PhalaTrustedWalletSession, SafeError> {
+    connect_phala_trusted_with_wire(config, collateral_json, raw_app_compose, selection, true)
+        .await?
+        .into_wallet()
+}
+
+async fn connect_phala_trusted_with_wire(
+    config: &PrivateEndpointConfig,
+    collateral_json: &[u8],
+    raw_app_compose: &[u8],
+    selection: &PhalaTrustedPolicy,
+    wallet: bool,
+) -> Result<PhalaTrustedRpcSession, SafeError> {
     if config.platform != Backend::PhalaDstack {
         return Err(wrong_platform());
     }
@@ -370,10 +394,11 @@ pub async fn connect_phala_trusted(
             .tor
             .get_or_try_init(|| async { ManagedTor::launch(&config.tor_executable) })
             .await?;
-        match request_evidence_with(
+        match request_evidence_with_wire(
             Backend::PhalaDstack,
             &config.endpoint,
             EvidenceTransport::Managed(tor),
+            wallet,
         )
         .await?
         {
@@ -430,6 +455,15 @@ async fn request_evidence_with(
     endpoint: &RemoteEndpoint,
     transport: EvidenceTransport<'_>,
 ) -> Result<NativeEvidence, SafeError> {
+    request_evidence_with_wire(platform, endpoint, transport, false).await
+}
+
+async fn request_evidence_with_wire(
+    platform: Backend,
+    endpoint: &RemoteEndpoint,
+    transport: EvidenceTransport<'_>,
+    wallet: bool,
+) -> Result<NativeEvidence, SafeError> {
     // Fresh OS randomness per native session; its encoded isolation label is
     // never returned or logged. RFC1929's one-byte length accommodates 64 hex bytes.
     let mut isolation = [0u8; 32];
@@ -452,7 +486,12 @@ async fn request_evidence_with(
             #[cfg(unix)]
             EvidenceTransport::Managed(tor) => tor.connect_bootstrap(endpoint, isolation).await?,
         };
-        let pending = channel.start_tls().await?.prepare_challenge()?;
+        let pending = if wallet {
+            channel.start_wallet_tls().await?
+        } else {
+            channel.start_tls().await?
+        }
+        .prepare_challenge()?;
         match platform {
             Backend::PhalaDstack => pending
                 .request_attestation()

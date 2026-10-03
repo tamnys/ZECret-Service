@@ -17,5 +17,8 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 tokio-socks.workspace = true
+tonic.workspace = true
+prost.workspace = true
 zrpc-protocol = { path = "../protocol" }
 zrpc-verifier = { path = "../verifier" }
+zrpc-wallet-read = { path = "../wallet-read" }
