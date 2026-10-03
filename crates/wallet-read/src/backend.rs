@@ -77,6 +77,27 @@ fn check_tree_state(tree: &wire::TreeState) -> Result<(), Status> {
     Ok(())
 }
 
+fn check_selected_tree_state(
+    tree: &wire::TreeState,
+    selected: &wire::BlockId,
+) -> Result<(), Status> {
+    check_tree_state(tree)?;
+    if selected.hash.is_empty() {
+        if tree.height != selected.height {
+            return Err(invalid_data());
+        }
+    } else {
+        // Zebra's BlockId hash is in internal little-endian byte order,
+        // while TreeState.hash is its conventional big-endian display hex.
+        let mut display = hex::decode(&tree.hash).map_err(|_| invalid_data())?;
+        display.reverse();
+        if display != selected.hash {
+            return Err(invalid_data());
+        }
+    }
+    Ok(())
+}
+
 fn check_subtree(root: &wire::SubtreeRoot) -> Result<(), Status> {
     if root.root_hash.len() != 32
         || root.completing_block_hash.len() != 32
@@ -444,13 +465,14 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
     ) -> Result<Response<wire::TreeState>, Status> {
         let request = request.into_inner();
         validate_unary_request(ReadMethod::GetTreeState, &request.encode_to_vec())?;
+        let selected = request.clone();
         let mut client = self.client().await?;
         let response = client
             .get_tree_state(request)
             .await
             .map_err(sanitize)?
             .into_inner();
-        check_tree_state(&response)?;
+        check_selected_tree_state(&response, &selected)?;
         Ok(Response::new(response))
     }
     async fn get_latest_tree_state(
@@ -648,6 +670,60 @@ mod tests {
         assert!(check_utxos(&reversed, &addresses, 100, 0).is_err());
         first.address = "t1Yzt1YSjHd8gdn6zaraWSpnbK7Sx9eWZ4u".into();
         assert!(check_utxo(&first, &addresses, 100).is_err());
+    }
+
+    #[test]
+    fn selected_tree_state_uses_display_to_internal_hash_order() {
+        let internal: Vec<u8> = (0..32).collect();
+        let display: Vec<u8> = internal.iter().rev().copied().collect();
+        let tree = wire::TreeState {
+            network: "test".into(),
+            height: 42,
+            hash: hex::encode(display),
+            ..Default::default()
+        };
+        assert!(
+            check_selected_tree_state(
+                &tree,
+                &wire::BlockId {
+                    height: 42,
+                    hash: vec![]
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            check_selected_tree_state(
+                &tree,
+                &wire::BlockId {
+                    height: 41,
+                    hash: vec![]
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            check_selected_tree_state(
+                &tree,
+                &wire::BlockId {
+                    height: 0,
+                    hash: internal.clone()
+                }
+            )
+            .is_ok()
+        );
+        let mut wrong = internal;
+        wrong[0] ^= 1;
+        assert!(
+            check_selected_tree_state(
+                &tree,
+                &wire::BlockId {
+                    height: 0,
+                    hash: wrong
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]

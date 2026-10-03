@@ -34,7 +34,10 @@ fn addresses(values: &[String]) -> Result<(), Status> {
 }
 
 fn block_id(id: &wire::BlockId) -> Result<(), Status> {
-    if id.height > u32::MAX as u64 || (!id.hash.is_empty() && id.hash.len() != 32) {
+    if id.height > u32::MAX as u64
+        || (id.hash.is_empty() && id.height == 0)
+        || (!id.hash.is_empty() && id.hash.len() != 32)
+    {
         return Err(invalid());
     }
     if !id.hash.is_empty() && id.height != 0 {
@@ -331,6 +334,13 @@ mod tests {
         };
         assert!(
             validate_unary_request(ReadMethod::GetBlockRange, &hash_end.encode_to_vec()).is_err()
+        );
+        assert!(
+            validate_unary_request(
+                ReadMethod::GetTreeState,
+                &wire::BlockId::default().encode_to_vec(),
+            )
+            .is_err()
         );
     }
 
