@@ -31,16 +31,18 @@ EXPECTED_ALL_BINARIES = {
     "zrpc", "zrpc-wrapper", "zrpc-node-wrapper", "zrpc-quote-proxy",
     "zrpc-gcp-quote-broker", "zrpc-gcp-guard", "zrpc-gcp-disk-id", "zrpc-gcp-cookie",
     "zrpc-gcp-early-init", "zrpc-gcp-lifecycle", "zrpc-gcp-import-producer",
-    "zrpc-uki-digest", "zrpc-payment-crypto",
+    "zrpc-uki-digest", "zrpc-wallet-reference", "zrpc-payment-crypto",
 }
 EXPECTED_SELECTED = ({("zrpc-cli", "zrpc"),
                       ("zrpc-lifecycle", "zrpc-gcp-lifecycle"),
                       ("zrpc-lifecycle", "zrpc-gcp-import-producer"),
                       ("zrpc-uki-digest", "zrpc-uki-digest"),
+                      ("zrpc-wallet-reference", "zrpc-wallet-reference"),
                       ("zrpc-payment-crypto", "zrpc-payment-crypto")}
                      | {("zrpc-server", name) for name in EXPECTED_ALL_BINARIES
                         if name not in {"zrpc", "zrpc-gcp-lifecycle",
                                         "zrpc-gcp-import-producer", "zrpc-uki-digest",
+                                        "zrpc-wallet-reference",
                                         "zrpc-payment-crypto"}})
 
 
