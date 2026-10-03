@@ -29,6 +29,7 @@ pub struct EnhancementReport {
     pub status_checks: u64,
     pub mined_transparent_checks: u64,
     pub unresolved_transparent_history: u64,
+    pub remaining_requests: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,6 +242,7 @@ pub async fn process_snapshot(
         wallet.set_transaction_status(txid, state.wallet_status())?;
         report.status_checks += 1;
     }
+    report.remaining_requests = wallet.transaction_data_requests()?.len();
     Ok(report)
 }
 
