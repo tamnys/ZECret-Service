@@ -73,7 +73,9 @@ enum BlockSpec {
 
 fn block_spec(request: &WalletReadRequest) -> Option<BlockSpec> {
     let selected = match request {
-        WalletReadRequest::Block(value) | WalletReadRequest::BlockNullifiers(value) => value,
+        WalletReadRequest::Block(value)
+        | WalletReadRequest::BlockNullifiers(value)
+        | WalletReadRequest::TreeState(value) => value,
         _ => return None,
     };
     if selected.hash.is_empty() {
@@ -87,6 +89,26 @@ fn selected_block_matches(spec: BlockSpec, block: &wire::CompactBlock) -> bool {
     match spec {
         BlockSpec::Height(height) => block.height == u64::from(height),
         BlockSpec::Hash(hash) => block.hash.as_slice() == hash,
+    }
+}
+
+fn valid_tree_state(tree: &wire::TreeState) -> bool {
+    tree.network == "test"
+        && tree.height <= u64::from(u32::MAX)
+        && tree.hash.len() == 64
+        && tree.hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn selected_tree_state_matches(spec: BlockSpec, tree: &wire::TreeState) -> bool {
+    if !valid_tree_state(tree) {
+        return false;
+    }
+    match spec {
+        BlockSpec::Height(height) => tree.height == u64::from(height),
+        BlockSpec::Hash(hash) => hex::decode(&tree.hash).is_ok_and(|mut display| {
+            display.reverse();
+            display.as_slice() == hash
+        }),
     }
 }
 
@@ -280,8 +302,19 @@ where
         WalletReadResult::TaddressBalanceStream(item) => emit!(TaddressBalanceStream, item),
         WalletReadResult::MempoolTx(mut value) => stream!(value, MempoolTx),
         WalletReadResult::MempoolStream(mut value) => stream!(value, MempoolStream),
-        WalletReadResult::TreeState(item) => emit!(TreeState, item),
-        WalletReadResult::LatestTreeState(item) => emit!(LatestTreeState, item),
+        WalletReadResult::TreeState(item) => {
+            if !selected_block.is_some_and(|selected| selected_tree_state_matches(selected, &item))
+            {
+                return Err(invalid_chain());
+            }
+            emit!(TreeState, item)
+        }
+        WalletReadResult::LatestTreeState(item) => {
+            if !valid_tree_state(&item) {
+                return Err(invalid_chain());
+            }
+            emit!(LatestTreeState, item)
+        }
         WalletReadResult::SubtreeRoots(mut value) => stream!(value, SubtreeRoots),
         WalletReadResult::AddressUtxos(item) => emit!(AddressUtxos, item),
         WalletReadResult::AddressUtxosStream(mut value) => {
@@ -342,5 +375,29 @@ mod tests {
             ..block
         };
         assert!(!selected_block_matches(by_hash, &wrong_hash));
+    }
+
+    #[test]
+    fn tree_state_context_uses_display_to_internal_hash_order() {
+        let internal: Vec<u8> = (0..32).collect();
+        let display: Vec<u8> = internal.iter().rev().copied().collect();
+        let tree = wire::TreeState {
+            network: "test".into(),
+            height: 42,
+            hash: hex::encode(display),
+            ..Default::default()
+        };
+        let selected = block_spec(&WalletReadRequest::TreeState(wire::BlockId {
+            height: 0,
+            hash: internal.clone(),
+        }))
+        .unwrap();
+        assert!(selected_tree_state_matches(selected, &tree));
+        let mut wrong = internal;
+        wrong[0] ^= 1;
+        let wrong_selector = BlockSpec::Hash(wrong.try_into().unwrap());
+        assert!(!selected_tree_state_matches(wrong_selector, &tree));
+        assert!(selected_tree_state_matches(BlockSpec::Height(42), &tree));
+        assert!(!selected_tree_state_matches(BlockSpec::Height(43), &tree));
     }
 }
