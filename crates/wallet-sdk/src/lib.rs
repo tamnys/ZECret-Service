@@ -65,6 +65,31 @@ struct RangeSpec {
     end: u32,
 }
 
+#[derive(Clone, Copy)]
+enum BlockSpec {
+    Height(u32),
+    Hash([u8; 32]),
+}
+
+fn block_spec(request: &WalletReadRequest) -> Option<BlockSpec> {
+    let selected = match request {
+        WalletReadRequest::Block(value) | WalletReadRequest::BlockNullifiers(value) => value,
+        _ => return None,
+    };
+    if selected.hash.is_empty() {
+        Some(BlockSpec::Height(u32::try_from(selected.height).ok()?))
+    } else {
+        Some(BlockSpec::Hash(selected.hash.as_slice().try_into().ok()?))
+    }
+}
+
+fn selected_block_matches(spec: BlockSpec, block: &wire::CompactBlock) -> bool {
+    match spec {
+        BlockSpec::Height(height) => block.height == u64::from(height),
+        BlockSpec::Hash(hash) => block.hash.as_slice() == hash,
+    }
+}
+
 fn range_spec(request: &WalletReadRequest) -> Option<RangeSpec> {
     let range = match request {
         WalletReadRequest::BlockRange(value) | WalletReadRequest::BlockRangeNullifiers(value) => {
@@ -135,12 +160,14 @@ impl WalletReader {
         .await?;
         let method = Mutex::new(None);
         let range = Mutex::new(None);
+        let selected_block = Mutex::new(None);
         let (result, marker) = session
             .read_from_request_async(
                 || async {
                     let request = request().await?;
                     *method.lock().map_err(|_| invalid_chain())? = Some(request.method());
                     *range.lock().map_err(|_| invalid_chain())? = range_spec(&request);
+                    *selected_block.lock().map_err(|_| invalid_chain())? = block_spec(&request);
                     Ok(request)
                 },
                 || {
@@ -171,7 +198,9 @@ impl WalletReader {
             .map_err(|_| invalid_chain())?
             .ok_or_else(invalid_chain)?;
         let range = *range.lock().map_err(|_| invalid_chain())?;
-        let delivered_items = drain_result(result, range, prior_block_hash, &mut sink).await?;
+        let selected_block = *selected_block.lock().map_err(|_| invalid_chain())?;
+        let delivered_items =
+            drain_result(result, range, selected_block, prior_block_hash, &mut sink).await?;
         self.tickets
             .mark_spent(marker)
             .map_err(|_| ticket_error())?;
@@ -186,6 +215,7 @@ impl WalletReader {
 async fn drain_result<S, SFut>(
     result: WalletReadResult,
     range: Option<RangeSpec>,
+    selected_block: Option<BlockSpec>,
     prior_block_hash: Option<[u8; 32]>,
     sink: &mut S,
 ) -> Result<u64, SafeError>
@@ -211,10 +241,16 @@ where
         WalletReadResult::LatestBlock(item) => emit!(LatestBlock, item),
         WalletReadResult::Block(item) => {
             zrpc_wallet_read::validate_compact_block(&item).map_err(|_| invalid_chain())?;
+            if !selected_block.is_some_and(|selected| selected_block_matches(selected, &item)) {
+                return Err(invalid_chain());
+            }
             emit!(Block, item)
         }
         WalletReadResult::BlockNullifiers(item) => {
             zrpc_wallet_read::validate_compact_block(&item).map_err(|_| invalid_chain())?;
+            if !selected_block.is_some_and(|selected| selected_block_matches(selected, &item)) {
+                return Err(invalid_chain());
+            }
             emit!(BlockNullifiers, item)
         }
         WalletReadResult::BlockRange(mut stream) => {
@@ -275,5 +311,36 @@ mod tests {
         let selected = range_spec(&WalletReadRequest::BlockRange(range)).unwrap();
         assert_eq!((selected.start, selected.end), (50, 52));
         assert!(range_spec(&WalletReadRequest::LightdInfo(wire::Empty {})).is_none());
+    }
+
+    #[test]
+    fn single_block_context_rejects_a_substituted_height_or_hash() {
+        let selected = block_spec(&WalletReadRequest::Block(wire::BlockId {
+            height: 42,
+            hash: vec![],
+        }))
+        .unwrap();
+        let block = wire::CompactBlock {
+            height: 42,
+            hash: vec![7; 32],
+            ..Default::default()
+        };
+        assert!(selected_block_matches(selected, &block));
+        let wrong_height = wire::CompactBlock {
+            height: 43,
+            ..block.clone()
+        };
+        assert!(!selected_block_matches(selected, &wrong_height));
+        let by_hash = block_spec(&WalletReadRequest::BlockNullifiers(wire::BlockId {
+            height: 0,
+            hash: vec![7; 32],
+        }))
+        .unwrap();
+        assert!(selected_block_matches(by_hash, &block));
+        let wrong_hash = wire::CompactBlock {
+            hash: vec![8; 32],
+            ..block
+        };
+        assert!(!selected_block_matches(by_hash, &wrong_hash));
     }
 }

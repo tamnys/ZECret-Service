@@ -39,6 +39,19 @@ fn check_block_id(id: &wire::BlockId) -> Result<(), Status> {
     Ok(())
 }
 
+fn check_selected_block(
+    block: &wire::CompactBlock,
+    selected: &wire::BlockId,
+) -> Result<(), Status> {
+    validate_compact_block(block)?;
+    if (!selected.hash.is_empty() && block.hash != selected.hash)
+        || (selected.hash.is_empty() && block.height != selected.height)
+    {
+        return Err(invalid_data());
+    }
+    Ok(())
+}
+
 fn check_raw_transaction(tx: &wire::RawTransaction) -> Result<(), Status> {
     if tx.data.is_empty() || (tx.height != u64::MAX && tx.height > u32::MAX as u64) {
         return Err(invalid_data());
@@ -74,11 +87,17 @@ fn check_subtree(root: &wire::SubtreeRoot) -> Result<(), Status> {
     Ok(())
 }
 
-fn check_utxo(utxo: &wire::GetAddressUtxosReply) -> Result<(), Status> {
+fn check_utxo(
+    utxo: &wire::GetAddressUtxosReply,
+    addresses: &HashSet<String>,
+    start_height: u64,
+) -> Result<(), Status> {
     if utxo.txid.len() != 32
         || utxo.index < 0
         || utxo.value_zat < 0
         || utxo.height > u32::MAX as u64
+        || utxo.height < start_height
+        || !addresses.contains(&utxo.address)
         || validate_client_stream_address(
             &wire::Address {
                 address: utxo.address.clone(),
@@ -92,9 +111,22 @@ fn check_utxo(utxo: &wire::GetAddressUtxosReply) -> Result<(), Status> {
     Ok(())
 }
 
-fn check_utxos(list: &wire::GetAddressUtxosReplyList) -> Result<(), Status> {
+fn check_utxos(
+    list: &wire::GetAddressUtxosReplyList,
+    addresses: &HashSet<String>,
+    start_height: u64,
+    max_entries: u32,
+) -> Result<(), Status> {
+    if max_entries != 0 && list.address_utxos.len() > max_entries as usize {
+        return Err(invalid_data());
+    }
+    let mut previous_height = None;
     for utxo in &list.address_utxos {
-        check_utxo(utxo)?;
+        check_utxo(utxo, addresses, start_height)?;
+        if previous_height.is_some_and(|prior| utxo.height < prior) {
+            return Err(invalid_data());
+        }
+        previous_height = Some(utxo.height);
     }
     Ok(())
 }
@@ -187,13 +219,14 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
     ) -> Result<Response<wire::CompactBlock>, Status> {
         let request = request.into_inner();
         validate_unary_request(ReadMethod::GetBlock, &request.encode_to_vec())?;
+        let selected = request.clone();
         let mut client = self.client().await?;
         let response = client
             .get_block(request)
             .await
             .map_err(sanitize)?
             .into_inner();
-        validate_compact_block(&response)?;
+        check_selected_block(&response, &selected)?;
         Ok(Response::new(response))
     }
     async fn get_block_nullifiers(
@@ -202,13 +235,14 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
     ) -> Result<Response<wire::CompactBlock>, Status> {
         let request = request.into_inner();
         validate_unary_request(ReadMethod::GetBlockNullifiers, &request.encode_to_vec())?;
+        let selected = request.clone();
         let mut client = self.client().await?;
         let response = client
             .get_block_nullifiers(request)
             .await
             .map_err(sanitize)?
             .into_inner();
-        validate_compact_block(&response)?;
+        check_selected_block(&response, &selected)?;
         Ok(Response::new(response))
     }
 
@@ -460,13 +494,16 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
     ) -> Result<Response<wire::GetAddressUtxosReplyList>, Status> {
         let request = request.into_inner();
         validate_unary_request(ReadMethod::GetAddressUtxos, &request.encode_to_vec())?;
+        let addresses = request.addresses.iter().cloned().collect::<HashSet<_>>();
+        let start_height = request.start_height;
+        let max_entries = request.max_entries;
         let mut client = self.client().await?;
         let response = client
             .get_address_utxos(request)
             .await
             .map_err(sanitize)?
             .into_inner();
-        check_utxos(&response)?;
+        check_utxos(&response, &addresses, start_height, max_entries)?;
         Ok(Response::new(response))
     }
     type GetAddressUtxosStreamStream = ReadStream<wire::GetAddressUtxosReply>;
@@ -476,15 +513,28 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
     ) -> Result<Response<Self::GetAddressUtxosStreamStream>, Status> {
         let request = request.into_inner();
         validate_unary_request(ReadMethod::GetAddressUtxosStream, &request.encode_to_vec())?;
+        let addresses = request.addresses.iter().cloned().collect::<HashSet<_>>();
+        let start_height = request.start_height;
+        let max_entries = request.max_entries;
         let mut client = self.client().await?;
         let input = client
             .get_address_utxos_stream(request)
             .await
             .map_err(sanitize)?
             .into_inner();
-        let output = input.map(|item| {
+        let mut previous_height = None;
+        let mut count = 0_u64;
+        let output = input.map(move |item| {
             let value = item.map_err(sanitize)?;
-            check_utxo(&value)?;
+            check_utxo(&value, &addresses, start_height)?;
+            if previous_height.is_some_and(|prior| value.height < prior) {
+                return Err(invalid_data());
+            }
+            previous_height = Some(value.height);
+            count = count.checked_add(1).ok_or_else(invalid_data)?;
+            if max_entries != 0 && count > u64::from(max_entries) {
+                return Err(invalid_data());
+            }
             Ok(value)
         });
         Ok(Response::new(Box::pin(output)))
@@ -518,6 +568,87 @@ impl wire::compact_tx_streamer_server::CompactTxStreamer for ZebraReadOnly {
 mod tests {
     use super::*;
     use wire::compact_tx_streamer_server::CompactTxStreamer;
+    use zrpc_protocol::PREVIEW_TESTNET_ADDRESS;
+
+    #[test]
+    fn selected_block_must_match_height_or_hash() {
+        let block = wire::CompactBlock {
+            height: 42,
+            hash: vec![7; 32],
+            prev_hash: vec![6; 32],
+            chain_metadata: Some(wire::ChainMetadata::default()),
+            ..Default::default()
+        };
+        assert!(
+            check_selected_block(
+                &block,
+                &wire::BlockId {
+                    height: 42,
+                    hash: vec![]
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            check_selected_block(
+                &block,
+                &wire::BlockId {
+                    height: 41,
+                    hash: vec![]
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            check_selected_block(
+                &block,
+                &wire::BlockId {
+                    height: 0,
+                    hash: vec![7; 32]
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            check_selected_block(
+                &block,
+                &wire::BlockId {
+                    height: 0,
+                    hash: vec![8; 32]
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn utxo_set_must_match_requested_addresses_heights_order_and_count() {
+        let addresses = HashSet::from([PREVIEW_TESTNET_ADDRESS.to_owned()]);
+        let mut first = wire::GetAddressUtxosReply {
+            address: PREVIEW_TESTNET_ADDRESS.to_owned(),
+            txid: vec![1; 32],
+            index: 0,
+            script: vec![],
+            value_zat: 10,
+            height: 100,
+        };
+        let second = wire::GetAddressUtxosReply {
+            height: 101,
+            ..first.clone()
+        };
+        let list = wire::GetAddressUtxosReplyList {
+            address_utxos: vec![first.clone(), second],
+        };
+        assert!(check_utxos(&list, &addresses, 100, 0).is_ok());
+        assert!(check_utxos(&list, &addresses, 100, 1).is_err());
+        assert!(check_utxos(&list, &addresses, 101, 0).is_err());
+        let reversed = wire::GetAddressUtxosReplyList {
+            address_utxos: list.address_utxos.iter().cloned().rev().collect(),
+        };
+        assert!(check_utxos(&reversed, &addresses, 100, 0).is_err());
+        first.address = "t1Yzt1YSjHd8gdn6zaraWSpnbK7Sx9eWZ4u".into();
+        assert!(check_utxo(&first, &addresses, 100).is_err());
+    }
 
     #[test]
     fn backend_requires_numeric_loopback() {
