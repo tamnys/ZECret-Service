@@ -127,7 +127,7 @@ The protocol accepts these read-only methods:
 | `getrawtransaction` | Read a transaction by its ID. |
 | `getaddressbalance` | Read one validated testnet transparent address balance in the Phala-trusting profile. |
 
-Wallet operations, transaction submission, batch requests, and arbitrary upstream URLs are rejected. The local demo returns fixtures; the approved Phala-trusting profile uses the live testnet service.
+The JSON-RPC interface rejects wallet operations, transaction submission, batch requests, and arbitrary upstream URLs. A separate [local wallet reader](docs/wallet-read.md) exposes pinned read-only lightwallet methods through an authenticated loopback bridge when a wallet-capable Phala release is approved. The local demo returns fixtures; the approved Phala-trusting profile uses the live testnet service.
 
 Chain status and confirmed address balances include
 `chain_context: {"height": ..., "hash": ...}`. This identifies the node state
