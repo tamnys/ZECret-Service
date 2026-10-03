@@ -77,6 +77,7 @@ pub enum ErrorCode {
     InvalidParameters,
     ResponseTooLarge,
     NodeUnavailable,
+    WalletTransactionNotFound,
     BackendBusy,
     BackendTimeout,
     InvalidBackendResponse,

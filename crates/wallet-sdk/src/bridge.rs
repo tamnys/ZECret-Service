@@ -64,6 +64,7 @@ fn status(error: SafeError) -> Status {
         ErrorCode::BackendTimeout | ErrorCode::StaleNonce => {
             Status::deadline_exceeded("Wallet read timed out.")
         }
+        ErrorCode::WalletTransactionNotFound => Status::not_found("Wallet transaction not found."),
         _ => Status::unavailable("Verified wallet read unavailable."),
     }
 }
@@ -589,6 +590,19 @@ impl CompactTxStreamer for WalletBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_absence_is_distinct_from_node_unavailability() {
+        assert_eq!(
+            status(SafeError::new(
+                ErrorCode::WalletTransactionNotFound,
+                "synthetic private detail",
+            ))
+            .code(),
+            tonic::Code::NotFound,
+        );
+        assert_eq!(status(unavailable()).code(), tonic::Code::Unavailable);
+    }
     use prost::Message;
 
     #[test]
