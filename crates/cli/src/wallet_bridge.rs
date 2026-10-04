@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
 };
@@ -11,9 +11,12 @@ use tokio::net::TcpListener;
 use zrpc_payments::PrivateDirectory;
 use zrpc_wallet_sdk::{WalletReader, bridge::WalletBridge};
 
-use super::{exhausted, payments::QueryTicketConfig, phala_trusted_inputs, print_json, required};
+use super::{
+    exhausted, payments::QueryTicketConfig, phala_trusted_inputs, print_json, required, take_flag,
+};
 
 pub(super) async fn run(mut args: Vec<String>) -> Result<(), String> {
+    let show_dashboard = take_flag(&mut args, "--dashboard");
     if required(&mut args, "--privacy-profile")? != "phala-trusted" {
         return Err("wallet bridge requires the explicit phala-trusted profile".into());
     }
@@ -44,6 +47,18 @@ pub(super) async fn run(mut args: Vec<String>) -> Result<(), String> {
     );
     let (bridge, capability) =
         WalletBridge::new(reader).map_err(|_| "wallet bridge unavailable")?;
+    let dashboard = if show_dashboard {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|_| "wallet dashboard loopback bind unavailable")?;
+        let address = listener
+            .local_addr()
+            .map_err(|_| "wallet dashboard address unavailable")?;
+        let session = zrpc_cli::LocalSession::new_wallet_bridge(address, bridge.clone())?;
+        Some((listener, session))
+    } else {
+        None
+    };
     PrivateDirectory::create(&capability_dir)
         .map_err(|_| "new private capability directory required")?;
     let capability_path = capability_dir.join("capability");
@@ -64,6 +79,25 @@ pub(super) async fn run(mut args: Vec<String>) -> Result<(), String> {
         return Err(error.into());
     }
     drop(capability);
+    if let Some((_, session)) = dashboard.as_ref() {
+        let delivered = (|| {
+            let url = session.bootstrap_url()?;
+            let mut tty = OpenOptions::new()
+                .write(true)
+                .open("/dev/tty")
+                .map_err(|_| "interactive terminal required for wallet dashboard")?;
+            writeln!(
+                tty,
+                "Open this one-time local wallet status link privately:\n{url}"
+            )
+            .map_err(|_| "wallet dashboard terminal unavailable")
+        })();
+        if let Err(error) = delivered {
+            let _ = fs::remove_file(&capability_path);
+            let _ = fs::remove_dir(&capability_dir);
+            return Err(error.into());
+        }
+    }
     let address = listener
         .local_addr()
         .map_err(|_| "wallet bridge address unavailable")?;
@@ -80,20 +114,31 @@ pub(super) async fn run(mut args: Vec<String>) -> Result<(), String> {
         let _ = fs::remove_dir(&capability_dir);
         return Err(error);
     }
-    let result = bridge
-        .serve_on(listener, async {
-            let mut terminate =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-            if let Some(signal) = terminate.as_mut() {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {},
-                    _ = signal.recv() => {},
-                }
-            } else {
-                let _ = tokio::signal::ctrl_c().await;
+    let shutdown = async {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        if let Some(signal) = terminate.as_mut() {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = signal.recv() => {},
             }
-        })
-        .await;
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    };
+    let result = if let Some((dashboard_listener, dashboard_session)) = dashboard {
+        tokio::select! {
+            result = bridge.serve_on(listener, shutdown) => result,
+            _ = axum::serve(dashboard_listener, zrpc_cli::dashboard(dashboard_session)) => {
+                Err(zrpc_protocol::SafeError::new(
+                    zrpc_protocol::ErrorCode::NodeUnavailable,
+                    "Local wallet dashboard stopped.",
+                ))
+            }
+        }
+    } else {
+        bridge.serve_on(listener, shutdown).await
+    };
     let removed = fs::remove_file(&capability_path).is_ok();
     let _ = fs::remove_dir(&capability_dir);
     if !removed {

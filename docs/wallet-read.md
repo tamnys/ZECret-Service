@@ -47,6 +47,8 @@ The [live Phala query guide](../README.md#live-phala-testnet-queries) describes 
 
 The bridge binds only to loopback and creates a per-run capability file inside `ZRPC_CAPABILITY_DIR`. Keep that directory private and remove it only after the bridge exits. Wallet clients must add the capability as `x-zrpc-capability` gRPC metadata. `zrpc_wallet_sdk::bridge::LocalWalletAdapter` reads the private file and supplies that metadata for both this repository's protobuf client and the maintained `zcash_client_backend` client. Unmodified wallets without a local authentication hook cannot connect. Browser-origin requests and public gRPC reflection are rejected.
 
+Add `--dashboard` to the bridge command to open an optional, separate loopback status page. The bridge prints its one-time local link only to the operator's terminal. The page shows whether a wallet read is in progress and the outcome of the last upstream read; it cannot send wallet RPCs or inspect wallet keys or balances. A past completed read does not mean a verified connection is still open. Node synchronization and wallet scan progress are not available from this bridge status page. The wallet application's own scan report is authoritative for its local progress.
+
 ## Reference wallet
 
 Set `ZRPC_WALLET_DIR` to a new private directory, `ZRPC_UFVK_FILE` to an owner-private regular file containing a **testnet unified full viewing key**, `ZRPC_BIRTHDAY_HEIGHT` to the wallet's restoration birthday, and `ZRPC_CACHE_DIR` to an existing owner-private cache directory. The reference reader reads the viewing key locally and never gives it to the bridge. Use a batch size chosen for your device's measured memory capacity; the CLI has no implicit batch size.

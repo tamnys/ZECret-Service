@@ -6,14 +6,21 @@ type Verification = {
   release_approval?: string; release?: string;
 };
 type BlockRef = {height:number;hash:string};
+type WalletBridgeReport = {
+  connection:string;last_read:string;last_read_verification:string;
+  last_ticket_spent:boolean|null;
+  node_sync:string;wallet_scan:string;
+};
 type Report = {
   chain_context?: BlockRef | null;
-  mode?: string; platform?: string; simulation: boolean; private_accepted: boolean;
+  mode?: string; platform?: string; simulation: boolean; private_accepted?: boolean;
   phala_trusted_authorized?: boolean;
-  query_sent: boolean | string; public_query_sent?: boolean | string; fixture_dispatched?: boolean;
+  query_sent?: boolean | string; browser_wallet_rpc_sent?: boolean;
+  privacy_profile?: string; public_query_sent?: boolean | string; fixture_dispatched?: boolean;
   verification?: Verification; chain_readiness?: unknown;
   error?: unknown; result?: unknown; privacy_verification?: string;
   default_address?: string;
+  wallet_bridge?: WalletBridgeReport;
   report?: {public_preview_passed:boolean;workload_identity_verified:boolean;
     public_query_sent:boolean|null;query_error?:unknown;
     inspection:{hardware_evidence?:{hardware_authenticity?:string;security_policy?:string};
@@ -31,7 +38,7 @@ const run = byId<HTMLButtonElement>('run');
 const session = byId('session');
 const methodSelect = byId<HTMLSelectElement>('method');
 let capability = '';
-let mode: 'simulation' | 'live_unverified' | 'live_testnet_preview' | 'phala_trusted_unverified' = 'simulation';
+let mode: 'simulation' | 'live_unverified' | 'live_testnet_preview' | 'phala_trusted_unverified' | 'wallet_bridge_status' = 'simulation';
 let bootstrap = location.hash.slice(1);
 history.replaceState(null, '', location.pathname);
 
@@ -67,6 +74,39 @@ function renderEvidence(verification?: Verification): void {
 }
 function show(report: Report, elapsed: number): void {
   byId('result').textContent = JSON.stringify(report, null, 2);
+  if (mode === 'wallet_bridge_status') {
+    const bridge = report.wallet_bridge;
+    if (report.mode !== mode || report.simulation !== false ||
+        report.privacy_profile !== 'phala_trusted' ||
+        report.browser_wallet_rpc_sent !== false || !bridge) {
+      throw new Error('Local wallet status is inconsistent. Restart the bridge.');
+    }
+    byId('block-context').hidden = true;
+    byId('sent').textContent = 'No';
+    byId('chain').textContent = 'Not reported';
+    byId('result-label').textContent = bridge.connection === 'verifying_or_reading'
+      ? 'READ IN PROGRESS' : bridge.last_read === 'upstream_read_completed'
+        ? 'LAST UPSTREAM READ COMPLETE' : bridge.last_read === 'unavailable_or_interrupted'
+          ? 'LAST READ UNAVAILABLE' : 'NO WALLET READ YET';
+    const values: [string,string][] = [
+      ['Current connection', bridge.connection.replaceAll('_',' ')],
+      ['Last upstream read', bridge.last_read.replaceAll('_',' ')],
+      ['Last read verification', bridge.last_read_verification.replaceAll('_',' ')],
+      ['Last read ticket', bridge.last_ticket_spent === true ? 'spent' : 'unknown'],
+      ['Wallet scan progress', 'not reported by bridge'],
+      ['Node synchronization', 'not reported by bridge']
+    ];
+    const evidence = byId('evidence');
+    evidence.replaceChildren();
+    for (const [label, value] of values) {
+      const row = document.createElement('div');
+      const name = document.createElement('dt'); name.textContent = label;
+      const state = document.createElement('dd'); state.textContent = value;
+      row.append(name, state); evidence.append(row);
+    }
+    byId('latency').textContent = `${elapsed.toFixed(1)} ms`;
+    return;
+  }
   const context = report.report?.preview?.balance_chain_context ?? report.chain_context
     ?? (report.simulation ? (report.result as {chain_context?:BlockRef} | null)?.chain_context : null);
   byId('block-context').hidden = !context;
@@ -164,11 +204,15 @@ run.addEventListener('click', async () => {
   byId('block-hash').textContent = '';
   const started = performance.now();
   try {
-    const report = mode === 'live_testnet_preview'
+    const report = mode === 'wallet_bridge_status'
+      ? await api('/api/status')
+      : mode === 'live_testnet_preview'
       ? await api(`/api/preview?address=${encodeURIComponent(byId<HTMLInputElement>('preview-address').value.trim())}`)
       : await api('/api/query', requestForMethod(), mode === 'simulation' ? byId<HTMLSelectElement>('scenario').value : undefined);
     show(report as Report, performance.now()-started);
-    session.textContent = mode === 'simulation' ? 'Local session ready. Simulation fixtures stay on this device.'
+    session.textContent = mode === 'wallet_bridge_status'
+      ? 'Local wallet status refreshed. Browser requests cannot start wallet reads.'
+      : mode === 'simulation' ? 'Local session ready. Simulation fixtures stay on this device.'
       : mode === 'live_testnet_preview' ? (report as Report).report?.preview
         ? 'Public testnet reads completed. Workload identity and private approval remain unverified.'
         : 'Preview stopped before public testnet results were available.'
@@ -187,7 +231,42 @@ async function start(): Promise<void> {
     capability = result.capability;
     mode = result.mode;
     bootstrap = '';
-    if (mode === 'live_testnet_preview') {
+    if (mode === 'wallet_bridge_status') {
+      const headerTag = document.querySelector('header .tag');
+      if (headerTag) headerTag.textContent = 'LOCAL WALLET STATUS';
+      const eyebrow = document.querySelector('.eyebrow');
+      if (eyebrow) eyebrow.textContent = 'ZCASH TESTNET · LOCAL READER';
+      const title = document.querySelector('h1');
+      if (title) {
+        const secondLine = document.createElement('span');
+        secondLine.textContent = 'Keep wallet state local.';
+        title.replaceChildren('Observe the bridge.', document.createElement('br'), secondLine);
+      }
+      const intro = document.querySelector('.intro');
+      if (intro) intro.textContent = 'See local bridge activity without sending a wallet request from the browser. Wallet synchronization runs in native software on your device.';
+      const evidenceTag = document.querySelector('.layout .panel:not(.controls) .section-top .tag');
+      if (evidenceTag) evidenceTag.textContent = 'STATUS ONLY';
+      byId('mode-label').textContent = 'WALLET BRIDGE · LOCAL STATUS';
+      byId('mode-description').textContent = 'The wallet bridge uses the Phala-trusting profile. Each wallet RPC still needs Tor, an approved release, a fresh TDX quote and the live TLS key binding. This page shows local bridge activity only; it cannot send wallet requests or read wallet state.';
+      const heading = document.querySelector('.controls h2');
+      if (heading) heading.textContent = 'Observe the bridge';
+      byId('method-label').hidden = true;
+      methodSelect.hidden = true;
+      byId('live-params').hidden = true;
+      byId('preview-fixture').hidden = true;
+      byId('scenario-label').hidden = true;
+      byId('scenario').hidden = true;
+      run.firstChild!.textContent = 'Refresh local status ';
+      byId('sent').previousElementSibling!.textContent = 'Wallet RPCs from browser';
+      byId('chain').previousElementSibling!.textContent = 'Node synchronization';
+      byId('release-note').textContent = 'A completed upstream read is historical. It does not prove a current verified connection or wallet synchronization.';
+      byId('gate-note').textContent = 'The authenticated local gRPC bridge is for native wallet software. A past successful read cannot authorize a new request. Wallet scanning progress and wallet state remain on the wallet device.';
+      const asideTitle = document.querySelector('.aside strong');
+      if (asideTitle) asideTitle.textContent = 'Local wallet status only.';
+      const started = performance.now();
+      show(await api('/api/status') as Report, performance.now()-started);
+      session.textContent = 'Local wallet status ready. Browser requests cannot start wallet reads.';
+    } else if (mode === 'live_testnet_preview') {
       document.querySelector('.notice')?.classList.add('preview');
       byId('mode-label').textContent = 'LIVE TESTNET PREVIEW';
       byId('mode-description').textContent = 'The native client checks a live Intel TDX quote, current collateral, a fresh challenge, and the TLS key before public testnet reads on the retained Tor connection. Workload identity and private approval remain unverified.';
