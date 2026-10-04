@@ -203,7 +203,6 @@ async fn process_mined_transparent_history(
         })
         .await?
         .into_inner();
-    let mut had_transactions = false;
     let mut previous_height = None;
     // Keep the untrusted stream out of the wallet database until the complete
     // range and its chain anchor have been checked. O_TMPFILE creates an
@@ -224,7 +223,6 @@ async fn process_mined_transparent_history(
         staged_count = staged_count
             .checked_add(1)
             .ok_or("transparent history transaction count overflow")?;
-        had_transactions = true;
         previous_height = Some(height);
     }
     // The stream reaching EOF does not prove the chain stayed on the same
@@ -271,10 +269,12 @@ async fn process_mined_transparent_history(
         if stage.stream_position()? != stage.metadata()?.len() {
             return Err("staged transparent history has trailing data".into());
         }
-        // The pinned backend does not delimit the initial mempool snapshot.
-        // For All + Unspent, the mined range is useful for discovery, but
-        // absence of a pending transaction remains unproven.
-        if !had_transactions && kind == MinedHistoryKind::Complete {
+        // The finite Mined + All range is complete even when it contains
+        // transactions. Record that fact after importing the whole validated
+        // stream. All + Unspent also asks about pending transactions, but the
+        // pinned backend has no initial mempool-snapshot marker, so it cannot
+        // authorize this notification.
+        if kind == MinedHistoryKind::Complete {
             wdb.notify_address_checked(request, end)?;
         }
         Ok(())
