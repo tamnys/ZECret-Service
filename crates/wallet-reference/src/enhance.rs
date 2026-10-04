@@ -10,13 +10,14 @@ use zcash_client_backend::{
         OutputStatusFilter, TransactionDataRequest, TransactionStatus, TransactionStatusFilter,
         TransactionsInvolvingAddress, WalletRead, WalletWrite,
     },
-    proto::service::{
-        BlockId, BlockRange, RawTransaction, TransparentAddressBlockFilter, TxFilter,
+    proto::{
+        compact_formats::CompactBlock,
+        service::{BlockId, BlockRange, RawTransaction, TransparentAddressBlockFilter, TxFilter},
     },
 };
 use zcash_client_sqlite::{WalletDb, util::SystemClock};
 use zcash_keys::encoding::encode_transparent_address_p;
-use zcash_primitives::transaction::Transaction;
+use zcash_primitives::{block::BlockHash, transaction::Transaction};
 use zcash_protocol::{
     TxId,
     consensus::{BlockHeight, BranchId, Network},
@@ -106,18 +107,27 @@ pub(crate) fn decode_pending_transaction(
 fn mined_history_bounds(
     start: BlockHeight,
     end_exclusive: Option<BlockHeight>,
+    scanned_tip: BlockHeight,
     tx_status: &TransactionStatusFilter,
     output_status: &OutputStatusFilter,
 ) -> Option<(BlockHeight, BlockHeight)> {
     if tx_status != &TransactionStatusFilter::Mined || output_status != &OutputStatusFilter::All {
         return None;
     }
-    let end_exclusive = end_exclusive?;
-    let end_inclusive = u32::from(end_exclusive).checked_sub(1)?;
+    // An open-ended wallet request is bounded by the locally scanned tip. It
+    // must not silently extend into blocks the wallet has not validated yet.
+    let end_inclusive = match end_exclusive {
+        Some(end) => u32::from(end).checked_sub(1)?,
+        None => u32::from(scanned_tip),
+    };
     if u32::from(start) > end_inclusive {
         return None;
     }
     Some((start, BlockHeight::from_u32(end_inclusive)))
+}
+
+fn matches_scanned_anchor(block: &CompactBlock, height: BlockHeight, hash: &BlockHash) -> bool {
+    block.height == u64::from(u32::from(height)) && block.hash.as_slice() == hash.0
 }
 
 async fn process_mined_transparent_history(
@@ -125,17 +135,18 @@ async fn process_mined_transparent_history(
     wallet: &mut LocalWallet,
     request: TransactionsInvolvingAddress,
 ) -> Result<bool, Box<dyn Error>> {
+    let tip = wallet
+        .chain_height()?
+        .ok_or("wallet chain tip unavailable")?;
     let Some((start, end)) = mined_history_bounds(
         request.block_range_start(),
         request.block_range_end(),
+        tip,
         request.tx_status_filter(),
         request.output_status_filter(),
     ) else {
         return Ok(false);
     };
-    let tip = wallet
-        .chain_height()?
-        .ok_or("wallet chain tip unavailable")?;
     if end > tip {
         return Err("transparent history extends beyond the scanned wallet tip".into());
     }
@@ -147,8 +158,11 @@ async fn process_mined_transparent_history(
         .get_block(anchor_selector.clone())
         .await?
         .into_inner();
-    if before.height != anchor_selector.height || before.hash.len() != 32 {
-        return Err("invalid transparent history anchor".into());
+    let scanned_hash = wallet
+        .get_block_hash(end)?
+        .ok_or("transparent history anchor is not in the scanned wallet")?;
+    if !matches_scanned_anchor(&before, end, &scanned_hash) {
+        return Err("transparent history anchor differs from the scanned wallet".into());
     }
     let mut stream = client
         .get_taddress_transactions(TransparentAddressBlockFilter {
@@ -329,6 +343,7 @@ mod tests {
             mined_history_bounds(
                 start,
                 end_exclusive,
+                BlockHeight::from_u32(102),
                 &TransactionStatusFilter::Mined,
                 &OutputStatusFilter::All,
             ),
@@ -338,6 +353,7 @@ mod tests {
             mined_history_bounds(
                 start,
                 Some(start),
+                BlockHeight::from_u32(102),
                 &TransactionStatusFilter::Mined,
                 &OutputStatusFilter::All,
             )
@@ -347,6 +363,7 @@ mod tests {
             mined_history_bounds(
                 start,
                 end_exclusive,
+                BlockHeight::from_u32(102),
                 &TransactionStatusFilter::All,
                 &OutputStatusFilter::All,
             )
@@ -356,10 +373,53 @@ mod tests {
             mined_history_bounds(
                 start,
                 end_exclusive,
+                BlockHeight::from_u32(102),
                 &TransactionStatusFilter::Mined,
                 &OutputStatusFilter::Unspent,
             )
             .is_none()
         );
+        assert_eq!(
+            mined_history_bounds(
+                start,
+                None,
+                BlockHeight::from_u32(102),
+                &TransactionStatusFilter::Mined,
+                &OutputStatusFilter::All,
+            ),
+            Some((start, BlockHeight::from_u32(102)))
+        );
+        assert!(
+            mined_history_bounds(
+                BlockHeight::from_u32(103),
+                None,
+                BlockHeight::from_u32(102),
+                &TransactionStatusFilter::Mined,
+                &OutputStatusFilter::All,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn transparent_history_anchor_uses_the_locally_scanned_hash() {
+        let hash: [u8; 32] = std::array::from_fn(|index| index as u8);
+        let height = BlockHeight::from_u32(102);
+        let block = CompactBlock {
+            height: 102,
+            hash: hash.to_vec(),
+            ..Default::default()
+        };
+        assert!(matches_scanned_anchor(&block, height, &BlockHash(hash)));
+        assert!(!matches_scanned_anchor(
+            &block,
+            height,
+            &BlockHash(hash.map(|value| 31 - value)),
+        ));
+        assert!(!matches_scanned_anchor(
+            &block,
+            BlockHeight::from_u32(103),
+            &BlockHash(hash),
+        ));
     }
 }
