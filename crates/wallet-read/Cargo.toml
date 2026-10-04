@@ -15,4 +15,6 @@ hex.workspace = true
 zrpc-protocol = { path = "../protocol" }
 
 [build-dependencies]
+prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 tonic-prost-build.workspace = true
