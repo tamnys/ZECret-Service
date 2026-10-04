@@ -46,6 +46,12 @@ enum ChainTxState {
     Orphaned,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MinedHistoryKind {
+    Complete,
+    PendingUnresolved,
+}
+
 impl ChainTxState {
     fn from_wire_height(height: u64) -> Result<Self, &'static str> {
         match height {
@@ -116,10 +122,14 @@ fn mined_history_bounds(
     scanned_tip: BlockHeight,
     tx_status: &TransactionStatusFilter,
     output_status: &OutputStatusFilter,
-) -> Option<(BlockHeight, BlockHeight)> {
-    if tx_status != &TransactionStatusFilter::Mined || output_status != &OutputStatusFilter::All {
-        return None;
-    }
+) -> Option<(BlockHeight, BlockHeight, MinedHistoryKind)> {
+    let kind = match (tx_status, output_status) {
+        (TransactionStatusFilter::Mined, OutputStatusFilter::All) => MinedHistoryKind::Complete,
+        (TransactionStatusFilter::All, OutputStatusFilter::Unspent) => {
+            MinedHistoryKind::PendingUnresolved
+        }
+        _ => return None,
+    };
     // An open-ended wallet request is bounded by the locally scanned tip. It
     // must not silently extend into blocks the wallet has not validated yet.
     let end_inclusive = match end_exclusive {
@@ -129,7 +139,7 @@ fn mined_history_bounds(
     if u32::from(start) > end_inclusive {
         return None;
     }
-    Some((start, BlockHeight::from_u32(end_inclusive)))
+    Some((start, BlockHeight::from_u32(end_inclusive), kind))
 }
 
 fn matches_scanned_anchor(block: &CompactBlock, height: BlockHeight, hash: &BlockHash) -> bool {
@@ -153,7 +163,7 @@ async fn process_mined_transparent_history(
     let tip = wallet
         .chain_height()?
         .ok_or("wallet chain tip unavailable")?;
-    let Some((start, end)) = mined_history_bounds(
+    let Some((start, end, kind)) = mined_history_bounds(
         request.block_range_start(),
         request.block_range_end(),
         tip,
@@ -261,12 +271,15 @@ async fn process_mined_transparent_history(
         if stage.stream_position()? != stage.metadata()?.len() {
             return Err("staged transparent history has trailing data".into());
         }
-        if !had_transactions {
+        // The pinned backend does not delimit the initial mempool snapshot.
+        // For All + Unspent, the mined range is useful for discovery, but
+        // absence of a pending transaction remains unproven.
+        if !had_transactions && kind == MinedHistoryKind::Complete {
             wdb.notify_address_checked(request, end)?;
         }
         Ok(())
     })?;
-    Ok(true)
+    Ok(kind == MinedHistoryKind::Complete)
 }
 
 pub async fn process_snapshot(
@@ -423,7 +436,11 @@ mod tests {
                 &TransactionStatusFilter::Mined,
                 &OutputStatusFilter::All,
             ),
-            Some((start, BlockHeight::from_u32(102)))
+            Some((
+                start,
+                BlockHeight::from_u32(102),
+                MinedHistoryKind::Complete
+            ))
         );
         assert!(
             mined_history_bounds(
@@ -445,6 +462,20 @@ mod tests {
             )
             .is_none()
         );
+        assert_eq!(
+            mined_history_bounds(
+                start,
+                end_exclusive,
+                BlockHeight::from_u32(102),
+                &TransactionStatusFilter::All,
+                &OutputStatusFilter::Unspent,
+            ),
+            Some((
+                start,
+                BlockHeight::from_u32(102),
+                MinedHistoryKind::PendingUnresolved
+            ))
+        );
         assert!(
             mined_history_bounds(
                 start,
@@ -463,7 +494,11 @@ mod tests {
                 &TransactionStatusFilter::Mined,
                 &OutputStatusFilter::All,
             ),
-            Some((start, BlockHeight::from_u32(102)))
+            Some((
+                start,
+                BlockHeight::from_u32(102),
+                MinedHistoryKind::Complete
+            ))
         );
         assert!(
             mined_history_bounds(
