@@ -3,7 +3,13 @@
 //! remain explicit in the report until their full protocol contract is met.
 
 use rusqlite::Connection;
-use std::error::Error;
+use std::{
+    error::Error,
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::Path,
+};
 use zcash_client_backend::{
     data_api::wallet::decrypt_and_store_transaction,
     data_api::{
@@ -130,10 +136,19 @@ fn matches_scanned_anchor(block: &CompactBlock, height: BlockHeight, hash: &Bloc
     block.height == u64::from(u32::from(height)) && block.hash.as_slice() == hash.0
 }
 
+fn open_history_stage(stage_dir: &Path) -> Result<File, std::io::Error> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_TMPFILE)
+        .open(stage_dir)
+}
+
 async fn process_mined_transparent_history(
     client: &mut MaintainedScannerClient,
     wallet: &mut LocalWallet,
     request: TransactionsInvolvingAddress,
+    stage_dir: &Path,
 ) -> Result<bool, Box<dyn Error>> {
     let tip = wallet
         .chain_height()?
@@ -180,6 +195,11 @@ async fn process_mined_transparent_history(
         .into_inner();
     let mut had_transactions = false;
     let mut previous_height = None;
+    // Keep the untrusted stream out of the wallet database until the complete
+    // range and its chain anchor have been checked. O_TMPFILE creates an
+    // unnamed file on the wallet's own filesystem; failure is fail-closed.
+    let mut stage = open_history_stage(stage_dir)?;
+    let mut staged_count = 0_u64;
     while let Some(raw) = stream.message().await? {
         let ChainTxState::Mined(height) = ChainTxState::from_wire_height(raw.height)? else {
             return Err("transparent history contained a non-main-chain transaction".into());
@@ -187,8 +207,13 @@ async fn process_mined_transparent_history(
         if height < start || height > end || previous_height.is_some_and(|prior| height < prior) {
             return Err("transparent history violated the requested block order".into());
         }
-        let transaction = decode_transaction(&raw, height)?;
-        decrypt_and_store_transaction(&Network::TestNetwork, wallet, &transaction, Some(height))?;
+        decode_transaction(&raw, height)?;
+        stage.write_all(&raw.height.to_le_bytes())?;
+        stage.write_all(&u64::try_from(raw.data.len())?.to_le_bytes())?;
+        stage.write_all(&raw.data)?;
+        staged_count = staged_count
+            .checked_add(1)
+            .ok_or("transparent history transaction count overflow")?;
         had_transactions = true;
         previous_height = Some(height);
     }
@@ -200,15 +225,54 @@ async fn process_mined_transparent_history(
     if after.height != before.height || after.hash != before.hash {
         return Err("transparent history changed during retrieval".into());
     }
-    if !had_transactions {
-        wallet.notify_address_checked(request, end)?;
-    }
+    stage.seek(SeekFrom::Start(0))?;
+    wallet.transactionally(|wdb| -> Result<(), Box<dyn Error>> {
+        for _ in 0..staged_count {
+            let mut field = [0_u8; 8];
+            stage.read_exact(&mut field)?;
+            let ChainTxState::Mined(height) =
+                ChainTxState::from_wire_height(u64::from_le_bytes(field))?
+            else {
+                return Err("staged history contained a non-main-chain transaction".into());
+            };
+            stage.read_exact(&mut field)?;
+            let length = u64::from_le_bytes(field);
+            let remaining = stage
+                .metadata()?
+                .len()
+                .checked_sub(stage.stream_position()?)
+                .ok_or("staged transparent history is incomplete")?;
+            if length > remaining {
+                return Err("staged transparent history is incomplete".into());
+            }
+            let mut data = Vec::new();
+            data.try_reserve_exact(usize::try_from(length)?)?;
+            data.resize(usize::try_from(length)?, 0);
+            stage.read_exact(&mut data)?;
+            let transaction = decode_transaction(
+                &RawTransaction {
+                    data,
+                    height: u64::from(u32::from(height)),
+                },
+                height,
+            )?;
+            decrypt_and_store_transaction(&Network::TestNetwork, wdb, &transaction, Some(height))?;
+        }
+        if stage.stream_position()? != stage.metadata()?.len() {
+            return Err("staged transparent history has trailing data".into());
+        }
+        if !had_transactions {
+            wdb.notify_address_checked(request, end)?;
+        }
+        Ok(())
+    })?;
     Ok(true)
 }
 
 pub async fn process_snapshot(
     client: &mut MaintainedScannerClient,
     wallet: &mut LocalWallet,
+    stage_dir: &Path,
 ) -> Result<EnhancementReport, Box<dyn Error>> {
     let mut report = EnhancementReport::default();
     let requests = wallet.transaction_data_requests()?;
@@ -217,7 +281,7 @@ pub async fn process_snapshot(
             TransactionDataRequest::GetStatus(txid) => (txid, false),
             TransactionDataRequest::Enhancement(txid) => (txid, true),
             TransactionDataRequest::TransactionsInvolvingAddress(history) => {
-                if process_mined_transparent_history(client, wallet, history).await? {
+                if process_mined_transparent_history(client, wallet, history, stage_dir).await? {
                     report.mined_transparent_checks += 1;
                 } else {
                     report.unresolved_transparent_history += 1;
@@ -273,6 +337,18 @@ pub async fn process_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_stage_has_no_directory_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut file = open_history_stage(directory.path()).unwrap();
+        file.write_all(b"synthetic transaction").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "synthetic transaction");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn pinned_testnet_transaction_requires_exact_id_and_no_trailing_data() {
