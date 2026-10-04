@@ -15,6 +15,7 @@ use zrpc_client::inspection::{PreviewEndpointConfig, PrivateEndpointConfig};
 use zrpc_client::{PrivateClient, Scenario, SimulationClient};
 use zrpc_protocol::TestnetTransparentAddress;
 use zrpc_verifier::{PhalaTrustedPolicy, ReleasePolicy};
+use zrpc_wallet_sdk::bridge::{BridgeReadOutcome, WalletBridge, WalletBridgeStatus};
 
 const MAX_BODY: usize = 16 * 1024; // Design §9 request bound.
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; worker-src 'none'";
@@ -32,6 +33,7 @@ enum DashboardMode {
     Simulation,
     Live(LiveConfiguration),
     Preview(PreviewConfiguration),
+    WalletBridge(WalletBridge),
 }
 
 enum LivePolicy {
@@ -178,6 +180,14 @@ impl LocalSession {
         session.mode = Arc::new(DashboardMode::Preview(preview));
         Ok(session)
     }
+    pub fn new_wallet_bridge(
+        address: std::net::SocketAddr,
+        bridge: WalletBridge,
+    ) -> Result<Self, &'static str> {
+        let mut session = Self::new(address)?;
+        session.mode = Arc::new(DashboardMode::WalletBridge(bridge));
+        Ok(session)
+    }
     /// Deliver only to the deliberate local browser launch, never an application log.
     pub fn bootstrap_url(&self) -> Result<String, &'static str> {
         let guard = self
@@ -266,19 +276,24 @@ async fn bootstrap(State(session): State<LocalSession>, headers: HeaderMap) -> R
             LivePolicy::PhalaTrusted(_) => "phala_trusted_unverified",
         },
         DashboardMode::Preview(_) => "live_testnet_preview",
+        DashboardMode::WalletBridge(_) => "wallet_bridge_status",
     };
     let platform = match session.mode.as_ref() {
         DashboardMode::Simulation => None,
         DashboardMode::Live(live) => Some(live.config.platform()),
         DashboardMode::Preview(preview) => Some(preview.config.platform()),
+        DashboardMode::WalletBridge(_) => None,
     };
     Json(json!({"capability":session.capability,"mode":mode,"platform":platform})).into_response()
 }
 async fn query(State(session): State<LocalSession>, request: Request) -> Response {
-    if matches!(session.mode.as_ref(), DashboardMode::Preview(_)) {
+    if matches!(
+        session.mode.as_ref(),
+        DashboardMode::Preview(_) | DashboardMode::WalletBridge(_)
+    ) {
         return (
             StatusCode::NOT_FOUND,
-            "private query unavailable in preview",
+            "browser query unavailable in this mode",
         )
             .into_response();
     }
@@ -453,7 +468,38 @@ async fn status(State(session): State<LocalSession>) -> Response {
             "default_address":preview.default_address.as_str(),"error":null}))
             .into_response()
         }
+        DashboardMode::WalletBridge(bridge) => match bridge.status() {
+            Ok(snapshot) => Json(wallet_bridge_report(snapshot)).into_response(),
+            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "wallet status unavailable")
+                .into_response(),
+        },
     }
+}
+
+fn wallet_bridge_report(snapshot: WalletBridgeStatus) -> serde_json::Value {
+    let last_outcome = match snapshot.last_outcome {
+        BridgeReadOutcome::NotAttempted => "not_attempted",
+        BridgeReadOutcome::InProgress => "in_progress",
+        BridgeReadOutcome::Completed => "upstream_read_completed",
+        BridgeReadOutcome::Unavailable => "unavailable_or_interrupted",
+    };
+    json!({
+        "mode":"wallet_bridge_status",
+        "simulation":false,
+        "platform":"phala-dstack",
+        "privacy_profile":"phala_trusted",
+        "browser_wallet_rpc_sent":false,
+        "wallet_bridge":{
+            "connection":if snapshot.active {"verifying_or_reading"} else {"no_active_session"},
+            "last_read":last_outcome,
+            "last_read_verification":if snapshot.last_outcome == BridgeReadOutcome::Completed {
+                "passed_for_last_completed_read"
+            } else {"not_established"},
+            "last_ticket_spent":snapshot.last_ticket_spent,
+            "node_sync":"not_reported_by_bridge",
+            "wallet_scan":"not_reported_by_bridge"
+        }
+    })
 }
 async fn index() -> impl IntoResponse {
     (
@@ -494,6 +540,44 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt;
+
+    #[test]
+    fn wallet_status_never_claims_a_current_verified_connection() {
+        let idle = wallet_bridge_report(WalletBridgeStatus::default());
+        assert_eq!(idle["wallet_bridge"]["connection"], "no_active_session");
+        assert_eq!(
+            idle["wallet_bridge"]["last_read_verification"],
+            "not_established"
+        );
+        assert!(idle["wallet_bridge"]["last_ticket_spent"].is_null());
+        let completed = wallet_bridge_report(WalletBridgeStatus {
+            active: false,
+            last_outcome: BridgeReadOutcome::Completed,
+            last_ticket_spent: Some(true),
+        });
+        assert_eq!(
+            completed["wallet_bridge"]["last_read_verification"],
+            "passed_for_last_completed_read"
+        );
+        assert_eq!(
+            completed["wallet_bridge"]["connection"],
+            "no_active_session"
+        );
+        assert!(completed["private_accepted"].is_null());
+        assert!(completed["query_sent"].is_null());
+        assert_eq!(completed["browser_wallet_rpc_sent"], false);
+        let failed = wallet_bridge_report(WalletBridgeStatus {
+            active: false,
+            last_outcome: BridgeReadOutcome::Unavailable,
+            last_ticket_spent: None,
+        });
+        assert_eq!(
+            failed["wallet_bridge"]["last_read_verification"],
+            "not_established"
+        );
+        assert!(failed["wallet_bridge"]["last_ticket_spent"].is_null());
+    }
+
     fn session() -> LocalSession {
         LocalSession::new("127.0.0.1:32123".parse().unwrap()).unwrap()
     }

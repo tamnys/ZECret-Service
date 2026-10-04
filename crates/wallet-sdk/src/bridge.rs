@@ -2,7 +2,7 @@
 //! the per-run capability before it decodes a protobuf request body. No wallet
 //! state is kept here; every permitted method goes through `WalletReader`.
 
-use crate::{WalletReadItem, WalletReader};
+use crate::{WalletReadCompletion, WalletReadItem, WalletReader};
 use futures_util::{Stream, stream};
 use std::{
     fs::OpenOptions,
@@ -12,7 +12,7 @@ use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::Path,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
 };
 use subtle::ConstantTimeEq;
 use tokio::{
@@ -38,6 +38,81 @@ pub type MaintainedScannerClient =
     zcash_client_backend::proto::service::compact_tx_streamer_client::CompactTxStreamerClient<
         tonic::service::interceptor::InterceptedService<Channel, LocalCapabilityInterceptor>,
     >;
+
+/// A local observation of the bridge, never authority for a future request.
+/// Failed or cancelled reads cannot establish which verification or ticket
+/// steps completed, so their outcome does not claim either one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BridgeReadOutcome {
+    NotAttempted,
+    InProgress,
+    Completed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalletBridgeStatus {
+    pub active: bool,
+    pub last_outcome: BridgeReadOutcome,
+    /// None means the ticket outcome is not established by this snapshot.
+    pub last_ticket_spent: Option<bool>,
+}
+
+impl Default for WalletBridgeStatus {
+    fn default() -> Self {
+        Self {
+            active: false,
+            last_outcome: BridgeReadOutcome::NotAttempted,
+            last_ticket_spent: None,
+        }
+    }
+}
+
+struct ActivityGuard {
+    status: Arc<StdMutex<WalletBridgeStatus>>,
+    completed: bool,
+}
+
+impl ActivityGuard {
+    fn begin(status: Arc<StdMutex<WalletBridgeStatus>>) -> Result<Self, SafeError> {
+        let mut snapshot = status.lock().map_err(|_| unavailable())?;
+        *snapshot = WalletBridgeStatus {
+            active: true,
+            last_outcome: BridgeReadOutcome::InProgress,
+            last_ticket_spent: None,
+        };
+        drop(snapshot);
+        Ok(Self {
+            status,
+            completed: false,
+        })
+    }
+
+    fn complete(&mut self, result: WalletReadCompletion) -> Result<(), SafeError> {
+        let mut snapshot = self.status.lock().map_err(|_| unavailable())?;
+        *snapshot = WalletBridgeStatus {
+            active: false,
+            last_outcome: BridgeReadOutcome::Completed,
+            last_ticket_spent: Some(result.ticket_spent),
+        };
+        self.completed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            if let Ok(mut snapshot) = self.status.lock() {
+                *snapshot = WalletBridgeStatus {
+                    active: false,
+                    last_outcome: BridgeReadOutcome::Unavailable,
+                    last_ticket_spent: None,
+                };
+            }
+        }
+    }
+}
 
 fn unavailable() -> SafeError {
     SafeError::new(
@@ -168,6 +243,7 @@ impl LocalWalletAdapter {
 pub struct WalletBridge {
     reader: Arc<Mutex<WalletReader>>,
     capability: Arc<SecretBytes>,
+    status: Arc<StdMutex<WalletBridgeStatus>>,
 }
 
 impl WalletBridge {
@@ -183,9 +259,17 @@ impl WalletBridge {
             Self {
                 reader: Arc::new(Mutex::new(reader)),
                 capability: Arc::new(SecretBytes::new(encoded)),
+                status: Arc::new(StdMutex::new(WalletBridgeStatus::default())),
             },
             local_copy,
         ))
+    }
+
+    pub fn status(&self) -> Result<WalletBridgeStatus, SafeError> {
+        self.status
+            .lock()
+            .map(|value| *value)
+            .map_err(|_| unavailable())
     }
 
     /// Tonic accepts HTTP/2 gRPC only. No gRPC-Web, reflection or public bind
@@ -239,8 +323,9 @@ impl WalletBridge {
         Select: Fn(WalletReadItem) -> Result<T, SafeError>,
     {
         let mut reader = self.reader.lock().await;
+        let mut activity = ActivityGuard::begin(self.status.clone()).map_err(status)?;
         let mut selected = None;
-        reader
+        let completion = reader
             .read_from_request(
                 request,
                 |item| {
@@ -257,9 +342,11 @@ impl WalletBridge {
             )
             .await
             .map_err(status)?;
-        selected
+        let response = selected
             .map(Response::new)
-            .ok_or_else(|| status(wrong_result()))
+            .ok_or_else(|| status(wrong_result()))?;
+        activity.complete(completion).map_err(status)?;
+        Ok(response)
     }
 
     fn streamed<T, F>(&self, request: WalletReadRequest, select: F) -> Response<ReadStream<T>>
@@ -271,6 +358,7 @@ impl WalletBridge {
         // lets an async producer wait for a slow local wallet consumer.
         let (sender, receiver) = mpsc::channel(1);
         let reader = self.reader.clone();
+        let status_snapshot = self.status.clone();
         let task = tokio::spawn(async move {
             let mut reader = tokio::select! {
                 guard = reader.lock() => guard,
@@ -278,6 +366,7 @@ impl WalletBridge {
                     return Err(Status::cancelled("Local wallet reader disconnected."));
                 }
             };
+            let mut activity = ActivityGuard::begin(status_snapshot).map_err(status)?;
             let closed = sender.clone();
             let read = reader.read_from_request(
                 || ready(Ok(request)),
@@ -291,9 +380,15 @@ impl WalletBridge {
                 },
                 None,
             );
-            tokio::select! {
-                result = read => result.map(|_| ()).map_err(status),
+            let result = tokio::select! {
+                result = read => result.map_err(status),
                 _ = closed.closed() => Err(Status::cancelled("Local wallet reader disconnected.")),
+            };
+            if let Ok(completion) = result {
+                activity.complete(completion).map_err(status)?;
+                Ok(())
+            } else {
+                result.map(|_| ())
             }
         });
         let output = stream::unfold(
@@ -590,6 +685,41 @@ impl CompactTxStreamer for WalletBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zrpc_wallet_read::ReadMethod;
+
+    #[test]
+    fn bridge_activity_only_reports_verified_completion_after_full_read() {
+        let status = Arc::new(StdMutex::new(WalletBridgeStatus::default()));
+        assert_eq!(
+            status.lock().unwrap().last_outcome,
+            BridgeReadOutcome::NotAttempted
+        );
+        {
+            let _cancelled = ActivityGuard::begin(status.clone()).unwrap();
+            let snapshot = *status.lock().unwrap();
+            assert!(snapshot.active);
+            assert_eq!(snapshot.last_outcome, BridgeReadOutcome::InProgress);
+            assert_eq!(snapshot.last_ticket_spent, None);
+        }
+        let snapshot = *status.lock().unwrap();
+        assert!(!snapshot.active);
+        assert_eq!(snapshot.last_outcome, BridgeReadOutcome::Unavailable);
+        assert_eq!(snapshot.last_ticket_spent, None);
+        {
+            let mut completed = ActivityGuard::begin(status.clone()).unwrap();
+            completed
+                .complete(WalletReadCompletion {
+                    method: ReadMethod::GetLatestBlock,
+                    delivered_items: 1,
+                    ticket_spent: true,
+                })
+                .unwrap();
+        }
+        let snapshot = *status.lock().unwrap();
+        assert!(!snapshot.active);
+        assert_eq!(snapshot.last_outcome, BridgeReadOutcome::Completed);
+        assert_eq!(snapshot.last_ticket_spent, Some(true));
+    }
 
     #[test]
     fn transaction_absence_is_distinct_from_node_unavailability() {
