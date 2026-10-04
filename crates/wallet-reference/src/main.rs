@@ -186,7 +186,12 @@ async fn scan(mut args: env::ArgsOs) -> Result<(), Box<dyn Error>> {
         batch_size,
     )
     .await?;
-    let enhanced = enhance::process_snapshot(&mut client, &mut wallet).await?;
+    let enhanced = enhance::process_snapshot(
+        &mut client,
+        &mut wallet,
+        wallet_path.parent().ok_or("wallet path has no parent")?,
+    )
+    .await?;
 
     // Only local derived totals and heights are printed. `is_synced` is the
     // maintained wallet scanner's local progress, not a claim of global tip
